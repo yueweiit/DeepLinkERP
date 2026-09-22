@@ -1990,6 +1990,15 @@
     $list.scrollTop(scrollTop);
   }
 
+  openMaterialAIReviewEvidence(dialog) {
+    const $evidence = dialog?.$wrapper?.find("[data-mf-ai-review-evidence]").first();
+    if (!$evidence?.length) return;
+    $evidence.prop("open", true);
+    const evidence = $evidence.get?.(0);
+    evidence?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+    evidence?.querySelector?.("summary")?.focus?.({ preventScroll: true });
+  }
+
   openMaterialAIProgressDialog() {
     const state = this.ensureMaterialFeeState();
     if (!state.aiFill) return;
@@ -2030,6 +2039,11 @@
           this.continueMaterialAIPaymentSelection(true).catch((error) => this.showError(error));
         } else if (action === "mf-ai-open-source") {
           this.openMaterialAISourceProcess($(event.currentTarget).attr("data-mf-ai-source-open-ref"));
+        } else if (action === "mf-ai-adopt-field") {
+          const $button = $(event.currentTarget);
+          this.changeMaterialAIRowSelection("fields", $button.attr("data-mf-ai-field-key"), $button.attr("data-mf-ai-candidate-id"));
+        } else if (action === "mf-ai-show-evidence") {
+          this.openMaterialAIReviewEvidence(dialog);
         }
       });
       dialog.$wrapper
@@ -2210,7 +2224,43 @@
       }).join("");
       return `<article class="ocw-mf-ai-review-source-group is-${String(group.read_status || "no_result").toLowerCase()}"><header><div><strong>${this.escape(group.label)}</strong><small>${this.escape(group.primary?.approval_no ? `审批 ${group.primary.approval_no}` : group.logical_source_id)}</small></div><b>${this.materialAIReadStatusLabel(group)}</b></header><details><summary>同步记录 ${rows.length} 条${auditRows.length ? ` · ${auditRows.length} 条仅审计` : ""}</summary><div>${records}</div></details></article>`;
     }).join("");
-    return `<details class="ocw-mf-ai-review-sources"><summary>资料来源 <span>${groups.length} 份</span></summary><div>${cards || `<p>未找到可用资料来源。</p>`}</div></details>`;
+    const catalog = fill?.row_review || {};
+    const skippedStatuses = new Set(["SKIPPED", "UNREADABLE", "FAILED", "TIMEOUT", "FORBIDDEN", "MISSING", "UNSUPPORTED", "CORRUPT"]);
+    const stageEvidence = [
+      ...(Array.isArray(catalog.stage_snapshots) ? catalog.stage_snapshots.map(stage => ({ ...stage, evidence_type: "装箱字段" })) : []),
+      ...(Array.isArray(catalog.fee_stage_snapshots) ? catalog.fee_stage_snapshots.map(stage => ({ ...stage, evidence_type: "费用" })) : []),
+    ].map(stage => {
+      const processRows = (Array.isArray(stage.processes) ? stage.processes : []).map(process => {
+        const evidence = (Array.isArray(process.evidence) ? process.evidence : []).map(record => {
+          const status = String(record.read_status || "NO_RESULT").toUpperCase();
+          const failed = skippedStatuses.has(status);
+          const safeReason = failed ? this.materialAIErrorMessage(record.skip_reason_text, "未能读取该资料") : "";
+          return `<li class="is-${this.escape(status.toLowerCase())}"><span><strong>${this.escape(record.source_label || record.evidence_id || "资料")}</strong><small>${this.escape(record.evidence_kind || "其他资料")}</small></span><em>${this.escape(status)}</em>${failed ? `<p>${this.escape(safeReason)}。已跳过，继续读取下一资料</p>` : ""}</li>`;
+        }).join("");
+        return `<article><header><strong>${this.escape(process.label || process.approval_no || "未命名流程")}</strong>${process.approval_no ? `<small>${this.escape(process.approval_no)}</small>` : ""}</header>${evidence ? `<ul>${evidence}</ul>` : "<p>本流程未记录可展示的资料依据。</p>"}</article>`;
+      }).join("");
+      const warnings = (Array.isArray(stage.warnings) ? stage.warnings : []).filter(Boolean)
+        .map(warning => this.materialAIErrorMessage(warning, "部分资料未能读取，已跳过。"));
+      if (!processRows && !warnings.length) return "";
+      return `<section class="ocw-mf-ai-review-stage-records"><h4>${this.escape(stage.stage_label || stage.stage || "其他阶段")} · ${stage.evidence_type}</h4>${processRows}${warnings.length ? `<ul class="ocw-mf-ai-stage-warnings">${warnings.map(warning => `<li>${this.escape(warning)}</li>`).join("")}</ul>` : ""}</section>`;
+    }).join("");
+    const fieldCandidateRows = (Array.isArray(catalog.field_candidates) ? catalog.field_candidates : []).map(candidate => {
+      const refs = (candidate.source_refs || []).map(ref => ref.source_id || ref.source_label).filter(Boolean);
+      const equivalentIds = candidate.presentation_equivalent_candidate_ids || [];
+      return `<tr><td>${this.escape(candidate.candidate_id || "--")}</td><td>${this.escape(candidate.source_label || refs.join(" / ") || "未标注来源")}</td><td>${this.escape(candidate.fieldname || "--")}</td><td>${this.escape(candidate.suggested_value ?? "--")}</td><td>${this.escape(equivalentIds.join(" / ") || candidate.presentation_representative_candidate_id || candidate.candidate_id || "--")}</td><td>${candidate.can_apply ? "可采用" : "只读 · 不可采用"}</td></tr>`;
+    }).join("");
+    const feeRows = (Array.isArray(catalog.fees) ? catalog.fees : []).map(fee => {
+      const values = fee.payload || fee;
+      const role = String(fee.selection_role || "");
+      const roleLabel = role === "component" ? "总额分项" : ({ primary_total: "应付总额", approved_quote: "已批准报价", ambiguous: "待核对", alternative: "其他记录" }[role] || "普通候选");
+      const source = [values.source_label, values.remark, fee.reason].filter(Boolean).join(" · ");
+      const reason = fee.blocked_reason || fee.resolution_reason || "";
+      return `<tr data-mf-ai-fee-evidence="${this.escape(fee.proposal_id || "")}"><td>${this.escape(fee.proposal_id || "--")}</td><td>${this.escape(values.expense_category || values.logical_fee_key || "--")}</td><td>${this.escape(values.amount ?? "--")} ${this.escape(values.currency || "")}</td><td>${this.escape(fee.previous_amount ?? values.previous_amount ?? "--")}</td><td>${this.escape(roleLabel)}</td><td>${this.escape(source || "--")}</td><td>${this.escape(reason || "--")}${fee.can_apply ? "" : "<small>只读 · 不可采用</small>"}</td></tr>`;
+    }).join("");
+    const scope = catalog.material_scope_reason
+      ? `<section class="ocw-mf-ai-review-scope"><h4>完整定行依据</h4><p>${this.escape(catalog.material_scope_reason)}${catalog.material_scope_fallback ? " 已按安全顺序回落。" : ""}</p></section>`
+      : "";
+    return `<div class="ocw-mf-ai-review-evidence-content">${scope}<section class="ocw-mf-ai-review-sources"><h4>资料来源 <span>${groups.length} 份</span></h4><div>${cards || `<p>未找到可展示的资料来源。</p>`}</div></section>${stageEvidence}${fieldCandidateRows ? `<section><h4>字段候选依据</h4><div class="ocw-mf-ai-preview-table"><table><thead><tr><th>候选 ID</th><th>来源</th><th>字段</th><th>建议值</th><th>等价候选</th><th>状态</th></tr></thead><tbody>${fieldCandidateRows}</tbody></table></div></section>` : ""}${feeRows ? `<section><h4>费用依据与其他记录</h4><div class="ocw-mf-ai-preview-table"><table><thead><tr><th>记录 ID</th><th>费用项目</th><th>金额</th><th>原金额</th><th>类型</th><th>来源 / 说明</th><th>核对信息</th></tr></thead><tbody>${feeRows}</tbody></table></div></section>` : ""}</div>`;
   }
 
   renderCurrentSourceReviewControls(context = {}, cargo = null, { fees = false, values = {} } = {}) {
@@ -2267,30 +2317,72 @@
     return { fees, mainFees, selectableIds, otherFees };
   }
 
-  ensureMaterialAIRowSelection(fill) {
+  materialAIFieldCandidateIndex(fieldCandidates) {
+    const entries = (Array.isArray(fieldCandidates) ? fieldCandidates : []).map(candidate => ({
+      candidate,
+      candidateId: String(candidate.candidate_id || ""),
+    })).filter(entry => entry.candidateId);
+    const candidatesById = new Map(entries.map(entry => [entry.candidateId, entry.candidate]));
+    const equivalentIdsByRepresentativeId = new Map();
+    entries.forEach(({ candidate, candidateId }) => {
+      if (String(candidate.presentation_representative_candidate_id || "") !== candidateId
+        || !Array.isArray(candidate.presentation_equivalent_candidate_ids)) return;
+      equivalentIdsByRepresentativeId.set(candidateId, new Set(candidate.presentation_equivalent_candidate_ids.map(String)));
+    });
+    return { entries, candidatesById, equivalentIdsByRepresentativeId };
+  }
+
+  materialAIFieldRepresentativeCandidateId(candidateIndex, fieldKey, candidateId) {
+    const selectedId = String(candidateId || "");
+    const selected = candidateIndex?.candidatesById?.get(selectedId);
+    if (!selected?.can_apply) return "";
+    const expectedKey = `${selected.item_name}:${selected.fieldname}`;
+    if (expectedKey !== String(fieldKey || "")) return "";
+    const groupId = String(selected.presentation_group_id || "");
+    const representativeId = String(selected.presentation_representative_candidate_id || "");
+    if (!groupId || !representativeId) return "";
+    const representative = candidateIndex.candidatesById.get(representativeId);
+    if (!representative?.can_apply
+      || `${representative.item_name}:${representative.fieldname}` !== expectedKey
+      || String(representative.presentation_group_id || "") !== groupId
+      || !candidateIndex.equivalentIdsByRepresentativeId.get(representativeId)?.has(selectedId)) return "";
+    return representativeId;
+  }
+
+  ensureMaterialAIRowSelection(fill, candidateIndex = null) {
     const feePolicy = this.materialAIReviewFeePolicy(fill);
     const fieldCandidates = Array.isArray(fill.row_review.field_candidates) ? fill.row_review.field_candidates : [];
+    const fieldCandidateIndex = candidateIndex || this.materialAIFieldCandidateIndex(fieldCandidates);
     const packingCandidates = Array.isArray(fill.draft?.packing_group_candidates) ? fill.draft.packing_group_candidates : [];
-    const packingDefaults = new Map();
-    packingCandidates.forEach((candidate) => {
-      const defaults = (candidate.assignment_options || []).filter((option) => option.can_apply && option.default_selected);
-      if (defaults.length === 1) packingDefaults.set(String(candidate.candidate_id), String(defaults[0].assignment_id));
-    });
-    if (!fill.rowSelection) fill.rowSelection = {
-      mode: "update_selected",
-      rows: new Set(fieldCandidates.length ? [] : (fill.row_review.rows || []).filter(row => row.can_update && (row.default_update_selected ?? row.default_selected)).map(row => String(row.row_id))),
-      fields: new Map(fieldCandidates.filter(candidate => candidate.can_apply && candidate.default_selected)
-        .map(candidate => [`${candidate.item_name}:${candidate.fieldname}`, String(candidate.candidate_id)])),
-      packingAssignments: packingDefaults,
-      fees: new Set(feePolicy.mainFees.filter(fee => fee.can_apply && fee.default_selected).map(fee => String(fee.proposal_id))),
-      request: 0, loading: false, preview: null, error: "", timer: null,
-    };
-    else {
+    if (!fill.rowSelection) {
+      const packingDefaults = new Map();
+      packingCandidates.forEach((candidate) => {
+        const defaults = (candidate.assignment_options || []).filter((option) => option.can_apply && option.default_selected);
+        if (defaults.length === 1) packingDefaults.set(String(candidate.candidate_id), String(defaults[0].assignment_id));
+      });
+      const fieldDefaults = new Map();
+      fieldCandidateIndex.entries.filter(entry => entry.candidate.default_selected).forEach(({ candidate, candidateId }) => {
+        const key = `${candidate.item_name}:${candidate.fieldname}`;
+        const representativeId = this.materialAIFieldRepresentativeCandidateId(fieldCandidateIndex, key, candidateId);
+        if (representativeId) fieldDefaults.set(key, representativeId);
+      });
+      fill.rowSelection = {
+        mode: "update_selected",
+        rows: new Set(fieldCandidates.length ? [] : (fill.row_review.rows || []).filter(row => row.can_update && (row.default_update_selected ?? row.default_selected)).map(row => String(row.row_id))),
+        fields: fieldDefaults,
+        packingAssignments: packingDefaults,
+        fees: new Set(feePolicy.mainFees.filter(fee => fee.can_apply && fee.default_selected).map(fee => String(fee.proposal_id))),
+        request: 0, loading: false, preview: null, error: "", timer: null,
+      };
+    } else {
       if (!(fill.rowSelection.fields instanceof Map)) fill.rowSelection.fields = new Map();
-      if (!(fill.rowSelection.packingAssignments instanceof Map)) fill.rowSelection.packingAssignments = new Map(packingDefaults);
+      if (!(fill.rowSelection.packingAssignments instanceof Map)) fill.rowSelection.packingAssignments = new Map();
       fill.rowSelection.fees.forEach(id => { if (!feePolicy.selectableIds.has(String(id))) fill.rowSelection.fees.delete(id); });
-      const validFieldIds = new Set(fieldCandidates.filter(candidate => candidate.can_apply).map(candidate => String(candidate.candidate_id)));
-      fill.rowSelection.fields.forEach((candidateId, key) => { if (!validFieldIds.has(String(candidateId))) fill.rowSelection.fields.delete(key); });
+      fill.rowSelection.fields.forEach((candidateId, key) => {
+        const representativeId = this.materialAIFieldRepresentativeCandidateId(fieldCandidateIndex, key, candidateId);
+        if (representativeId) fill.rowSelection.fields.set(key, representativeId);
+        else fill.rowSelection.fields.delete(key);
+      });
       const validPackingAssignments = new Map(packingCandidates.map((candidate) => [
         String(candidate.candidate_id),
         new Set((candidate.assignment_options || []).filter((option) => option.can_apply).map((option) => String(option.assignment_id))),
@@ -2304,8 +2396,8 @@
     return fill.rowSelection;
   }
 
-  materialAIRowSelectionKey(fill) {
-    const selection = this.ensureMaterialAIRowSelection(fill);
+  materialAIRowSelectionKey(fill, candidateIndex = null) {
+    const selection = this.ensureMaterialAIRowSelection(fill, candidateIndex);
     return JSON.stringify([this.detailState.batchName, this.detailState.versionName, fill.runId || fill.run_id,
       fill.row_review.fingerprint, selection.mode, [...selection.rows].sort(), [...selection.fields.entries()].sort(),
       [...selection.packingAssignments.entries()].sort(), [...selection.fees].sort()]);
@@ -2314,7 +2406,8 @@
   changeMaterialAIRowSelection(kind, id, checked) {
     const fill = this.ensureMaterialFeeState().aiFill;
     if (!fill?.row_review || fill.applying || fill.discarding) return;
-    const selection = this.ensureMaterialAIRowSelection(fill);
+    const candidateIndex = this.materialAIFieldCandidateIndex(fill.row_review.field_candidates);
+    const selection = this.ensureMaterialAIRowSelection(fill, candidateIndex);
     const rows = fill.row_review.rows || [];
     const feePolicy = this.materialAIReviewFeePolicy(fill);
     if (kind === "mode") {
@@ -2327,8 +2420,11 @@
       });
       if (id === "add_selected") { selection.fees.clear(); selection.fields.clear(); selection.packingAssignments.clear(); }
       else if (!(selection.fields.size) && (fill.row_review.field_candidates || []).length) {
-        (fill.row_review.field_candidates || []).filter(candidate => candidate.can_apply && candidate.default_selected)
-          .forEach(candidate => selection.fields.set(`${candidate.item_name}:${candidate.fieldname}`, String(candidate.candidate_id)));
+        candidateIndex.entries.filter(entry => entry.candidate.default_selected).forEach(({ candidate, candidateId }) => {
+          const key = `${candidate.item_name}:${candidate.fieldname}`;
+          const representativeId = this.materialAIFieldRepresentativeCandidateId(candidateIndex, key, candidateId);
+          if (representativeId) selection.fields.set(key, representativeId);
+        });
       }
       if (id !== "add_selected" && !selection.packingAssignments.size) {
         (fill.draft?.packing_group_candidates || []).forEach((candidate) => {
@@ -2337,10 +2433,10 @@
         });
       }
     } else if (kind === "fields") {
-      const candidate = (fill.row_review.field_candidates || []).find(row => String(row.candidate_id) === String(checked));
       if (!checked) selection.fields.delete(String(id));
-      else if (candidate?.can_apply && `${candidate.item_name}:${candidate.fieldname}` === String(id)) {
-        selection.fields.set(String(id), String(candidate.candidate_id));
+      else {
+        const representativeId = this.materialAIFieldRepresentativeCandidateId(candidateIndex, id, checked);
+        if (representativeId) selection.fields.set(String(id), representativeId);
       }
     } else if (kind === "packingAssignments") {
       const candidate = (fill.draft?.packing_group_candidates || []).find(row => String(row.candidate_id) === String(id));
@@ -2369,13 +2465,13 @@
         else selection[kind].delete(itemId);
       }
     }
-    this.scheduleMaterialAIRowPreview();
+    this.scheduleMaterialAIRowPreview(candidateIndex);
   }
 
-  scheduleMaterialAIRowPreview() {
+  scheduleMaterialAIRowPreview(candidateIndex = null) {
     const fill = this.ensureMaterialFeeState().aiFill;
     if (!fill?.row_review || fill.applying || fill.discarding) return;
-    const selection = this.ensureMaterialAIRowSelection(fill);
+    const selection = this.ensureMaterialAIRowSelection(fill, candidateIndex);
     clearTimeout(selection.timer);
     selection.request += 1;
     selection.preview = null;
@@ -2391,12 +2487,18 @@
     const state = this.ensureMaterialFeeState();
     const fill = state.aiFill;
     if (!fill?.row_review || fill.applying || fill.discarding) return;
-    const selection = this.ensureMaterialAIRowSelection(fill);
+    const candidateIndex = this.materialAIFieldCandidateIndex(fill.row_review.field_candidates);
+    const selection = this.ensureMaterialAIRowSelection(fill, candidateIndex);
+    const fieldChoices = {};
+    selection.fields.forEach((candidateId, fieldKey) => {
+      const representativeId = this.materialAIFieldRepresentativeCandidateId(candidateIndex, fieldKey, candidateId);
+      if (representativeId) fieldChoices[fieldKey] = representativeId;
+    });
     clearTimeout(selection.timer);
     const request = ++selection.request;
-    const key = this.materialAIRowSelectionKey(fill);
+    const key = this.materialAIRowSelectionKey(fill, candidateIndex);
     const current = () => this.materialFeeState === state && state.aiFill === fill && request === selection.request
-      && key === this.materialAIRowSelectionKey(fill) && this.detailState.tab === "documents";
+      && key === this.materialAIRowSelectionKey(fill, candidateIndex) && this.detailState.tab === "documents";
     const previous = selection.inFlight;
     let release;
     const inFlight = new Promise(resolve => { release = resolve; });
@@ -2410,7 +2512,7 @@
       const result = await this.call("overseas_costing.api.materials.preview_source_ai_selection", {
         batch_name: state.batchName, run_id: fill.runId || fill.run_id,
         row_ids_json: JSON.stringify([...selection.rows]), fee_ids_json: JSON.stringify([...selection.fees]),
-        ...((fill.row_review.field_candidates || []).length ? { field_choices_json: JSON.stringify(Object.fromEntries(selection.fields)) } : {}),
+        ...((fill.row_review.field_candidates || []).length ? { field_choices_json: JSON.stringify(fieldChoices) } : {}),
         ...((fill.draft?.packing_group_candidates || []).length ? { packing_assignments_json: JSON.stringify(Object.fromEntries(selection.packingAssignments)) } : {}),
         mode: selection.mode, expected_version: this.detailState.versionName || null,
       }, false);
@@ -2479,30 +2581,86 @@
     }
   }
 
-  renderMaterialAIStageEvidence(stage) {
-    const processes = Array.isArray(stage?.processes) ? stage.processes : [];
-    const evidenceLabels = {
-      dedicated_attachment: "专用附件", approval_form: "审批正文", attachment: "附件",
-      comment_attachment: "评论附件", comment: "评论", other: "其他资料",
-    };
-    const skippedStatuses = new Set(["SKIPPED", "UNREADABLE", "FAILED", "TIMEOUT", "FORBIDDEN", "MISSING", "UNSUPPORTED", "CORRUPT"]);
-    const evidenceCount = processes.reduce((sum, process) => sum + (Array.isArray(process.evidence) ? process.evidence.length : 0), 0);
-    const processRows = processes.map(process => {
-      const evidence = Array.isArray(process.evidence) ? process.evidence : [];
-      const evidenceRows = evidence.map(record => {
-        const status = String(record.read_status || "NO_RESULT").toUpperCase();
-        const skipped = skippedStatuses.has(status);
-        const label = record.source_label || evidenceLabels[record.evidence_kind] || record.evidence_id || "资料";
-        const safeReason = skipped ? this.materialAIErrorMessage(record.skip_reason_text, "未能读取该资料") : "";
-        return `<li class="is-${this.escape(status.toLowerCase())}"><span><b>${this.escape(evidenceLabels[record.evidence_kind] || record.evidence_kind || "其他资料")}</b>${this.escape(label)}</span><em>${this.escape(status)}</em>${skipped ? `<small>${this.escape(safeReason)}。已跳过，继续读取下一资料</small>` : ""}</li>`;
-      }).join("");
-      const processLabel = process.label || process.approval_no || "未命名流程";
-      const approval = process.approval_no ? `审批 ${process.approval_no}` : "";
-      return `<section><header><strong>${this.escape(processLabel)}</strong>${approval ? `<span>${this.escape(approval)}</span>` : ""}</header>${evidenceRows ? `<ul>${evidenceRows}</ul>` : '<p>本流程未记录可展示的资料依据。</p>'}</section>`;
-    }).join("");
-    const warnings = (Array.isArray(stage?.warnings) ? stage.warnings : []).filter(Boolean)
-      .map(warning => this.materialAIErrorMessage(warning, "部分资料未能读取，已跳过。"));
-    return `<details class="ocw-mf-ai-stage-evidence"><summary>资料依据 <span>${processes.length} 个流程 · ${evidenceCount} 份资料</span></summary><div>${processRows || "<p>本阶段暂无可展示的资料依据。</p>"}${warnings.length ? `<ul class="ocw-mf-ai-stage-warnings">${warnings.map(warning => `<li>${this.escape(warning)}</li>`).join("")}</ul>` : ""}</div></details>`;
+  materialAIFirstActionableStageIndex(stages, isActionable) {
+    return stages.findIndex(stage => Boolean(isActionable(stage)));
+  }
+
+  materialAIStageUnreadableCount(stage) {
+    const failed = new Set(["SKIPPED", "UNREADABLE", "FAILED", "TIMEOUT", "FORBIDDEN", "MISSING", "UNSUPPORTED", "CORRUPT"]);
+    const evidenceCount = (stage?.processes || []).reduce((count, process) => count + (process.evidence || [])
+      .filter(record => failed.has(String(record.read_status || "").toUpperCase())).length, 0);
+    return evidenceCount || (Array.isArray(stage?.warnings) ? stage.warnings.filter(Boolean).length : 0);
+  }
+
+  renderMaterialAIStageWarning(stage) {
+    const count = this.materialAIStageUnreadableCount(stage);
+    if (!count) return "";
+    return `<p class="ocw-mf-ai-stage-warning"><span>${count} 份资料未读取</span><button type="button" class="ocw-link-btn" data-action="mf-ai-show-evidence">查看依据</button></p>`;
+  }
+
+  materialAIStageMaterialRows(stage, candidatesById) {
+    const materialRows = new Map();
+    (Array.isArray(stage?.rows) ? stage.rows : []).forEach((row, rowIndex) => {
+      const fields = Object.entries(row.field_candidates || {}).map(([fieldname, candidateIds]) => {
+        const ids = (Array.isArray(candidateIds) ? candidateIds : [candidateIds]).filter(Boolean).map(String)
+          .filter(id => candidatesById.has(id));
+        return [fieldname, ids];
+      }).filter(([, ids]) => ids.length);
+      if (!fields.length) return;
+      const firstCandidate = candidatesById.get(fields[0][1][0]) || {};
+      const materialKey = String(firstCandidate.item_name || row.item_name || row.material_stable_key || `row:${row.row_id || rowIndex}`);
+      if (!materialRows.has(materialKey)) materialRows.set(materialKey, {
+        materialKey, item_name: firstCandidate.item_name || row.item_name || "",
+        material_code: row.material_code || "", product_name: row.product_name || "", field_candidates: {},
+      });
+      const aggregate = materialRows.get(materialKey);
+      if (!aggregate.material_code && row.material_code) aggregate.material_code = row.material_code;
+      if (!aggregate.product_name && row.product_name) aggregate.product_name = row.product_name;
+      fields.forEach(([fieldname, ids]) => {
+        aggregate.field_candidates[fieldname] = [...new Set([...(aggregate.field_candidates[fieldname] || []), ...ids])];
+      });
+    });
+    return [...materialRows.values()];
+  }
+
+  materialAIFieldPresentationGroups(candidates, candidatesById) {
+    const groups = new Map();
+    candidates.forEach(candidate => {
+      const groupId = String(candidate.presentation_group_id || "");
+      if (!groupId) return;
+      if (!groups.has(groupId)) groups.set(groupId, { groupId, candidates: [] });
+      groups.get(groupId).candidates.push(candidate);
+    });
+    return [...groups.values()].map(group => {
+      const representativeId = String(group.candidates[0]?.presentation_representative_candidate_id || "");
+      const representative = candidatesById.get(representativeId);
+      const equivalentIds = new Set([representativeId, ...group.candidates.map(candidate => String(candidate.candidate_id || "")), ...(representative?.presentation_equivalent_candidate_ids || []).map(String)]);
+      const canApply = group.candidates.some(candidate => candidate.can_apply) && Boolean(representative?.can_apply);
+      return { ...group, representativeId, representative, equivalentIds, canApply };
+    });
+  }
+
+  renderMaterialAIFieldChoice({ candidates, candidatesById, key, material, label, selection, value, busy }) {
+    const groups = this.materialAIFieldPresentationGroups(candidates, candidatesById);
+    const applicableGroups = groups.filter(group => group.canApply);
+    const readonlyGroups = groups.filter(group => !group.canApply);
+    const selectedId = String(selection.fields.get(key) || "");
+    const selectedGroup = groups.find(group => group.equivalentIds.has(selectedId));
+    const readonly = readonlyGroups.map(group => `<span class="ocw-mf-ai-field-readonly" data-mf-ai-presentation-group="${this.escape(group.groupId)}">${value(group.representative?.suggested_value)}<b>只读</b></span>`).join("");
+    const conflict = groups.length > 1
+      ? `<span class="ocw-mf-ai-field-conflict-meta"><em>${groups.length} 个值</em><button type="button" class="ocw-link-btn" data-action="mf-ai-show-evidence">查看依据</button></span>`
+      : "";
+    if (!applicableGroups.length) return `${readonly}${conflict}`;
+    if (applicableGroups.length === 1) {
+      const group = applicableGroups[0];
+      const display = value(group.representative?.suggested_value);
+      const control = selectedGroup === group
+        ? `<span class="ocw-mf-ai-field-selected" data-mf-ai-field-selected="${this.escape(group.groupId)}">${display}<b aria-label="已采用">✓</b></span>`
+        : `<button type="button" class="ocw-outline-btn ocw-mini-btn ocw-mf-ai-field-adopt" data-action="mf-ai-adopt-field" data-mf-ai-field-key="${this.escape(key)}" data-mf-ai-candidate-id="${this.escape(group.representativeId)}" ${busy}>采用 ${display}</button>`;
+      return `${control}${readonly}${conflict}`;
+    }
+    const options = [`<option value="" ${applicableGroups.includes(selectedGroup) ? "" : "selected"}>不采用</option>`, ...applicableGroups.map(group => `<option value="${this.escape(group.representativeId)}" ${selectedGroup === group ? "selected" : ""}>${value(group.representative?.suggested_value)}</option>`)].join("");
+    return `<select data-mf-ai-field-select="${this.escape(key)}" aria-label="${this.escape(material)} ${this.escape(label)}" ${busy}>${options}</select>${readonly}${conflict}`;
   }
 
   renderMaterialAIPackingStages(fill, selection, fieldColumnOrder, fieldLabels, value, busy, itemLabel) {
@@ -2510,51 +2668,39 @@
     const snapshots = new Map((catalog.stage_snapshots || []).map(stage => [String(stage.stage || ""), stage]));
     const specs = [["payment", 0, "支付申请"], ["international_logistics", 1, "国际物流"], ["purchase", 2, "采购支出"]];
     const candidatesById = new Map((catalog.field_candidates || []).map(candidate => [String(candidate.candidate_id), candidate]));
-    const stages = specs.map(([stage, rank, label]) => ({ status: "UNAVAILABLE", processes: [], rows: [], warnings: [], fallback_reason: "本阶段未找到有效资料。", ...(snapshots.get(stage) || {}), stage, stage_rank: rank, stage_label: label }));
-    const sharedFields = new Set(stages.flatMap(stage => (stage.rows || []).flatMap(row => Object.keys(row.field_candidates || {}))));
+    const stages = specs.map(([stage, rank, label]) => ({ status: "UNAVAILABLE", processes: [], rows: [], warnings: [], ...(snapshots.get(stage) || {}), stage, stage_rank: rank, stage_label: label }));
+    const stageViews = stages.map(stage => ({ stage, rows: this.materialAIStageMaterialRows(stage, candidatesById) }));
+    const sharedFields = new Set(stageViews.flatMap(view => view.rows.flatMap(row => Object.keys(row.field_candidates || {}))));
     const sharedColumns = fieldColumnOrder.filter(([fieldname]) => sharedFields.has(fieldname));
-    let openIndex = stages.findIndex(stage => (stage.rows || []).length);
-    if (openIndex < 0) openIndex = stages.findIndex(stage => ["AVAILABLE", "PARTIAL"].includes(String(stage.status || "").toUpperCase()));
-    if (openIndex < 0) openIndex = 0;
-    const evidenceKindLabel = kind => ({ dedicated_attachment: "专用附件", approval_form: "审批正文", attachment: "附件", comment_attachment: "评论附件", comment: "评论" }[kind] || "资料");
-    const panels = stages.map((stage, index) => {
-      const rows = Array.isArray(stage.rows) ? stage.rows : [];
-      const processes = new Map((stage.processes || []).map(process => [String(process.process_instance_id || ""), process]));
+    const actionable = view => view.rows.some(row => Object.values(row.field_candidates || {}).some(ids => ids.some(id => candidatesById.get(String(id))?.can_apply)));
+    const openIndex = this.materialAIFirstActionableStageIndex(stageViews, actionable);
+    const panels = stageViews.map((view, index) => {
+      const { stage, rows } = view;
       const stageColumns = sharedColumns;
       const selectedCount = rows.reduce((count, row) => count + Object.entries(row.field_candidates || {}).filter(([fieldname, candidateIds]) => {
-        const localIds = new Set((Array.isArray(candidateIds) ? candidateIds : [candidateIds]).map(String));
-        const candidates = [...localIds].map(id => candidatesById.get(id)).filter(Boolean);
+        const candidates = candidateIds.map(id => candidatesById.get(String(id))).filter(Boolean);
         const keyItem = candidates[0]?.item_name || row.item_name || "";
-        return localIds.has(String(selection.fields.get(`${keyItem}:${fieldname}`) || ""));
+        const selectedId = String(selection.fields.get(`${keyItem}:${fieldname}`) || "");
+        return this.materialAIFieldPresentationGroups(candidates, candidatesById)
+          .some(group => group.equivalentIds.has(selectedId));
       }).length, 0);
       const matrixRows = rows.map(row => {
-        const process = processes.get(String(row.process_instance_id || "")) || {};
-        const processLabel = process.label || process.approval_no || "未命名流程";
         const material = [row.material_code, row.product_name && String(row.product_name) !== String(row.material_code) ? row.product_name : ""].filter(Boolean).join(" · ") || itemLabel(row.item_name || row.material_stable_key);
         const fieldCells = stageColumns.map(([fieldname]) => {
           const ids = (Array.isArray(row.field_candidates?.[fieldname]) ? row.field_candidates[fieldname] : [row.field_candidates?.[fieldname]]).filter(Boolean).map(String);
           const candidates = ids.map(id => candidatesById.get(id)).filter(Boolean);
           if (!candidates.length) return '<td class="is-empty">—</td>';
-          const applicable = candidates.filter(candidate => candidate.can_apply);
           const keyItem = candidates[0]?.item_name || row.item_name || "";
           const key = `${keyItem}:${fieldname}`;
-          const selectedId = String(selection.fields.get(key) || "");
-          const localSelected = candidates.find(candidate => String(candidate.candidate_id) === selectedId);
-          const reason = localSelected?.resolution_reason || candidates[0]?.resolution_reason || "";
-          const conflict = Boolean(row.process_conflict || candidates.length > 1 || candidates.some(candidate => candidate.conflict));
-          if (!applicable.length) return `<td class="${conflict ? "is-conflict" : ""}"><span class="ocw-mf-ai-field-readonly">${candidates.map(candidate => value(candidate.suggested_value)).join(" / ")}<b>只读</b></span>${reason ? `<small>${this.escape(reason)}</small>` : ""}</td>`;
-          const options = [`<option value="" ${localSelected ? "" : "selected"}>未采用此阶段</option>`, ...applicable.map(candidate => `<option value="${this.escape(candidate.candidate_id)}" ${String(candidate.candidate_id) === selectedId ? "selected" : ""}>${value(candidate.suggested_value)} · ${this.escape(evidenceKindLabel(candidate.evidence_kind))}</option>`)].join("");
-          const stateLabel = conflict ? `有冲突 · ${candidates.length} 个候选` : localSelected ? "已采用此阶段" : `${candidates.length} 个候选 · 当前采用其他阶段`;
-          return `<td class="${conflict ? "is-conflict" : ""}"><select data-mf-ai-field-select="${this.escape(key)}" aria-label="${this.escape(material)} ${this.escape(fieldLabels[fieldname] || fieldname)}" ${busy}>${options}</select><em>${this.escape(stateLabel)}</em>${reason ? `<small>${this.escape(reason)}</small>` : ""}</td>`;
+          const groups = this.materialAIFieldPresentationGroups(candidates, candidatesById);
+          return `<td class="${groups.length > 1 ? "is-conflict" : ""}">${this.renderMaterialAIFieldChoice({ candidates, candidatesById, key, material, label: fieldLabels[fieldname] || fieldname, selection, value, busy })}</td>`;
         }).join("");
-        return `<tr><td class="ocw-mf-ai-stage-process">${this.escape(processLabel)}</td><th scope="row">${value(material)}</th>${fieldCells}</tr>`;
+        return `<tr data-mf-ai-material-row="${this.escape(row.materialKey)}"><th scope="row">${value(material)}</th>${fieldCells}</tr>`;
       }).join("");
-      const emptyMessage = (stage.processes || []).length
-        ? "已找到流程，但未识别出可采用字段；已按优先级继续向下补充"
-        : "未找到有效资料";
-      const empty = `<tr><td colspan="${stageColumns.length + 2}" class="is-empty">${this.escape(emptyMessage)}</td></tr>`;
+      const empty = `<tr><td colspan="${stageColumns.length + 1}" class="is-empty">无可用资料</td></tr>`;
       const status = String(stage.status || "UNAVAILABLE").toUpperCase();
-      return `<details class="ocw-mf-ai-stage-panel is-${this.escape(status.toLowerCase())}" data-mf-ai-packing-stage="${this.escape(stage.stage)}" ${index === openIndex ? "open" : ""}><summary><strong>${this.escape(stage.stage_label)} · 优先级 ${Number(stage.stage_rank || 0) + 1}</strong><span><b>${this.escape(this.materialAIStageStatusLabel(status))}</b>已采用 ${selectedCount} 个字段</span></summary>${this.materialAIStageSourceActions(stage)}${stage.fallback_reason ? `<p class="ocw-mf-ai-stage-fallback">${this.escape(stage.fallback_reason)}</p>` : ""}<div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-stage-matrix"><thead><tr><th>所属流程</th><th>物料</th>${stageColumns.map(([, label]) => `<th>${this.escape(label)}</th>`).join("")}</tr></thead><tbody>${matrixRows || empty}</tbody></table></div>${this.renderMaterialAIStageEvidence(stage)}</details>`;
+      const hasActionable = actionable(view);
+      return `<details class="ocw-mf-ai-stage-panel is-${this.escape(status.toLowerCase())}" data-mf-ai-packing-stage="${this.escape(stage.stage)}" ${index === openIndex ? "open" : ""}><summary><strong>${this.escape(stage.stage_label)}</strong><span><b>${hasActionable ? this.escape(this.materialAIStageStatusLabel(status)) : "无可用资料"}</b>已选 ${selectedCount} 项</span></summary>${this.materialAIStageSourceActions(stage)}${this.renderMaterialAIStageWarning(stage)}<div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-stage-matrix"><thead><tr><th>物料</th>${stageColumns.map(([, label]) => `<th>${this.escape(label)}</th>`).join("")}</tr></thead><tbody>${matrixRows || empty}</tbody></table></div></details>`;
     }).join("");
     const assignedIds = new Set(stages.flatMap(stage => (stage.rows || []).flatMap(row => Object.values(row.field_candidates || {}).flat().map(String))));
     const unclassified = (catalog.field_candidates || []).filter(candidate => !assignedIds.has(String(candidate.candidate_id)));
@@ -2565,19 +2711,13 @@
       unclassifiedGroups.get(key).candidates.push(candidate);
     });
     const unclassifiedRows = [...unclassifiedGroups.values()].map(({ key, itemName, fieldname, candidates }) => {
-      const applicable = candidates.filter(candidate => candidate.can_apply);
-      const selectedId = String(selection.fields.get(key) || "");
-      const selected = candidates.find(candidate => String(candidate.candidate_id) === selectedId);
       const source = candidates.map(candidate => candidate.source_label || candidate.priority_reason || "未分类资料").filter(Boolean).join(" / ");
       const candidateIds = candidates.map(candidate => String(candidate.candidate_id)).join(",");
-      const control = applicable.length
-        ? `<select data-mf-ai-field-select="${this.escape(key)}" ${busy}><option value="" ${selected ? "" : "selected"}>不采用未分类资料</option>${applicable.map(candidate => `<option value="${this.escape(candidate.candidate_id)}" ${String(candidate.candidate_id) === selectedId ? "selected" : ""}>${value(candidate.suggested_value)} · ${this.escape(candidate.source_label || "未分类资料")}</option>`).join("")}</select>`
-        : `<span class="ocw-mf-ai-field-readonly">${candidates.map(candidate => value(candidate.suggested_value)).join(" / ")}<b>只读</b></span>`;
-      const reason = selected?.resolution_reason || candidates[0]?.resolution_reason || "未归入固定业务阶段，仅按服务器候选状态展示。";
-      return `<tr data-mf-ai-unclassified-candidates="${this.escape(candidateIds)}"><td>${value(itemLabel(itemName))}</td><td>${this.escape(fieldLabels[fieldname] || fieldname)}</td><td>${control}</td><td>${this.escape(source)}</td><td>${this.escape(reason)}</td></tr>`;
+      const control = this.renderMaterialAIFieldChoice({ candidates, candidatesById, key, material: itemLabel(itemName), label: fieldLabels[fieldname] || fieldname, selection, value, busy });
+      return `<tr data-mf-ai-unclassified-candidates="${this.escape(candidateIds)}"><td>${value(itemLabel(itemName))}</td><td>${this.escape(fieldLabels[fieldname] || fieldname)}</td><td>${control}</td><td>${this.escape(source)}</td></tr>`;
     }).join("");
-    const unclassifiedSection = unclassified.length ? `<details class="ocw-mf-ai-unclassified" data-mf-ai-unclassified-packing="1"><summary>其他记录 / 未归类资料 <span>${unclassified.length} 个字段候选</span></summary><div class="ocw-mf-ai-preview-table"><table><thead><tr><th>物料</th><th>字段</th><th>候选值</th><th>资料来源</th><th>核对说明</th></tr></thead><tbody>${unclassifiedRows}</tbody></table></div></details>` : "";
-    return `<section class="ocw-mf-ai-preview-section" data-mf-ai-field-candidates><h4>装箱资料（按业务阶段） <span>已选 ${selection.fields.size}</span></h4><p>支付申请 → 国际物流 → 采购支出；优先级只决定默认值，可逐字段改选低优先级候选。</p>${panels}${unclassifiedSection}</section>`;
+    const unclassifiedSection = unclassified.length ? `<details class="ocw-mf-ai-unclassified" data-mf-ai-unclassified-packing="1"><summary>其他可选字段 <span>${unclassified.length} 个</span></summary><div class="ocw-mf-ai-preview-table"><table><thead><tr><th>物料</th><th>字段</th><th>候选值</th><th>资料来源</th></tr></thead><tbody>${unclassifiedRows}</tbody></table></div></details>` : "";
+    return `<section class="ocw-mf-ai-preview-section" data-mf-ai-field-candidates><h4>装箱资料 <span>已选 ${selection.fields.size}</span></h4>${panels}${unclassifiedSection}</section>`;
   }
 
   materialAIFeeScopes(fee) {
@@ -2593,67 +2733,40 @@
     return new Set();
   }
 
-  renderMaterialAIFeeStages(fill, selection, feePolicy, value, busy) {
+  renderMaterialAIFeeChoiceRow(fee, selection, value, disabled = false) {
+    const values = fee.payload || fee;
+    const readonly = selection.mode === "add_selected" || !fee.can_apply || disabled;
+    return `<tr><td><input type="checkbox" data-mf-ai-fee-select="${this.escape(fee.proposal_id)}" ${readonly ? "disabled" : ""} ${selection.fees.has(String(fee.proposal_id)) ? "checked" : ""} aria-label="选择费用 ${this.escape(values.expense_category || values.logical_fee_key || "")}"></td><td>${value(values.expense_category || values.logical_fee_key)}</td><td>${value(values.amount)} ${value(values.currency)}</td></tr>`;
+  }
+
+  renderMaterialAIFeeStages(fill, selection, feePolicy, value) {
     const catalog = fill.row_review || {};
     const snapshots = new Map((catalog.fee_stage_snapshots || []).map(stage => [String(stage.stage || ""), stage]));
     const specs = [["payment", 0, "支付申请"], ["international_logistics", 1, "国际物流"], ["purchase", 2, "采购支出"]];
     const feesById = new Map(feePolicy.fees.map(fee => [String(fee.proposal_id), fee]));
     const mainIds = new Set(feePolicy.mainFees.map(fee => String(fee.proposal_id)));
-    const stages = specs.map(([stage, rank, label]) => ({ status: "UNAVAILABLE", processes: [], fees: [], warnings: [], fallback_reason: "本阶段未找到有效费用资料。", ...(snapshots.get(stage) || {}), stage, stage_rank: rank, stage_label: label }));
-    let openIndex = stages.findIndex(stage => (stage.fees || []).length);
-    if (openIndex < 0) openIndex = stages.findIndex(stage => ["AVAILABLE", "PARTIAL"].includes(String(stage.status || "").toUpperCase()));
-    if (openIndex < 0) openIndex = 0;
-    const feeRole = fee => String(fee.selection_role || "");
-    const feeDescription = fee => {
-      const values = fee.payload || fee;
-      return [values.source_label, values.remark, fee.reason].filter(Boolean).join(" · ") || fee.blocked_reason || "";
-    };
-    const panels = stages.map((stage, index) => {
+    const stages = specs.map(([stage, rank, label]) => ({ status: "UNAVAILABLE", processes: [], fees: [], warnings: [], ...(snapshots.get(stage) || {}), stage, stage_rank: rank, stage_label: label }));
+    const stageViews = stages.map(stage => {
       const feeIds = new Set((stage.fees || []).map(fee => String(fee?.proposal_id || fee || "")).filter(Boolean));
       const stageFees = [...feeIds].map(id => feesById.get(id)).filter(Boolean);
-      const componentsByParent = new Map();
-      stageFees.filter(fee => feeRole(fee) === "component").forEach(fee => {
-        const parentId = String(fee.parent_proposal_id || "");
-        if (!componentsByParent.has(parentId)) componentsByParent.set(parentId, []);
-        componentsByParent.get(parentId).push(fee);
-      });
-      const renderComponents = fee => {
-        const components = componentsByParent.get(String(fee.proposal_id)) || [];
-        if (!components.length) return "";
-        return `<tr class="ocw-mf-ai-fee-components" data-mf-ai-fee-components-for="${this.escape(fee.proposal_id)}"><td></td><td colspan="4"><div><strong>总额分项（只读）</strong>${fee.resolution_reason ? `<p>${this.escape(fee.resolution_reason)}</p>` : ""}<table><thead><tr><th>分项</th><th>金额</th><th>币种</th><th>来源 / 说明</th></tr></thead><tbody>${components.map(component => { const values = component.payload || component; return `<tr><td>${value(values.expense_category || values.logical_fee_key)}</td><td>${value(values.amount)}</td><td>${value(values.currency)}</td><td>${value(feeDescription(component))}</td></tr>`; }).join("")}</tbody></table></div></td></tr>`;
-      };
       const mainFees = stageFees.filter(fee => mainIds.has(String(fee.proposal_id)));
-      const renderMain = fee => {
-        const values = fee.payload || fee;
-        const readonly = selection.mode === "add_selected" || !fee.can_apply || fill.applying;
-        return `<tr><td><input type="checkbox" data-mf-ai-fee-select="${this.escape(fee.proposal_id)}" ${readonly ? "disabled" : ""} ${selection.fees.has(String(fee.proposal_id)) ? "checked" : ""} aria-label="选择费用 ${this.escape(values.expense_category || values.logical_fee_key || "")}"></td><td>${value(values.expense_category || values.logical_fee_key)}</td><td>${value(values.amount)} ${value(values.currency)}</td><td>${value(fee.previous_amount ?? values.previous_amount)}</td><td>${value(fee.blocked_reason || fee.resolution_reason || values.remark || values.source_label || fee.reason || "")}${!fee.can_apply ? "<small>只读 · 不可采用</small>" : selection.mode === "add_selected" ? "<small>新增物料需单独确认</small>" : ""}</td></tr>${renderComponents(fee)}`;
-      };
-      const stageMainIds = new Set(mainFees.map(fee => String(fee.proposal_id)));
-      const renderedComponentIds = new Set([...componentsByParent.entries()].filter(([parentId]) => stageMainIds.has(parentId)).flatMap(([, components]) => components.map(fee => String(fee.proposal_id))));
-      const otherFees = stageFees.filter(fee => !mainIds.has(String(fee.proposal_id)) && !renderedComponentIds.has(String(fee.proposal_id)));
-      const other = otherFees.length ? `<details class="ocw-mf-ai-stage-other-fees"><summary>其他记录 <span>${otherFees.length} 条（只读）</span></summary><div class="ocw-mf-ai-preview-table"><table><thead><tr><th>费用项目</th><th>金额</th><th>币种</th><th>来源 / 说明</th><th>不可采用原因</th></tr></thead><tbody>${otherFees.map(fee => { const values = fee.payload || fee; return `<tr><td>${value(values.expense_category || values.logical_fee_key)}</td><td>${value(values.amount)}</td><td>${value(values.currency)}</td><td>${value(feeDescription(fee))}</td><td>${value(fee.blocked_reason || fee.resolution_reason || "该记录角色不可采用，仅供参考。")}<small>只读 · 不可采用</small></td></tr>`; }).join("")}</tbody></table></div></details>` : "";
+      return { stage, mainFees };
+    });
+    const actionable = view => view.mainFees.some(fee => fee.can_apply);
+    const openIndex = this.materialAIFirstActionableStageIndex(stageViews, actionable);
+    const renderMain = fee => this.renderMaterialAIFeeChoiceRow(fee, selection, value, fill.applying);
+    const panels = stageViews.map((view, index) => {
+      const { stage, mainFees } = view;
       const status = String(stage.status || "UNAVAILABLE").toUpperCase();
       const selectedCount = mainFees.filter(fee => selection.fees.has(String(fee.proposal_id))).length;
-      const emptyMessage = (stage.processes || []).length
-        ? "已找到流程，但未识别出可采用费用；已按优先级继续向下补充"
-        : "未找到有效费用资料";
-      const empty = `<tr><td colspan="5">${this.escape(emptyMessage)}</td></tr>`;
-      return `<details class="ocw-mf-ai-stage-panel is-${this.escape(status.toLowerCase())}" data-mf-ai-fee-stage="${this.escape(stage.stage)}" ${index === openIndex ? "open" : ""}><summary><strong>${this.escape(stage.stage_label)} · 优先级 ${Number(stage.stage_rank || 0) + 1}</strong><span><b>${this.escape(this.materialAIStageStatusLabel(status))}</b>已选 ${selectedCount} 项</span></summary>${stage.fallback_reason ? `<p class="ocw-mf-ai-stage-fallback">${this.escape(stage.fallback_reason)}</p>` : ""}<div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-fee-catalog"><thead><tr><th>选择</th><th>费用项目</th><th>采用金额</th><th>原金额</th><th>来源与说明</th></tr></thead><tbody>${mainFees.map(renderMain).join("") || empty}</tbody></table></div>${other}${this.renderMaterialAIStageEvidence(stage)}</details>`;
+      const hasActionable = actionable(view);
+      const empty = '<tr><td colspan="3">无可用资料</td></tr>';
+      return `<details class="ocw-mf-ai-stage-panel is-${this.escape(status.toLowerCase())}" data-mf-ai-fee-stage="${this.escape(stage.stage)}" ${index === openIndex ? "open" : ""}><summary><strong>${this.escape(stage.stage_label)}</strong><span><b>${hasActionable ? this.escape(this.materialAIStageStatusLabel(status)) : "无可用资料"}</b>已选 ${selectedCount} 项</span></summary>${this.materialAIStageSourceActions(stage)}${this.renderMaterialAIStageWarning(stage)}<div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-fee-catalog"><thead><tr><th>选择</th><th>费用项目</th><th>金额</th></tr></thead><tbody>${mainFees.map(renderMain).join("") || empty}</tbody></table></div></details>`;
     }).join("");
     const assignedIds = new Set(stages.flatMap(stage => (stage.fees || []).map(fee => String(fee?.proposal_id || fee || "")).filter(Boolean)));
-    const unclassified = feePolicy.fees.filter(fee => !assignedIds.has(String(fee.proposal_id)));
-    const roleLabels = { primary_total: "应付总额", component: "总额分项", approved_quote: "已批准报价", ambiguous: "待核对", alternative: "其他记录" };
-    const unclassifiedRows = unclassified.map(fee => {
-      const values = fee.payload || fee;
-      const id = String(fee.proposal_id || "");
-      const role = feeRole(fee);
-      const selectable = feePolicy.selectableIds.has(id) && fee.can_apply;
-      const control = selectable ? `<input type="checkbox" data-mf-ai-fee-select="${this.escape(id)}" ${selection.mode === "add_selected" || fill.applying ? "disabled" : ""} ${selection.fees.has(id) ? "checked" : ""}>` : "<span>只读</span>";
-      const reason = fee.blocked_reason || fee.resolution_reason || (selectable ? "未归入固定业务阶段，可按服务器候选状态人工选择。" : "未归入固定业务阶段，仅供核对。");
-      return `<tr data-mf-ai-fee-record="${this.escape(id)}"><td>${control}</td><td>${value(values.expense_category || values.logical_fee_key)}</td><td>${value(values.amount)} ${value(values.currency)}</td><td>${this.escape(roleLabels[role] || role || "普通候选")}</td><td>${value(feeDescription(fee))}</td><td>${this.escape(reason)}</td></tr>`;
-    }).join("");
-    const unclassifiedSection = unclassified.length ? `<details class="ocw-mf-ai-unclassified" data-mf-ai-unclassified-fees="1"><summary>其他记录 / 未归类费用 <span>${unclassified.length} 条</span></summary><div class="ocw-mf-ai-preview-table"><table><thead><tr><th>选择</th><th>费用项目</th><th>金额</th><th>角色</th><th>来源</th><th>核对说明</th></tr></thead><tbody>${unclassifiedRows}</tbody></table></div></details>` : "";
-    return `<section class="ocw-mf-ai-preview-section" data-mf-ai-fee-stages><h4>费用 <span>已选 ${selection.fees.size}</span></h4><p>支付申请 → 国际物流 → 采购支出；优先级只决定默认值，同一费用覆盖范围只能采用一份。</p>${panels}${unclassifiedSection}</section>`;
+    const unclassified = feePolicy.mainFees.filter(fee => !assignedIds.has(String(fee.proposal_id)));
+    const unclassifiedSection = unclassified.length ? `<details class="ocw-mf-ai-unclassified" data-mf-ai-unclassified-fees="1"><summary>其他可选费用 <span>${unclassified.length} 条</span></summary><div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-fee-catalog"><thead><tr><th>选择</th><th>费用项目</th><th>金额</th></tr></thead><tbody>${unclassified.map(renderMain).join("")}</tbody></table></div></details>` : "";
+    return `<section class="ocw-mf-ai-preview-section" data-mf-ai-fee-stages><h4>费用 <span>已选 ${selection.fees.size}</span></h4>${panels}${unclassifiedSection}</section>`;
   }
 
   renderMaterialAIRowReview(fill) {
@@ -2706,29 +2819,7 @@
       }).join("");
     };
     const fieldLabels = Object.fromEntries(columns);
-    const workflowLabels = { payment: "支付申请", international_logistics: "国际物流审批", purchase: "商品采购支出", other: "其他来源" };
-    const evidenceLabels = { dedicated_attachment: "专用附件", approval_form: "审批正文", attachment: "其他相关附件", comment: "评论", other: "其他证据" };
     const fieldCandidates = Array.isArray(catalog.field_candidates) ? catalog.field_candidates : [];
-    const fieldGroups = new Map();
-    fieldCandidates.forEach(candidate => {
-      const key = `${candidate.item_name}:${candidate.fieldname}`;
-      if (!fieldGroups.has(key)) fieldGroups.set(key, []);
-      fieldGroups.get(key).push(candidate);
-    });
-    const fieldSourceGroups = new Map();
-    fieldCandidates.forEach(candidate => {
-      const refId = (candidate.source_refs || []).map(ref => ref.source_id).find(Boolean);
-      const sourceKey = String(candidate.source_group_id || refId || `${candidate.workflow_stage || "other"}:${candidate.evidence_kind || "other"}:${candidate.source_label || "未命名来源"}`);
-      if (!fieldSourceGroups.has(sourceKey)) fieldSourceGroups.set(sourceKey, { sourceKey, candidates: [] });
-      fieldSourceGroups.get(sourceKey).candidates.push(candidate);
-    });
-    const rankedFieldSources = [...fieldSourceGroups.values()].map(group => {
-      const workflowRank = Math.min(...group.candidates.map(candidate => Number(candidate.workflow_rank ?? ({ payment: 0, international_logistics: 1, purchase: 2, other: 3 }[candidate.workflow_stage] ?? 3))));
-      const evidenceRank = Math.min(...group.candidates.map(candidate => Number(candidate.evidence_rank ?? ({ dedicated_attachment: 0, approval_form: 1, attachment: 2, comment: 3, other: 4 }[candidate.evidence_kind] ?? 4))));
-      const representative = [...group.candidates].sort((left, right) => Number(left.workflow_rank ?? 3) - Number(right.workflow_rank ?? 3) || Number(left.evidence_rank ?? 4) - Number(right.evidence_rank ?? 4))[0] || {};
-      const evidenceKinds = [...new Set([...group.candidates].sort((left, right) => Number(left.evidence_rank ?? 4) - Number(right.evidence_rank ?? 4)).map(candidate => candidate.evidence_kind || "other"))];
-      return { ...group, workflowRank, evidenceRank, sourceLabel: representative.source_label || "未命名来源", workflowStage: representative.workflow_stage || "other", evidenceKinds, priorityReason: representative.priority_reason || "" };
-    }).sort((left, right) => left.workflowRank - right.workflowRank || left.evidenceRank - right.evidenceRank || String(left.sourceLabel).localeCompare(String(right.sourceLabel), "zh-CN"));
     const fieldColumnOrder = [...columns, ["goods_value", "采购货值 RMB"], ["purchase_uom", "采购单位"], ["unit_price_uom", "单价单位"], ["volume_weight_kg", "体积重 kg"], ["chargeable_weight_kg", "计费重 kg"], ["weight_ratio", "重量占比"], ["packaging_type", "包装类型"]];
     fieldColumnOrder.forEach(([fieldname, label]) => { fieldLabels[fieldname] = label; });
     const currentItems = catalog.rows || [];
@@ -2738,31 +2829,9 @@
       const name = row?.values?.product_name;
       return [code, name && String(name) !== String(code) ? name : ""].filter(Boolean).join(" · ") || itemName;
     };
-    const renderFieldSource = (group, index) => {
-      const sourceFields = new Set(group.candidates.map(candidate => String(candidate.fieldname || "")));
-      const sourceColumns = fieldColumnOrder.filter(([fieldname]) => sourceFields.has(fieldname));
-      const sourceItems = [...new Set(group.candidates.map(candidate => String(candidate.item_name || "")))];
-      const selectedCount = group.candidates.filter(candidate => String(selection.fields.get(`${candidate.item_name}:${candidate.fieldname}`) || "") === String(candidate.candidate_id)).length;
-      const rows = sourceItems.map(itemName => `<tr><th scope="row">${value(itemLabel(itemName))}</th>${sourceColumns.map(([fieldname]) => {
-        const key = `${itemName}:${fieldname}`;
-        const candidates = group.candidates.filter(candidate => String(candidate.item_name || "") === itemName && String(candidate.fieldname || "") === fieldname);
-        if (!candidates.length) return '<td class="is-empty">—</td>';
-        const applicable = candidates.filter(candidate => candidate.can_apply);
-        const selectedId = String(selection.fields.get(key) || "");
-        const localSelected = candidates.find(candidate => String(candidate.candidate_id) === selectedId);
-        const reason = localSelected?.resolution_reason || candidates[0]?.resolution_reason || "";
-        if (!applicable.length) return `<td><span class="ocw-mf-ai-field-readonly">${candidates.map(candidate => value(candidate.suggested_value)).join(" / ")}<b>只读</b></span>${reason ? `<small>${this.escape(reason)}</small>` : ""}</td>`;
-        const options = [`<option value="" ${localSelected ? "" : "selected"}>不采用此来源</option>`, ...applicable.map(candidate => `<option value="${this.escape(candidate.candidate_id)}" ${String(candidate.candidate_id) === selectedId ? "selected" : ""}>${value(candidate.suggested_value)} · ${this.escape(evidenceLabels[candidate.evidence_kind] || candidate.evidence_kind || "其他证据")}</option>`)].join("");
-        return `<td><select data-mf-ai-field-select="${this.escape(key)}" aria-label="${this.escape(itemLabel(itemName))} ${this.escape(fieldLabels[fieldname] || fieldname)}" ${busy}>${options}</select>${reason ? `<small>${this.escape(reason)}</small>` : ""}${candidates.length > 1 ? `<em>${candidates.length} 个同来源候选</em>` : ""}</td>`;
-      }).join("")}</tr>`).join("");
-      const workflow = workflowLabels[group.workflowStage] || group.workflowStage || "其他来源";
-      const evidence = group.evidenceKinds.map(kind => evidenceLabels[kind] || kind || "其他证据").join(" / ");
-      return `<details class="ocw-mf-ai-field-source-group" data-mf-ai-field-source-group="${this.escape(group.sourceKey)}" ${index === 0 ? "open" : ""}><summary><strong>来源 ${index + 1} · ${this.escape(group.sourceLabel)}</strong><span>${this.escape(workflow)} · ${this.escape(evidence)} · 已采用 ${selectedCount} 个字段</span></summary>${group.priorityReason ? `<p>${this.escape(group.priorityReason)}</p>` : ""}<div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-field-source-matrix"><thead><tr><th>物料</th>${sourceColumns.map(([, label]) => `<th>${this.escape(label)}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></div></details>`;
-    };
-    const hasPackingStages = Array.isArray(catalog.stage_snapshots);
-    const fieldChoiceSection = hasPackingStages
+    const fieldChoiceSection = Array.isArray(catalog.stage_snapshots)
       ? this.renderMaterialAIPackingStages(fill, selection, fieldColumnOrder, fieldLabels, value, busy, itemLabel)
-      : fieldCandidates.length ? `<section class="ocw-mf-ai-preview-section" data-mf-ai-field-candidates><h4>装箱资料候选（按来源优先级） <span>已选 ${selection.fields.size} / ${fieldGroups.size}</span></h4><p>来源读取失败或字段无效时自动回退到下一来源；优先级只决定默认值，每个字段仍可单独改选低优先级候选。</p>${rankedFieldSources.map(renderFieldSource).join("")}</section>` : "";
+      : "";
     const renderCandidateRows = rows => rows.map(row => {
       const allowed = selection.mode === "update_selected" ? row.can_update : selection.mode === "add_selected" ? row.can_add : row.can_fill;
       const origin = row.origin === "current" ? "当前已有" : row.action === "add_candidate" ? "待新增" : "本次识别";
@@ -2790,51 +2859,22 @@
       + (otherSourceRows.length ? `<details class="ocw-mf-ai-source-candidate-group"><summary><strong>其他识别结果</strong><span>${otherSourceRows.length} 行</span></summary>${renderCandidateTable(otherSourceRows)}</details>` : "")
       + (currentRows.length ? `<details class="ocw-mf-ai-source-candidate-group is-current"><summary><strong>当前已有</strong><span>${currentRows.length} 行 · 未选行保留</span></summary>${renderCandidateTable(currentRows)}</details>` : "");
     const feePolicy = this.materialAIReviewFeePolicy(fill);
-    const fees = feePolicy.fees;
-    const feeRole = fee => String(fee.selection_role || "");
     const mainFees = feePolicy.mainFees;
-    const otherFees = feePolicy.otherFees;
-    const componentsByParent = new Map();
-    fees.filter(fee => feeRole(fee) === "component").forEach(fee => {
-      const parentId = String(fee.parent_proposal_id || "");
-      if (!componentsByParent.has(parentId)) componentsByParent.set(parentId, []);
-      componentsByParent.get(parentId).push(fee);
-    });
-    const feeDescription = fee => {
-      const values = fee.payload || fee;
-      return [values.source_label, values.remark, fee.reason].filter(Boolean).join(" · ") || fee.blocked_reason || "";
-    };
-    const renderFeeComponents = fee => {
-      const rows = componentsByParent.get(String(fee.proposal_id)) || [];
-      if (!rows.length) return "";
-      return `<tr class="ocw-mf-ai-fee-components" data-mf-ai-fee-components-for="${this.escape(fee.proposal_id)}"><td></td><td colspan="4"><div><strong>总额分项（只读）</strong>${fee.resolution_reason ? `<p>${this.escape(fee.resolution_reason)}</p>` : ""}<table><thead><tr><th>分项</th><th>金额</th><th>币种</th><th>来源 / 说明</th></tr></thead><tbody>${rows.map(component => {
-        const values = component.payload || component;
-        return `<tr><td>${value(values.expense_category || values.logical_fee_key)}</td><td>${value(values.amount)}</td><td>${value(values.currency)}</td><td>${value(feeDescription(component))}</td></tr>`;
-      }).join("")}</tbody></table></div></td></tr>`;
-    };
-    const renderMainFee = fee => {
-      const values = fee.payload || fee;
-      return `<tr><td><input type="checkbox" data-mf-ai-fee-select="${this.escape(fee.proposal_id)}" ${selection.mode === "add_selected" || !fee.can_apply || fill.applying ? "disabled" : ""} ${selection.fees.has(String(fee.proposal_id)) ? "checked" : ""} aria-label="选择费用 ${this.escape(values.expense_category || values.logical_fee_key || "")}"></td><td>${value(values.expense_category || values.logical_fee_key)}</td><td>${value(values.amount)} ${value(values.currency)}</td><td>${value(fee.previous_amount ?? values.previous_amount)}</td><td>${value(fee.blocked_reason || values.remark || values.source_label || fee.reason || "")}${!fee.can_apply ? "<small>只读 · 不可采用</small>" : selection.mode === "add_selected" ? "<small>新增物料需单独确认</small>" : ""}</td></tr>${renderFeeComponents(fee)}`;
-    };
-    const otherFeeRecords = otherFees.length ? `<section class="ocw-mf-ai-other-fees" data-mf-ai-other-fees="1"><h4>其他费用记录（只读 · 不可采用）</h4><div class="ocw-mf-ai-preview-table"><table><thead><tr><th>费用项目</th><th>金额</th><th>币种</th><th>来源 / 说明</th><th>不可采用原因</th></tr></thead><tbody>${otherFees.map(fee => {
-      const values = fee.payload || fee;
-      const reason = fee.blocked_reason || "服务器已将该记录标记为不可采用，仅供参考。";
-      return `<tr><td>${value(values.expense_category || values.logical_fee_key)}</td><td>${value(values.amount)}</td><td>${value(values.currency)}</td><td>${value(feeDescription(fee))}</td><td>${value(reason)}</td></tr>`;
-    }).join("")}</tbody></table></div></section>` : "";
+    const renderMainFee = fee => this.renderMaterialAIFeeChoiceRow(fee, selection, value, fill.applying);
     const hasFeeStages = Array.isArray(catalog.fee_stage_snapshots);
     const feeSection = hasFeeStages
-      ? this.renderMaterialAIFeeStages(fill, selection, feePolicy, value, busy)
-      : `<section class="ocw-mf-ai-preview-section"><h4>费用 <span>已选 ${selection.fees.size} / ${mainFees.length}</span></h4><div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-fee-catalog"><thead><tr><th>选择</th><th>费用项目</th><th>采用金额</th><th>原金额</th><th>来源与说明</th></tr></thead><tbody>${mainFees.map(renderMainFee).join("") || '<tr><td colspan="5">本次没有费用候选</td></tr>'}</tbody></table></div></section>`;
-    const scopeNotice = catalog.material_scope_reason
-      ? `<section class="ocw-mf-ai-preview-section" data-mf-ai-material-scope><h4>主表物料范围</h4><p>${this.escape(catalog.material_scope_reason)}${catalog.material_scope_fallback ? " 已按安全顺序回落。" : ""}</p></section>`
-      : "";
-    return `<div class="ocw-mf-ai-review-dialog" data-mf-ai-review-host="1"><header><div><strong>填充预览</strong><span>物料逐字段选择，费用单独选择；最终明细由服务器预览。</span></div></header>
-      <main class="ocw-mf-ai-dialog-body"><section class="ocw-mf-ai-row-controls"><label>填充方式 <select data-mf-ai-row-mode ${busy}><option value="update_selected" ${selection.mode === "update_selected" ? "selected" : ""}>更新所选行（默认）</option><option value="fill_missing" ${selection.mode === "fill_missing" ? "selected" : ""}>只补缺失</option>${hasAddCandidates ? `<option value="add_selected" ${selection.mode === "add_selected" ? "selected" : ""}>单独确认新增</option>` : ""}</select></label><p>${selection.mode === "update_selected" ? "只更新所选候选对应的现有物料行；其他行完全保留。未匹配的新物料需单独确认新增。" : selection.mode === "add_selected" ? "仅新增明确勾选的未匹配物料；本次不同时更新现有行或费用，确认前请再次核对行数。" : "只补真正缺失的字段；已填金额、数量和 0 值保留。匹配不唯一的行需核对。"}</p></section>
-      ${scopeNotice}${fieldChoiceSection}${selection.mode !== "add_selected" && (hasPackingStages || fieldCandidates.length) ? "" : `<section class="ocw-mf-ai-preview-section"><h4>物料行 <span>已选 ${selection.rows.size} / ${(catalog.rows || []).length}</span></h4><div class="ocw-mf-ai-row-toolbar"><button type="button" class="ocw-outline-btn" data-action="mf-ai-row-all" ${busy}>全选可用行</button><button type="button" class="ocw-outline-btn" data-action="mf-ai-row-none" ${busy}>全不选</button></div>${groupedTables || renderCandidateTable([])}</section>`}
+      ? this.renderMaterialAIFeeStages(fill, selection, feePolicy, value)
+      : `<section class="ocw-mf-ai-preview-section"><h4>费用 <span>已选 ${selection.fees.size} / ${mainFees.length}</span></h4><div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-fee-catalog"><thead><tr><th>选择</th><th>费用项目</th><th>金额</th></tr></thead><tbody>${mainFees.map(renderMainFee).join("") || '<tr><td colspan="3">本次没有费用候选</td></tr>'}</tbody></table></div></section>`;
+    const modeSummary = selection.mode === "update_selected" ? "将更新已选字段，不清空其他内容" : selection.mode === "add_selected" ? "仅新增已选物料，不同时更新费用" : "只补缺失字段，保留已有内容";
+    const modeHelp = selection.mode === "update_selected" ? "更新已选字段，未选字段与其他行保留。" : selection.mode === "add_selected" ? "仅新增明确勾选的未匹配物料；本次不同时更新现有行或费用。" : "只补真正缺失的字段；已填金额、数量和 0 值保留。";
+    const scopeNotice = '<p class="ocw-mf-ai-scope-summary" data-mf-ai-material-scope>定行依据：国际物流/支付申请/采购支出</p>';
+    return `<div class="ocw-mf-ai-review-dialog" data-mf-ai-review-host="1"><header><div><strong>填充预览</strong><span>${modeSummary}</span></div></header>
+      <main class="ocw-mf-ai-dialog-body"><details class="ocw-mf-ai-row-controls"><summary>更多设置</summary><div><label>填充方式 <select data-mf-ai-row-mode ${busy}><option value="update_selected" ${selection.mode === "update_selected" ? "selected" : ""}>更新所选行（默认）</option><option value="fill_missing" ${selection.mode === "fill_missing" ? "selected" : ""}>只补缺失</option>${hasAddCandidates ? `<option value="add_selected" ${selection.mode === "add_selected" ? "selected" : ""}>单独确认新增</option>` : ""}</select></label><p>${modeHelp}</p></div></details>
+      ${scopeNotice}${fieldChoiceSection}${selection.mode !== "add_selected" && (Array.isArray(catalog.stage_snapshots) || fieldCandidates.length) ? "" : `<section class="ocw-mf-ai-preview-section"><h4>物料行 <span>已选 ${selection.rows.size} / ${(catalog.rows || []).length}</span></h4><div class="ocw-mf-ai-row-toolbar"><button type="button" class="ocw-outline-btn" data-action="mf-ai-row-all" ${busy}>全选可用行</button><button type="button" class="ocw-outline-btn" data-action="mf-ai-row-none" ${busy}>全不选</button></div>${groupedTables || renderCandidateTable([])}</section>`}
       ${feeSection}
       ${mergedAmountSummary}${packingGroupSummary}<section class="ocw-mf-ai-preview-section" data-mf-ai-final-preview><h4>确认后物料清单</h4>${selection.loading ? '<p role="status">正在更新服务器预览…</p>' : preview ? `<p>最终 ${preview.rows?.length || 0} 行 · 新增 ${Number(preview.added_count || 0)} · 移除 ${Number(preview.removed_count || 0)} · 补充 ${Number(preview.updated_count || 0)} · 缺项 ${missingCount}</p><div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-final-table"><thead><tr>${columns.map(([, label]) => `<th>${label}</th>`).join("")}</tr></thead><tbody>${(preview.rows || []).map(row => `<tr>${finalCells(row)}</tr>`).join("")}</tbody></table></div>` : '<p>等待服务器预览。</p>'}${notices.length ? `<ul>${notices.map(row => `<li>${this.escape(typeof row === "string" ? row : row.message || row.reason || row.fieldname || "待核对")}</li>`).join("")}</ul>` : ""}</section>
       ${selection.error ? `<p class="ocw-mf-ai-review-error" role="alert">${this.escape(selection.error)}</p>` : ""}
-      <details class="ocw-mf-ai-review-advanced"><summary>资料来源与其他记录</summary>${this.renderMaterialAIReviewSources(fill)}${hasFeeStages ? "" : otherFeeRecords}${mainFees.map(fee => this.renderSourceAIReviewAlternativeQuotes({...fee, proposal_type: "fee_update"})).join("")}<button class="ocw-outline-btn" type="button" data-action="mf-ai-change-sources" ${busy}>更换来源并重新生成</button></details></main>
+      <details class="ocw-mf-ai-review-advanced" data-mf-ai-review-evidence><summary>查看依据与其他记录</summary>${this.renderMaterialAIReviewSources(fill)}<button class="ocw-outline-btn" type="button" data-action="mf-ai-change-sources" ${busy}>更换来源并重新生成</button></details></main>
       <footer class="ocw-mf-ai-dialog-footer"><span>确认前不会修改已保存数据</span><div><button class="ocw-outline-btn" type="button" data-action="mf-ai-review-cancel" ${busy}>取消</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-discard" ${busy}>放弃草稿</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-row-preview" ${selection.loading || fill.applying ? "disabled" : ""}>重新读取资料源</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-apply" ${this.canConfirmMaterialAIRowSelection(fill) ? "" : "disabled"}>${fill.applying ? "正在填充…" : selection.mode === "add_selected" ? "确认新增" : "确认填充"}</button></div></footer></div>`;
   }
 
