@@ -2984,9 +2984,13 @@ class OverseasCostWorkbench {
   }
 
   openErpPayloadPreviewDialog(payload = {}, result = {}) {
-    const items = Array.isArray(payload.items) ? payload.items : [];
-    const pools = payload.expense_pools || {};
-    const allocations = pools.item_allocations || {};
+    const sites = Array.isArray(payload.sites) ? payload.sites : [];
+    const groups = sites.flatMap((site) => (site.groups || []).map((group) => ({...group, site_code:site.site_code || group.site_code})));
+    const routedItems = groups.flatMap((group) => (group.items || []).map((item) => ({
+      ...item, __company:group.subsidiary_code, __site:group.site_code, __supplier:group.supplier,
+    })));
+    const items = routedItems.length ? routedItems : (Array.isArray(payload.items) ? payload.items : []);
+    const companies = [...new Set(groups.map((group) => group.subsidiary_code).filter(Boolean))];
     const rows = items.slice(0, 12).map((item, index) => {
       const formula = item.cost_formula || {};
       const derivedPrice = item.adopted_price?.source_type === "purchase_total_derived";
@@ -2994,11 +2998,13 @@ class OverseasCostWorkbench {
         <tr>
           <td>${this.escape(String(index + 1))}</td>
           <td>${this.escape(this.formatValue(item.material_code || "--"))}</td>
+          <td>${this.escape(this.formatValue(item.__company || item.subsidiary_code || "--"))}</td>
+          <td>${this.escape(this.formatValue(item.__supplier || item.supplier || "--"))}</td>
           <td>${this.escape(this.formatMoney(item.adopted_price?.value ?? item.original_unit_price ?? formula.original_unit_price ?? "--"))}${derivedPrice ? '<small class="ocw-result-source">按货值÷采购数量计算</small>' : ""}</td>
           <td>${this.escape(this.formatMoney(item.comprehensive_unit_price ?? formula.comprehensive_unit_price ?? "--"))}</td>
-          <td>${this.escape(this.formatValue(item.outbound_quantity ?? "--"))}</td>
-          <td>${this.escape(this.formatMoney(formula.allocated_logistics_cost ?? 0))}</td>
-          <td>${this.escape(this.formatMoney(formula.allocated_clearance_tax_cost ?? 0))}</td>
+          <td>${this.escape(this.formatValue(item.source_quantity ?? item.outbound_quantity ?? formula.quantity ?? "--"))}</td>
+          <td>${this.escape(this.formatMoney(item.total_cost_rmb ?? formula.total_cost ?? "--"))}</td>
+          <td>${this.escape(this.formatMoney(item.allocated_fee_rmb ?? formula.allocated_total_cost ?? 0))}</td>
         </tr>
       `;
     }).join("");
@@ -3014,22 +3020,22 @@ class OverseasCostWorkbench {
             <div class="ocw-erp-preview">
               <div class="ocw-erp-preview-summary">
                 <div><span>目标系统</span><strong>${this.escape(payload.target_system || "DeepLinkERP")}</strong></div>
-                <div><span>业务主体</span><strong>${this.escape(payload.subsidiary_code || "--")}</strong></div>
+                <div><span>ERP 公司</span><strong>${this.escape(companies.length ? `${companies.length} 家` : payload.subsidiary_code || "--")}</strong></div>
                 <div><span>批次</span><strong>${this.escape(payload.batch_no || payload.batch_name || result.batch_name || "--")}</strong></div>
                 <div><span>版本</span><strong>${this.escape(payload.version_name || result.version_name || "--")}</strong></div>
                 <div><span>物料行数</span><strong>${this.escape(this.formatValue(payload.item_count || items.length || 0))}</strong></div>
                 <div><span>综合成本</span><strong>${this.escape(this.formatMoney(payload.total_cost_rmb || 0))} RMB</strong></div>
               </div>
               <div class="ocw-erp-pool-strip">
-                <span>物流 ${this.escape(this.formatMoney(allocations.logistics_allocated_rmb || 0))} RMB</span>
-                <span>清关 ${this.escape(this.formatMoney(allocations.clearance_fee_rmb || 0))} RMB</span>
-                <span>关税 ${this.escape(this.formatMoney(allocations.tariff_tax_total || 0))}</span>
-                <span>规则 ${this.escape(this.formatValue((pools.rules || []).length || 0))} 条</span>
+                <span>站点 ${this.escape(this.formatValue(sites.length || 0))} 个</span>
+                <span>Company ${this.escape(this.formatValue(companies.length || payload.company_count || 0))} 家</span>
+                <span>采购单分组 ${this.escape(this.formatValue(groups.length || payload.group_count || 0))} 组</span>
+                <span>分摊费用 ${this.escape(this.formatMoney(payload.allocated_fee_rmb || 0))} RMB</span>
               </div>
               <div class="ocw-erp-preview-table-wrap">
                 <table class="ocw-erp-preview-table">
-                  <thead><tr><th>#</th><th>物料编码</th><th>原始单价</th><th>综合单价</th><th>出库数量</th><th>分摊物流</th><th>清关/关税</th></tr></thead>
-                  <tbody>${rows || `<tr><td colspan="7">暂无物料明细</td></tr>`}</tbody>
+                  <thead><tr><th>#</th><th>物料编码</th><th>ERP 公司</th><th>供应商</th><th>原始单价</th><th>综合单价</th><th>采购数量</th><th>综合成本</th><th>分摊费用</th></tr></thead>
+                  <tbody>${rows || `<tr><td colspan="9">暂无物料明细</td></tr>`}</tbody>
                 </table>
               </div>
               <details class="ocw-erp-json-detail">
@@ -10994,6 +11000,9 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='mf-exclude-selected']", () => {
       this.excludeSelectedMaterials().catch((error) => this.showError(error));
     });
+    this.$root.on("click", "[data-action='mf-set-project']", () => {
+      this.openProjectCollectionDialog().catch((error) => this.showError(error));
+    });
     this.$root.on("click", "[data-action='mf-clear-selection']", () => {
       this.clearMaterialSelection();
     });
@@ -11965,10 +11974,8 @@ class OverseasCostWorkbench {
     state.packingGroupSelections = state.packingGroupSelections instanceof Set ? state.packingGroupSelections : new Set();
     const key = String(stableLineKey || "");
     if (!key) return;
-    const group = [...this.materialPackingGroups().values()].find((value) =>
-      (value.member_keys || []).map(String).includes(key));
-    const keys = group ? (group.member_keys || []).map(String) : [key];
-    keys.forEach((value) => checked ? state.packingGroupSelections.add(value) : state.packingGroupSelections.delete(value));
+    if (checked) state.packingGroupSelections.add(key);
+    else state.packingGroupSelections.delete(key);
   }
 
   materialPageSelectableRows() {
@@ -12045,6 +12052,7 @@ class OverseasCostWorkbench {
     const unmergeEnabled = editable && completeSelection && selectedGroupIds.length >= 1
       && !ungroupedKeys.length && selectedMemberKeys.length === selectedCount;
     const removeEnabled = editable && completeSelection && selectedCount > 0;
+    const projectEnabled = editable && selectedCount > 0 && !unknownKeys.length && !lockedPageKeys.length;
     return {
       selectedKeys, selectedCount, crossPageCount, selectedGroupIds, incompleteGroupIds, ungroupedKeys, lockedPageKeys,
       actions: {
@@ -12058,6 +12066,7 @@ class OverseasCostWorkbench {
         remove:{enabled:removeEnabled, reason:removeEnabled ? "" : !editable ? readonlyReason
           : lockedPageKeys.length ? "当前选择包含不可操作的 AI 替换草稿行"
           : incompleteGroupIds.length ? "删除组员前请先解除合并" : "请先选择物料"},
+        project:{enabled:projectEnabled, reason:projectEnabled ? "" : !editable ? readonlyReason : "请先选择有效物料行"},
         clear:{enabled:selectedCount > 0, reason:selectedCount ? "" : "当前没有选中物料"},
       },
     };
@@ -12073,9 +12082,67 @@ class OverseasCostWorkbench {
       ${button("合并装箱组", "mf-create-packing-group", context.actions.merge)}
       ${button("编辑装箱组", "mf-edit-selected-packing-group", context.actions.edit)}
       ${button("解除合并", "mf-remove-selected-packing-groups", context.actions.unmerge)}
+      ${button("批量设置项目归属", "mf-set-project", context.actions.project)}
       ${button("删除所选", "mf-exclude-selected", context.actions.remove, "ocw-outline-btn is-danger")}
       ${button("清除选择", "mf-clear-selection", context.actions.clear)}
     </div>`;
+  }
+
+  async openProjectCollectionDialog() {
+    const state = this.ensureMaterialFeeState();
+    const context = this.materialSelectionContext();
+    if (!context.actions.project.enabled) throw new Error(context.actions.project.reason);
+    const selected = (state.materials?.items || []).filter((row) =>
+      context.selectedKeys.has(String(row.stable_line_key || "")));
+    if (selected.length !== context.selectedCount || selected.some((row) => !row.name)) {
+      throw new Error("选中物料已变化，请刷新后重试。");
+    }
+    const optionsResult = await this.call("overseas_costing.api.materials.list_project_route_options", {
+      batch_name:this.detailState.batchName,
+    }, false);
+    if (!optionsResult?.ok) throw new Error(optionsResult?.message || "项目路由加载失败。");
+    const options = optionsResult.options || [];
+    if (!options.length) throw new Error("当前没有可用的项目路由。");
+    const validProjects = new Set(options.map((row) => row.project_collection));
+    const invalidCurrent = [...new Set(selected.map((row) => String(row.project_collection || "").trim())
+      .filter((project) => project && !validProjects.has(project)))];
+    const routeWarning = [...new Set([...(optionsResult.conflicts || []), ...invalidCurrent])];
+    const dialog = new frappe.ui.Dialog({
+      title:`批量设置项目归属（${selected.length} 行）`,
+      fields:[
+        {fieldtype:"Select", fieldname:"project_collection", label:"项目归属", reqd:1,
+          options:options.map((row) => row.project_collection),
+          description:"只修改当前明确勾选的物料行。"},
+        {fieldtype:"HTML", fieldname:"preview", options:`<div class="ocw-mf-project-preview">${routeWarning.length
+          ? `<p class="text-danger">以下归属当前无有效唯一路由：${routeWarning.map((value) => this.escape(value)).join("、")}</p>` : ""}</div>`},
+      ],
+      primary_action_label:"预览并保存",
+      primary_action:async (values) => {
+        const target = String(values.project_collection || "").trim();
+        if (!target) return;
+        const company = options.find((row) => row.project_collection === target)?.subsidiary_code || "";
+        const previewRows = selected.map((row) =>
+          `${this.escape(row.material_code || row.stable_line_key)}：${this.escape(row.project_collection || "未设置")} → ${this.escape(target)}`);
+        dialog.fields_dict.preview.$wrapper.html(`<p><strong>ERP 公司：</strong>${this.escape(company)}</p><p>${previewRows.join("<br>")}</p>`);
+        frappe.confirm(`确认只修改这 ${selected.length} 行的项目归属？`, async () => {
+          if (!(await this.ensureEditSession())) return;
+          const updates = selected.map((row) => ({item_name:row.name, fieldname:"project_collection", value:target,
+            remark:"批量设置 ERP 项目归属"}));
+          const result = await this.call("overseas_costing.api.calculate.batch_update_items", {
+            batch_name:this.detailState.batchName, version_name:this.detailState.versionName,
+            updates:JSON.stringify(updates), remark:"批量设置 ERP 项目归属",
+            edit_token:this.detailState.editToken, expected_modified:this.detailState.expectedModified,
+          }, false);
+          if (!result?.ok) throw new Error(result?.message || "项目归属未保存。");
+          this.updateMaterialFeeExpectedModified(result);
+          state.packingGroupSelections.clear();
+          dialog.hide();
+          await this.loadMaterialFeeWorkspace({quiet:true});
+          frappe.show_alert({message:`已更新 ${Number(result.changed_count || 0)} 行项目归属`, indicator:"green"});
+        });
+      },
+    });
+    dialog.show();
   }
 
   async openMaterialPackingGroupDialog(action = "create", groupId = "") {

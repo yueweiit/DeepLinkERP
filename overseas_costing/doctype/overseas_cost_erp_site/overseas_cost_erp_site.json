@@ -15,7 +15,7 @@
     {"fieldname": "base_url", "fieldtype": "Data", "label": "接口地址"},
     {"fieldname": "authorization", "fieldtype": "Password", "label": "鉴权Token"},
     {"fieldname": "push_mode", "fieldtype": "Select", "label": "推送模式", "options": "standard_purchase\ngeneric_resource", "default": "standard_purchase"},
-    {"fieldname": "company", "fieldtype": "Data", "label": "目标公司"},
+    {"fieldname": "company", "fieldtype": "Link", "label": "目标公司", "options": "Company"},
     {"fieldname": "default_supplier", "fieldtype": "Data", "label": "默认供应商"},
     {"fieldname": "cost_center", "fieldtype": "Data", "label": "默认成本中心"},
     {"fieldname": "default_currency", "fieldtype": "Data", "label": "默认币种", "default": "CNY"},

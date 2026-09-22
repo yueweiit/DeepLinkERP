@@ -201,6 +201,18 @@ BUSINESS_ENTITY_FIELD_ALIASES = (
     "归属公司",
     "子公司",
 )
+PROJECT_OWNERSHIP_FIELD_ALIASES = (
+    "项目归属Pertenencia del proyecto",
+    "项目归属",
+    "Pertenencia del proyecto",
+    "项目proyecto",
+)
+OPTIONAL_LOGISTICS_FEE_FIELDS = (
+    ("customs_clearance_fee", "清关费", "goods_value", ("清关费", "Gastos de despacho de aduana", "Customs clearance fee")),
+    ("import_tax", "进口税费", "goods_value", ("进口税费", "Impuestos de importación", "Import tax")),
+    ("express_surcharge", "快递附加费", "chargeable_weight", ("快递附加费", "Cargo adicional exprés", "Express surcharge")),
+    ("destination_delivery", "当地配送费", "gross_weight", ("当地配送费", "Entrega local", "Local delivery fee")),
+)
 PURCHASE_DETAIL_TABLE_FIELD_ALIASES = (
     "需求明细",
     "Desglose de los gastos",
@@ -1846,7 +1858,7 @@ def extract_form_fields(instance: dict) -> dict[str, Any]:
         ext_value = _parse_json_text(component.get("ext_value") or component.get("extValue"))
         if name:
             resolved_value = value if value not in (None, "") else ext_value
-            if _field_matches_alias(name, BUSINESS_ENTITY_FIELD_ALIASES):
+            if _field_matches_alias(name, BUSINESS_ENTITY_FIELD_ALIASES + PROJECT_OWNERSHIP_FIELD_ALIASES):
                 ext_entity = _extract_dingtalk_entity_value(ext_value)
                 value_entity = _extract_dingtalk_entity_value(value)
                 if ext_entity.get("name"):
@@ -1917,23 +1929,22 @@ def _field_matches_alias(fieldname: Any, aliases: tuple[str, ...]) -> bool:
     return any(alias and alias in normalized_fieldname for alias in normalized_aliases)
 
 
-def _extract_dingtalk_entity_value(value: Any) -> dict[str, str]:
+def _extract_dingtalk_entity_values(value: Any) -> list[dict[str, str]]:
     parsed = _parse_json_text(value)
     if isinstance(parsed, list):
+        entities: list[dict[str, str]] = []
         for item in parsed:
-            entity = _extract_dingtalk_entity_value(item)
-            if entity.get("name") or entity.get("id"):
-                return entity
-        return {"name": "", "id": ""}
+            entities.extend(_extract_dingtalk_entity_values(item))
+        return _unique_dingtalk_entities(entities)
     if isinstance(parsed, dict):
         for key in ("selectedOptions", "selected_options", "options", "items", "list", "data"):
             nested_value = parsed.get(key)
             if isinstance(nested_value, str):
                 nested_value = _parse_json_text(nested_value)
             if isinstance(nested_value, (list, dict)):
-                nested_entity = _extract_dingtalk_entity_value(nested_value)
-                if nested_entity.get("name") or nested_entity.get("id"):
-                    return nested_entity
+                nested_entities = _extract_dingtalk_entity_values(nested_value)
+                if nested_entities:
+                    return nested_entities
         name = _clean(
             parsed.get("deptName")
             or parsed.get("name")
@@ -1955,9 +1966,60 @@ def _extract_dingtalk_entity_value(value: Any) -> dict[str, str]:
             or parsed.get("id")
             or parsed.get("value")
         )
-        return {"name": name, "id": entity_id}
+        return [{"name": name, "id": entity_id}] if name or entity_id else []
     text = _clean(parsed)
-    return {"name": text, "id": ""}
+    return [{"name": text, "id": ""}] if text else []
+
+
+def _unique_dingtalk_entities(entities: list[dict[str, str]]) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for entity in entities:
+        normalized = {"name": _clean(entity.get("name")), "id": _clean(entity.get("id"))}
+        identity = (normalized["id"], normalized["name"])
+        if not any(identity) or identity in seen:
+            continue
+        seen.add(identity)
+        result.append(normalized)
+    return result
+
+
+def _extract_dingtalk_entity_value(value: Any) -> dict[str, str]:
+    entities = _extract_dingtalk_entity_values(value)
+    return entities[0] if entities else {"name": "", "id": ""}
+
+
+def extract_project_candidates_from_approval(item: dict) -> dict:
+    """Return every selected project department; never choose the first of many."""
+
+    form_fields = item.get("form_fields") or {}
+    source_field, raw_value = _find_field_entry(form_fields, PROJECT_OWNERSHIP_FIELD_ALIASES)
+    candidates = _extract_dingtalk_entity_values(raw_value)
+    if not candidates:
+        stack = list(reversed(item.get("raw_form_components") or item.get("form_component_values") or item.get("formComponentValues") or []))
+        while stack:
+            component = stack.pop()
+            if not isinstance(component, dict):
+                continue
+            for child_key in ("details", "children", "items"):
+                children = component.get(child_key)
+                if isinstance(children, str):
+                    children = _parse_json_text(children)
+                if isinstance(children, list):
+                    stack.extend(reversed(children))
+            name = _clean(component.get("name") or component.get("label") or component.get("bizAlias") or component.get("componentName") or component.get("id"))
+            if not _field_matches_alias(name, PROJECT_OWNERSHIP_FIELD_ALIASES):
+                continue
+            source_field = name
+            raw_value = component.get("ext_value") or component.get("extValue") or component.get("value")
+            candidates = _extract_dingtalk_entity_values(raw_value)
+            if candidates:
+                break
+    return {
+        "candidates": candidates,
+        "source_field": source_field,
+        "source": "dingtalk_form_project_ownership" if source_field else "",
+    }
 
 
 def _extract_subsidiary_from_form_components(components: Any) -> dict[str, str]:
@@ -2171,7 +2233,7 @@ def extract_logistics_fee_from_approval(item: dict) -> dict:
     currency_field, currency_raw = _find_field_entry(form_fields, LOGISTICS_CURRENCY_FIELD_ALIASES)
     explicit_currency = _normalize_currency_code(currency_raw)
     source_field, raw_value = _find_field_entry(form_fields, LOGISTICS_FEE_FIELD_ALIASES)
-    amount = _parse_money_amount(raw_value, allow_zero=True)
+    amount = _parse_money_amount(raw_value)
     if amount is None:
         return {}
     currency = _normalize_currency_code(raw_value) or explicit_currency or "RMB"
@@ -2184,6 +2246,56 @@ def extract_logistics_fee_from_approval(item: dict) -> dict:
         "currency_field": currency_field,
         "currency_value": currency_raw,
     }
+
+
+def extract_logistics_fees_from_approval(item: dict) -> list[dict]:
+    """Extract positive OA estimates into canonical logical fee descriptors."""
+
+    from overseas_costing.services import fee_service
+
+    fees: list[dict] = []
+    mode = detect_approval_transport_mode(
+        item.get("transport_mode") or item.get("transport_mode_raw") or (item.get("form_fields") or {})
+    )
+    primary = item.get("logistics_fee") if isinstance(item.get("logistics_fee"), dict) else {}
+    primary = primary or extract_logistics_fee_from_approval(item)
+    primary_amount = _parse_money_amount(primary.get("amount")) if primary else None
+    if primary_amount is not None and mode:
+        definition = fee_service.primary_freight_definition(mode)
+        fees.append(
+            {
+                **primary,
+                **definition,
+                "amount": primary_amount,
+                "currency": _normalize_currency_code(primary.get("currency")) or "RMB",
+                "rule_code": "oa_logistics_freight",
+            }
+        )
+
+    form_fields = item.get("form_fields") or {}
+    templates = {row["logical_fee_key"]: row for row in fee_service.build_default_fee_templates(mode)}
+    for logical_key, label, basis, aliases in OPTIONAL_LOGISTICS_FEE_FIELDS:
+        source_field, raw_value = _find_field_entry(form_fields, aliases)
+        amount = _parse_money_amount(raw_value)
+        if amount is None:
+            continue
+        template = templates.get(logical_key) or {}
+        fees.append(
+            {
+                "logical_fee_key": logical_key,
+                "rule_code": f"oa_{logical_key}",
+                "expense_category": template.get("expense_category") or label,
+                "allocation_basis": template.get("allocation_basis") or basis,
+                "basis_field": template.get("basis_field") or basis,
+                "required_evidence_role": template.get("required_evidence_role") or "expense_invoice",
+                "amount": amount,
+                "currency": _normalize_currency_code(raw_value) or "MXN",
+                "source_label": label,
+                "source_field": source_field,
+                "source_value": raw_value,
+            }
+        )
+    return fees
 
 
 def _parse_quote_total_amount(value: Any) -> float | None:
@@ -3420,11 +3532,14 @@ def _merge_oa_extra_json(old_value: Any, new_value: Any) -> str:
             "transport_mode_raw": new_data.get("transport_mode_raw"),
             "open_url": new_data.get("open_url"),
             "logistics_fee": new_data.get("logistics_fee") or {},
+            "logistics_fees": new_data.get("logistics_fees") or [],
             "logistics_quote_candidates": new_data.get("logistics_quote_candidates") or [],
             "linked_purchase_approvals": new_data.get("linked_purchase_approvals") or [],
             "oa_attachments": new_data.get("oa_attachments") or [],
             "oa_form_attachments": new_data.get("oa_form_attachments") or [],
             "oa_comment_attachments": new_data.get("oa_comment_attachments") or [],
+            "subsidiary": new_data.get("subsidiary") or {},
+            "project_ownership": new_data.get("project_ownership") or {},
             "form_fields": new_data.get("form_fields") or {},
         }
     return _json_dumps(merged)
@@ -3498,6 +3613,7 @@ def _flatten_dingtalk_table_row(row: Any) -> dict:
     if isinstance(row_value, dict):
         row_value = row_value.get("rowValue") or row_value.get("row_value") or row_value
     flattened: dict[str, Any] = {}
+    columns: list[str] = []
     if isinstance(row_value, list):
         for cell in row_value:
             if not isinstance(cell, dict):
@@ -3505,17 +3621,26 @@ def _flatten_dingtalk_table_row(row: Any) -> dict:
             label = _clean(cell.get("label") or cell.get("name") or cell.get("key"))
             value = cell.get("value")
             if label:
+                columns.append(label)
                 flattened[label] = value
     elif isinstance(row_value, dict):
         for key, value in row_value.items():
             if isinstance(value, dict):
                 label = _clean(value.get("label") or value.get("name") or key)
+                if label:
+                    columns.append(label)
                 flattened[label] = value.get("value")
             else:
-                flattened[_clean(key)] = value
+                label = _clean(key)
+                if label:
+                    columns.append(label)
+                    flattened[label] = value
     if row.get("rowNumber") or row.get("row_number"):
         flattened["_dingtalk_row_number"] = row.get("rowNumber") or row.get("row_number")
-    return {key: value for key, value in flattened.items() if key and value not in (None, "")}
+    result = {key: value for key, value in flattened.items() if key and value not in (None, "")}
+    if columns:
+        result["_oa_goods_columns"] = list(dict.fromkeys(columns))
+    return result
 
 
 def _is_oa_goods_placeholder_row(row: dict) -> bool:
@@ -3613,7 +3738,9 @@ def extract_oa_goods_rows(item: dict) -> list[dict]:
     else:
         return []
 
+    project_ownership = extract_project_candidates_from_approval(item)
     common_values = {
+        "project_collection": project_ownership["candidates"][0]["name"] if len(project_ownership["candidates"]) == 1 else "",
         "项目proyecto": form_fields.get("项目proyecto"),
         "物料类别TIPO": form_fields.get("物料类别TIPO"),
         "物流方式Camino Envío": item.get("transport_mode_raw"),
@@ -3980,6 +4107,7 @@ def build_oa_item_values_from_approval(item: dict) -> list[dict]:
     source_instance_id = _clean(item.get("source_instance_id"))
     source_dingtalk_url = _clean(item.get("source_dingtalk_url"))
     rows = extract_oa_goods_rows(item)
+    project_ownership = extract_project_candidates_from_approval(item)
     form_fields = item.get("form_fields") or {}
     total_gross_weight = _to_number_or_none(_find_field_value(form_fields, LOGISTICS_WEIGHT_FIELD_ALIASES))
     values: list[dict] = []
@@ -3989,6 +4117,7 @@ def build_oa_item_values_from_approval(item: dict) -> list[dict]:
             {
                 "row_no": index,
                 "quantity": _to_number_or_none(mapped.get("quantity")),
+                "gross_weight_kg": _to_number_or_none(mapped.get("gross_weight_kg")),
                 "actual_shipped_qty": _to_number_or_none(mapped.get("quantity")),
                 "actual_shipped_qty_mode": "EXPLICIT_SOURCE",
                 "shipped_uom": mapped.get("unit") or "",
@@ -4004,12 +4133,20 @@ def build_oa_item_values_from_approval(item: dict) -> list[dict]:
                         "approval_no": source_approval_no,
                         "instance_id": source_instance_id,
                         "dingtalk_row_number": row.get("_dingtalk_row_number"),
+                        "goods_table_columns": row.get("_oa_goods_columns") or [],
+                        "project_candidates": project_ownership.get("candidates") or [],
+                        "project_source_field": project_ownership.get("source_field") or "",
                     }
                 ),
             }
         )
         values.append(mapped)
-    if total_gross_weight and values and not any(_to_number_or_none(row.get("gross_weight_kg")) for row in values):
+    has_line_weight_column = any(
+        _field_matches_alias(column, ("重量 Peso", "重量Peso（KG）", "重量Peso(KG)", "Peso KG"))
+        for row in rows
+        for column in (row.get("_oa_goods_columns") or [])
+    )
+    if total_gross_weight and values and not has_line_weight_column and not any(_to_number_or_none(row.get("gross_weight_kg")) for row in values):
         total_quantity = sum(_to_number_or_none(row.get("quantity")) or 0 for row in values)
         if total_quantity > 0:
             for mapped in values:
@@ -4037,6 +4174,7 @@ def build_batch_values_from_approval(item: dict) -> dict:
         transport_mode=transport_mode,
     ) or ""
     subsidiary = extract_subsidiary_from_approval(item)
+    project_ownership = extract_project_candidates_from_approval(item)
     values = {
         "batch_no": batch_no,
         "waybill_no": logistics_no,
@@ -4077,12 +4215,14 @@ def build_batch_values_from_approval(item: dict) -> dict:
                 "transport_mode_raw": item.get("transport_mode_raw"),
                 "open_url": item.get("open_url"),
                 "logistics_fee": item.get("logistics_fee") or extract_logistics_fee_from_approval(item),
+                "logistics_fees": item.get("logistics_fees") or extract_logistics_fees_from_approval(item),
                 "logistics_quote_candidates": item.get("logistics_quote_candidates") or extract_logistics_quote_candidates_from_approval(item),
                 "linked_purchase_approvals": item.get("linked_purchase_approvals") or [],
                 "oa_attachments": oa_attachments,
                 "oa_form_attachments": oa_form_attachments,
                 "oa_comment_attachments": item.get("oa_comment_attachments") or [],
                 "subsidiary": subsidiary,
+                "project_ownership": project_ownership,
                 "form_fields": form_fields,
             }
         ),
@@ -5099,11 +5239,12 @@ def _oa_fee_sync_context(batch_name, version_name, *, edit_token=None, expected_
     return batch
 
 
-def _sync_oa_logistics_allocation_rule(
+def _sync_oa_fee_descriptor(
     *,
     batch_name: str,
     version_name: str,
     approval_item: dict,
+    fee_descriptor: dict | None = None,
     edit_token: str | None = None,
     expected_modified: str | None = None,
     manual_entry: bool = False,
@@ -5112,14 +5253,16 @@ def _sync_oa_logistics_allocation_rule(
     if frappe is not None and has_final_binding(batch_name):
         return {'action': 'skipped', 'ok': True, 'created_count': 0, 'updated_count': 0, 'skipped': True, 'reason': '已关联最终物流采购支出，保留其费用与物料来源'}
 
-    """把国际物流 OA 的物流费用落成整票分摊规则。"""
+    """用同一条保护路径把一项 OA 费用落成整票分摊规则。"""
 
     if manual_entry and (not edit_token or not expected_modified):
         return {"ok": False, "action": "blocked", "created_count": 0, "updated_count": 0,
                 "message": "缺少编辑会话或数据版本，请刷新后重试。"}
 
-    fee = approval_item.get("logistics_fee") if isinstance(approval_item.get("logistics_fee"), dict) else {}
-    fee = fee or extract_logistics_fee_from_approval(approval_item)
+    fee = dict(fee_descriptor or {})
+    if not fee:
+        fee = approval_item.get("logistics_fee") if isinstance(approval_item.get("logistics_fee"), dict) else {}
+        fee = fee or extract_logistics_fee_from_approval(approval_item)
     if not fee and detect_approval_transport_mode(
         approval_item.get("transport_mode") or approval_item.get("transport_mode_raw") or (approval_item.get("form_fields") or {})
     ) == "EXPRESS":
@@ -5136,7 +5279,7 @@ def _sync_oa_logistics_allocation_rule(
                 "source_field": selected.get("source_field") or "物流报价",
                 "source_value": selected.get("evidence_line") or selected.get("source_value") or "",
             }
-    parsed_amount = _parse_money_amount(fee.get("amount"), allow_zero=True) if fee else None
+    parsed_amount = _parse_money_amount(fee.get("amount")) if fee else None
     if not fee or parsed_amount is None:
         return {
             "action": "skipped",
@@ -5173,14 +5316,30 @@ def _sync_oa_logistics_allocation_rule(
                 return {"ok": False, "invalid_business": True, "invalid_business_scope": invalid.get("scope"),
                         "message": invalid.get("message"), "action": "blocked", "created_count": 0, "updated_count": 0}
             mode = batch.get("transport_mode")
-            definition = fee_service.primary_freight_definition(mode)
+            if fee.get("logical_fee_key"):
+                definition = {
+                    "logical_fee_key": fee["logical_fee_key"],
+                    "expense_category": fee.get("expense_category") or fee.get("source_label") or fee["logical_fee_key"],
+                    "allocation_basis": fee.get("allocation_basis") or "goods_value",
+                    "required_evidence_role": fee.get("required_evidence_role") or "expense_invoice",
+                }
+            else:
+                definition = fee_service.primary_freight_definition(mode)
         except (ValueError, PermissionError, RuntimeError) as exc:
             return {"ok": False, "action": "blocked", "created_count": 0, "updated_count": 0, "message": str(exc)}
     else:
         mode = detect_approval_transport_mode(approval_item.get("transport_mode") or approval_item.get("transport_mode_raw")
                                               or (approval_item.get("form_fields") or {}))
         try:
-            definition = fee_service.primary_freight_definition(mode)
+            if fee.get("logical_fee_key"):
+                definition = {
+                    "logical_fee_key": fee["logical_fee_key"],
+                    "expense_category": fee.get("expense_category") or fee.get("source_label") or fee["logical_fee_key"],
+                    "allocation_basis": fee.get("allocation_basis") or "goods_value",
+                    "required_evidence_role": fee.get("required_evidence_role") or "expense_invoice",
+                }
+            else:
+                definition = fee_service.primary_freight_definition(mode)
         except ValueError as exc:
             return {"ok": False, "action": "blocked", "created_count": 0, "updated_count": 0, "message": str(exc)}
 
@@ -5190,10 +5349,11 @@ def _sync_oa_logistics_allocation_rule(
     manual_basis = str(fee.get("allocation_basis") or approval_item.get("allocation_basis") or "").strip()
     if manual_entry and manual_basis in fee_service.ALLOCATION_BASES:
         allocation_basis = manual_basis
+    rule_code = str(fee.get("rule_code") or "oa_logistics_freight").strip()
     values = {
         "batch": batch_name,
         "version": version_name,
-        "rule_code": "oa_logistics_freight",
+        "rule_code": rule_code,
         **definition,
         "amount_status": "ESTIMATED",
         "allocation_basis": allocation_basis,
@@ -5226,13 +5386,13 @@ def _sync_oa_logistics_allocation_rule(
         f"""select {rule_fields} from `tabOverseas Cost Allocation Rule`
             where batch = %s and version = %s order by name for update""",
         (batch_name, version_name), as_dict=True)
-    candidates = [dict(row) for row in rules if row.get("rule_code") == "oa_logistics_freight"
+    candidates = [dict(row) for row in rules if row.get("rule_code") == rule_code
                   or fee_service.map_historical_fee_key(row, mode) == definition["logical_fee_key"]]
     active = [row for row in candidates if fee_service.fee_is_active(row)]
 
     def preserve(action, reason, *, ok=True):
         names = [str(row.get("name") or "") for row in candidates]
-        _insert_batch_audit_log(batch_name=batch_name, field_name="oa_logistics_freight_candidate",
+        _insert_batch_audit_log(batch_name=batch_name, field_name="oa_logistics_fee_candidate",
                                old_value={"rule_names": names},
                                new_value={"candidate_fee": fee, "action": action, "reason": reason},
                                remark="保留新的 OA 物流报价供复核，现有费用记录未修改。")
@@ -5241,14 +5401,14 @@ def _sync_oa_logistics_allocation_rule(
                 **({"duplicate_rule_names": [str(row.get("name") or "") for row in active]} if action == "conflict" else {})}
 
     if len(active) > 1:
-        return preserve("conflict", "国际物流费用存在重复记录，请先核对并停用重复费用。", ok=False)
+        return preserve("conflict", f"{definition['expense_category']}存在重复记录，请先核对并停用重复费用。", ok=False)
     if any(not fee_service.fee_is_active(row) for row in candidates):
         return preserve("retired", "该物流费用已有停用记录，同步保留停用状态。")
     current = active[0] if active else {}
     existing_name = current.get("name")
     if existing_name:
         revisions = [str(current.get(field) or "") for field in ("amount_revision", "scope_revision")]
-        if (current.get("rule_code") != "oa_logistics_freight"
+        if (current.get("rule_code") != rule_code
                 or str(current.get("amount_status") or "").upper() in {"ACTUAL", "NOT_INCURRED", "INCLUDED"}
                 or any(value and not value.startswith("oa:") for value in revisions)
                 or current.get("logical_fee_key") not in (None, "", definition["logical_fee_key"])):
@@ -5283,7 +5443,7 @@ def _sync_oa_logistics_allocation_rule(
 
     _insert_batch_audit_log(
         batch_name=batch_name,
-        field_name="oa_logistics_freight_rule",
+        field_name="oa_logistics_fee_rule",
         old_value={"rule_name": existing_name} if existing_name else None,
         new_value={**values, "rule_name": rule_name},
         remark="从钉钉国际物流 OA 生成/更新物流费用分摊规则",
@@ -5296,6 +5456,92 @@ def _sync_oa_logistics_allocation_rule(
         "updated_count": updated_count,
         "fee": fee,
         "rule": values,
+    }
+
+
+def _sync_oa_logistics_allocation_rule(
+    *,
+    batch_name: str,
+    version_name: str,
+    approval_item: dict,
+    edit_token: str | None = None,
+    expected_modified: str | None = None,
+    manual_entry: bool = False,
+) -> dict:
+    """Compatibility adapter for the manual primary-freight quote APIs.
+
+    Callers: ``confirm_logistics_quote_candidate`` and
+    ``save_manual_logistics_quote``. Remove after those APIs submit canonical
+    logical-fee descriptors directly.
+    """
+
+    return _sync_oa_fee_descriptor(
+        batch_name=batch_name,
+        version_name=version_name,
+        approval_item=approval_item,
+        edit_token=edit_token,
+        expected_modified=expected_modified,
+        manual_entry=manual_entry,
+    )
+
+
+def _sync_oa_logistics_allocation_rules(
+    *,
+    batch_name: str,
+    version_name: str,
+    approval_item: dict,
+    include_new_optional_fees: bool = True,
+) -> dict:
+    """Synchronize every positive logistics fee through the canonical upsert."""
+
+    from overseas_costing.services import fee_service
+
+    descriptors = extract_logistics_fees_from_approval(approval_item)
+    if not include_new_optional_fees:
+        descriptors = [
+            descriptor
+            for descriptor in descriptors
+            if descriptor.get("logical_fee_key") in {definition[0] for definition in fee_service.PRIMARY_FREIGHT.values()}
+        ]
+    if not descriptors:
+        return {
+            "ok": True,
+            "action": "skipped",
+            "created_count": 0,
+            "updated_count": 0,
+            "results": [],
+            "reason": "当前国际物流 OA 没有可同步的正数费用。",
+        }
+
+    results = [
+        _sync_oa_fee_descriptor(
+            batch_name=batch_name,
+            version_name=version_name,
+            approval_item=approval_item,
+            fee_descriptor=descriptor,
+        )
+        for descriptor in descriptors
+    ]
+    failed = [result for result in results if result.get("ok") is False]
+    created_count = sum(int(result.get("created_count") or 0) for result in results)
+    updated_count = sum(int(result.get("updated_count") or 0) for result in results)
+    if failed:
+        action = "blocked"
+    elif created_count:
+        action = "created"
+    elif updated_count:
+        action = "updated"
+    elif all(result.get("action") == "unchanged" for result in results):
+        action = "unchanged"
+    else:
+        action = "preserved"
+    return {
+        "ok": not failed,
+        "action": action,
+        "created_count": created_count,
+        "updated_count": updated_count,
+        "results": results,
+        "message": "；".join(str(result.get("message") or "").strip() for result in failed if result.get("message")),
     }
 
 
@@ -6414,10 +6660,11 @@ def save_sea_approvals_to_erp(result: dict, *, recalculate_after_sync: bool = Tr
                 version_name=saved_row.get("version_name") or "",
                 approval_item=item,
             )
-            logistics_fee_sync = _sync_oa_logistics_allocation_rule(
+            logistics_fee_sync = _sync_oa_logistics_allocation_rules(
                 batch_name=saved_row["batch_name"],
                 version_name=saved_row.get("version_name") or "",
                 approval_item=item,
+                include_new_optional_fees=saved_row.get("action") == "created",
             )
             if recalculate_after_sync:
                 recalculate_sync = _recalculate_after_purchase_sync(
@@ -7481,6 +7728,7 @@ def pull_latest_logistics_approvals_to_erp(
     max_pages: int | None = None,
     chunk_days: int | None = None,
     access_token: str = "",
+    dry_run: bool = False,
 ) -> dict:
     """手动拉取指定时间范围内的国际物流 OA，并保存/更新为成本批次。
 
@@ -7547,6 +7795,45 @@ def pull_latest_logistics_approvals_to_erp(
         app_secret=_runtime_config_value("DINGTALK_APP_SECRET", "DINGTALK_APPSECRET", "overseas_costing_dingtalk_app_secret"),
         transport_modes=transport_modes or "ALL",
     )
+    if dry_run:
+        previews = []
+        for approval in pull_result.get("items") or []:
+            item_values = build_oa_item_values_from_approval(approval)
+            previews.append(
+                {
+                    "source_approval_no": approval.get("source_approval_no"),
+                    "source_instance_id": approval.get("source_instance_id"),
+                    "approval_status": approval.get("approval_status"),
+                    "transport_mode": approval.get("transport_mode"),
+                    "project_ownership": extract_project_candidates_from_approval(approval),
+                    "logistics_fees": extract_logistics_fees_from_approval(approval),
+                    "item_count": len(item_values),
+                    "items": [
+                        {
+                            key: row.get(key)
+                            for key in ("row_no", "material_code", "product_name", "quantity", "gross_weight_kg", "project_collection")
+                        }
+                        for row in item_values[:20]
+                    ],
+                }
+            )
+        return {
+            "ok": bool(pull_result.get("ok", True)),
+            "dry_run": True,
+            "data_source": pull_result.get("data_source"),
+            "source_updated_at": pull_result.get("source_updated_at"),
+            "source_lag_seconds": pull_result.get("source_lag_seconds"),
+            "start": resolved_start,
+            "end": resolved_end,
+            "pull": {
+                "total_instance_count": pull_result.get("total_instance_count", 0),
+                "detail_count": pull_result.get("detail_count", 0),
+                "filtered_count": pull_result.get("filtered_count", 0),
+                "transport_counts": pull_result.get("transport_counts", {}),
+            },
+            "previews": previews[:20],
+        }
+
     save_result = save_sea_approvals_to_erp(pull_result)
     summary = {
         "ok": bool(save_result.get("ok")),

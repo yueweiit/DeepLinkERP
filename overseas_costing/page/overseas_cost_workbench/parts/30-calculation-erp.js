@@ -936,9 +936,13 @@
   }
 
   openErpPayloadPreviewDialog(payload = {}, result = {}) {
-    const items = Array.isArray(payload.items) ? payload.items : [];
-    const pools = payload.expense_pools || {};
-    const allocations = pools.item_allocations || {};
+    const sites = Array.isArray(payload.sites) ? payload.sites : [];
+    const groups = sites.flatMap((site) => (site.groups || []).map((group) => ({...group, site_code:site.site_code || group.site_code})));
+    const routedItems = groups.flatMap((group) => (group.items || []).map((item) => ({
+      ...item, __company:group.subsidiary_code, __site:group.site_code, __supplier:group.supplier,
+    })));
+    const items = routedItems.length ? routedItems : (Array.isArray(payload.items) ? payload.items : []);
+    const companies = [...new Set(groups.map((group) => group.subsidiary_code).filter(Boolean))];
     const rows = items.slice(0, 12).map((item, index) => {
       const formula = item.cost_formula || {};
       const derivedPrice = item.adopted_price?.source_type === "purchase_total_derived";
@@ -946,11 +950,13 @@
         <tr>
           <td>${this.escape(String(index + 1))}</td>
           <td>${this.escape(this.formatValue(item.material_code || "--"))}</td>
+          <td>${this.escape(this.formatValue(item.__company || item.subsidiary_code || "--"))}</td>
+          <td>${this.escape(this.formatValue(item.__supplier || item.supplier || "--"))}</td>
           <td>${this.escape(this.formatMoney(item.adopted_price?.value ?? item.original_unit_price ?? formula.original_unit_price ?? "--"))}${derivedPrice ? '<small class="ocw-result-source">按货值÷采购数量计算</small>' : ""}</td>
           <td>${this.escape(this.formatMoney(item.comprehensive_unit_price ?? formula.comprehensive_unit_price ?? "--"))}</td>
-          <td>${this.escape(this.formatValue(item.outbound_quantity ?? "--"))}</td>
-          <td>${this.escape(this.formatMoney(formula.allocated_logistics_cost ?? 0))}</td>
-          <td>${this.escape(this.formatMoney(formula.allocated_clearance_tax_cost ?? 0))}</td>
+          <td>${this.escape(this.formatValue(item.source_quantity ?? item.outbound_quantity ?? formula.quantity ?? "--"))}</td>
+          <td>${this.escape(this.formatMoney(item.total_cost_rmb ?? formula.total_cost ?? "--"))}</td>
+          <td>${this.escape(this.formatMoney(item.allocated_fee_rmb ?? formula.allocated_total_cost ?? 0))}</td>
         </tr>
       `;
     }).join("");
@@ -966,22 +972,22 @@
             <div class="ocw-erp-preview">
               <div class="ocw-erp-preview-summary">
                 <div><span>目标系统</span><strong>${this.escape(payload.target_system || "DeepLinkERP")}</strong></div>
-                <div><span>业务主体</span><strong>${this.escape(payload.subsidiary_code || "--")}</strong></div>
+                <div><span>ERP 公司</span><strong>${this.escape(companies.length ? `${companies.length} 家` : payload.subsidiary_code || "--")}</strong></div>
                 <div><span>批次</span><strong>${this.escape(payload.batch_no || payload.batch_name || result.batch_name || "--")}</strong></div>
                 <div><span>版本</span><strong>${this.escape(payload.version_name || result.version_name || "--")}</strong></div>
                 <div><span>物料行数</span><strong>${this.escape(this.formatValue(payload.item_count || items.length || 0))}</strong></div>
                 <div><span>综合成本</span><strong>${this.escape(this.formatMoney(payload.total_cost_rmb || 0))} RMB</strong></div>
               </div>
               <div class="ocw-erp-pool-strip">
-                <span>物流 ${this.escape(this.formatMoney(allocations.logistics_allocated_rmb || 0))} RMB</span>
-                <span>清关 ${this.escape(this.formatMoney(allocations.clearance_fee_rmb || 0))} RMB</span>
-                <span>关税 ${this.escape(this.formatMoney(allocations.tariff_tax_total || 0))}</span>
-                <span>规则 ${this.escape(this.formatValue((pools.rules || []).length || 0))} 条</span>
+                <span>站点 ${this.escape(this.formatValue(sites.length || 0))} 个</span>
+                <span>Company ${this.escape(this.formatValue(companies.length || payload.company_count || 0))} 家</span>
+                <span>采购单分组 ${this.escape(this.formatValue(groups.length || payload.group_count || 0))} 组</span>
+                <span>分摊费用 ${this.escape(this.formatMoney(payload.allocated_fee_rmb || 0))} RMB</span>
               </div>
               <div class="ocw-erp-preview-table-wrap">
                 <table class="ocw-erp-preview-table">
-                  <thead><tr><th>#</th><th>物料编码</th><th>原始单价</th><th>综合单价</th><th>出库数量</th><th>分摊物流</th><th>清关/关税</th></tr></thead>
-                  <tbody>${rows || `<tr><td colspan="7">暂无物料明细</td></tr>`}</tbody>
+                  <thead><tr><th>#</th><th>物料编码</th><th>ERP 公司</th><th>供应商</th><th>原始单价</th><th>综合单价</th><th>采购数量</th><th>综合成本</th><th>分摊费用</th></tr></thead>
+                  <tbody>${rows || `<tr><td colspan="9">暂无物料明细</td></tr>`}</tbody>
                 </table>
               </div>
               <details class="ocw-erp-json-detail">

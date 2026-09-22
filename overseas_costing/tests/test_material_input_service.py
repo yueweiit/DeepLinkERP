@@ -393,8 +393,8 @@ def test_material_requirements_mark_only_active_contextual_missing_cells() -> No
         ],
     )
 
-    assert result["missing_cell_count"] == 0
-    assert result["rows"]["A"]["missing_fields"] == []
+    assert result["missing_cell_count"] == 1
+    assert result["rows"]["A"]["missing_fields"] == ["volume_m3"]
     assert result["rows"]["B"]["missing_fields"] == []
     assert all("project_collection" not in row["missing_fields"] for row in result["rows"].values())
 

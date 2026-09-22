@@ -360,7 +360,7 @@ console.log(JSON.stringify({select,fields:columns.map(column=>column.field)}));
     assert '__actions' not in result['fields']
 
 
-def test_material_selection_expands_whole_group_and_toolbar_enforces_action_matrix():
+def test_material_selection_is_exact_and_toolbar_enforces_action_matrix():
     result = _fee_workspace_result(r"""
 const w=Object.create(Harness.prototype);w.detailState={readOnly:false};const state=w.ensureMaterialFeeState();
 state.materials={packing_group_editable:true,items:[
@@ -382,11 +382,11 @@ console.log(JSON.stringify({group:{selected:[...group.selectedKeys],cross:group.
   cleared,merge:merge.actions.merge,mixed:{edit:mixed.actions.edit,unmerge:mixed.actions.unmerge,
   remove:mixed.actions.remove}}));
 """)
-    assert result['group']['selected'] == ['L1', 'L2', 'LX']
-    assert result['group']['cross'] == 1
-    assert result['group']['edit'] is True and result['group']['unmerge'] is True
+    assert result['group']['selected'] == ['L1']
+    assert result['group']['cross'] == 0
+    assert result['group']['edit'] is False and result['group']['unmerge'] is False
     assert result['group']['merge'] is False
-    assert result['cleared'] == []
+    assert result['cleared'] == ['L1']
     assert result['merge']['enabled'] is True
     assert result['mixed']['edit']['enabled'] is False
     assert result['mixed']['unmerge']['enabled'] is False

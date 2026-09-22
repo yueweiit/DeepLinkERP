@@ -18,7 +18,7 @@ from overseas_costing.services.fee_service import (
 
 def test_express_defaults_are_unconfirmed_zeros_and_mexican_currencies():
     rows = {row['logical_fee_key']: row for row in build_default_fee_templates('EXPRESS')}
-    for key, currency in [('express_surcharge', 'RMB'), ('destination_delivery', 'MXN')]:
+    for key, currency in [('express_surcharge', 'MXN'), ('destination_delivery', 'MXN')]:
         assert rows[key]['amount'] == '0'
         assert rows[key]['amount_status'] == 'ESTIMATED'
         assert rows[key]['currency'] == currency

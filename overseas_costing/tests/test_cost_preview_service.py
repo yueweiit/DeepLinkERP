@@ -32,7 +32,7 @@ def test_express_default_zero_fees_count_as_estimates_without_fx_or_physical_val
     assert blocked['reason_code'] == 'FX_RATE_MISSING'
 
 
-def test_saved_fees_from_reported_case_are_all_counted_without_packing_data():
+def test_saved_physical_fees_are_blocked_without_packing_data_while_other_fees_continue():
     from overseas_costing.services.fee_service import build_default_fee_templates
 
     items = _items()
@@ -45,11 +45,14 @@ def test_saved_fees_from_reported_case_are_all_counted_without_packing_data():
         fee.update(amount_status="ACTUAL", amount=amount, currency="RMB")
     before = deepcopy((items, fees))
     result = preview_comprehensive_cost_data(items, fees, {})
-    assert result["summary"]["total_cost_rmb"] == "79404.00"
-    assert result["summary"]["allocated_fees_rmb"] == "6004.00"
-    assert result["summary"]["included_fee_count"] == 5
-    assert result["excluded_fees"] == []
-    assert result["included_fees"][0]["fallback_reason"] == "PREFERRED_BASIS_INCOMPLETE"
+    assert result["summary"]["total_cost_rmb"] == "74400.00"
+    assert result["summary"]["allocated_fees_rmb"] == "1000.00"
+    assert result["summary"]["included_fee_count"] == 3
+    assert {row["fee_key"] for row in result["excluded_fees"]} == {
+        "international_sea_freight",
+        "sea_port_forwarder_surcharge",
+    }
+    assert {row["reason_code"] for row in result["excluded_fees"]} == {"ALLOCATION_DENOMINATOR_ZERO"}
     assert (items, fees) == before
 
 
@@ -65,7 +68,7 @@ def test_zero_foreign_fee_needs_no_fx_but_unknown_amount_is_still_excluded():
 
 @pytest.mark.parametrize(("currency", "amount", "expected"), [("RMB", "10", "160.00"), ("USD", "10", "220.00"), ("MXN", "25", "160.00")])
 def test_supported_currencies_convert_before_automatic_allocation(currency, amount, expected):
-    result = preview_comprehensive_cost_data(_items(), [{"amount_status": "ACTUAL", "amount": amount, "currency": currency, "allocation_basis": "chargeable_weight"}], {"fx_usd_to_rmb": "7", "fx_rmb_to_mxn": "2.5"})
+    result = preview_comprehensive_cost_data(_items(), [{"amount_status": "ACTUAL", "amount": amount, "currency": currency, "allocation_basis": "gross_weight"}], {"fx_usd_to_rmb": "7", "fx_rmb_to_mxn": "2.5"})
     assert result["summary"]["total_cost_rmb"] == expected
 
 
@@ -369,7 +372,7 @@ def test_partial_shipment_unit_prices_use_unrounded_goods_value() -> None:
     }
 
 
-def test_preview_lists_missing_fx_and_unknown_amount_but_counts_estimated_fallback() -> None:
+def test_preview_lists_missing_fx_and_unknown_amount_but_counts_complete_estimate() -> None:
     result = preview_comprehensive_cost_data(
         _items(),
         [
@@ -391,7 +394,7 @@ def test_preview_lists_missing_fx_and_unknown_amount_but_counts_estimated_fallba
                 "amount_status": "ESTIMATED",
                 "amount": "50",
                 "currency": "RMB",
-                "allocation_basis": "chargeable_weight",
+                "allocation_basis": "gross_weight",
             },
         ],
         {"fx_usd_to_rmb": "", "fx_rmb_to_mxn": "2.5"},

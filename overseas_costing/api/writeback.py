@@ -18,8 +18,15 @@ from overseas_costing.services.access_control import require_batch_permission
 def check_writeback_ready(batch_name: str, version_name: str | None = None) -> dict:
     """检查当前批次/版本是否可回写 ERP。"""
 
+    from overseas_costing.services.erp_sync_plan_service import preview_site_sync_plan
+
     batch_name = require_batch_permission(batch_name, "read")
-    return batch_service.check_writeback_ready(batch_name=batch_name, version_name=version_name)
+    plan = preview_site_sync_plan(batch_name=batch_name, version_name=version_name)
+    return {
+        **plan,
+        "blocking_reasons": batch_service._erp_plan_blocking_messages(plan),
+        "message": "ERP 推送校验通过。" if plan.get("ready") else "ERP 推送校验存在阻断项。",
+    }
 
 
 @frappe.whitelist()

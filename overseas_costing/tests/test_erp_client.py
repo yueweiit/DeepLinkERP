@@ -4,6 +4,8 @@ import io
 import json
 from urllib.error import HTTPError
 
+import pytest
+
 from overseas_costing.services import erp_client
 
 
@@ -310,6 +312,92 @@ def test_existing_purchase_order_is_checked_before_any_item_write(monkeypatch) -
     assert writes == []
 
 
+def test_standard_group_push_deduplicates_by_company_scoped_business_key(monkeypatch) -> None:
+    looked_up = []
+    monkeypatch.setattr(
+        erp_client,
+        "_find_existing_purchase_order_by_business_key",
+        lambda payload, config: looked_up.append(payload["business_key"]) or "PO-EXISTING",
+    )
+    monkeypatch.setattr(
+        erp_client,
+        "_find_existing_purchase_order",
+        lambda payload, config: (_ for _ in ()).throw(AssertionError("must not use batch-level lookup")),
+    )
+    monkeypatch.setattr(
+        erp_client,
+        "_ensure_item",
+        lambda item, payload, config: (_ for _ in ()).throw(AssertionError("existing purchase must not write items")),
+    )
+    config = {
+        "enabled": True,
+        "base_url": "https://erp.example.com/api/resource",
+        "authorization": "token abc:def",
+        "push_mode": "standard_purchase",
+        "supplier": "SUP",
+        "item_group": "Products",
+        "stock_uom": "Nos",
+        "timeout": 30,
+    }
+
+    first = erp_client.push_overseas_cost_payload_with_config(
+        {
+            "batch_no": "B1",
+            "subsidiary_code": "Company A",
+            "business_key": "PURCHASE:B1:Company A:SUP:CNY:Nos",
+            "items": [{"material_code": "M1"}],
+        },
+        config,
+    )
+    second = erp_client.push_overseas_cost_payload_with_config(
+        {
+            "batch_no": "B1",
+            "subsidiary_code": "Company B",
+            "business_key": "PURCHASE:B1:Company B:SUP:CNY:Nos",
+            "items": [{"material_code": "M2"}],
+        },
+        config,
+    )
+
+    assert first["erp_target_doc"] == "PO-EXISTING"
+    assert second["erp_target_doc"] == "PO-EXISTING"
+    assert looked_up == [
+        "PURCHASE:B1:Company A:SUP:CNY:Nos",
+        "PURCHASE:B1:Company B:SUP:CNY:Nos",
+    ]
+
+
+def test_standard_group_push_propagates_unknown_network_outcome(monkeypatch) -> None:
+    monkeypatch.setattr(erp_client, "_find_existing_purchase_order_by_business_key", lambda payload, config: "")
+    monkeypatch.setattr(erp_client, "_ensure_item", lambda item, payload, config: {"ok": True})
+    monkeypatch.setattr(
+        erp_client,
+        "_request_json",
+        lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError("response lost after POST")),
+    )
+    config = {
+        "enabled": True,
+        "base_url": "https://erp.example.com/api/resource",
+        "authorization": "token abc:def",
+        "push_mode": "standard_purchase",
+        "supplier": "SUP",
+        "item_group": "Products",
+        "stock_uom": "Nos",
+        "timeout": 30,
+    }
+
+    with pytest.raises(TimeoutError, match="response lost after POST"):
+        erp_client.push_overseas_cost_payload_with_config(
+            {
+                "batch_no": "B1",
+                "subsidiary_code": "Company A",
+                "business_key": "PURCHASE:B1:Company A:SUP:CNY:Nos",
+                "items": [{"material_code": "M1"}],
+            },
+            config,
+        )
+
+
 def test_explicit_purchase_body_carries_stable_sync_fields() -> None:
     body = erp_client._build_purchase_order_body(
         {
@@ -325,6 +413,40 @@ def test_explicit_purchase_body_carries_stable_sync_fields() -> None:
     assert body["custom_overseas_business_key"] == "BK1"
     assert body["custom_overseas_cost_result_hash"] == "H1"
     assert body["items"][0]["custom_overseas_stable_line_key"] == "L1"
+
+
+def test_routed_payload_company_overrides_legacy_global_default() -> None:
+    body = erp_client._build_purchase_order_body(
+        {
+            "batch_no": "B1",
+            "subsidiary_code": "YW MOLDES MX模具",
+            "items": [{"material_code": "M1", "stable_line_key": "L1", "supplier": "SUP"}],
+        },
+        {"company": "LEGACY DEFAULT", "stock_uom": "Nos", "default_currency": "CNY"},
+    )
+
+    assert body["company"] == "YW MOLDES MX模具"
+
+
+def test_purchase_order_and_item_use_real_material_uom_before_global_default() -> None:
+    payload = {
+        "batch_no": "B1",
+        "erp_stock_uom": "kg",
+        "items": [
+            {
+                "material_code": "M1",
+                "purchase_uom": "kg",
+                "source_quantity": 2,
+            }
+        ],
+    }
+
+    item_body = erp_client._build_item_body(payload["items"][0], payload, {"stock_uom": "Nos"})
+    purchase_body = erp_client._build_purchase_order_body(payload, {"stock_uom": "Nos", "default_currency": "CNY"})
+
+    assert item_body["stock_uom"] == "kg"
+    assert purchase_body["items"][0]["uom"] == "kg"
+    assert purchase_body["items"][0]["stock_uom"] == "kg"
 
 
 def test_standard_purchase_flow_uses_default_supplier_when_item_suppliers_conflict(monkeypatch) -> None:

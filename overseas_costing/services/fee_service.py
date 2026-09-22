@@ -111,7 +111,7 @@ def build_default_fee_templates(transport_mode: str) -> list[dict]:
         key = row["logical_fee_key"]
         if key in {"customs_clearance_fee", "import_tax", "destination_delivery", "express_surcharge"}:
             row["entry_responsibility"] = "MEXICO"
-        if key in {"customs_clearance_fee", "import_tax", "destination_delivery"}:
+        if key in {"customs_clearance_fee", "import_tax", "destination_delivery", "express_surcharge"}:
             row["currency"] = "MXN"
         if key in {"express_surcharge", "destination_delivery"}:
             # A display/preview default, not a persisted actual or no-charge declaration.

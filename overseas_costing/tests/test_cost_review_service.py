@@ -16,7 +16,7 @@ def saved_context():
     values = {"name": "I-1", "row_no": 1, "stable_line_key": "line-1", "material_code": "SKU-1",
               "product_name": "Product", "unit": "件", "purchase_uom": "件", "unit_price_uom": "件",
               "quantity": 10.0, "actual_shipped_qty_mode": "DEFAULT_PURCHASE", "goods_value": 100.0,
-              "gross_weight_kg": 0.0, "volume_m3": 0.0}
+              "gross_weight_kg": 1.0, "volume_m3": 1.0, "chargeable_weight_kg": 1.0}
     items = [{field: values.get(field) for field in cost_preview_service.COST_INPUT_FIELDS}]
     rules = []
     for index, template in enumerate(fee_service.build_default_fee_templates("SEA")):
@@ -63,7 +63,7 @@ def codes(result):
     return {row["code"] for row in result["review_blockers"]}
 
 
-def test_current_saved_result_is_ready_with_goods_value_fallback_and_missing_sync_marker():
+def test_current_saved_result_is_ready_with_complete_physical_basis_and_missing_sync_marker():
     context = saved_context()
     before = deepcopy(context)
     result = evaluate(context)

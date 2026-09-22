@@ -9,6 +9,9 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 
 
+DEFAULT_SITE_CODE = "DEEPLINKERP"
+
+
 def resolve_item_routes(
     items: list[dict],
     routes: list[dict],
@@ -32,17 +35,17 @@ def resolve_item_routes(
     blocking_reasons: list[str] = []
     for index, item in enumerate(items, start=1):
         item_key = _text(item.get("stable_line_key") or item.get("name") or item.get("row_no") or index)
+        project = _text(item.get("project_collection"))
         if _text(item.get("route_status")) == "OVERRIDDEN":
             result = {
                 "status": "OVERRIDDEN",
                 "subsidiary_code": _text(item.get("subsidiary_code")),
-                "site_code": _text(item.get("erp_site_code")),
+                "site_code": _text(item.get("erp_site_code")) or DEFAULT_SITE_CODE,
                 "route_revision": item.get("route_revision") or 1,
                 "reason": "人工确认的 ERP 路由",
             }
             by_item[item_key] = {"stable_line_key": item_key, "project_collection": project, **result}
             continue
-        project = _text(item.get("project_collection"))
         candidates = by_project.get(project, []) if project else []
         targets = {_route_target(route) for route in candidates}
 
@@ -82,29 +85,32 @@ def build_site_payload_preview(result: dict) -> dict:
     每行的分摊金额是唯一费用来源；本函数不重新分摊，也不把批次总额复制到站点。
     """
 
-    groups: dict[tuple[str, str, str, str], dict] = {}
+    groups: dict[tuple[str, str, str, str, str], dict] = {}
     blocking: list[dict] = []
     for index, item in enumerate(result.get("items") or [], start=1):
         item_key = _text(item.get("stable_line_key") or item.get("name") or item.get("row_no") or index)
         status = _text(item.get("route_status")).upper()
         site_code = _text(item.get("erp_site_code"))
-        if status not in {"RESOLVED", "OVERRIDDEN"} or not site_code:
+        subsidiary_code = _text(item.get("subsidiary_code"))
+        if status not in {"RESOLVED", "OVERRIDDEN"} or not site_code or not subsidiary_code:
             blocking.append({"code": "ITEM_ROUTE_REQUIRED", "stable_line_key": item_key})
             continue
 
         group_key = (
             site_code,
+            subsidiary_code,
             _text(item.get("supplier")),
             normalize_currency(item.get("purchase_currency")),
-            _text(item.get("erp_stock_uom") or item.get("stock_uom")),
+            resolve_item_uom(item),
         )
         group = groups.setdefault(
             group_key,
             {
                 "site_code": site_code,
-                "supplier": group_key[1],
-                "purchase_currency": group_key[2],
-                "erp_stock_uom": group_key[3],
+                "subsidiary_code": subsidiary_code,
+                "supplier": group_key[2],
+                "purchase_currency": group_key[3],
+                "erp_stock_uom": group_key[4],
                 "items": [],
                 "total_cost_rmb": Decimal("0"),
                 "allocated_fee_rmb": Decimal("0"),
@@ -150,7 +156,7 @@ def build_erp_push_state(result: dict, site_configs: list[dict] | None = None) -
     if site_configs is not None:
         for site in preview["sites"]:
             config = configured_sites.get(site["site_code"])
-            if not config:
+            if site["site_code"] != DEFAULT_SITE_CODE and not config:
                 blocking.append({"code": "ERP_SITE_CONFIG_REQUIRED", "site_code": site["site_code"]})
 
     source_total = _decimal(preview["source_total_cost_rmb"])
@@ -165,6 +171,19 @@ def normalize_currency(value) -> str:
     text = _text(value).upper().replace("人民币", "CNY").replace("RMB", "CNY")
     text = text.replace("美元", "USD").replace("美金", "USD").replace("墨西哥比索", "MXN").replace("比索", "MXN")
     return text or "CNY"
+
+
+def resolve_item_uom(item: dict, fallback: str = "") -> str:
+    """Resolve the real material UOM used for ERP grouping and document rows."""
+
+    return _text(
+        item.get("erp_stock_uom")
+        or item.get("stock_uom")
+        or item.get("purchase_uom")
+        or item.get("shipped_uom")
+        or item.get("unit")
+        or fallback
+    )
 
 
 def preview_bulk_route(items: list[dict], target_site: str, target_subsidiary: str | None = None) -> dict:
@@ -186,6 +205,27 @@ def preview_bulk_route(items: list[dict], target_site: str, target_subsidiary: s
     }
 
 
+def list_unambiguous_project_routes(routes: list[dict], *, as_of: date | None = None) -> dict:
+    """Return active projects that resolve to exactly one Company/site target."""
+
+    effective_date = as_of or date.today()
+    by_project: dict[str, set[tuple[str, str]]] = {}
+    for route in routes:
+        project = _text(route.get("project_collection"))
+        if project and _route_is_active(route, effective_date):
+            by_project.setdefault(project, set()).add(_route_target(route))
+    options = []
+    conflicts = []
+    for project, targets in sorted(by_project.items()):
+        if len(targets) != 1:
+            conflicts.append(project)
+            continue
+        company, site_code = next(iter(targets))
+        if company:
+            options.append({"project_collection": project, "subsidiary_code": company, "site_code": site_code})
+    return {"options": options, "conflicts": conflicts}
+
+
 def _route_is_active(route: dict, as_of: date) -> bool:
     if route.get("enabled") in (0, False, "0"):
         return False
@@ -195,7 +235,10 @@ def _route_is_active(route: dict, as_of: date) -> bool:
 
 
 def _route_target(route: dict) -> tuple[str, str]:
-    return _text(route.get("subsidiary_code")), _text(route.get("site_code") or route.get("erp_site"))
+    return (
+        _text(route.get("subsidiary_code")),
+        _text(route.get("site_code") or route.get("erp_site")) or DEFAULT_SITE_CODE,
+    )
 
 
 def _parse_date(value) -> date | None:
@@ -228,6 +271,7 @@ def _decimal_text(value) -> str:
 def _serialise_group(group: dict) -> dict:
     return {
         "site_code": group["site_code"],
+        "subsidiary_code": group["subsidiary_code"],
         "supplier": group["supplier"],
         "purchase_currency": group["purchase_currency"],
         "erp_stock_uom": group["erp_stock_uom"],

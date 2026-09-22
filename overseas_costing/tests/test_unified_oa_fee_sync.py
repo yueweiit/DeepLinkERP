@@ -71,10 +71,11 @@ def install(monkeypatch, rows=None, mode="AIR"):
 
     def get_doc(values):
         def insert(**kwargs):
-            row = {**values, "name": "NEW"}
-            db.writes.append(("Overseas Cost Allocation Rule", "NEW", deepcopy(values)))
+            name = f"NEW-{len(db.rows) + 1}"
+            row = {**values, "name": name}
+            db.writes.append(("Overseas Cost Allocation Rule", name, deepcopy(values)))
             db.rows.append(row)
-            return SimpleNamespace(name="NEW")
+            return SimpleNamespace(name=name)
         return SimpleNamespace(insert=insert)
 
     monkeypatch.setattr(importer, "frappe", SimpleNamespace(db=db, get_all=get_all, get_doc=get_doc,
@@ -89,22 +90,58 @@ def sync(amount=500, **extra):
     return importer._sync_oa_logistics_allocation_rule(batch_name="B", version_name="V", approval_item=approval)
 
 
+def test_multi_fee_sync_uses_one_canonical_upsert_path_and_is_idempotent(monkeypatch):
+    db, _ = install(monkeypatch, mode="EXPRESS")
+    approval = {
+        "transport_mode_raw": "Express快递",
+        "form_fields": {
+            "物流费用": "100 USD",
+            "币种Moneda": "USD",
+            "清关费": "200",
+            "进口税费": "300",
+            "快递附加费": "40",
+            "当地配送费": "50",
+        },
+    }
+
+    created = importer._sync_oa_logistics_allocation_rules(
+        batch_name="B", version_name="V", approval_item=approval
+    )
+    repeated = importer._sync_oa_logistics_allocation_rules(
+        batch_name="B", version_name="V", approval_item=approval
+    )
+
+    assert created["ok"] is True
+    assert created["created_count"] == 5
+    assert repeated["action"] == "unchanged"
+    assert repeated["updated_count"] == 0
+    assert len(db.rows) == 5
+    assert {row["logical_fee_key"] for row in db.rows} == {
+        "international_express_fee",
+        "customs_clearance_fee",
+        "import_tax",
+        "express_surcharge",
+        "destination_delivery",
+    }
+    assert next(row for row in db.rows if row["logical_fee_key"] == "international_express_fee")["currency"] == "USD"
+    assert all(row["currency"] == "MXN" for row in db.rows if row["logical_fee_key"] != "international_express_fee")
+
+
 @pytest.mark.parametrize("mode,key,label,basis,count", MODES)
-@pytest.mark.parametrize("amount", [0, 500])
-def test_new_oa_fee_uses_saved_batch_transport_and_explicit_estimate(monkeypatch, mode, key, label, basis, count, amount):
+def test_new_oa_fee_uses_saved_batch_transport_and_explicit_estimate(monkeypatch, mode, key, label, basis, count):
     db, audits = install(monkeypatch, mode=mode)
-    result = sync(amount, transport_mode="SEA")
+    result = sync(500, transport_mode="SEA")
     assert result["action"] == "created"
     row = db.rows[0]
     assert (row["logical_fee_key"], row["expense_category"], row["allocation_basis"]) == (key, label, basis)
-    assert row["amount_status"] == "ESTIMATED" and row["amount"] == amount
+    assert row["amount_status"] == "ESTIMATED" and row["amount"] == 500
     assert row["rule_code"] == "oa_logistics_freight" and row["amount_revision"].startswith("oa:")
     assert audits
-    assert sync(amount)["action"] == "unchanged"
+    assert sync(500)["action"] == "unchanged"
     assert len(db.rows) == 1
 
 
-@pytest.mark.parametrize("amount", [None, "", "garbage"])
+@pytest.mark.parametrize("amount", [None, "", 0, "0", "garbage"])
 def test_absent_or_invalid_oa_money_does_not_create_a_zero_fee(monkeypatch, amount):
     db, _ = install(monkeypatch)
     assert sync(amount)["action"] == "skipped"
@@ -205,9 +242,8 @@ def test_manual_confirmation_of_unchanged_oa_estimate_marks_it_as_manually_saved
 
 
 @pytest.mark.parametrize("value", [0, "0", "0.00 RMB"])
-def test_explicit_zero_in_oa_form_field_survives_extraction(value):
-    fee = importer.extract_logistics_fee_from_approval({"form_fields": {"物流费用": value}})
-    assert fee["amount"] == 0
+def test_explicit_zero_in_oa_form_field_does_not_create_an_estimated_fee(value):
+    assert importer.extract_logistics_fee_from_approval({"form_fields": {"物流费用": value}}) == {}
 
 
 @pytest.mark.parametrize("operation", ["confirm_logistics_quote_candidate", "save_manual_logistics_quote"])
@@ -363,6 +399,30 @@ def test_oa_sync_checks_current_item_provenance_after_parent_lock(monkeypatch):
     result = sync()
     assert not result["ok"] and result["invalid_business"]
     assert not db.writes
+
+
+def test_existing_approval_refresh_does_not_backfill_new_optional_fee_mappings(monkeypatch):
+    descriptors = [
+        {"logical_fee_key": "international_air_freight", "amount": 100},
+        {"logical_fee_key": "customs_clearance_fee", "amount": 20},
+    ]
+    captured = []
+    monkeypatch.setattr(importer, "extract_logistics_fees_from_approval", lambda approval: descriptors)
+    monkeypatch.setattr(
+        importer,
+        "_sync_oa_fee_descriptor",
+        lambda **kwargs: captured.append(kwargs["fee_descriptor"]) or {"ok": True, "action": "unchanged"},
+    )
+
+    result = importer._sync_oa_logistics_allocation_rules(
+        batch_name="B",
+        version_name="V",
+        approval_item={},
+        include_new_optional_fees=False,
+    )
+
+    assert result["ok"] is True
+    assert captured == [descriptors[0]]
 
 
 @pytest.mark.parametrize("basis", ["goods_value", "gross_weight", "volume", "chargeable_weight"])

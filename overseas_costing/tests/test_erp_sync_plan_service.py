@@ -5,7 +5,7 @@ def test_preview_site_sync_plan_blocks_before_reading_routes_when_batch_is_not_c
     monkeypatch.setattr(
         plans.batch_service,
         "check_writeback_ready",
-        lambda batch_name, version_name: {
+        lambda batch_name, version_name, **kwargs: {
             "ready": False,
             "batch_name": batch_name,
             "version_name": version_name,
@@ -77,3 +77,54 @@ def test_get_site_sync_requests_resolves_server_batch_before_listing(monkeypatch
 
     assert result["batch_name"] == "B-REAL"
     assert result["items"] == [{"batch": "B-REAL", "version": "V-REAL"}]
+
+
+def test_project_route_options_only_include_unambiguous_company_routes(monkeypatch) -> None:
+    monkeypatch.setattr(
+        plans,
+        "_active_routes",
+        lambda: [
+            {"project_collection": "P1", "subsidiary_code": "COMPANY-1", "erp_site": ""},
+            {"project_collection": "P2", "subsidiary_code": "COMPANY-2", "erp_site": "S2"},
+            {"project_collection": "P2", "subsidiary_code": "COMPANY-X", "erp_site": "S2"},
+        ],
+    )
+
+    result = plans.list_project_route_options()
+
+    assert result["options"] == [{"project_collection": "P1", "subsidiary_code": "COMPANY-1", "site_code": "DEEPLINKERP"}]
+    assert result["conflicts"] == ["P2"]
+
+
+def test_insert_plan_audit_log_records_created_reused_and_sites(monkeypatch) -> None:
+    captured = {}
+    monkeypatch.setattr(
+        plans.batch_service,
+        "_insert_batch_audit_log",
+        lambda **values: captured.update(values),
+    )
+
+    plans._insert_plan_audit_log(
+        {
+            "batch_name": "B1",
+            "version_name": "V1",
+            "request_specs": {
+                "requests": [
+                    {"site_code": "DEEPLINKERP"},
+                    {"site_code": "MEXICO"},
+                ]
+            },
+        },
+        {
+            "requests": [
+                {"action": "CREATE"},
+                {"action": "REUSE"},
+            ]
+        },
+    )
+
+    assert captured["batch_doc_name"] == "B1"
+    assert captured["field_name"] == "erp_site_sync_plan"
+    assert '"created_count": 1' in captured["new_value"]
+    assert '"reused_count": 1' in captured["new_value"]
+    assert '"sites": ["DEEPLINKERP", "MEXICO"]' in captured["new_value"]

@@ -1071,7 +1071,7 @@ def test_build_batch_source_status_explains_missing_and_pending_purchase_approva
     assert "尚未同步" in pending["purchase_approval_sync_message"]
 
 
-def test_build_calculation_confirmation_readiness_requires_subsidiary_and_fee_pools() -> None:
+def test_build_calculation_confirmation_readiness_defers_company_to_erp_routing() -> None:
     result = _build_calculation_confirmation_readiness(
         batch={
             "status": "Calculated",
@@ -1101,7 +1101,7 @@ def test_build_calculation_confirmation_readiness_requires_subsidiary_and_fee_po
     assert result["ready"] is False
     assert result["checks"]["has_subsidiary_code"] is False
     assert result["checks"]["has_international_freight"] is False
-    assert "当前批次缺少归属业务主体。" in result["blocking_reasons"]
+    assert "当前批次缺少归属业务主体。" not in result["blocking_reasons"]
     assert "当前批次缺少国际运费费用池或分摊结果。" in result["blocking_reasons"]
     assert any(gap["fieldname"] == "subsidiary_code" for gap in result["field_gaps"]["batch"])
     assert any(gap["fieldname"] == "国际运费" for gap in result["field_gaps"]["rules"])
@@ -1801,135 +1801,32 @@ def test_direct_confirmation_writes_final_derived_price_result_only_once(monkeyp
     assert state["commit_count"] == 1
 
 
-def test_writeback_to_erp_records_failed_attempt_when_config_missing(monkeypatch) -> None:
-    from overseas_costing.services import batch_service
+def test_public_erp_adapters_delegate_to_company_grouped_plan(monkeypatch) -> None:
+    from overseas_costing.services import erp_sync_plan_service
 
-    set_values = []
-    inserted_logs = []
-
-    class FakeDB:
-        @staticmethod
-        def set_value(doctype, name, values, update_modified=False):
-            set_values.append((doctype, name, values, update_modified))
-
-        @staticmethod
-        def commit():
-            pass
-
-    class FakeDoc:
-        def __init__(self, payload):
-            self.payload = payload
-
-        def insert(self, ignore_permissions=False):
-            inserted_logs.append((self.payload, ignore_permissions))
-            return self
-
-    class FakeSession:
-        user = "tester@example.com"
-
-    class FakeFrappe:
-        db = FakeDB()
-        session = FakeSession()
-
-        @staticmethod
-        def get_doc(payload):
-            return FakeDoc(payload)
-
-    monkeypatch.setattr(batch_service, "frappe", FakeFrappe)
     monkeypatch.setattr(
-        batch_service,
-        "preview_erp_payload",
-        lambda batch_name, version_name=None: {
-            "ok": True,
-            "ready": True,
-            "batch_name": "BATCH-001",
-            "version_name": "VERSION-001",
-            "payload": {"target_system": "DeepLinkERP", "batch_no": "BATCH-001", "item_count": 1, "subsidiary_code": "MX01"},
+        erp_sync_plan_service,
+        "preview_site_sync_plan",
+        lambda batch, version: {
+            "kind": "preview", "ok": True, "ready": True, "batch_name": batch, "version_name": version,
+            "push_state": {"preview": {"preview_total_cost_rmb": "10", "preview_allocated_fee_rmb": "2", "sites": [
+                {"site_code": "DEEPLINKERP", "groups": [
+                    {"subsidiary_code": "COMPANY-A", "items": [{"stable_line_key": "L1"}]},
+                ]},
+            ]}},
         },
     )
     monkeypatch.setattr(
-        batch_service,
-        "_load_erp_push_context",
-        lambda batch_name, version_name=None: {"batch": {"extra_json": "{}", "confirm_status": "Confirmed"}},
-    )
-    monkeypatch.setattr(
-        batch_service.erp_client,
-        "push_overseas_cost_payload",
-        lambda payload: {
-            "ok": False,
-            "status": "Failed",
-            "message": "缺少 DeepLinkERP 目标 DocType 配置",
-            "request": {"authorization_configured": True},
-            "response": {},
-        },
+        erp_sync_plan_service,
+        "execute_site_sync_plan",
+        lambda batch, version: {"kind": "execute", "batch_name": batch, "version_name": version},
     )
 
-    result = writeback_to_erp("BATCH-001", "VERSION-001")
-
-    assert result["ok"] is False
-    assert result["writeback_status"] == "Failed"
-    assert result["retryable"] is True
-    assert set_values[0][2]["writeback_status"] == "Failed"
-    assert set_values[0][2]["writeback_message"] == "缺少 DeepLinkERP 目标 DocType 配置"
-    saved_extra = json.loads(set_values[0][2]["extra_json"])
-    assert saved_extra["erp_writeback"]["attempt_count"] == 1
-    assert saved_extra["erp_writeback"]["attempt_history"][0]["status"] == "Failed"
-    assert inserted_logs[0][0]["action_type"] == "WRITEBACK"
-
-
-def test_writeback_to_erp_blocks_when_not_confirmed(monkeypatch) -> None:
-    from overseas_costing.services import batch_service
-
-    set_values = []
-
-    class FakeDB:
-        @staticmethod
-        def set_value(doctype, name, values, update_modified=False):
-            set_values.append((doctype, name, values, update_modified))
-
-        @staticmethod
-        def commit():
-            pass
-
-    class FakeSession:
-        user = "tester@example.com"
-
-    class FakeFrappe:
-        db = FakeDB()
-        session = FakeSession()
-
-    monkeypatch.setattr(batch_service, "frappe", FakeFrappe)
-    monkeypatch.setattr(
-        batch_service,
-        "preview_erp_payload",
-        lambda batch_name, version_name=None: {
-            "ok": True,
-            "ready": True,
-            "batch_name": "BATCH-001",
-            "version_name": "VERSION-001",
-            "payload": {"target_system": "DeepLinkERP", "batch_no": "BATCH-001", "item_count": 1, "subsidiary_code": "MX01"},
-        },
-    )
-    monkeypatch.setattr(
-        batch_service,
-        "_load_erp_push_context",
-        lambda batch_name, version_name=None: {"batch": {"extra_json": "{}", "confirm_status": "Pending", "writeback_status": "Not Started"}},
-    )
-    monkeypatch.setattr(
-        batch_service.erp_client,
-        "push_overseas_cost_payload",
-        lambda payload: (_ for _ in ()).throw(AssertionError("push_overseas_cost_payload should not run")),
-    )
-
-    result = writeback_to_erp("BATCH-001", "VERSION-001")
-
-    assert result["ok"] is False
-    assert result["queued"] is False
-    assert result["pushed"] is False
-    assert result["retryable"] is False
-    assert "校验计算结果" in result["message"]
-    assert set_values == []
-
+    preview = batch_service.preview_erp_payload("BATCH-001", "VERSION-001")
+    assert preview["kind"] == "preview"
+    assert preview["payload"]["company_count"] == 1
+    assert preview["payload"]["items"] == [{"stable_line_key": "L1"}]
+    assert writeback_to_erp("BATCH-001", "VERSION-001")["kind"] == "execute"
 
 def test_confirm_calculation_result_rejects_active_review_round(monkeypatch) -> None:
     writes = []
@@ -1966,34 +1863,6 @@ def test_confirm_calculation_result_rejects_active_review_round(monkeypatch) -> 
     assert writes == []
 
 
-def test_writeback_to_erp_rejects_active_review_round_before_preview(monkeypatch) -> None:
-    class DB:
-        def sql(self, *args, **kwargs):
-            return []
-
-    monkeypatch.setattr(batch_service, "frappe", SimpleNamespace(db=DB()))
-    monkeypatch.setattr(batch_service, "_resolve_batch_name", lambda _value: "BATCH-001")
-    monkeypatch.setattr(batch_service, "_resolve_version_name", lambda *_args: "VERSION-001")
-    monkeypatch.setattr(batch_service, "_build_review_remediation_gate", lambda *_args, **_kwargs: {
-        "erp_blocked": True, "remediation_state": "resubmitted",
-        "blocking_reasons": ["财务尚未确认全部整改问题，不能推送 ERP。"],
-    }, raising=False)
-    monkeypatch.setattr(
-        batch_service,
-        "preview_erp_payload",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("blocked request must not preview")),
-    )
-    from overseas_costing.services.logistics_settlement import runtime
-    monkeypatch.setattr(runtime, "installed", lambda: False)
-
-    result = batch_service.writeback_to_erp("BATCH-001", "VERSION-001")
-
-    assert result["ok"] is False
-    assert result["queued"] is False
-    assert result["pushed"] is False
-    assert result["remediation_state"] == "resubmitted"
-
-
 def test_batch_detail_projects_current_review_remediation_state(monkeypatch) -> None:
     from overseas_costing.services import effective_logistics_source
 
@@ -2024,93 +1893,6 @@ def test_batch_detail_projects_current_review_remediation_state(monkeypatch) -> 
     assert result["header"]["remediation_state"] == "returned"
     assert result["header"]["unresolved_count"] == 1
     assert result["header"]["round_name"] == "ROUND-1"
-
-
-def test_writeback_to_erp_records_success_and_target_doc(monkeypatch) -> None:
-    from overseas_costing.services import batch_service
-
-    set_values = []
-
-    class FakeDB:
-        @staticmethod
-        def set_value(doctype, name, values, update_modified=False):
-            set_values.append((doctype, name, values, update_modified))
-
-        @staticmethod
-        def commit():
-            pass
-
-    class FakeDoc:
-        def __init__(self, payload):
-            self.payload = payload
-
-        def insert(self, ignore_permissions=False):
-            return self
-
-    class FakeSession:
-        user = "tester@example.com"
-
-    class FakeFrappe:
-        db = FakeDB()
-        session = FakeSession()
-
-        @staticmethod
-        def get_doc(payload):
-            return FakeDoc(payload)
-
-    previous_extra = {
-        "erp_writeback": {
-            "attempt_count": 1,
-            "attempt_history": [{"attempt_no": 1, "status": "Failed"}],
-        }
-    }
-    monkeypatch.setattr(batch_service, "frappe", FakeFrappe)
-    monkeypatch.setattr(
-        batch_service,
-        "preview_erp_payload",
-        lambda batch_name, version_name=None: {
-            "ok": True,
-            "ready": True,
-            "batch_name": "BATCH-001",
-            "version_name": "VERSION-001",
-            "payload": {"target_system": "DeepLinkERP", "batch_no": "BATCH-001", "item_count": 1, "subsidiary_code": "MX01"},
-        },
-    )
-    monkeypatch.setattr(
-        batch_service,
-        "_load_erp_push_context",
-        lambda batch_name, version_name=None: {
-            "batch": {
-                "extra_json": json.dumps(previous_extra, ensure_ascii=False),
-                "confirm_status": "Confirmed",
-            }
-        },
-    )
-    monkeypatch.setattr(
-        batch_service.erp_client,
-        "push_overseas_cost_payload",
-        lambda payload: {
-            "ok": True,
-            "status": "Success",
-            "message": "DeepLinkERP 返回成功，目标单据 ERP-PUSH-001。",
-            "erp_target_doc": "ERP-PUSH-001",
-            "http_status": 200,
-            "request": {"target_doctype": "Overseas Cost Push"},
-            "response": {"data": {"name": "ERP-PUSH-001"}},
-        },
-    )
-
-    result = writeback_to_erp("BATCH-001", "VERSION-001")
-
-    assert result["ok"] is True
-    assert result["pushed"] is True
-    assert result["writeback_status"] == "Success"
-    assert result["erp_target_doc"] == "ERP-PUSH-001"
-    assert set_values[0][2]["writeback_status"] == "Success"
-    assert set_values[0][2]["erp_target_doc"] == "ERP-PUSH-001"
-    saved_extra = json.loads(set_values[0][2]["extra_json"])
-    assert saved_extra["erp_writeback"]["attempt_count"] == 2
-    assert [item["status"] for item in saved_extra["erp_writeback"]["attempt_history"]] == ["Failed", "Success"]
 
 
 def test_build_writeback_field_gaps_exposes_missing_item_fieldnames() -> None:

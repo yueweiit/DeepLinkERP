@@ -89,56 +89,6 @@ def _get_batch_source_meta(batch_name: str) -> dict:
     return meta
 
 
-def get_batch_list(filters: dict) -> dict:
-    return {
-        "ok": True,
-        "message": "批次列表接口骨架已创建，后续接数据库查询。",
-        "filters": filters,
-        "items": [],
-        "total": 0,
-    }
-
-
-def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
-    source_meta = _get_batch_source_meta(batch_name)
-    return {
-        "ok": True,
-        "message": "批次详情接口骨架已创建。",
-        "batch_name": batch_name,
-        "version_name": version_name,
-        "header": {
-            "batch_no": source_meta.get("batch_no") or batch_name,
-            "source_approval_no": source_meta.get("source_approval_no", ""),
-            "source_instance_id": source_meta.get("source_instance_id", ""),
-            "source_dingtalk_url": source_meta.get("source_dingtalk_url", ""),
-            "source_title": source_meta.get("source_title", ""),
-            "source_creator_name": source_meta.get("source_creator_name", ""),
-            "source_approval_status": source_meta.get("source_approval_status", ""),
-        },
-        "summary": {},
-    }
-
-
-def get_batch_items(batch_name: str, version_name: str | None = None) -> dict:
-    return {
-        "ok": True,
-        "message": "批次明细接口骨架已创建。",
-        "batch_name": batch_name,
-        "version_name": version_name,
-        "columns": [],
-        "items": [],
-    }
-
-
-def get_version_list(batch_name: str) -> dict:
-    return {
-        "ok": True,
-        "message": "版本列表接口骨架已创建。",
-        "batch_name": batch_name,
-        "items": [],
-    }
-
-
 def get_dingtalk_order_link(batch_name: str) -> dict:
     """返回钉钉原单跳转信息。"""
 
@@ -157,36 +107,10 @@ def get_dingtalk_order_link(batch_name: str) -> dict:
     }
 
 
-def check_writeback_ready(batch_name: str, version_name: str | None = None) -> dict:
-    return {
-        "ok": True,
-        "ready": False,
-        "batch_name": batch_name,
-        "version_name": version_name,
-        "checks": {
-            "has_current_version": False,
-            "is_confirmed": False,
-            "has_dirty_data": True,
-        },
-        "message": "回写检查骨架已创建，后续接正式校验规则。",
-    }
-
-
-def writeback_to_erp(batch_name: str, version_name: str) -> dict:
-    return {
-        "ok": True,
-        "queued": True,
-        "batch_name": batch_name,
-        "version_name": version_name,
-        "message": "ERP 回写骨架已创建，当前仅预留入口。",
-    }
-
-
 # --- Database-backed query implementation for the Excel flat-table MVP. ---
 
 import json as _json
 
-from overseas_costing.services import erp_client
 from overseas_costing.utils.field_mapper import normalize_business_type, normalize_transport_mode
 
 EXCEL_COLUMNS = [
@@ -2726,7 +2650,7 @@ def _non_final_fee_reasons(rules: list[dict]) -> list[str]:
     return reasons
 
 
-def _comprehensive_readiness(batch, items, rules, version_name, *, for_writeback=False):
+def _comprehensive_readiness(batch, items, rules, version_name, *, for_writeback=False, require_batch_subsidiary=True):
     snapshot = batch["summary_snapshot"]
     result = snapshot.get("comprehensive_cost") or {}
     gaps = _build_writeback_field_gaps(batch, items, rules, version_name)
@@ -2735,7 +2659,7 @@ def _comprehensive_readiness(batch, items, rules, version_name, *, for_writeback
     missing = []
     if invalid.get("invalid"):
         missing.append(invalid.get("message") or "当前批次审批已被排除。")
-    if not _resolve_batch_subsidiary_code(batch):
+    if require_batch_subsidiary and not _resolve_batch_subsidiary_code(batch):
         missing.append("当前批次缺少归属业务主体。")
     dirty = batch.get("status") == "Dirty"
     if dirty:
@@ -2785,7 +2709,13 @@ def _build_calculation_confirmation_readiness(
     resolved_version_name: str | None,
 ) -> dict:
     if (batch.get("summary_snapshot") or {}).get("calculation_schema") == 2:
-        return _comprehensive_readiness(batch, items, rules, resolved_version_name)
+        return _comprehensive_readiness(
+            batch,
+            items,
+            rules,
+            resolved_version_name,
+            require_batch_subsidiary=False,
+        )
     item_quality = _build_writeback_item_quality(items)
     field_gaps = _build_writeback_field_gaps(batch, items, rules, resolved_version_name)
     actual_total_cost = _as_float(batch.get("actual_total_cost_rmb"))
@@ -2844,8 +2774,6 @@ def _build_calculation_confirmation_readiness(
         blocking_reasons.append(invalid_business_state.get("message") or "当前批次存在已拒绝/撤销/终止审批，不进入综合成本确认或 ERP 推送。")
     if not checks["has_current_version"]:
         blocking_reasons.append("当前批次没有当前版本。")
-    if not checks["has_subsidiary_code"]:
-        blocking_reasons.append("当前批次缺少归属业务主体。")
     if checks["has_dirty_data"]:
         blocking_reasons.append("当前批次存在未重新计算的数据。")
     if not checks["has_items"]:
@@ -2888,9 +2816,18 @@ def _build_writeback_readiness(
     items: list[dict],
     resolved_version_name: str | None,
     rules: list[dict] | None = None,
+    *,
+    require_batch_subsidiary: bool = True,
 ) -> dict:
     if (batch.get("summary_snapshot") or {}).get("calculation_schema") == 2:
-        return _comprehensive_readiness(batch, items, rules or [], resolved_version_name, for_writeback=True)
+        return _comprehensive_readiness(
+            batch,
+            items,
+            rules or [],
+            resolved_version_name,
+            for_writeback=True,
+            require_batch_subsidiary=require_batch_subsidiary,
+        )
     rules = rules or []
     item_quality = _build_writeback_item_quality(items)
     field_gaps = _build_writeback_field_gaps(batch, items, rules, resolved_version_name)
@@ -2920,7 +2857,7 @@ def _build_writeback_readiness(
         blocking_reasons.append(invalid_business_state.get("message") or "当前批次存在已拒绝/撤销/终止审批，不进入综合成本确认或 ERP 推送。")
     if not checks["has_current_version"]:
         blocking_reasons.append("当前批次没有当前版本。")
-    if not checks["has_subsidiary_code"]:
+    if require_batch_subsidiary and not checks["has_subsidiary_code"]:
         blocking_reasons.append("当前批次缺少归属业务主体。")
     if not checks["is_confirmed"]:
         blocking_reasons.append("当前批次还没有确认。")
@@ -3268,7 +3205,12 @@ def get_audit_logs(batch_name: str, version_name: str | None = None, limit: int 
     }
 
 
-def check_writeback_ready(batch_name: str, version_name: str | None = None) -> dict:
+def check_writeback_ready(
+    batch_name: str,
+    version_name: str | None = None,
+    *,
+    require_batch_subsidiary: bool = True,
+) -> dict:
     if frappe is None:
         blocking_reasons = ["当前未连接 Frappe，不能执行真实回写检查。"]
         return {
@@ -3316,6 +3258,7 @@ def check_writeback_ready(batch_name: str, version_name: str | None = None) -> d
         items=context["items"],
         resolved_version_name=context["version_name"],
         rules=context["rules"],
+        require_batch_subsidiary=require_batch_subsidiary,
     )
     if readiness.get("field_gaps"):
         readiness["field_gaps"]["summary"] = {
@@ -3477,211 +3420,50 @@ def confirm_calculation_result(batch_name: str, version_name: str | None = None,
 
 
 def preview_erp_payload(batch_name: str, version_name: str | None = None) -> dict:
-    if frappe is None:
-        return {
-            "ok": False,
-            "dry_run": True,
-            "ready": False,
-            "batch_name": batch_name,
-            "version_name": version_name,
-            "message": "当前未连接 Frappe，不能生成真实 ERP 推送报文。",
-        }
+    """Compatibility API delegating to the canonical per-Company sync planner."""
 
-    context = _load_erp_push_context(batch_name, version_name)
-    if not context.get("ok"):
-        return {**context, "ready": False}
+    from overseas_costing.services.erp_sync_plan_service import preview_site_sync_plan
 
-    remediation_gate = _build_review_remediation_gate(context["batch_doc_name"])
-    if remediation_gate.get("erp_blocked"):
-        return {
-            "ok": False,
-            "ready": False,
-            "batch_name": context["batch_doc_name"],
-            "version_name": context["version_name"],
-            **remediation_gate,
-            "message": "；".join(remediation_gate.get("blocking_reasons") or []),
-        }
-
-    readiness = _build_writeback_readiness(
-        batch=context["batch"],
-        items=context["items"],
-        resolved_version_name=context["version_name"],
-        rules=context["rules"],
-    )
-    if readiness.get("field_gaps"):
-        readiness["field_gaps"]["summary"] = {
-            "missing_total": readiness["field_gaps"].get("missing_total", 0),
-            "batch_count": len(readiness["field_gaps"].get("batch") or []),
-            "rule_count": len(readiness["field_gaps"].get("rules") or []),
-            "item_count": len(readiness["field_gaps"].get("items") or []),
-        }
-    if not readiness["ready"]:
-        return {
-            "ok": False,
-            "batch_name": context["batch_doc_name"],
-            "version_name": context["version_name"],
-            **readiness,
-        }
-
-    payload = _build_erp_push_payload(
-        batch=context["batch"],
-        version=context["version"],
-        items=context["items"],
-        rules=context["rules"],
-        readiness=readiness,
-    )
-    config_readiness = erp_client.validate_payload_for_push(payload)
-    if not config_readiness.get("ready"):
-        blocking_reasons = list(readiness.get("blocking_reasons") or [])
-        blocking_reasons.extend(config_readiness.get("blocking_reasons") or [])
-        return {
-            "ok": False,
-            "ready": False,
-            "batch_name": context["batch_doc_name"],
-            "version_name": context["version_name"],
-            "payload": payload,
-            **readiness,
-            "blocking_reasons": blocking_reasons,
-            "config_ready": False,
-            "erp_config": config_readiness.get("request") or {},
-            "message": config_readiness.get("message") or "ERP 推送配置未完成。",
-        }
+    plan = preview_site_sync_plan(batch_name, version_name)
+    preview = ((plan.get("push_state") or {}).get("preview") or {})
+    sites = preview.get("sites") or []
+    items = [item for site in sites for group in site.get("groups") or [] for item in group.get("items") or []]
+    payload = {
+        "target_system": "DeepLinkERP",
+        "batch_name": plan.get("batch_name") or batch_name,
+        "version_name": plan.get("version_name") or version_name,
+        "sites": sites,
+        "items": items,
+        "item_count": len(items),
+        "company_count": len({group.get("subsidiary_code") for site in sites for group in site.get("groups") or [] if group.get("subsidiary_code")}),
+        "group_count": sum(len(site.get("groups") or []) for site in sites),
+        "total_cost_rmb": preview.get("preview_total_cost_rmb") or 0,
+        "allocated_fee_rmb": preview.get("preview_allocated_fee_rmb") or 0,
+    }
     return {
-        "ok": True,
-        "ready": True,
-        "batch_name": context["batch_doc_name"],
-        "version_name": context["version_name"],
+        **plan,
         "payload": payload,
-        **readiness,
-        "config_ready": True,
-        "erp_config": config_readiness.get("request") or {},
-        "message": "DeepLinkERP 推送报文已生成，请人工预览后执行推送。",
+        "blocking_reasons": _erp_plan_blocking_messages(plan),
+        "message": "已按 ERP 公司生成推送预览。" if plan.get("ready") else "ERP 推送预览存在阻断项。",
     }
 
 
 def writeback_to_erp(batch_name: str, version_name: str | None = None) -> dict:
-    if frappe is not None:
-        from overseas_costing.services.logistics_settlement.runtime import lock_for_final_action, installed
-        settlement_issues = lock_for_final_action(_resolve_batch_name(batch_name) or batch_name, version_name) if installed() else []
-        if settlement_issues:
-            return {'ok': False, 'queued': False, 'pushed': False, 'blocking_reasons': settlement_issues, 'message': '；'.join(settlement_issues)}
-        if callable(getattr(getattr(frappe, "db", None), "sql", None)):
-            batch_doc_name = _resolve_batch_name(batch_name) or batch_name
-            _lock_confirmation_records(batch_doc_name, version_name)
-            remediation_gate = _build_review_remediation_gate(batch_doc_name, for_update=True)
-            if remediation_gate.get("erp_blocked"):
-                return {
-                    "ok": False, "queued": False, "pushed": False, "retryable": False,
-                    **remediation_gate,
-                    "message": "；".join(remediation_gate.get("blocking_reasons") or []),
-                }
-    preview = preview_erp_payload(batch_name=batch_name, version_name=version_name)
-    if not preview.get("ok"):
-        return {
-            **preview,
-            "queued": False,
-        }
-    if frappe is None:
-        return {
-            **preview,
-            "queued": False,
-            "message": "当前未连接 Frappe，不能组织 ERP 推送。",
-        }
+    """Compatibility API delegating to the canonical ledger-backed executor."""
 
-    context = _load_erp_push_context(batch_name, version_name)
-    batch = context.get("batch") or {}
-    confirm_status = str(batch.get("confirm_status") or batch.get("status") or "").strip().lower()
-    if "confirmed" not in confirm_status:
-        blocking_reason = "请先点击“校验计算结果”，确认通过后再推送 ERP。"
-        return {
-            **preview,
-            "ok": False,
-            "queued": False,
-            "pushed": False,
-            "retryable": False,
-            "writeback_status": batch.get("writeback_status") or "Not Started",
-            "message": blocking_reason,
-            "blocking_reasons": list(preview.get("blocking_reasons") or []) + [blocking_reason],
-        }
+    from overseas_costing.services.erp_sync_plan_service import execute_site_sync_plan
 
-    batch_extra = _load_json_value((context.get("batch") or {}).get("extra_json"))
-    if not isinstance(batch_extra, dict):
-        batch_extra = {}
-    previous_push = batch_extra.get("erp_writeback")
-    if not isinstance(previous_push, dict):
-        previous_push = {}
+    result = execute_site_sync_plan(batch_name, version_name)
+    return {**result, "blocking_reasons": _erp_plan_blocking_messages(result)}
 
-    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    attempt_no = int(previous_push.get("attempt_count") or 0) + 1
-    push_result = erp_client.push_overseas_cost_payload(preview.get("payload") or {})
-    writeback_status = "Success" if push_result.get("ok") else "Failed"
-    message = push_result.get("message") or (
-        "DeepLinkERP 推送成功。" if writeback_status == "Success" else "DeepLinkERP 推送失败。"
-    )
-    target_doc = push_result.get("erp_target_doc") or ""
-    attempt_record = {
-        "attempt_no": attempt_no,
-        "status": writeback_status,
-        "pushed_at": now_text,
-        "message": message,
-        "erp_target_doc": target_doc,
-        "http_status": push_result.get("http_status"),
-        "request": push_result.get("request") or {},
-        "response": push_result.get("response") or {},
-    }
-    attempt_history = list(previous_push.get("attempt_history") or [])
-    attempt_history.append(attempt_record)
-    batch_extra["erp_writeback"] = {
-        "status": writeback_status,
-        "attempt_count": attempt_no,
-        "last_attempt_at": now_text,
-        "last_message": message,
-        "erp_target_doc": target_doc,
-        "payload": preview.get("payload") or {},
-        "attempt_history": attempt_history[-20:],
-    }
-    frappe.db.set_value(
-        "Overseas Cost Batch",
-        preview["batch_name"],
-        {
-            "writeback_status": writeback_status,
-            "writeback_time": now_text,
-            "writeback_message": message,
-            "erp_target_doc": target_doc,
-            "extra_json": _json.dumps(batch_extra, ensure_ascii=False, default=str),
-        },
-        update_modified=True,
-    )
-    _insert_batch_audit_log(
-        batch_doc_name=preview["batch_name"],
-        version_name=preview["version_name"],
-        action_type="WRITEBACK",
-        field_name="erp_payload",
-        new_value=_json.dumps(
-            {
-                "target_system": "DeepLinkERP",
-                "item_count": preview["payload"].get("item_count"),
-                "subsidiary_code": preview["payload"].get("subsidiary_code"),
-                "writeback_status": writeback_status,
-                "erp_target_doc": target_doc,
-                "attempt_no": attempt_no,
-            },
-            ensure_ascii=False,
-            default=str,
-        ),
-        action_remark=message,
-    )
-    frappe.db.commit()
 
-    return {
-        **preview,
-        "ok": bool(push_result.get("ok")),
-        "queued": writeback_status != "Success",
-        "pushed": writeback_status == "Success",
-        "retryable": writeback_status == "Failed",
-        "writeback_status": writeback_status,
-        "erp_target_doc": target_doc,
-        "erp_response": push_result.get("response") or {},
-        "attempt_no": attempt_no,
-        "message": message,
-    }
+def _erp_plan_blocking_messages(result: dict) -> list[str]:
+    messages = []
+    for reason in result.get("blocking") or result.get("blocking_reasons") or []:
+        if isinstance(reason, dict):
+            message = str(reason.get("message") or reason.get("code") or "").strip()
+        else:
+            message = str(reason or "").strip()
+        if message and message not in messages:
+            messages.append(message)
+    return messages

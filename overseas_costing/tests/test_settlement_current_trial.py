@@ -12,7 +12,8 @@ from overseas_costing.tests.test_source_metadata_security import controllers
 def item(name='A', **values):
     return dict(name=name, stable_line_key=name, quantity=10, actual_shipped_qty=4,
                 actual_shipped_qty_mode='EXPLICIT_SOURCE', unit='件', shipped_uom='件',
-                unit_price=10, goods_value=100, gross_weight_kg=1, **values)
+                unit_price=10, goods_value=100, gross_weight_kg=1, chargeable_weight_kg=1,
+                volume_m3=1, **values)
 
 
 def final(amount='0', **values):

@@ -37,6 +37,17 @@ def test_item_has_explicit_erp_route_fields() -> None:
     assert fields["route_status"]["options"] == "UNRESOLVED\nRESOLVED\nOVERRIDDEN\nCONFLICT"
 
 
+def test_project_route_links_company_and_shared_site_is_optional() -> None:
+    route = _doctype("overseas_cost_project_route")
+    fields = {row["fieldname"]: row for row in route["fields"]}
+
+    assert fields["subsidiary_code"] == {
+        "fieldname": "subsidiary_code", "fieldtype": "Link", "label": "ERP公司",
+        "options": "Company", "reqd": 1, "in_list_view": 1,
+    }
+    assert not fields["erp_site"].get("reqd")
+
+
 def test_erp_sync_doctypes_are_valid_json() -> None:
     for name in (
         "overseas_cost_erp_site",

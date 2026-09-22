@@ -133,16 +133,9 @@ def select_allocation_basis(fee: dict, eligible: list[dict]) -> dict:
         return {**selection, "basis": "direct"}
     if _decimal(fee.get("amount")) == 0:
         return {**selection, "basis": "zero_amount"}
-    candidates = [preferred] if preferred == "goods_value" else [preferred, "goods_value"]
-    for basis in candidates:
-        values = [basis_decimal(row, basis) for row in eligible]
-        if values and all(value is not None and value > 0 for value in values):
-            return {
-                **selection,
-                "basis": basis,
-                "fallback_reason": "PREFERRED_BASIS_INCOMPLETE" if basis != preferred else "",
-            }
     values = [basis_decimal(row, preferred) for row in eligible]
+    if values and all(value is not None and value > 0 for value in values):
+        return {**selection, "basis": preferred, "fallback_reason": ""}
     code = "ALLOCATION_DENOMINATOR_ZERO" if values and all(value == 0 for value in values) else "ALLOCATION_BASIS_INCOMPLETE"
     return {**selection, "code": code}
 

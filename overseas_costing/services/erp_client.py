@@ -13,6 +13,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from overseas_costing.services.erp_routing_service import resolve_item_uom
+
 try:
     import frappe
 except Exception:  # pragma: no cover - 本地单测无 Frappe 时保持可导入
@@ -116,6 +118,22 @@ def push_overseas_cost_payload(payload: dict) -> dict:
         }
 
     config = get_erp_push_config()
+    return push_overseas_cost_payload_with_config(payload, config)
+
+
+def push_overseas_cost_payload_with_config(payload: dict, config: dict) -> dict:
+    """Use a server-resolved site configuration for one Company-scoped group."""
+
+    missing = _missing_config_reasons(config, payload=payload)
+    if missing:
+        return {
+            "ok": False,
+            "status": "Failed",
+            "config_ready": False,
+            "blocking_reasons": missing,
+            "message": "ERP 推送配置未完成：" + "；".join(missing),
+            "request": _redact_request_config(config),
+        }
     if config.get("push_mode") == PUSH_MODE_STANDARD:
         return _push_standard_purchase_flow(payload, config)
 
@@ -179,7 +197,33 @@ def _push_generic_resource(payload: dict, config: dict) -> dict:
 
 
 def _push_standard_purchase_flow(payload: dict, config: dict) -> dict:
+    if _clean(payload.get("business_key")):
+        # The grouped ledger owns unknown-outcome handling. Do not translate
+        # network failures into retryable FAILED here: a POST may have reached
+        # ERP even when its response was lost.
+        try:
+            result = create_purchase(payload, config)
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="ignore")
+            return {
+                "ok": False,
+                "status": "Failed",
+                "config_ready": True,
+                "http_status": exc.code,
+                "message": f"DeepLinkERP 标准模块推送失败：HTTP {exc.code} {_compact_text(detail)}",
+                "request": _redact_request_config(config),
+                "response": _load_json_response(detail),
+            }
+        return {
+            **result,
+            "config_ready": True,
+            "request": _redact_request_config(config),
+        }
+
     try:
+        # Historical direct callers did not provide a stable business key. Keep
+        # their batch/version lookup and retryable error response only at this
+        # compatibility boundary; grouped requests take the path above.
         purchase_order_name = _find_existing_purchase_order(payload, config)
         item_results = [_ensure_item(item, payload, config) for item in payload.get("items") or []]
 
@@ -690,7 +734,7 @@ def _build_item_body(item: dict, payload: dict, config: dict) -> dict:
         "item_code": item_code,
         "item_name": item_name or item_code,
         "item_group": config.get("item_group") or "All Item Groups",
-        "stock_uom": config.get("stock_uom") or "Nos",
+        "stock_uom": resolve_item_uom(item, payload.get("erp_stock_uom") or config.get("stock_uom") or "Nos"),
         "is_stock_item": 1,
         "custom_overseas_batch_no": payload.get("batch_no") or payload.get("batch_name") or "",
         "custom_overseas_cost_version": payload.get("version_code") or payload.get("version_name") or "",
@@ -706,7 +750,7 @@ def _build_item_body(item: dict, payload: dict, config: dict) -> dict:
 def _build_purchase_order_body(payload: dict, config: dict) -> dict:
     items = payload.get("items") or []
     schedule_date = config.get("schedule_date") or date.today().isoformat()
-    company = config.get("company") or payload.get("subsidiary_code") or ""
+    company = payload.get("subsidiary_code") or config.get("company") or ""
     currency = _normalize_currency(_first_item_value(items, "purchase_currency") or config.get("default_currency") or "CNY")
     supplier, supplier_source = _resolve_supplier(payload, config, items)
     return {
@@ -761,12 +805,13 @@ def _build_purchase_order_item(item: dict, payload: dict, config: dict, schedule
         - clearance_amount
         - tax_amount
     )
+    item_uom = resolve_item_uom(item, payload.get("erp_stock_uom") or config.get("stock_uom") or "Nos")
     row = {
         "item_code": item.get("material_code") or "",
         "item_name": item.get("material_name") or "",
         "qty": qty,
-        "uom": config.get("stock_uom") or "Nos",
-        "stock_uom": config.get("stock_uom") or "Nos",
+        "uom": item_uom,
+        "stock_uom": item_uom,
         "conversion_factor": 1,
         "schedule_date": schedule_date,
         "rate": original_unit_price,

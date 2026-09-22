@@ -58,6 +58,7 @@ def build_sync_request_specs(
             group_identity = "\x1f".join(
                 (
                     _text(site.get("site_code")),
+                    _text(group.get("subsidiary_code")),
                     _text(group.get("supplier")),
                     _text(group.get("purchase_currency")),
                     _text(group.get("erp_stock_uom")),
@@ -77,8 +78,10 @@ def build_sync_request_specs(
                 "operation": operation,
                 "business_key": business_key,
                 "batch": _text(batch),
+                "batch_name": _text(batch),
                 "cost_result_hash": _text(cost_result_hash),
                 "site_code": _text(site.get("site_code")),
+                "subsidiary_code": _text(group.get("subsidiary_code")),
                 "supplier": _text(group.get("supplier")),
                 "purchase_currency": _text(group.get("purchase_currency")),
                 "erp_stock_uom": _text(group.get("erp_stock_uom")),
@@ -140,16 +143,10 @@ def build_site_sync_plan(
         {
             "batch": _text(batch.get("name") or batch.get("batch_no")),
             "version": _text(version.get("name") or version.get("version_code")),
-            "items": [
-                {
-                    "stable_line_key": row["stable_line_key"],
-                    "route_status": row["route_status"],
-                    "site_code": row["erp_site_code"],
-                    "total_cost_rmb": row.get("total_cost_rmb"),
-                    "allocated_fee_rmb": row.get("allocated_fee_rmb"),
-                }
-                for row in routed_items
-            ],
+            # The complete routed preview is request-affecting input. Hashing
+            # only totals would incorrectly reuse a request when SKU, quantity,
+            # UOM, supplier, or another PO field changed without changing cost.
+            "preview": push_state["preview"],
         }
     )
     specs = build_sync_request_specs(
@@ -189,7 +186,10 @@ def classify_existing_request(existing: dict | None, candidate: dict) -> str:
 
     if not existing:
         return "CREATE"
-    if _text(existing.get("request_id")) == _text(candidate.get("request_id")):
+    if (
+        _text(existing.get("request_id")) == _text(candidate.get("request_id"))
+        and _text(existing.get("payload_hash")) == _text(candidate.get("payload_hash"))
+    ):
         return "REUSE"
     if (
         _text(existing.get("business_key")) == _text(candidate.get("business_key"))

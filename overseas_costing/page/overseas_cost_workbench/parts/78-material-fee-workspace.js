@@ -153,6 +153,9 @@
     this.$root.on("click", "[data-action='mf-exclude-selected']", () => {
       this.excludeSelectedMaterials().catch((error) => this.showError(error));
     });
+    this.$root.on("click", "[data-action='mf-set-project']", () => {
+      this.openProjectCollectionDialog().catch((error) => this.showError(error));
+    });
     this.$root.on("click", "[data-action='mf-clear-selection']", () => {
       this.clearMaterialSelection();
     });
@@ -1124,10 +1127,8 @@
     state.packingGroupSelections = state.packingGroupSelections instanceof Set ? state.packingGroupSelections : new Set();
     const key = String(stableLineKey || "");
     if (!key) return;
-    const group = [...this.materialPackingGroups().values()].find((value) =>
-      (value.member_keys || []).map(String).includes(key));
-    const keys = group ? (group.member_keys || []).map(String) : [key];
-    keys.forEach((value) => checked ? state.packingGroupSelections.add(value) : state.packingGroupSelections.delete(value));
+    if (checked) state.packingGroupSelections.add(key);
+    else state.packingGroupSelections.delete(key);
   }
 
   materialPageSelectableRows() {
@@ -1204,6 +1205,7 @@
     const unmergeEnabled = editable && completeSelection && selectedGroupIds.length >= 1
       && !ungroupedKeys.length && selectedMemberKeys.length === selectedCount;
     const removeEnabled = editable && completeSelection && selectedCount > 0;
+    const projectEnabled = editable && selectedCount > 0 && !unknownKeys.length && !lockedPageKeys.length;
     return {
       selectedKeys, selectedCount, crossPageCount, selectedGroupIds, incompleteGroupIds, ungroupedKeys, lockedPageKeys,
       actions: {
@@ -1217,6 +1219,7 @@
         remove:{enabled:removeEnabled, reason:removeEnabled ? "" : !editable ? readonlyReason
           : lockedPageKeys.length ? "当前选择包含不可操作的 AI 替换草稿行"
           : incompleteGroupIds.length ? "删除组员前请先解除合并" : "请先选择物料"},
+        project:{enabled:projectEnabled, reason:projectEnabled ? "" : !editable ? readonlyReason : "请先选择有效物料行"},
         clear:{enabled:selectedCount > 0, reason:selectedCount ? "" : "当前没有选中物料"},
       },
     };
@@ -1232,9 +1235,67 @@
       ${button("合并装箱组", "mf-create-packing-group", context.actions.merge)}
       ${button("编辑装箱组", "mf-edit-selected-packing-group", context.actions.edit)}
       ${button("解除合并", "mf-remove-selected-packing-groups", context.actions.unmerge)}
+      ${button("批量设置项目归属", "mf-set-project", context.actions.project)}
       ${button("删除所选", "mf-exclude-selected", context.actions.remove, "ocw-outline-btn is-danger")}
       ${button("清除选择", "mf-clear-selection", context.actions.clear)}
     </div>`;
+  }
+
+  async openProjectCollectionDialog() {
+    const state = this.ensureMaterialFeeState();
+    const context = this.materialSelectionContext();
+    if (!context.actions.project.enabled) throw new Error(context.actions.project.reason);
+    const selected = (state.materials?.items || []).filter((row) =>
+      context.selectedKeys.has(String(row.stable_line_key || "")));
+    if (selected.length !== context.selectedCount || selected.some((row) => !row.name)) {
+      throw new Error("选中物料已变化，请刷新后重试。");
+    }
+    const optionsResult = await this.call("overseas_costing.api.materials.list_project_route_options", {
+      batch_name:this.detailState.batchName,
+    }, false);
+    if (!optionsResult?.ok) throw new Error(optionsResult?.message || "项目路由加载失败。");
+    const options = optionsResult.options || [];
+    if (!options.length) throw new Error("当前没有可用的项目路由。");
+    const validProjects = new Set(options.map((row) => row.project_collection));
+    const invalidCurrent = [...new Set(selected.map((row) => String(row.project_collection || "").trim())
+      .filter((project) => project && !validProjects.has(project)))];
+    const routeWarning = [...new Set([...(optionsResult.conflicts || []), ...invalidCurrent])];
+    const dialog = new frappe.ui.Dialog({
+      title:`批量设置项目归属（${selected.length} 行）`,
+      fields:[
+        {fieldtype:"Select", fieldname:"project_collection", label:"项目归属", reqd:1,
+          options:options.map((row) => row.project_collection),
+          description:"只修改当前明确勾选的物料行。"},
+        {fieldtype:"HTML", fieldname:"preview", options:`<div class="ocw-mf-project-preview">${routeWarning.length
+          ? `<p class="text-danger">以下归属当前无有效唯一路由：${routeWarning.map((value) => this.escape(value)).join("、")}</p>` : ""}</div>`},
+      ],
+      primary_action_label:"预览并保存",
+      primary_action:async (values) => {
+        const target = String(values.project_collection || "").trim();
+        if (!target) return;
+        const company = options.find((row) => row.project_collection === target)?.subsidiary_code || "";
+        const previewRows = selected.map((row) =>
+          `${this.escape(row.material_code || row.stable_line_key)}：${this.escape(row.project_collection || "未设置")} → ${this.escape(target)}`);
+        dialog.fields_dict.preview.$wrapper.html(`<p><strong>ERP 公司：</strong>${this.escape(company)}</p><p>${previewRows.join("<br>")}</p>`);
+        frappe.confirm(`确认只修改这 ${selected.length} 行的项目归属？`, async () => {
+          if (!(await this.ensureEditSession())) return;
+          const updates = selected.map((row) => ({item_name:row.name, fieldname:"project_collection", value:target,
+            remark:"批量设置 ERP 项目归属"}));
+          const result = await this.call("overseas_costing.api.calculate.batch_update_items", {
+            batch_name:this.detailState.batchName, version_name:this.detailState.versionName,
+            updates:JSON.stringify(updates), remark:"批量设置 ERP 项目归属",
+            edit_token:this.detailState.editToken, expected_modified:this.detailState.expectedModified,
+          }, false);
+          if (!result?.ok) throw new Error(result?.message || "项目归属未保存。");
+          this.updateMaterialFeeExpectedModified(result);
+          state.packingGroupSelections.clear();
+          dialog.hide();
+          await this.loadMaterialFeeWorkspace({quiet:true});
+          frappe.show_alert({message:`已更新 ${Number(result.changed_count || 0)} 行项目归属`, indicator:"green"});
+        });
+      },
+    });
+    dialog.show();
   }
 
   async openMaterialPackingGroupDialog(action = "create", groupId = "") {

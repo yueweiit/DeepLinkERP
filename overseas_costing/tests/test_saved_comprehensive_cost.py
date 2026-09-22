@@ -12,9 +12,11 @@ def inputs():
     items = [
         dict(name="I1", stable_line_key="L1", material_code="CW000023", goods_value=12300,
              quantity=1000, actual_shipped_qty=990, actual_shipped_qty_mode="EXPLICIT_SOURCE",
+             gross_weight_kg=100, chargeable_weight_kg=120,
              unit="个", purchase_uom="个", unit_price_uom="个", shipped_uom="个"),
         dict(name="I2", stable_line_key="L2", material_code="OTHER", goods_value=28500,
-             quantity=7000, unit="个", purchase_uom="个", unit_price_uom="个", shipped_uom="个"),
+             quantity=7000, gross_weight_kg=200, chargeable_weight_kg=230,
+             unit="个", purchase_uom="个", unit_price_uom="个", shipped_uom="个"),
     ]
     fees = fee_service.build_default_fee_templates("AIR")
     # Keep the historical surcharge from this saved case; it is no longer a new default.
@@ -158,7 +160,8 @@ def test_confirmation_uses_saved_snapshot_zero_fees_and_keeps_real_entity_gap():
     assert result["total_cost_rmb"] == 64677
     assert result["checks"]["has_tariff"]
     assert not result["field_gaps"]["rules"]
-    assert result["blocking_reasons"] == ["当前批次缺少归属业务主体。"]
+    assert result["blocking_reasons"] == []
+    assert result["ready"] is True
     batch.update(status="Dirty", subsidiary_code="MX01")
     result = batch_service._build_calculation_confirmation_readiness(batch, items, fees, "V")
     assert not result["ready"] and result["checks"]["has_dirty_data"]

@@ -18,6 +18,16 @@ MAX_PREVIEW_REVISION_LENGTH = 200_000
 MAX_AI_UPDATES_BYTES = 1_000_000
 
 
+@frappe.whitelist()
+def list_project_route_options(batch_name: str) -> dict:
+    """Return valid project-to-Company choices for exact selected item rows."""
+
+    from overseas_costing.services.erp_sync_plan_service import list_project_route_options as list_options
+
+    require_batch_permission(batch_name, "read")
+    return list_options()
+
+
 def _choices_payload(value) -> dict:
     if isinstance(value, dict):
         payload = value

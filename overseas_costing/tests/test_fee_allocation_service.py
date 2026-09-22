@@ -8,17 +8,16 @@ from overseas_costing.services.fee_allocation_service import allocate_fee
 
 
 @pytest.mark.parametrize("physical", [None, "", "0", "NaN", "Infinity", "-1"])
-def test_incomplete_physical_basis_falls_back_for_the_entire_fee(physical):
+def test_incomplete_physical_basis_blocks_the_entire_fee(physical):
     items = [
         {"stable_line_key": "A", "volume_m3": "1", "goods_value": "100"},
         {"stable_line_key": "B", "volume_m3": physical, "goods_value": "300"},
     ]
     result = allocate_fee({"logical_fee_key": "international_sea_freight", "amount_status": "ACTUAL", "amount": "2004", "allocation_basis": "volume"}, items)
-    assert result["status"] == "ALLOCATED"
-    assert result["basis"] == "goods_value"
+    assert result["status"] == "BLOCKED"
+    assert result["code"] == "ALLOCATION_BASIS_INCOMPLETE"
     assert result["preferred_basis"] == "volume"
-    assert result["allocations"] == {"A": "501.00", "B": "1503.00"}
-    assert result["fallback_reason"] == "PREFERRED_BASIS_INCOMPLETE"
+    assert result["allocations"] == {}
 
 
 @pytest.mark.parametrize(("fee_key", "field", "basis"), [
@@ -43,13 +42,13 @@ def test_zero_amount_needs_no_allocation_measurements():
     assert result["allocations"] == {"A": "0.00"}
 
 
-def test_fallback_keeps_item_scope_and_conserves_stable_remainder():
+def test_incomplete_scoped_basis_does_not_switch_to_goods_value():
     items = [{"stable_line_key": key, "goods_value": "1"} for key in ["C", "B", "A", "OUT"]]
     fee = {"amount_status": "ACTUAL", "amount": "1", "allocation_basis": "volume", "scope_type": "ITEMS", "scope_item_keys": ["A", "B", "C"]}
     result = allocate_fee(fee, items)
-    assert result["allocations"] == {"A": "0.34", "B": "0.33", "C": "0.33", "OUT": "0.00"}
-    assert sum(map(Decimal, result["allocations"].values())) == Decimal("1")
-    assert allocate_fee(fee, list(reversed(items)))["allocations"] == result["allocations"]
+    assert result["status"] == "BLOCKED"
+    assert result["code"] == "ALLOCATION_BASIS_INCOMPLETE"
+    assert result["allocations"] == {}
 
 
 @pytest.mark.parametrize("amount", ["NaN", "Infinity", "-Infinity"])

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 
+from overseas_costing.scripts import import_oa_logistics
 from overseas_costing.utils.dingtalk import (
     build_desktop_approval_url,
     build_dingtalk_order_payload,
@@ -532,6 +533,67 @@ def test_extract_logistics_fee_from_approval_only_reads_explicit_amount() -> Non
     )
 
     assert quote_fee == {}
+
+
+def test_extract_logistics_fees_maps_optional_mexico_fees_without_shared_currency() -> None:
+    fees = import_oa_logistics.extract_logistics_fees_from_approval(
+        {
+            "transport_mode_raw": "Express快递",
+            "form_fields": {
+                "物流费用": "125 USD",
+                "币种Moneda": "美元Dólar",
+                "清关费": "800",
+                "进口税费": "1200 MXN",
+                "快递附加费": "0",
+                "当地配送费": "450",
+            },
+        }
+    )
+
+    assert [(row["logical_fee_key"], row["amount"], row["currency"], row["allocation_basis"]) for row in fees] == [
+        ("international_express_fee", 125.0, "USD", "chargeable_weight"),
+        ("customs_clearance_fee", 800.0, "MXN", "goods_value"),
+        ("import_tax", 1200.0, "MXN", "goods_value"),
+        ("destination_delivery", 450.0, "MXN", "gross_weight"),
+    ]
+
+
+def test_project_ownership_keeps_all_dingtalk_entities_and_assigns_only_single_choice() -> None:
+    single = {
+        "form_fields": {
+            "项目归属Pertenencia del proyecto": [
+                {"deptName": "YW MOLDES MX模具", "deptId": "D-MOLD"},
+            ],
+            "货物信息Bienes": [{"rowValue": [
+                {"label": "物料编码 Código de material", "value": "M1"},
+                {"label": "物料名称（中文）Nombre del material (chino)", "value": "模具"},
+                {"label": "数量Cantidad", "value": "1"},
+            ]}],
+        }
+    }
+    multiple = {
+        **single,
+        "form_fields": {
+            **single["form_fields"],
+            "项目归属Pertenencia del proyecto": {
+                "selectedOptions": [
+                    {"deptName": "YW MOLDES MX模具", "itemId": "D-MOLD"},
+                    {"deptName": "AmigoMart", "itemId": "D-AMIGO"},
+                ]
+            },
+        },
+    }
+
+    assert import_oa_logistics.extract_project_candidates_from_approval(single)["candidates"] == [
+        {"name": "YW MOLDES MX模具", "id": "D-MOLD"}
+    ]
+    assert build_oa_item_values_from_approval(single)[0]["project_collection"] == "YW MOLDES MX模具"
+    multiple_item = build_oa_item_values_from_approval(multiple)[0]
+    assert multiple_item.get("project_collection") in (None, "")
+    assert json.loads(multiple_item["extra_json"])["project_candidates"] == [
+        {"name": "YW MOLDES MX模具", "id": "D-MOLD"},
+        {"name": "AmigoMart", "id": "D-AMIGO"},
+    ]
 
     candidates = extract_logistics_quote_candidates_from_approval(
         {
@@ -1730,6 +1792,34 @@ def test_build_oa_item_values_allocates_header_weight_by_quantity() -> None:
 
     assert [item["material_code"] for item in items] == ["MHA101290", "MHA201290"]
     assert [item["gross_weight_kg"] for item in items] == [16.6, 16.6]
+
+
+def test_line_weight_column_is_authoritative_and_missing_rows_are_not_inferred() -> None:
+    approval = {
+        "form_fields": {
+            "重量Peso（KG）": "33.2",
+            "货物信息Bienes": [
+                {"rowValue": [
+                    {"label": "物料编码 Código de material", "value": "M1"},
+                    {"label": "物料名称（中文）Nombre del material (chino)", "value": "物料一"},
+                    {"label": "数量Cantidad", "value": "1"},
+                    {"label": "重量 Peso", "value": "12.5"},
+                ]},
+                {"rowValue": [
+                    {"label": "物料编码 Código de material", "value": "M2"},
+                    {"label": "物料名称（中文）Nombre del material (chino)", "value": "物料二"},
+                    {"label": "数量Cantidad", "value": "1"},
+                    {"label": "重量 Peso", "value": ""},
+                ]},
+            ],
+        }
+    }
+
+    items = build_oa_item_values_from_approval(approval)
+
+    assert items[0]["gross_weight_kg"] == 12.5
+    assert items[1].get("gross_weight_kg") in (None, "")
+    assert json.loads(items[1]["extra_json"])["goods_table_columns"][-1] == "重量 Peso"
 
 
 def test_build_oa_item_values_keeps_spec_model_for_air_approval() -> None:
@@ -3387,3 +3477,42 @@ def test_pull_latest_logistics_approvals_to_erp_reuses_pull_and_save(monkeypatch
     assert calls["pull"]["transport_modes"] == "SEA,AIR"
     assert calls["pull"]["limit"] == 50
     assert calls["save"]["items"][0]["source_approval_no"] == "OA-1"
+
+
+def test_pull_latest_dry_run_previews_new_mapping_without_database_save(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    monkeypatch.setattr(import_oa_logistics, "resolve_dingtalk_env_file", lambda env_file=None: "")
+    monkeypatch.setattr(import_oa_logistics, "_has_dingtalk_pull_credentials", lambda: True)
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "pull_logistics_approvals",
+        lambda **kwargs: {
+            "ok": True,
+            "data_source": "postgres",
+            "filtered_count": 1,
+            "items": [{
+                "source_approval_no": "OA-NEW",
+                "transport_mode": "EXPRESS",
+                "form_fields": {
+                    "项目归属Pertenencia del proyecto": [{"deptName": "AmigoMart", "deptId": "D1"}],
+                    "快递附加费": "25",
+                },
+            }],
+        },
+    )
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "save_sea_approvals_to_erp",
+        lambda result: (_ for _ in ()).throw(AssertionError("dry run must not save")),
+    )
+
+    result = pull_latest_logistics_approvals_to_erp(
+        start="2026-09-22",
+        end="2026-09-22",
+        dry_run=True,
+    )
+
+    assert result["dry_run"] is True
+    assert result["previews"][0]["project_ownership"]["candidates"] == [{"name": "AmigoMart", "id": "D1"}]
+    assert result["previews"][0]["logistics_fees"][0]["logical_fee_key"] == "express_surcharge"
