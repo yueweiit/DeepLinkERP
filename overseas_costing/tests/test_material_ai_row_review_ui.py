@@ -15,11 +15,13 @@ w.detailState={batchName:'B',versionName:'V',tab:'documents',editToken:'token',e
 const state=w.ensureMaterialFeeState();w.renderMaterialAIReviewDialog=()=>{};w.renderMaterialFeeWorkspacePreservingPosition=()=>{};
 w.loadMaterialFeeWorkspace=async()=>true;w.ensureEditSession=async()=>true;
 global.frappe={show_alert:()=>{}};
-const catalog={policy:'ai-row-review-4',fingerprint:'fp',rows:[
+const catalog={policy:'ai-field-review-7',fingerprint:'fp',rows:[
  {row_id:'source',origin:'source',action:'update',values:{material_code:'NEW',gross_weight_kg:0},can_fill:true,can_update:true,can_add:false,can_replace:true,default_selected:true,default_update_selected:true,default_replace_selected:true},
  {row_id:'current',origin:'current',action:'retain',values:{material_code:'OLD'},can_fill:false,can_update:false,can_add:false,can_replace:true,default_selected:false},
  {row_id:'ambiguous',origin:'source',action:'review',label:'待核对',values:{material_code:'DUP'},can_fill:false,can_update:false,can_add:false,can_replace:true,blocked_reason:'匹配不唯一'}
-],source_groups:[{group_id:'packing',source_id:'PACKING-LIST',source_label:'国际物流装箱清单.xlsx',priority:1,row_ids:['source'],has_conflicts:false}],fees:[{proposal_id:'fee',payload:{expense_category:'运费',amount:0,currency:'RMB'},can_apply:true,default_selected:true},{proposal_id:'quote',payload:{expense_category:'旧报价',amount:999},can_apply:false,default_selected:true,blocked_reason:'已采用实际费用'}]};
+],source_groups:[{group_id:'packing',source_id:'PACKING-LIST',source_label:'国际物流装箱清单.xlsx',priority:1,row_ids:['source'],has_conflicts:false}],fees:[{proposal_id:'fee',payload:{expense_category:'运费',amount:0,currency:'RMB'},can_apply:true,default_selected:true},{proposal_id:'quote',payload:{expense_category:'旧报价',amount:999},can_apply:false,default_selected:true,blocked_reason:'已采用实际费用'}],
+stage_snapshots:[{stage:'payment',rows:[],processes:[]},{stage:'international_logistics',rows:[],processes:[]},{stage:'purchase',rows:[],processes:[]}],
+fee_stage_snapshots:[{stage:'payment',fees:[],processes:[]},{stage:'international_logistics',fees:[],processes:[]},{stage:'purchase',fees:[],processes:[]}]};
 const ready=()=>{state.aiFill=w.initializeMaterialAIDraft({status:'READY',run_id:'run',row_review:catalog});return state.aiFill};
 const calls=[];
 """
@@ -41,10 +43,11 @@ w.changeMaterialAIRowSelection('mode','update_selected');w.changeMaterialAIRowSe
 assert.deepEqual([...review.rows],['source']);
 w.changeMaterialAIRowSelection('mode','fill_missing');assert.deepEqual([...review.rows],['source']);
 const html=w.renderMaterialAIReviewDialogContent();
-for(const text of ['本次识别','当前已有','待核对','只补缺失','更新所选行','已采用实际费用','全选','全不选'])assert(html.includes(text),text);
+for(const text of ['只补缺失','更新所选行','已采用实际费用'])assert(html.includes(text),text);
 assert(!html.includes('替换整表'));
 assert(!html.includes('data-mf-ai-proposal-select'));assert(!html.includes('data-mf-ai-edit'));
-assert(html.includes('data-mf-ai-row-select="source"'));assert(html.includes('data-mf-ai-fee-select="quote" disabled'));
+assert(!html.includes('data-mf-ai-row-select="source"'));assert(!html.includes('data-mf-ai-source-group='));
+assert(html.includes('data-mf-ai-fee-select="quote" disabled'));
 """)
 
 
@@ -309,12 +312,54 @@ selection.preview={id:'P',revision:'R',can_apply:true,rows:[]};selection.preview
 const html=w.renderMaterialAIReviewDialogContent();
 assert(html.includes('无可用资料'));assert(html.includes('部分可用'));
 const logistics=html.slice(html.indexOf('data-mf-ai-packing-stage="international_logistics"'),html.indexOf('data-mf-ai-packing-stage="purchase"'));
-assert(logistics.includes('2 份资料未读取'));assert(logistics.includes('data-action="mf-ai-show-evidence"'));
+assert(logistics.includes('1 份资料未读取'));assert(logistics.includes('需核对'));assert(logistics.includes('data-action="mf-ai-show-evidence"'));
 assert(!logistics.includes('文件格式不支持'));assert(!logistics.includes('已跳过，继续读取下一资料'));
 const evidence=html.slice(html.indexOf('查看依据与其他记录'));
 assert(evidence.includes('文件格式不支持'));assert(evidence.includes('已跳过，继续读取下一资料'));
 assert(!html.includes('Internal Server Error'));assert(!html.includes('&lt;html'));assert(w.canConfirmMaterialAIRowSelection(fill));
 const apply=html.match(/data-action="mf-ai-apply"([^>]*)>/);assert(apply&&!apply[1].includes('disabled'));
+""")
+
+
+def test_process_conflict_warning_requires_review_without_claiming_a_read_failure():
+    run_ui(r"""
+const fill=ready();fill.row_review={...fill.row_review,policy:'ai-field-review-7',field_candidates:[
+ {candidate_id:'LOG-W',item_name:'I1',fieldname:'gross_weight_kg',suggested_value:'8',workflow_stage:'international_logistics',can_apply:true,default_selected:true,presentation_group_id:'LOG-8',presentation_representative_candidate_id:'LOG-W',presentation_equivalent_candidate_ids:['LOG-W']},
+],stage_snapshots:[
+ {stage:'payment',stage_label:'支付申请',status:'UNAVAILABLE',rows:[],processes:[],warnings:[]},
+ {stage:'international_logistics',stage_label:'国际物流',status:'PARTIAL',warnings:['两个流程的毛重不一致，请核对。'],rows:[{item_name:'I1',material_code:'SKU-1',field_candidates:{gross_weight_kg:['LOG-W']}}],processes:[{label:'国际物流',evidence:[{evidence_id:'OK',source_label:'packing.xlsx',read_status:'COMPLETED'}]}]},
+ {stage:'purchase',stage_label:'采购支出',status:'UNAVAILABLE',rows:[],processes:[],warnings:[]},
+],fee_stage_snapshots:[]};
+delete fill.rowSelection;w.ensureMaterialAIRowSelection(fill);
+const html=w.renderMaterialAIReviewDialogContent();
+const logistics=html.slice(html.indexOf('data-mf-ai-packing-stage="international_logistics"'),html.indexOf('data-mf-ai-packing-stage="purchase"'));
+assert(logistics.includes('需核对'));assert(logistics.includes('data-action="mf-ai-show-evidence"'));
+assert(!logistics.includes('资料未读取'));
+const evidence=html.slice(html.indexOf('查看依据与其他记录'));
+assert(evidence.includes('两个流程的毛重不一致，请核对。'));
+""")
+
+
+def test_current_policy_without_either_stage_snapshot_requires_reanalysis_and_never_previews_or_confirms():
+    run_ui(r"""
+const packingSnapshots=[{stage:'payment',rows:[],processes:[]}];
+const feeSnapshots=[{stage:'payment',fees:[],processes:[]}];
+catalog.policy='ai-field-review-7';catalog.stage_snapshots=packingSnapshots;catalog.fee_stage_snapshots=feeSnapshots;
+const fill=ready();
+for(const missing of ['packing','fees']){
+ fill.row_review.stage_snapshots=missing==='packing'?undefined:packingSnapshots;
+ fill.row_review.fee_stage_snapshots=missing==='fees'?undefined:feeSnapshots;
+ const selection=fill.rowSelection;
+ selection.loading=false;selection.preview={id:'P',revision:'R',can_apply:true,rows:[]};selection.previewKey=w.materialAIRowSelectionKey(fill);
+ assert.equal(w.canConfirmMaterialAIRowSelection(fill),false,missing);
+ const html=w.renderMaterialAIReviewDialogContent();
+ assert(html.includes('资料处理规则已更新，请重新分析资料'),missing);
+ assert(!html.includes('data-mf-ai-source-group='),missing);assert(!html.includes('优先级'),missing);
+ const apply=html.match(/data-action="mf-ai-apply"([^>]*)>/);assert(apply&&apply[1].includes('disabled'),missing);
+ calls.length=0;w.call=async(method,args)=>{calls.push({method,args});return {ok:true,preview:{id:'HIDDEN',revision:1,can_apply:true}}};
+ await w.previewMaterialAIRowSelection();await w.confirmMaterialAIRowSelection();
+ assert.deepEqual(calls,[],`${missing} snapshot absence must not submit hidden defaults`);
+}
 """)
 
 
@@ -774,7 +819,8 @@ releaseStart({ok:true,status:'QUEUED',run_id:'run-2',source_progress:[{source_id
 const fill=state.aiFill;assert.equal(fill.runId,'run-2');assert.equal(fill.rowSelection.mode,'update_selected');
 assert.deepEqual([...fill.rowSelection.rows],['new-source']);assert.deepEqual(fill.source_progress,[{source_id:'SOURCE-2'}]);
 assert.equal(fill.selections.size,0);assert.deepEqual(fill.manualUpdates,{});
-const html=w.renderMaterialAIReviewDialogContent();assert(html.includes('data-mf-ai-row-select="new-source"'));
+const html=w.renderMaterialAIReviewDialogContent();assert(html.includes('data-mf-ai-packing-stage="payment"'));
+assert(!html.includes('data-mf-ai-row-select="new-source"'));assert(!html.includes('data-mf-ai-source-group='));
 assert(!html.includes('data-mf-ai-autofill-preview'));assert(!html.includes('OLD'));
 """)
 
@@ -810,35 +856,6 @@ w.call=async(method,args)=>{calls.push({method,args});return {ok:true,status:'QU
 await w.startMaterialAIFill({force:true,restart:true});
 assert(calls[0].method.endsWith('start_source_ai_review'));
 assert.equal(calls.length,1);assert(!('payment_candidate_refs_json' in calls[0].args));
-""")
-
-
-def test_material_candidates_render_as_expandable_priority_source_tables():
-    run_ui(r"""
-const fill=ready();
-fill.row_review={...fill.row_review,rows:[
- {...fill.row_review.rows[0],source_group_id:'packing',source_priority:1,source_label:'国际物流装箱清单.xlsx',meaningful_field_count:2,
-   default_update_selected:false,default_selection_reason:'同物料存在更完整的候选，未默认选择。'},
- {...fill.row_review.rows[0],row_id:'lower',source_group_id:'oa',source_priority:2,source_label:'国际物流审批',lower_priority:true,
-   conflict_fields:['gross_weight_kg'],meaningful_field_count:7,default_update_selected:true,
-   default_selection_reason:'有效字段 7 项，为同物料候选中最完整，已默认选择。'},
- fill.row_review.rows[1]
-],source_groups:[
- {group_id:'packing',source_id:'PACKING-LIST',source_label:'国际物流装箱清单.xlsx',priority:1,priority_reason:'当前无有效实际装箱匹配，采用流程装箱单附件',actual_packing_match_status:'none',row_ids:['source'],has_conflicts:false},
- {group_id:'oa',source_id:'LOGISTICS-OA',source_label:'国际物流审批',priority:2,row_ids:['lower'],has_conflicts:true}
-]};
-delete fill.rowSelection;w.ensureMaterialAIRowSelection(fill);
-const html=w.renderMaterialAIReviewDialogContent();
-assert.deepEqual([...fill.rowSelection.rows],['lower']);
-assert(html.includes('来源 1'));assert(html.includes('来源 2'));assert(html.includes('国际物流装箱清单.xlsx'));
-assert(html.includes('当前无有效实际装箱匹配，采用流程装箱单附件'));
-assert(html.includes('data-mf-ai-source-group="packing" open'));
-assert(html.includes('有效字段 7 项，为同物料候选中最完整，已默认选择。'));
-assert(html.includes('与更高优先级来源存在差异：毛重 kg'));
-assert(!html.includes('勾选即人工覆盖'));
-assert(html.includes('当前已有'));
-w.scheduleMaterialAIRowPreview=()=>{};w.changeMaterialAIRowSelection('rows','source',true);
-assert.deepEqual([...fill.rowSelection.rows].sort(),['lower','source']);
 """)
 
 
@@ -948,7 +965,12 @@ def test_review_source_and_css_retire_duplicate_evidence_and_second_sticky_colum
     stage_css = css[css.index('.ocw-mf-ai-stage-panel'):css.index('.ocw-mf-ai-unclassified')]
 
     assert 'renderMaterialAIStageEvidence(' not in source
+    assert 'data-mf-ai-source-group=' not in source
+    assert 'const hasFeeStages' not in source
+    assert 'const sourceTables' not in source
     assert 'ocw-mf-ai-stage-evidence' not in css
+    assert '.ocw-mf-ai-source-candidate-group' not in css
+    assert '.ocw-mf-ai-source-priority-reason' not in css
     assert '.ocw-mf-ai-field-source-group' not in css
     assert '.ocw-mf-ai-fee-components' not in css
     assert '.ocw-mf-ai-other-fees' not in css
