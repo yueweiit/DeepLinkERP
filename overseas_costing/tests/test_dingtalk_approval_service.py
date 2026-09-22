@@ -390,7 +390,6 @@ def test_form_fields_use_attachment_context_for_generic_name_and_id_aliases() ->
     [
         '{"fileUrl":"https://files.example/a?token=SECRET"',
         '{"fileName":"quote.pdf","downloadId":"SECRET"',
-        '{"token":"SECRET"',
         'https://files.example/a?X-Amz-Signature=SECRET',
     ],
 )
@@ -413,13 +412,32 @@ def test_display_value_keeps_non_sensitive_malformed_legacy_text() -> None:
     assert service._display_value(malformed_value) == malformed_value
 
 
-def test_safe_form_value_hides_structured_auth_keys_and_signed_url_values() -> None:
+def test_display_value_uses_attachment_context_for_malformed_generic_attachment_aliases() -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    malformed_attachment = '{"name":"invoice.pdf","id":"SECRET-ID"'
+    malformed_business = '{"token":"board-vote"'
+
+    assert service._display_value(
+        malformed_attachment,
+        attachment_context=True,
+    ) == "审批附件（敏感内容已隐藏）"
+    assert service._display_value(malformed_attachment) == malformed_attachment
+    assert service._display_value(malformed_business) == malformed_business
+    assert service._display_value(
+        malformed_business,
+        attachment_context=True,
+    ) == "审批附件（敏感内容已隐藏）"
+
+
+def test_safe_form_value_only_hides_global_technical_credentials_and_signed_urls() -> None:
     from overseas_costing.services import dingtalk_approval_service as service
 
     sanitized = service._safe_form_value({
         "name": "普通业务",
-        "auth": "SECRET-AUTH",
-        "token": "SECRET-TOKEN",
+        "accessToken": "SECRET-ACCESS-TOKEN",
+        "authCode": "SECRET-AUTH-CODE",
+        "authMediaId": "SECRET-AUTH-MEDIA",
         "url": "https://files.example/a?X-Amz-Signature=SECRET-SIGNATURE",
     })
 
@@ -428,6 +446,38 @@ def test_safe_form_value_hides_structured_auth_keys_and_signed_url_values() -> N
         "url": "审批附件（敏感内容已隐藏）",
     }
     assert "SECRET" not in json.dumps(sanitized, ensure_ascii=False)
+
+
+def test_safe_form_value_preserves_business_signature_and_authorization_fields() -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    contract = {
+        "name": "合同",
+        "signature": "张三签字",
+        "authorization": "董事会批准",
+        "auth": "法务授权",
+        "token": "业务标识",
+        "sig": "手写签名",
+        "status": "approved",
+    }
+
+    assert service._safe_form_value(contract) == contract
+
+
+def test_safe_form_value_hides_contextual_credentials_in_attachment_context() -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    sanitized = service._safe_form_value({
+        "label": "附件元数据",
+        "signature": "SECRET-SIGNATURE",
+        "authorization": "SECRET-AUTHORIZATION",
+        "auth": "SECRET-AUTH",
+        "token": "SECRET-TOKEN",
+        "sig": "SECRET-SIG",
+        "credential": "SECRET-CREDENTIAL",
+    }, attachment_context=True)
+
+    assert sanitized == {"label": "附件元数据"}
 
 
 @pytest.mark.parametrize(

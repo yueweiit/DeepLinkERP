@@ -81,16 +81,50 @@ def _approval_matches_batch(batch: dict, payload: dict) -> bool:
     )
 
 
-AUTH_FORM_VALUE_KEYS = (
-    "accessToken", "access_token", "token", "signature", "sig",
-    "credential", "auth", "authorization", "authCode", "authMediaId",
+CREDENTIAL_KEY_RULES = (
+    {"aliases": ("accessToken", "access_token"), "global": True, "url_suffix": True},
+    {"aliases": ("authCode",), "global": True, "url_suffix": False},
+    {"aliases": ("authMediaId",), "global": True, "url_suffix": False},
+    {"aliases": ("token",), "global": False, "url_suffix": True},
+    {"aliases": ("signature",), "global": False, "url_suffix": True},
+    {"aliases": ("sig",), "global": False, "url_suffix": True},
+    {"aliases": ("credential",), "global": False, "url_suffix": True},
+    {"aliases": ("auth",), "global": False, "url_suffix": True},
+    {"aliases": ("authorization",), "global": False, "url_suffix": True},
 )
+
+
+def _normalized_sensitive_key(value) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+GLOBAL_CREDENTIAL_KEYS = {
+    _normalized_sensitive_key(alias)
+    for rule in CREDENTIAL_KEY_RULES
+    if rule["global"]
+    for alias in rule["aliases"]
+}
+CONTEXTUAL_CREDENTIAL_KEYS = {
+    _normalized_sensitive_key(alias)
+    for rule in CREDENTIAL_KEY_RULES
+    if not rule["global"]
+    for alias in rule["aliases"]
+}
+URL_CREDENTIAL_KEYS = {
+    _normalized_sensitive_key(alias)
+    for rule in CREDENTIAL_KEY_RULES
+    for alias in rule["aliases"]
+}
+URL_CREDENTIAL_SUFFIXES = {
+    _normalized_sensitive_key(alias)
+    for rule in CREDENTIAL_KEY_RULES
+    if rule["url_suffix"]
+    for alias in rule["aliases"]
+}
 FORM_VALUE_PRIVATE_KEYS = {
-    "authcode",
-    "authmediaid",
     "key",
     "rownumber",
-} | {str(key).replace("_", "").lower() for key in AUTH_FORM_VALUE_KEYS}
+} | GLOBAL_CREDENTIAL_KEYS
 SENSITIVE_FORM_TEXT_PLACEHOLDER = "审批附件（敏感内容已隐藏）"
 
 
@@ -121,20 +155,12 @@ def _text_has_sensitive_auth_url(value: str) -> bool:
     lowered = value.lower()
     if "http://" not in lowered and "https://" not in lowered:
         return False
-    exact_names = {
-        "access_token", "accesstoken", "token", "signature", "sig",
-        "credential", "auth", "authorization",
-    }
-    sensitive_suffixes = (
-        "-token", "_token", "-signature", "_signature",
-        "-credential", "_credential",
-    )
     for query_part in re.split(r"[?&]", lowered)[1:]:
         parameter_name, separator, _parameter_value = query_part.partition("=")
-        normalized_name = parameter_name.strip()
+        normalized_name = _normalized_sensitive_key(parameter_name)
         if separator and (
-            normalized_name in exact_names
-            or normalized_name.endswith(sensitive_suffixes)
+            normalized_name in URL_CREDENTIAL_KEYS
+            or any(normalized_name.endswith(suffix) for suffix in URL_CREDENTIAL_SUFFIXES)
         ):
             return True
     return False
@@ -185,6 +211,7 @@ def _safe_form_value(value, *, attachment_context: bool = False):
         private_keys.update(
             str(key).replace("_", "").lower() for key in identity_keys
         )
+        private_keys.update(CONTEXTUAL_CREDENTIAL_KEYS)
     return {
         str(key): _safe_form_value(item, attachment_context=attachment_context)
         for key, item in value.items()
@@ -192,28 +219,42 @@ def _safe_form_value(value, *, attachment_context: bool = False):
     }
 
 
-def _unparsed_form_text_is_sensitive(value: str) -> bool:
+def _unparsed_form_text_has_key(value: str, keys) -> bool:
+    key_pattern = "|".join(re.escape(key) for key in keys)
+    return bool(
+        key_pattern
+        and re.search(
+            rf"(?i)(?<![A-Za-z0-9_])[\"']?(?:{key_pattern})[\"']?\s*[:=]",
+            value,
+        )
+    )
+
+
+def _unparsed_form_text_is_sensitive(
+    value: str,
+    *,
+    attachment_context: bool = False,
+) -> bool:
     aliases = _attachment_alias_contract()
     generic_identity_keys = {"id", "url"}
     specific_identity_keys = tuple(
         key for key in aliases["identity_keys"] if key not in generic_identity_keys
     )
-    auth_keys = AUTH_FORM_VALUE_KEYS
-    sensitive_keys = (*specific_identity_keys, *auth_keys)
-    key_pattern = "|".join(re.escape(key) for key in sensitive_keys)
-    if re.search(rf"(?i)(?<![A-Za-z0-9_])[\"']?(?:{key_pattern})[\"']?\s*[:=]", value):
+    credential_keys = {
+        alias
+        for rule in CREDENTIAL_KEY_RULES
+        if rule["global"] or attachment_context
+        for alias in rule["aliases"]
+    }
+    if _unparsed_form_text_has_key(
+        value,
+        (*specific_identity_keys, *credential_keys),
+    ):
         return True
-    specific_name_pattern = "|".join(re.escape(key) for key in aliases["specific_name_keys"])
-    has_specific_name = bool(
-        re.search(
-            rf"(?i)(?<![A-Za-z0-9_])[\"']?(?:{specific_name_pattern})[\"']?\s*[:=]",
-            value,
-        )
-    )
-    has_generic_identity = bool(
-        re.search(r"(?i)(?<![A-Za-z0-9_])[\"']?(?:id|url)[\"']?\s*[:=]", value)
-    )
-    if has_specific_name and has_generic_identity:
+    name_keys = aliases["name_keys"] if attachment_context else aliases["specific_name_keys"]
+    has_attachment_name = _unparsed_form_text_has_key(value, name_keys)
+    has_attachment_identity = _unparsed_form_text_has_key(value, aliases["identity_keys"])
+    if has_attachment_name and has_attachment_identity:
         return True
     return _text_has_sensitive_auth_url(value)
 
@@ -226,7 +267,14 @@ def _display_value(value, *, attachment_context: bool = False) -> str:
         try:
             decoded = json.loads(value)
         except (TypeError, ValueError):
-            return SENSITIVE_FORM_TEXT_PLACEHOLDER if _unparsed_form_text_is_sensitive(value) else value
+            return (
+                SENSITIVE_FORM_TEXT_PLACEHOLDER
+                if _unparsed_form_text_is_sensitive(
+                    value,
+                    attachment_context=attachment_context,
+                )
+                else value
+            )
     sanitized = _safe_form_value(decoded, attachment_context=attachment_context)
     if sanitized is None:
         return ""
