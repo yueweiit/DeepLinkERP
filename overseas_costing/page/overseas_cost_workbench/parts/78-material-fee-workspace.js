@@ -4564,7 +4564,11 @@
         // 摘要优先展示：把服务端已解析出的字段放在文件名下方，用户不必打开
         // 凭证就能判断该选哪一份。摘要只做展示，不参与任何业务判定。
         const summary = this.materialFeeEvidenceSummaryHtml(candidate);
-        return `<label class="ocw-mf-evidence-option"><input type="radio" name="mf-evidence-attachment" data-mf-evidence-attachment="${this.escape(candidate.attachment || "")}"/><span><strong>${this.escape(candidate.file_name || candidate.attachment || "--")}</strong>${summary}<small>${this.escape(candidate.source_type || "附件")} · ${this.escape(candidate.parse_status || "Draft")}${linked.has(candidate.attachment) ? " · 已关联，可重新解析" : ""}</small>${scopeNote}</span></label>`;
+        // 文件名含“凭证”的资料高亮，用户上传时常靠命名表达“这就是凭证件”。
+        const voucherClass = candidate.is_voucher_name ? " is-voucher" : "";
+        const voucherTag = candidate.is_voucher_name
+          ? `<span class="ocw-mf-evidence-voucher-tag">凭证</span>` : "";
+        return `<label class="ocw-mf-evidence-option${voucherClass}"><input type="radio" name="mf-evidence-attachment" data-mf-evidence-attachment="${this.escape(candidate.attachment || "")}"/><span><strong>${this.escape(candidate.file_name || candidate.attachment || "--")}${voucherTag}</strong>${summary}<small>${this.escape(candidate.source_type || "附件")} · ${this.escape(candidate.parse_status || "Draft")}${linked.has(candidate.attachment) ? " · 已关联，可重新解析" : ""}</small>${scopeNote}</span></label>`;
       }).join("");
       const body = records
         || `<div class="ocw-mf-evidence-source-empty">该流程暂无可关联资料，可上传新凭证。</div>`;

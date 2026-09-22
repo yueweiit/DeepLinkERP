@@ -546,3 +546,42 @@ def test_evidence_candidates_without_inventory_fall_back_to_the_attachment_cache
 
     assert candidate["workflow_stage"] == "purchase"
     assert candidate["workflow_source"] == "attachment_cache"
+
+
+@pytest.mark.parametrize(
+    "file_name,expected",
+    [
+        ("国际物流凭证.pdf", True),
+        ("运费凭证-202609.pdf", True),
+        ("凭证.jpg", True),
+        ("commercial_invoice.pdf", False),
+        ("装箱单.xlsx", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_evidence_candidates_flag_voucher_file_names(file_name, expected) -> None:
+    """文件名含“凭证”的资料要被标出来，其余资料不能被误标。"""
+
+    attachments = [
+        {
+            "name": "ATT-VOUCHER",
+            "file_name": file_name,
+            "source_type": "OA",
+            "parse_status": "Parsed",
+            "parse_result_json": "{}",
+            "mapped_result_json": "{}",
+        }
+    ]
+
+    candidate = build_evidence_candidates(attachments)[0]
+
+    assert candidate["is_voucher_name"] is expected
+
+
+def test_voucher_marker_is_the_single_shared_token() -> None:
+    """高亮判定只认一个服务端常量，前端不再维护第二份关键词。"""
+
+    assert fee_service.VOUCHER_FILE_NAME_MARKER == "凭证"
+    assert fee_service.is_voucher_file_name("XX凭证YY") is True
+    assert fee_service.is_voucher_file_name("voucher.pdf") is False

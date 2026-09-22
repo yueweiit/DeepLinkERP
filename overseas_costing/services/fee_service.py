@@ -315,6 +315,21 @@ def _extract_amount_candidates(payload: dict) -> list[dict]:
     return result[:30]
 
 
+#: 文件名命中该词时前端高亮，提示这是用户要优先关联的凭证件。
+#: 放在服务端是为了让判定与展示同源，避免前端各自维护一份关键词。
+VOUCHER_FILE_NAME_MARKER = "凭证"
+
+
+def is_voucher_file_name(file_name: object) -> bool:
+    """Return True when the attachment file name advertises itself as a voucher.
+
+    ``Overseas Cost Attachment`` 没有凭证标记字段，用户上传时是否把文件命名成
+    “XX凭证”是他唯一的显式表达。这里只做一次子串判定，不猜测、不推断语义。
+    """
+
+    return VOUCHER_FILE_NAME_MARKER in str(file_name or "")
+
+
 def build_evidence_candidates(
     attachments: list[dict],
     *,
@@ -365,10 +380,11 @@ def build_evidence_candidates(
                 "form_fields": owning_approval.get("form_fields") or evidence_source.get("form_fields") or {},
             }
         workflow_stage = classify_workflow_stage(evidence_source)
+        file_name = str(attachment.get("file_name") or "")
         result.append(
             {
                 "attachment": str(attachment.get("name") or ""),
-                "file_name": str(attachment.get("file_name") or ""),
+                "file_name": file_name,
                 "file_url": str(attachment.get("file_url") or ""),
                 "source_type": str(attachment.get("source_type") or ""),
                 "attachment_type": str(attachment.get("attachment_type") or ""),
@@ -381,6 +397,8 @@ def build_evidence_candidates(
                 "workflow_source": "approval_inventory" if owning_approval else "attachment_cache",
                 "process_instance_id": instance_id,
                 "evidence_kind": classify_evidence_kind(evidence_source),
+                # 文件名含“凭证”的资料在弹窗里高亮，用户第一眼就能找到目标件。
+                "is_voucher_name": is_voucher_file_name(file_name),
                 "audit_only": bool(descriptor and descriptor.get("audit_only")),
                 "amount_candidates": [] if descriptor else _extract_amount_candidates({**parsed, **mapped}),
                 "summary": _evidence_candidate_summary(

@@ -7628,6 +7628,10 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
 .ocw-mf-evidence-summary > span { display: inline-flex; align-items: baseline; gap: 4px; padding: 2px 6px; border-radius: 4px; background: #f2f6fb; font-size: 11px; }
 .ocw-mf-evidence-summary > span > i { color: #98a2b3; font-style: normal; }
 .ocw-mf-evidence-summary > span > b { color: #344054; font-weight: 500; }
+/* 文件名含“凭证”的资料高亮：用户上传时常用命名表达“这份就是要关联的凭证件”。 */
+.ocw-mf-evidence-option.is-voucher { background: #fff8e7; box-shadow: inset 3px 0 0 #f0a02a; }
+.ocw-mf-evidence-option.is-voucher > span > strong { color: #8a5700; }
+.ocw-mf-evidence-voucher-tag { margin-left: 6px; padding: 1px 5px; border-radius: 4px; background: #f0a02a; color: #fff; font-size: 10px; font-weight: 500; vertical-align: 1px; }
 .ocw-mf-import-summary { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 .ocw-mf-import-summary span { padding: 7px 10px; border-radius: 6px; background: #f2f4f7; }
 .ocw-mf-import-table { max-height: 58vh; border: 1px solid var(--mf-border); }

@@ -595,3 +595,42 @@ def test_evidence_picker_always_renders_the_three_process_group_titles() -> None
     )[0]
     assert "ocw-mf-evidence-source-empty" in picker
     assert "该流程暂无可关联资料，可上传新凭证。" in picker
+
+
+def test_evidence_picker_highlights_voucher_file_names() -> None:
+    """文件名含“凭证”的候选要高亮；判定读服务端标记，前端不自己匹配关键词。"""
+
+    source = PART.read_text(encoding="utf-8")
+    picker = source.split("renderMaterialFeeEvidencePicker(candidates, linked)", 1)[1].split(
+        "evidenceSourceGroups(candidates)", 1
+    )[0]
+
+    # 高亮只由服务端 is_voucher_name 驱动。
+    assert "candidate.is_voucher_name" in picker
+    assert "is-voucher" in picker
+    assert "ocw-mf-evidence-voucher-tag" in picker
+    # 前端不得复制服务端的关键词判定。
+    assert '"凭证"' not in picker and "'凭证'" not in picker
+
+    css = CSS.read_text(encoding="utf-8")
+    assert ".ocw-mf-evidence-option.is-voucher" in css
+    assert ".ocw-mf-evidence-voucher-tag" in css
+
+
+def test_evidence_picker_renders_the_server_summary_and_never_recomputes_it() -> None:
+    """摘要必须是服务端既有解析结果的投影，前端只做展示与截断。"""
+
+    source = PART.read_text(encoding="utf-8")
+    renderer = source.split("materialFeeEvidenceSummaryHtml(candidate)", 1)[1].split(
+        "evidenceSourceGroups(candidates)", 1
+    )[0]
+
+    assert "candidate?.summary" in renderer
+    assert "ocw-mf-evidence-summary" in renderer
+    # 键值对上限与后端一致，避免超长摘要撑破弹窗。
+    assert ".slice(0, 8)" in renderer
+    # 前端不参与任何金额或业务判定。
+    assert "amount" not in renderer.lower()
+
+    css = CSS.read_text(encoding="utf-8")
+    assert ".ocw-mf-evidence-summary" in css
