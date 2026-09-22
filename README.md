@@ -67,15 +67,17 @@ MES 可调用以下接口创建入库 Stock Entry：
 
 入库接口必须传 `sales_order`。该字段优先填写 CRM 销售订单号（ERP Sales Order 的 `custom_crm_order_no`）；系统会自动解析对应的 ERP 销售订单，并写入 Stock Entry 的 `custom_sales_order` Link 字段。为兼容旧调用，也支持直接填写 ERP Sales Order 内部单号。创建并提交成功的响应会返回 ERP 销售订单号 `sales_order` 和 CRM 订单号 `sales_order_crm_order_no`，以及 `stock_entry_docstatus: 1`、`submitted: true`。
 
+MES 重试入库请求时必须继续使用原来的 `custom_stock_entry_no`，ERP 会按“公司 + MES 入库编号”复用原 Stock Entry，并在响应中返回 `idempotent_reuse: true`；不会再次创建 ERP 单据。相同编号但公司、销售订单或明细不一致时，ERP 返回 HTTP 409 和 `ERP_STOCK_ENTRY_IDENTITY_CONFLICT`，MES 不应生成新编号绕过该错误。
+
 提交入库后，系统会向 `mes_status_callback_url` 回调 Stock Entry 状态；MES 接口需要返回 HTTP 2xx 的 JSON，并且 `success: true`、`data.status: "processed"`。
 
 异步接口返回的是“已接收并返回任务号”，压测脚本统计的是 MES 到 ERP 的接收耗时，不是后台建单耗时。
 
-MES 创建物料需求后，应保存返回的 task_id，并轮询：
+MES 创建物料需求后，响应会同时放在 Frappe 标准的 `message` 和兼容字段 `data` 中。应保存返回的 `task_id`（`message.task_id` 或 `data.task_id`），并轮询：
 
     GET /api/method/mes_integration.api.get_material_request_task_status?task_id=<task_id>
 
-状态为 queued、processing、success 或 failed。只有 success 表示 Material Request 已创建并提交；失败时可使用同一个幂等号重新调用创建接口。任务成功后会自动清空暂存的原始大 payload，只保留状态和单据号。
+状态为 queued、processing、success 或 failed。响应中的 `request_id` 对应请求的 `custom_material_request_no`。只有 success 表示 Material Request 已创建并提交；失败时可使用同一个幂等号重新调用创建接口。任务成功后会自动清空暂存的原始大 payload，只保留状态和单据号。
 
 ### Contributing
 
