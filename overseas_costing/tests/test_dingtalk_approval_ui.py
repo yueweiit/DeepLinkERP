@@ -101,9 +101,16 @@ for(const action of ['preview-dingtalk-attachment','download-dingtalk-attachment
 assert(!html.includes('装箱单 <bad>.png'));assert(html.includes('装箱单 &lt;bad&gt;.png'));
 assert(!html.includes('<script>'));assert(html.includes('&lt;script&gt;run()&lt;/script&gt;'));
 assert(!html.includes('src="javascript:'));
+const nestedEncoding=(value,depth)=>{
+ for(let pass=1;pass<depth;pass+=1)value=value.replaceAll('%','%25');
+ return value;
+};
 for(const unsafe of [
  '//evil.example/image.png','javascript:alert(1)','data:image/png;base64,AAAA','https://evil.example/image.png',
- '\n/private/files/a.png','/files/../../api/method/logout','/private/files/%2e%2e/api','/files/%252e%252e/api'
+ '\n/private/files/a.png','/files/../../api/method/logout','/private/files/%2e%2e/api','/files/%252e%252e/api',
+ `/files/${nestedEncoding('%2e%2e',6)}/api`,
+ `/files/name${nestedEncoding('%2f',6)}..${nestedEncoding('%2f',6)}api.png`,
+ `/files/name${nestedEncoding('%0a',6)}.png`
 ]){
  assert.equal(w.dingtalkAttachmentPreviewUrl({preview_url:unsafe}),'',unsafe);
 }

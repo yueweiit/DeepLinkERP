@@ -331,6 +331,7 @@
     if (!(path.startsWith("/files/") || path.startsWith("/private/files/"))) return "";
     for (const segment of value.split("/")) {
       let decoded = segment;
+      let settled = false;
       for (let pass = 0; pass < 4; pass += 1) {
         let next;
         try {
@@ -338,8 +339,20 @@
         } catch (_error) {
           return "";
         }
-        if (next === decoded) break;
+        if (next === decoded) {
+          settled = true;
+          break;
+        }
         decoded = next;
+      }
+      if (!settled) {
+        let next;
+        try {
+          next = decodeURIComponent(decoded);
+        } catch (_error) {
+          return "";
+        }
+        if (next !== decoded) return "";
       }
       if (decoded === "." || decoded === ".." || /[\/\\\u0000-\u001f\u007f]/.test(decoded)) return "";
     }
