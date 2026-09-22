@@ -316,6 +316,51 @@ def test_form_fields_render_structured_values_without_download_credentials() -> 
     assert "SECRET" not in rendered
 
 
+def test_safe_form_value_uses_importer_attachment_aliases_for_nested_payloads() -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    value = [
+        {
+            "fileName": "报价单.pdf",
+            "fileUrl": "https://files.example/a?X-Amz-Signature=SECRET-URL-1",
+        },
+        {
+            "file_name": "packing.xlsx",
+            "file_url": "https://files.example/b?sig=SECRET-URL-2",
+        },
+        {"name": "invoice.pdf", "downloadId": "SECRET-DOWNLOAD-ID"},
+        {
+            "nested": {
+                "title": "photo.jpg",
+                "id": "SECRET-ID",
+                "preview_url": "https://files.example/c?signature=SECRET-URL-3",
+            },
+        },
+        {
+            "fileName": {"downloadUrl": "SECRET-NESTED-NAME"},
+            "fileId": "SECRET-NESTED-FILE-ID",
+        },
+        {"title": ["SECRET-LIST-NAME"], "id": "SECRET-LIST-ID"},
+        {
+            "fileName": "",
+            "fileUrl": "https://files.example/d?signature=SECRET-EMPTY-NAME-URL",
+        },
+    ]
+
+    sanitized = service._safe_form_value(value)
+
+    assert sanitized == [
+        "报价单.pdf",
+        "packing.xlsx",
+        "invoice.pdf",
+        {"nested": "photo.jpg"},
+        "审批附件",
+        "审批附件",
+        {"fileName": ""},
+    ]
+    assert "SECRET" not in json.dumps(sanitized, ensure_ascii=False)
+
+
 def test_form_fields_expose_six_row_table_with_bilingual_columns_in_source_order() -> None:
     from overseas_costing.services import dingtalk_approval_service as service
 
@@ -388,6 +433,22 @@ def test_form_fields_mark_empty_scalar_values_without_changing_display_text() ->
             "table": {"columns": [], "rows": []},
         },
     ]
+
+
+def test_form_fields_treat_json_null_string_as_empty() -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    field = service._form_fields({
+        "formComponentValues": [{
+            "name": "备注",
+            "componentType": "TextareaField",
+            "value": "null",
+        }],
+    })[0]
+
+    assert field["value"] == ""
+    assert field["is_empty"] is True
+    assert field["display_kind"] == "scalar"
 
 
 @pytest.mark.parametrize(
@@ -473,13 +534,55 @@ def test_timeline_classifies_comment_decisions_system_and_unknown_in_source_orde
     assert "source_id" not in timeline[3]
 
 
+def test_timeline_treats_legacy_comment_without_type_as_comment() -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    item = service._timeline({
+        "comments": [{
+            "comment": "历史评论",
+            "userId": "U-1",
+            "createTime": "2026-09-01",
+        }],
+    }, "PROC-1")[0]
+
+    assert item["operation_type"] == "comment"
+    assert item["event_kind"] == "comment"
+    assert item["display_label"] == "评论"
+    assert item["remark"] == "历史评论"
+
+
+@pytest.mark.parametrize(
+    "operation_type",
+    ["RESTART_PROCESS_INSTANCE", "ASYNC", "EXECUTE_TASK_UNKNOWN"],
+)
+def test_timeline_does_not_classify_unknown_substring_operations_as_known_events(
+    operation_type,
+) -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    item = service._timeline({
+        "operationRecords": [{
+            "type": operation_type,
+            "result": "AGREE",
+            "remark": "未知事件",
+            "userId": "U-1",
+        }],
+    }, "PROC-1")[0]
+
+    assert item["event_kind"] == "system"
+    assert item["display_label"] == "其他流程记录"
+    assert item["operation_type"] == operation_type
+    assert item["result"] == "AGREE"
+
+
 def test_timeline_parses_only_internal_mentions_and_keeps_markup_as_plain_text() -> None:
     from overseas_costing.services import dingtalk_approval_service as service
 
     remark = (
-        "<script>alert(1)</script> 请 [张三](USER_123) 处理 "
+        "<script>alert(1)</script> 请 [张三](USER_123) [李四](123-456) 处理 "
         "[外部](https://evil.example) [相对](/approvals/123) "
-        "[文档](README.md) [文件](ftp://host/file) **加粗**"
+        "[文档](README.md) [普通文档](README) [无数字](USER_NAME) "
+        "[张[三](USER_123) [文件](ftp://host/file) **加粗**"
     )
     item = service._timeline({
         "operationRecords": [{
@@ -493,16 +596,54 @@ def test_timeline_parses_only_internal_mentions_and_keeps_markup_as_plain_text()
     assert item["remark_segments"] == [
         {"kind": "text", "text": "<script>alert(1)</script> 请 "},
         {"kind": "mention", "text": "张三"},
+        {"kind": "text", "text": " "},
+        {"kind": "mention", "text": "李四"},
         {
             "kind": "text",
             "text": (
                 " 处理 [外部](https://evil.example) [相对](/approvals/123) "
-                "[文档](README.md) [文件](ftp://host/file) **加粗**"
+                "[文档](README.md) [普通文档](README) [无数字](USER_NAME) "
+                "[张[三](USER_123) [文件](ftp://host/file) **加粗**"
             ),
         },
     ]
     assert {segment["kind"] for segment in item["remark_segments"]} <= {"text", "mention"}
     assert "href" not in repr(item["remark_segments"])
+
+
+def test_timeline_keeps_large_unclosed_mention_markup_as_one_text_segment() -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    remark = "[" + ("a" * 200_000) + "(USER_123"
+
+    segments = service._remark_segments(remark)
+
+    assert segments == [{"kind": "text", "text": remark}]
+
+
+def test_timeline_mention_parser_handles_large_unclosed_numeric_target_linearly() -> None:
+    import time
+
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    remark = "[张三](" + ("1" * 20_000)
+
+    started_at = time.perf_counter()
+    segments = service._remark_segments(remark)
+    elapsed = time.perf_counter() - started_at
+
+    assert segments == [{"kind": "text", "text": remark}]
+    assert elapsed < 0.5
+
+
+def test_timeline_does_not_parse_mentions_inside_unclosed_outer_label() -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    remark = "[[坏](USER_1) [好](USER_2)"
+
+    segments = service._remark_segments(remark)
+
+    assert segments == [{"kind": "text", "text": remark}]
 
 
 def test_attachment_item_keeps_workflow_field_identity_without_exposing_credentials() -> None:

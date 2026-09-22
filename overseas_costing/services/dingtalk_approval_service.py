@@ -100,12 +100,28 @@ def _safe_form_value(value):
         return [_safe_form_value(item) for item in value]
     if not isinstance(value, dict):
         return value
-    if value.get("fileName") and (value.get("fileId") or value.get("spaceId")):
-        return str(value.get("fileName") or "审批附件")
+    from overseas_costing.scripts.import_oa_logistics import (
+        ATTACHMENT_FILE_ID_KEYS,
+        ATTACHMENT_FILE_NAME_KEYS,
+        ATTACHMENT_FILE_URL_KEYS,
+        ATTACHMENT_SPACE_ID_KEYS,
+        _looks_like_attachment_payload,
+    )
+
+    if _looks_like_attachment_payload(value):
+        file_name = next(
+            (value.get(key) for key in ATTACHMENT_FILE_NAME_KEYS if value.get(key) not in (None, "")),
+            "",
+        )
+        return file_name if isinstance(file_name, str) else "审批附件"
+    private_keys = FORM_VALUE_PRIVATE_KEYS | {
+        str(key).replace("_", "").lower()
+        for key in (*ATTACHMENT_FILE_ID_KEYS, *ATTACHMENT_FILE_URL_KEYS, *ATTACHMENT_SPACE_ID_KEYS)
+    }
     return {
         str(key): _safe_form_value(item)
         for key, item in value.items()
-        if str(key).replace("_", "").lower() not in FORM_VALUE_PRIVATE_KEYS
+        if str(key).replace("_", "").lower() not in private_keys
     }
 
 
@@ -119,6 +135,8 @@ def _display_value(value) -> str:
         except (TypeError, ValueError):
             return value
     sanitized = _safe_form_value(decoded)
+    if sanitized is None:
+        return ""
     if isinstance(sanitized, list):
         if all(isinstance(item, str) for item in sanitized):
             return "；".join(sanitized)
@@ -300,7 +318,7 @@ def _actor_identity(
 
 
 _MENTION_PATTERN = re.compile(
-    r"\[([^\]\r\n]+)\]\(([A-Za-z0-9]+(?:[_-][A-Za-z0-9]+)*)\)",
+    r"\[([^\[\]\r\n]+)\]\(([A-Za-z_-]*[0-9][A-Za-z0-9_-]*)\)",
 )
 
 
@@ -309,14 +327,38 @@ def _remark_segments(remark: str) -> list[dict[str, str]]:
         return []
     segments = []
     cursor = 0
+    text_start = 0
+    bracket_depth = 0
     for match in _MENTION_PATTERN.finditer(remark):
-        if match.start() > cursor:
-            segments.append({"kind": "text", "text": remark[cursor:match.start()]})
+        for character in remark[cursor:match.start()]:
+            if character == "[":
+                bracket_depth += 1
+            elif character == "]" and bracket_depth:
+                bracket_depth -= 1
+        if bracket_depth:
+            cursor = match.end()
+            continue
+        if match.start() > text_start:
+            segments.append({"kind": "text", "text": remark[text_start:match.start()]})
         segments.append({"kind": "mention", "text": match.group(1)})
         cursor = match.end()
-    if cursor < len(remark):
-        segments.append({"kind": "text", "text": remark[cursor:]})
+        text_start = match.end()
+    if text_start < len(remark):
+        segments.append({"kind": "text", "text": remark[text_start:]})
     return segments
+
+
+COMMENT_OPERATION_TYPES = {"ADD_REMARK", "COMMENT"}
+TASK_OPERATION_TYPES = {
+    "EXECUTE_TASK",
+    "EXECUTE_TASK_AGENT",
+    "EXECUTE_TASK_APPEND",
+    "EXECUTE_TASK_NORMAL",
+    "EXECUTE_TASK_TRANSFER",
+}
+START_OPERATION_TYPES = {"PROCESS_START", "START_PROCESS", "START_PROCESS_INSTANCE"}
+CC_OPERATION_TYPES = {"PROCESS_CC"}
+SYNC_OPERATION_TYPES = {"SYNC", "SYNC_PROCESS"}
 
 
 def _timeline_presentation(operation_type: str, operation_result: str, remark: str) -> tuple[str, str]:
@@ -327,19 +369,19 @@ def _timeline_presentation(operation_type: str, operation_result: str, remark: s
         "REFUSE", "REFUSED", "REJECT", "REJECTED", "DENY", "DENIED", "DISAGREE",
         "拒绝", "驳回", "不同意", "不通过",
     }
-    if normalized_type == "ADD_REMARK" and remark:
+    if normalized_type in COMMENT_OPERATION_TYPES and remark:
         return "comment", "评论"
-    if agreed:
-        return "decision", "同意"
-    if refused:
-        return "decision", "拒绝"
-    if "EXECUTE_TASK" in normalized_type:
+    if normalized_type in TASK_OPERATION_TYPES:
+        if agreed:
+            return "decision", "同意"
+        if refused:
+            return "decision", "拒绝"
         return "decision", "审批处理"
-    if "START" in normalized_type and ("PROCESS" in normalized_type or "INSTANCE" in normalized_type):
+    if normalized_type in START_OPERATION_TYPES:
         return "system", "发起审批"
-    if normalized_type == "PROCESS_CC" or normalized_type.endswith("_CC"):
+    if normalized_type in CC_OPERATION_TYPES:
         return "system", "抄送"
-    if "SYNC" in normalized_type:
+    if normalized_type in SYNC_OPERATION_TYPES:
         return "system", "同步"
     return "system", "其他流程记录"
 
