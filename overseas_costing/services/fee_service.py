@@ -383,9 +383,92 @@ def build_evidence_candidates(
                 "evidence_kind": classify_evidence_kind(evidence_source),
                 "audit_only": bool(descriptor and descriptor.get("audit_only")),
                 "amount_candidates": [] if descriptor else _extract_amount_candidates({**parsed, **mapped}),
+                "summary": _evidence_candidate_summary(
+                    parsed=parsed,
+                    mapped=mapped,
+                    classification=classification,
+                    attachment=attachment,
+                    owning_approval=owning_approval,
+                ),
             }
         )
     return result
+
+
+def _evidence_candidate_summary(
+    *,
+    parsed: dict,
+    mapped: dict,
+    classification: dict,
+    attachment: dict,
+    owning_approval: dict,
+) -> dict:
+    """Project already-parsed evidence into a pickable summary.
+
+    选择阶段只展示服务端**已经解析出来的**字段，避免在弹窗里现调 AI。
+    这里不生成任何新数值，只把既有解析结果整理成可展示的键值，供前端在流程
+    标签下优先展示，帮助用户判断该选哪一份凭证。
+    """
+
+    source = classification if isinstance(classification, dict) else {}
+    summary: dict = {}
+    for key, label in (
+        ("code", "类型"),
+        ("category", "类别"),
+        ("name", "名称"),
+        ("label", "分类"),
+    ):
+        value = str(source.get(key) or "").strip()
+        if value:
+            summary[label] = value
+            break
+
+    evidence_type = str(
+        parsed.get("evidence_type") or mapped.get("evidence_type") or source.get("evidence_type") or ""
+    ).strip()
+    if evidence_type:
+        summary["凭证种类"] = evidence_type
+
+    # 金额与币种取自既有解析结果，服务端不重新计算。
+    amounts = _extract_amount_candidates({**parsed, **mapped})
+    if amounts:
+        first = amounts[0]
+        amount_text = str(first.get("amount") or "").strip()
+        currency = str(first.get("currency") or "").strip()
+        if amount_text:
+            summary["金额"] = f"{currency} {amount_text}".strip()
+
+    for key, label in (
+        ("expense_type", "费用类别"),
+        ("occurred_at", "发生日期"),
+        ("invoice_no", "单据号"),
+        ("source_doc_no", "单据号"),
+    ):
+        value = str(parsed.get(key) or mapped.get(key) or "").strip()
+        if value and label not in summary:
+            summary[label] = value
+
+    # 归属审批的名称是判断“这份资料属于哪个流程”的最直接线索。
+    approval_title = str(owning_approval.get("approval_title") or "").strip()
+    if approval_title:
+        summary["所属审批"] = approval_title
+
+    form_fields = owning_approval.get("form_fields") or {}
+    if isinstance(form_fields, dict):
+        for field_name, field_value in form_fields.items():
+            label = str(field_name or "").strip()
+            text = str(field_value or "").strip()
+            if not text or not label:
+                continue
+            if any(marker in label for marker in ("金额", "合计", "总额", "币种", "供应商", "费用类型")):
+                summary.setdefault(label[:20], text[:60])
+            if len(summary) >= 8:
+                break
+
+    parse_status = str(attachment.get("parse_status") or "").strip()
+    summary["解析状态"] = parse_status or "Draft"
+    # 键值对上限用于保护前端渲染，摘要只是辅助信息，不承载业务真相。
+    return dict(list(summary.items())[:8])
 
 
 def _fee_approval_detail(batch_name: str, version_name: str | None) -> dict:

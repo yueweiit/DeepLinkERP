@@ -388,6 +388,10 @@
 .ocw-mf-evidence-source-group > header strong { color: #344054; font-size: 12px; }
 .ocw-mf-evidence-source-group > header b { flex: 0 0 auto; border-radius: 999px; padding: 2px 6px; background: #fff; color: #475467; font-size: 10px; font-weight: 400; }
 .ocw-mf-evidence-source-empty { padding: 7px 8px; border: 1px dashed #dfe4ec; border-radius: 6px; background: #fbfcfe; color: #98a2b3; font-size: 11px; }
+.ocw-mf-evidence-summary { display: flex; flex-wrap: wrap; gap: 4px 6px; margin: 4px 0 3px; }
+.ocw-mf-evidence-summary > span { display: inline-flex; align-items: baseline; gap: 4px; padding: 2px 6px; border-radius: 4px; background: #f2f6fb; font-size: 11px; }
+.ocw-mf-evidence-summary > span > i { color: #98a2b3; font-style: normal; }
+.ocw-mf-evidence-summary > span > b { color: #344054; font-weight: 500; }
 .ocw-mf-import-summary { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 .ocw-mf-import-summary span { padding: 7px 10px; border-radius: 6px; background: #f2f4f7; }
 .ocw-mf-import-table { max-height: 58vh; border: 1px solid var(--mf-border); }

@@ -15408,13 +15408,29 @@ class OverseasCostWorkbench {
       const records = group.rows.map((candidate) => {
         const scopeNote = candidate.in_current_source === false && candidate.stage_selectable
           ? `<em>不在当前采购支出范围，解析后需人工确认</em>` : "";
-        return `<label class="ocw-mf-evidence-option"><input type="radio" name="mf-evidence-attachment" data-mf-evidence-attachment="${this.escape(candidate.attachment || "")}"/><span><strong>${this.escape(candidate.file_name || candidate.attachment || "--")}</strong><small>${this.escape(candidate.source_type || "附件")} · ${this.escape(candidate.parse_status || "Draft")}${linked.has(candidate.attachment) ? " · 已关联，可重新解析" : ""}</small>${scopeNote}</span></label>`;
+        // 摘要优先展示：把服务端已解析出的字段放在文件名下方，用户不必打开
+        // 凭证就能判断该选哪一份。摘要只做展示，不参与任何业务判定。
+        const summary = this.materialFeeEvidenceSummaryHtml(candidate);
+        return `<label class="ocw-mf-evidence-option"><input type="radio" name="mf-evidence-attachment" data-mf-evidence-attachment="${this.escape(candidate.attachment || "")}"/><span><strong>${this.escape(candidate.file_name || candidate.attachment || "--")}</strong>${summary}<small>${this.escape(candidate.source_type || "附件")} · ${this.escape(candidate.parse_status || "Draft")}${linked.has(candidate.attachment) ? " · 已关联，可重新解析" : ""}</small>${scopeNote}</span></label>`;
       }).join("");
       const body = records
         || `<div class="ocw-mf-evidence-source-empty">该流程暂无可关联资料，可上传新凭证。</div>`;
       return `<section class="ocw-mf-evidence-source-group"><header><strong>${this.escape(group.label)}</strong><b>${group.rows.length} 份</b></header>${body}</section>`;
     }).join("");
     return `<div class="ocw-mf-evidence-picker"><div class="ocw-mf-dialog-note">可先选凭证，系统再提取金额、币种、费用类别及 SKU／税种关系。采购、费用申请、国际物流三类资料都可关联，所有结果都要在审核草稿中确认。</div>${cards || `<div class="ocw-detail-empty"><strong>暂无可关联资料</strong><span>可先上传新凭证。</span></div>`}<button class="ocw-outline-btn" type="button" data-action="mf-upload-evidence">上传新凭证并解析</button></div>`;
+  }
+
+  materialFeeEvidenceSummaryHtml(candidate) {
+    const summary = candidate?.summary;
+    if (!summary || typeof summary !== "object") return "";
+    const entries = Object.entries(summary)
+      .filter(([, value]) => String(value ?? "").trim())
+      .slice(0, 8);
+    if (!entries.length) return "";
+    const items = entries
+      .map(([label, value]) => `<span><i>${this.escape(String(label))}</i><b>${this.escape(String(value))}</b></span>`)
+      .join("");
+    return `<div class="ocw-mf-evidence-summary">${items}</div>`;
   }
 
   evidenceSourceGroups(candidates) {
