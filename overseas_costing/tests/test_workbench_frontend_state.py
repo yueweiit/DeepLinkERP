@@ -457,7 +457,6 @@ def test_documents_tab_is_replaced_only_by_phase_one_material_fee_workspace() ->
             "本地上传装箱单",
         "确认写入物料表",
         "净重 kg",
-        "查看资料来源",
         "详细待办",
         "SKU 综合单价试算",
     ):
@@ -617,7 +616,7 @@ def test_fee_workspace_enter_and_blur_share_inline_save_path() -> None:
         "workspace.loadMaterialFeeWorkspace=()=>{};workspace.ensureMaterialFeeState=()=>({});"
         "workspace.renderMaterialFeeWorkspace=()=>{};workspace.openMaterialFeeDialog=()=>{};"
         "workspace.openMaterialFeeEvidenceDialog=()=>{};workspace.setMaterialFeeEvidenceStatus=async()=>{};"
-        "workspace.refreshMaterialFeeCostPreview=async()=>{};workspace.openMaterialFeeSourcesDialog=()=>{};"
+        "workspace.refreshMaterialFeeCostPreview=async()=>{};"
         "workspace.openMaterialXlsxUploader=()=>{};workspace.saveMaterialFeeCell=async()=>{};"
         "workspace.previewMaterialPaste=()=>{};let saves=0;workspace.saveMaterialFeeInlineAmount=async()=>{saves+=1};"
         "global.$=(value)=>value;workspace.bindMaterialFeeWorkspaceEvents();"
@@ -638,7 +637,7 @@ def test_fee_workspace_tab_within_amount_cell_saves_only_after_leaving_cell() ->
         "workspace.$root={on:(event,selector,handler)=>{handlers[`${event} ${selector}`]=handler}};"
         "workspace.loadMaterialFeeWorkspace=()=>{};workspace.renderMaterialFeeWorkspace=()=>{};workspace.openMaterialFeeDialog=()=>{};"
         "workspace.openMaterialFeeEvidenceDialog=()=>{};workspace.setMaterialFeeEvidenceStatus=async()=>{};workspace.refreshMaterialFeeCostPreview=async()=>{};"
-        "workspace.openMaterialFeeSourcesDialog=()=>{};workspace.openMaterialXlsxUploader=()=>{};workspace.saveMaterialFeeCell=async()=>{};"
+        "workspace.openMaterialXlsxUploader=()=>{};workspace.saveMaterialFeeCell=async()=>{};"
         "workspace.previewMaterialPaste=()=>{};let saves=0;workspace.saveMaterialFeeInlineAmount=async(input)=>{saves+=1;input.closest().find('[data-mf-fee-input]').prop('disabled',true)};"
         "const fixture=makeFeeInput({amount:'2400',currency:'USD',originalAmount:'2000',originalCurrency:'RMB'});global.$=(value)=>value;"
         "workspace.bindMaterialFeeWorkspaceEvents();"
@@ -663,7 +662,7 @@ def test_fee_workspace_blur_clears_focus_target_until_another_fee_input_focuses(
         "workspace.$root={on:(event,selector,handler)=>{handlers[`${event} ${selector}`]=handler}};"
         "workspace.loadMaterialFeeWorkspace=()=>{};workspace.renderMaterialFeeWorkspace=()=>{};workspace.openMaterialFeeDialog=()=>{};"
         "workspace.openMaterialFeeEvidenceDialog=()=>{};workspace.setMaterialFeeEvidenceStatus=async()=>{};workspace.refreshMaterialFeeCostPreview=async()=>{};"
-        "workspace.openMaterialFeeSourcesDialog=()=>{};workspace.openMaterialXlsxUploader=()=>{};workspace.saveMaterialFeeCell=async()=>{};"
+        "workspace.openMaterialXlsxUploader=()=>{};workspace.saveMaterialFeeCell=async()=>{};"
         "workspace.previewMaterialPaste=()=>{};workspace.saveMaterialFeeInlineAmount=async()=>{};"
         "const input={attrs:{'data-fee-key':'fee-a','data-mf-fee-input':'amount'},attr(name){return this.attrs[name]}};global.$=(value)=>value;"
         "workspace.bindMaterialFeeWorkspaceEvents();handlers['focus [data-mf-fee-input]']({currentTarget:input});"

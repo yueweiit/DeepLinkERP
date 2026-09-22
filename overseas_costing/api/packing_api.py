@@ -76,30 +76,6 @@ def list_packing_attachment_sheets(batch_name, source_kind, source_id):
 
 
 @frappe.whitelist()
-def list_current_source_documents(batch_name, version_name=None):
-    """The same controlled manifest shown to AI, plus separately labelled history."""
-    batch_name = require_packing_workflow_permission(batch_name, 'read')
-    from overseas_costing.services.effective_source_values import batch_source_context
-    context = batch_source_context(batch_name,version_name)
-    sources = packing_snapshot_service.list_material_ai_sources(batch_name,version_name)
-    allowed = ('source_kind','source_id','source_label','file_name','sheet_name','approval_no','available',
-               'excluded','exclude_reason','source_context','actor_name','occurred_at',
-               'cache_refreshed_at','refresh_last_checked_at','refresh_last_success_at','refresh_error',
-               'analysis_allowed','analysis_reason','analysis_code','analysis_required','adoption_allowed',
-               'final_fee_allowed','adoption_restriction')
-    items = [{key:source.get(key) for key in allowed} for source in sources]
-    history = []
-    if context.get('root_kind') == 'expense':
-        from overseas_costing.services.effective_logistics_source import current_source_bundle, attachment_allowed
-        bundle = current_source_bundle(batch_name,version_name)
-        for row in frappe.get_all('Overseas Cost Attachment',filters={'batch':batch_name},
-                    fields=['name','version','source_type','source_doc_no','file_name','file_url','parse_result_json'],limit_page_length=0):
-            if not attachment_allowed(row,bundle):
-                history.append({key:row.get(key) for key in ('name','source_doc_no','file_name','file_url','version')}|{'historical':True})
-    return {'ok':True,'source_context':context,'items':items,'historical_items':history}
-
-
-@frappe.whitelist()
 def request_packing_workbook_refresh(batch_name, workbook_id, request_id):
     batch_name = require_packing_workflow_permission(batch_name, "refresh")
     request_key = _request_key(request_id)

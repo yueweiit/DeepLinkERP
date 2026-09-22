@@ -37,7 +37,8 @@ def test_source_error_keeps_approval_and_corrective_action(monkeypatch):
         raise SourceEligibilityError('附件本地归档缺失。', source={'approval_no':'APP1', 'source_label':'packing.xlsx'},code='SOURCE_ARCHIVE_MISSING')
     result=endpoint('B1')
     assert result['error']['approval_no']=='APP1' and 'packing.xlsx' in result['message']
-    assert '资料来源' in result['error']['next_action']
+    assert '刷新资料' in result['error']['next_action']
+    assert '查看资料来源' not in result['error']['next_action']
 
 
 def test_returned_conflict_is_structured_without_losing_current_note():

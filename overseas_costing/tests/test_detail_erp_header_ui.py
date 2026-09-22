@@ -225,7 +225,8 @@ console.log(JSON.stringify({header}));
     erp_rule = stylesheet.split(".ocw-detail-erp-action {", 1)[1].split("}", 1)[0]
     assert "overflow: clip" in page_rule
     assert "position: sticky" in header_rule
-    assert "top: 12px" in header_rule
+    assert "top: 0" in header_rule
+    assert "top: 12px" not in header_rule
     assert "z-index: 50" in header_rule
     assert "flex: 0 0 auto" in erp_rule
     assert "230px" not in erp_rule

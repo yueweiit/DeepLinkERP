@@ -31,7 +31,7 @@ def source_review_endpoint(stage):
                     source = error if isinstance(error, SourceEligibilityError) else None
                     code = getattr(source, 'code', 'REVIEW_REQUIRED')
                     reason = str(error) if isinstance(error, ValueError) else '分析服务暂时不可用，请提供记录编号以便排查。'
-                    action = '查看资料来源，核对状态或补齐归档后重新分析。' if source else '刷新资料或预览后重试。'
+                    action = '刷新资料，核对状态或补齐归档后重新分析。' if source else '刷新资料或预览后重试。'
                     name = type(error).__name__
                     if isinstance(error, PermissionError) or name in {'PermissionError', 'AuthenticationError', 'SessionExpired'}:
                         code = 'PERMISSION_DENIED'

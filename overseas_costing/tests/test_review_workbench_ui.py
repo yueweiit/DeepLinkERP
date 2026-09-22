@@ -940,6 +940,13 @@ def test_finance_remediation_drawer_is_client_draft_until_one_formal_submit():
     assert '.ocw-review-drawer__body' in css
     assert 'overflow-y: auto' in css
     assert '.ocw-review-drawer__footer' in css
+    assert '.ocw-review-draft-card > label {' in css
+    label_rule = css.split('.ocw-review-draft-card > label {', 1)[1].split('}', 1)[0]
+    textarea_rule = css.split('.ocw-review-draft-card textarea {', 1)[1].split('}', 1)[0]
+    assert 'display: block' in label_rule
+    assert 'width: 100%' in label_rule
+    assert 'display: block' in textarea_rule
+    assert 'box-sizing: border-box' in textarea_rule
 
 
 def test_review_communication_tab_supports_reply_resubmit_resolution_and_direct_target():

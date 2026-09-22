@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 PARTS = Path(__file__).resolve().parents[1] / 'page/overseas_cost_workbench/parts'
+PACKING_API = PARTS.parents[2] / 'api/packing_api.py'
 
 
 def run_js(body):
@@ -463,31 +464,29 @@ w.renderMaterialFeeTable=()=>'<table data-current-fee-table></table>';w.renderMa
 w.renderMaterialFeeTodos=()=>'';w.bindMaterialGridScrollControls=()=>{};w.restoreMaterialFeeInputFocus=()=>{};
 w.renderMaterialFeeWorkspace();
 assert(!html.includes('data-area="settlement-strip"'));
-for(const marker of ['data-current-material-grid','data-current-fee-table','data-current-cost-result','mf-import-wiki','mf-ai-fill','mf-show-sources'])assert(html.includes(marker));
+for(const marker of ['data-current-material-grid','data-current-fee-table','data-current-cost-result','mf-import-wiki','mf-ai-fill'])assert(html.includes(marker));
+assert(!html.includes('mf-show-sources'));
 assert.equal(typeof w.loadSettlementStrip,'undefined');
 assert.equal(typeof w.renderFreightStrip,'undefined');
 assert(!html.includes('manual-documents'));
 ''')
 
 
-def test_archive_evidence_uses_current_sources_dialog_and_ignores_late_closed_response():
-    run_js(WORKSPACE_METHODS + '''
-const state={batchName:'B',fees:{evidence_candidates:[{attachment:'manual',file_name:'manual.xlsx'}]}};
-w.ensureMaterialFeeState=()=>state;w.detailState={batchName:'B',versionName:'V',tab:'documents'};
-const calls=[];let resolve;let sourceHtml='';let active;
-w.call=(method,args)=>{calls.push({method,args});return new Promise(r=>resolve=r)};
-global.frappe={ui:{Dialog:class {constructor(options){this.options=options;this.fields_dict={sources:{$wrapper:{html:html=>sourceHtml=html}}};this.$wrapper={addClass:()=>{},on:()=>{}};active=this;}show(){}hide(){this.onhide?.();}}}};
-w.openMaterialFeeSourcesDialog();
-assert.equal(calls.length,1);assert.equal(calls[0].method,'overseas_costing.api.packing_api.list_current_source_documents');
-assert.equal(calls[0].args.version_name,'V');
-active.hide();resolve({ok:true,items:[{name:'oa',source_type:'OA',file_name:'<archived>',file_url:'/private/files/a.xlsx'}]});
-await new Promise(r=>setImmediate(r));assert.equal(sourceHtml,'');
-w.materialFeeState=state;w.openMaterialFeeSourcesDialog();
-resolve({ok:true,source_context:{root_kind:'expense'},items:[{source_label:'当前支出正文',available:true}],historical_items:[{name:'oa',file_name:'<archived>',file_url:'/private/files/a.xlsx'}]});
-await new Promise(r=>setImmediate(r));
-assert(!sourceHtml.includes('manual.xlsx'));assert(sourceHtml.includes('&lt;archived&gt;'));assert(sourceHtml.includes('历史留存，不参与当前核算与 AI'));assert(sourceHtml.includes('当前资料来源：采购支出'));
-assert(sourceHtml.includes('data-mf-preview-source'));assert(!sourceHtml.includes('delete-manual-document'));
-''')
+def test_current_source_dialog_feature_is_removed_end_to_end():
+    workspace = (PARTS / '78-material-fee-workspace.js').read_text(encoding='utf-8')
+    stylesheet = (PARTS / '48-material-fee-workspace.css').read_text(encoding='utf-8')
+    packing_api = PACKING_API.read_text(encoding='utf-8')
+
+    for removed in (
+        'mf-show-sources',
+        'openMaterialFeeSourcesDialog',
+        'renderMaterialFeeSourcesContent',
+        'list_current_source_documents',
+    ):
+        assert removed not in workspace
+    assert 'def list_current_source_documents' not in packing_api
+    assert '.ocw-mf-source-actions' not in stylesheet
+    assert '.ocw-mf-source-list' not in stylesheet
 
 
 def test_settlement_quantity_is_readonly_and_distinct_from_original_packing_values():

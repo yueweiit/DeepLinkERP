@@ -62,8 +62,9 @@
 }
 .ocw-review-draft-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .ocw-review-draft-head button { border: 0; background: transparent; color: #c44835; }
+.ocw-review-draft-card > label { display: block; width: 100%; }
 .ocw-review-draft-card label > span { display: block; font-weight: 600; margin-bottom: 7px; }
-.ocw-review-draft-card textarea { width: 100%; resize: vertical; border: 1px solid #cfd9e6; border-radius: 7px; padding: 10px; }
+.ocw-review-draft-card textarea { display: block; box-sizing: border-box; width: 100%; resize: vertical; border: 1px solid #cfd9e6; border-radius: 7px; padding: 10px; }
 .ocw-review-draft-card em { color: #d33; font-style: normal; }
 .ocw-review-anchor { display: grid; gap: 2px; margin-bottom: 12px; padding: 9px 11px; border-radius: 7px; background: #edf6ff; }
 .ocw-review-anchor span, .ocw-review-anchor small { color: #6c7a8e; }

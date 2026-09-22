@@ -395,12 +395,6 @@
 .ocw-mf-import-table select { max-width: 190px; }
 .ocw-mf-paste-preview { max-height: 55vh; }
 
-.ocw-mf-source-actions { display: flex; gap: 8px; margin-bottom: 12px; }
-.ocw-mf-source-list { display: grid; gap: 7px; max-height: 440px; overflow: auto; }
-.ocw-mf-source-list > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--mf-border); border-radius: 7px; }
-.ocw-mf-source-list span { display: grid; gap: 3px; }
-.ocw-mf-source-list small { color: var(--mf-muted); }
-
 .ocw-mf-ai-banner { display: grid; gap: 8px; padding: 12px 16px; border-top: 1px solid #cfe5fb; border-bottom: 1px solid #cfe5fb; background: #f4f9ff; }
 .ocw-mf-ai-banner > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .ocw-mf-ai-banner > div:first-child span, .ocw-mf-ai-banner p { color: #475467; font-size: 11px; }

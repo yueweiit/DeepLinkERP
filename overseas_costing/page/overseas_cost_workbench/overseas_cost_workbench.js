@@ -10957,7 +10957,6 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='mf-adjust-cost']", () => {
       this.openCostTrialAdjustment().catch((error) => this.showError(error));
     });
-    this.$root.on("click", "[data-action='mf-show-sources']", () => this.openMaterialFeeSourcesDialog());
     this.$root.on("click", "[data-action='mf-import-wiki']", async () => {
       try {
         await this.openWikiMaterialImportDialog();
@@ -11543,7 +11542,6 @@ class OverseasCostWorkbench {
         <div class="ocw-detail-section-head ocw-mf-page-head">
           <div><span>资料与费用</span><h2>综合成本资料工作区</h2><p>没有装箱计划也可以先用 OA 资料预览；正式推送前再补齐红色缺项和未定费用。</p>${this.renderMaterialFeeCacheStatus()}</div>
           <div class="ocw-detail-section-actions">
-            <button class="ocw-outline-btn" type="button" data-action="mf-show-sources">查看资料来源</button>
             <button class="ocw-outline-btn" type="button" data-action="mf-reload">刷新</button>
           </div>
         </div>
@@ -16540,51 +16538,6 @@ class OverseasCostWorkbench {
       <details class="ocw-mf-allocation-notes"><summary>查看系统分摊说明</summary><p>已确认的项目规则优先按项目毛重，再按项目内发货行毛重分摊，缺项时不会切换依据。其他费用：海运与港杂优先按体积，空运与快递按计费重，配送按毛重，清关与税费按采购货值。适用物料的体积或重量不齐全时，整笔费用自动按完整的采购货值分摊。</p><ul>${allocationNotes || "<li>本次暂无已计入费用。</li>"}</ul></details>
       ${staleCost ? "</details>" : ""}
     </section>`;
-  }
-
-  renderMaterialFeeSourcesContent(candidates = [], context = {}, history = []) {
-    const label = context.packing?.selected_source?.source_label || (context.root_kind === "expense" ? (context.separate_adoption ? "支付单据" : "采购支出") : "国际物流");
-    const rows = candidates.map((row) => `<div><span><strong>${this.escape(row.source_label || row.file_name || row.attachment || "资料")}</strong><small>${this.escape(row.approval_no || "")} · ${this.escape(row.source_kind || row.source_type || "附件")}${row.sheet_name ? ` · ${this.escape(row.sheet_name)}` : ""} · ${row.excluded || row.available === false ? this.escape(row.exclude_reason || "资料待处理") : "当前来源"}</small>${row.cache_refreshed_at ? `<small>本地缓存：${this.escape(row.cache_refreshed_at)}</small>` : ""}${row.refresh_error ? `<small>上次刷新失败，资料待核对：${this.escape(row.refresh_error)}</small>` : ""}</span></div>`).join("");
-    const old = history.map((row) => `<div><span><strong>${this.escape(row.file_name || "历史资料")}</strong><small>${this.escape(row.source_doc_no || "")} · 历史留存，不参与当前核算与 AI</small></span>${row.file_url ? `<button class="ocw-outline-btn ocw-mini-btn" data-mf-preview-source="1" data-file-url="${this.escape(row.file_url)}" data-file-name="${this.escape(row.file_name || "")}">查看历史附件</button>` : ""}</div>`).join("");
-    return `<div class="ocw-mf-sources"><div class="ocw-mf-dialog-note"><strong>当前资料来源：${this.escape(label)}</strong><p>${context.separate_adoption ? "以下资料用于当前装箱、物料及 AI 分析；实际运费按已采用费用明细单独核对。" : "装箱、物料、费用及 AI 使用以下同一份资料清单。"}</p></div><div class="ocw-mf-source-actions"><button class="ocw-outline-btn" data-action="view-current-source">打开当前原单</button></div><div class="ocw-mf-source-list">${rows || '<div class="ocw-detail-empty"><strong>当前来源资料待补</strong></div>'}</div>${old ? `<details><summary>历史资料（${history.length}）</summary><div class="ocw-mf-source-list">${old}</div></details>` : ""}</div>`;
-  }
-
-  openMaterialFeeSourcesDialog() {
-    const state = this.ensureMaterialFeeState();
-    const dialog = new frappe.ui.Dialog({
-      title: "查看资料来源",
-      fields: [{ fieldtype: "HTML", fieldname: "sources", options: '<div class="ocw-detail-empty">正在读取当前来源…</div>' }],
-      primary_action_label: "关闭", primary_action: () => dialog.hide(),
-    });
-    dialog.show(); dialog.$wrapper.addClass("ocw-mf-dialog");
-    dialog.$wrapper.on("click", "[data-mf-preview-source]", (event) => {
-      const $button = $(event.currentTarget);
-      this.openOaAttachmentFilePreviewDialog($button.attr("data-file-url"), $button.attr("data-file-name"));
-    });
-    dialog.$wrapper.on("click", "[data-action='view-current-source']", () => {
-      const data = state.settlementData;
-      const sourceId = dialog.sourceContext?.root_source_id;
-      const source = (data?.candidates || []).map(row => row.expense).find(row => row?.id === sourceId)
-        || (data?.binding ? data.expense : data?.logistics);
-      if (source?.open_url) this.openSettlementSource(source);
-      else if (data?.binding || dialog.sourceContext?.root_kind === "expense") {
-        frappe.show_alert({ message: "当前采购支出原单入口待补，请刷新关联资料。", indicator: "orange" });
-      } else { dialog.hide(); this.switchDetailTab("dingtalk"); }
-    });
-    const batchName = this.detailState.batchName;
-    const versionName = this.detailState.versionName || null;
-    let open = true; dialog.onhide = () => { open = false; };
-    const current = () => open && this.materialFeeState === state && this.detailState.batchName === batchName && (this.detailState.versionName || null) === versionName;
-    this.call("overseas_costing.api.packing_api.list_current_source_documents", {
-      batch_name: batchName, version_name: versionName,
-    }, false).then((result) => {
-      if (!current()) return;
-      if (!result?.ok) throw new Error(result?.message || "资料清单读取失败");
-      dialog.sourceContext = result.source_context || {};
-      dialog.fields_dict.sources.$wrapper.html(this.renderMaterialFeeSourcesContent(result.items || [], result.source_context || {}, result.historical_items || []));
-    }).catch((error) => {
-      if (current()) dialog.fields_dict.sources.$wrapper.html(`<div class="ocw-detail-empty is-error">${this.escape(error.message || "当前资料读取失败，请重试")}</div>`);
-    });
   }
 
   openMaterialXlsxUploader() {
