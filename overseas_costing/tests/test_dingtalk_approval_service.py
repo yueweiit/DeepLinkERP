@@ -328,22 +328,17 @@ def test_safe_form_value_uses_importer_attachment_aliases_for_nested_payloads() 
             "file_name": "packing.xlsx",
             "file_url": "https://files.example/b?sig=SECRET-URL-2",
         },
-        {"name": "invoice.pdf", "downloadId": "SECRET-DOWNLOAD-ID"},
-        {
-            "nested": {
-                "title": "photo.jpg",
-                "id": "SECRET-ID",
-                "preview_url": "https://files.example/c?signature=SECRET-URL-3",
-            },
-        },
         {
             "fileName": {"downloadUrl": "SECRET-NESTED-NAME"},
             "fileId": "SECRET-NESTED-FILE-ID",
         },
-        {"title": ["SECRET-LIST-NAME"], "id": "SECRET-LIST-ID"},
         {
             "fileName": "",
             "fileUrl": "https://files.example/d?signature=SECRET-EMPTY-NAME-URL",
+        },
+        {
+            "fileName": "https://files.example/e?token=SECRET-IN-FILE-NAME",
+            "fileId": "FILE-5",
         },
     ]
 
@@ -352,13 +347,101 @@ def test_safe_form_value_uses_importer_attachment_aliases_for_nested_payloads() 
     assert sanitized == [
         "报价单.pdf",
         "packing.xlsx",
-        "invoice.pdf",
-        {"nested": "photo.jpg"},
         "审批附件",
         "审批附件",
-        {"fileName": ""},
+        "审批附件（敏感内容已隐藏）",
     ]
     assert "SECRET" not in json.dumps(sanitized, ensure_ascii=False)
+
+
+def test_safe_form_value_preserves_ordinary_name_and_id_business_object() -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    project = {
+        "name": "项目 A",
+        "id": "P-1",
+        "amount": 100,
+        "currency": "MXN",
+    }
+
+    assert service._safe_form_value(project) == project
+
+
+def test_form_fields_use_attachment_context_for_generic_name_and_id_aliases() -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    field = service._form_fields({
+        "formComponentValues": [{
+            "name": "附件",
+            "componentType": "DDAttachment",
+            "value": json.dumps([
+                {"name": "invoice.pdf", "downloadId": "SECRET-DOWNLOAD-ID"},
+                {"title": "photo.jpg", "id": "SECRET-ID"},
+            ], ensure_ascii=False),
+        }],
+    })[0]
+
+    assert field["value"] == "invoice.pdf；photo.jpg"
+    assert "SECRET" not in json.dumps(field, ensure_ascii=False)
+
+
+@pytest.mark.parametrize(
+    "malformed_value",
+    [
+        '{"fileUrl":"https://files.example/a?token=SECRET"',
+        '{"fileName":"quote.pdf","downloadId":"SECRET"',
+        '{"token":"SECRET"',
+        'https://files.example/a?X-Amz-Signature=SECRET',
+    ],
+)
+def test_display_value_hides_sensitive_attachment_text_when_json_is_malformed(
+    malformed_value,
+) -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    displayed = service._display_value(malformed_value)
+
+    assert displayed == "审批附件（敏感内容已隐藏）"
+    assert "SECRET" not in displayed
+
+
+def test_display_value_keeps_non_sensitive_malformed_legacy_text() -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    malformed_value = "legacy malformed ["
+
+    assert service._display_value(malformed_value) == malformed_value
+
+
+def test_safe_form_value_hides_structured_auth_keys_and_signed_url_values() -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    sanitized = service._safe_form_value({
+        "name": "普通业务",
+        "auth": "SECRET-AUTH",
+        "token": "SECRET-TOKEN",
+        "url": "https://files.example/a?X-Amz-Signature=SECRET-SIGNATURE",
+    })
+
+    assert sanitized == {
+        "name": "普通业务",
+        "url": "审批附件（敏感内容已隐藏）",
+    }
+    assert "SECRET" not in json.dumps(sanitized, ensure_ascii=False)
+
+
+@pytest.mark.parametrize(
+    "ordinary_url",
+    [
+        "https://example.com/?design=modern",
+        "https://example.com/?signal=green",
+        "https://example.com/?author=smk",
+    ],
+)
+def test_display_value_keeps_non_credential_url_parameters(ordinary_url) -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    assert service._display_value(ordinary_url) == ordinary_url
 
 
 def test_form_fields_expose_six_row_table_with_bilingual_columns_in_source_order() -> None:
@@ -579,10 +662,12 @@ def test_timeline_parses_only_internal_mentions_and_keeps_markup_as_plain_text()
     from overseas_costing.services import dingtalk_approval_service as service
 
     remark = (
-        "<script>alert(1)</script> 请 [张三](USER_123) [李四](123-456) 处理 "
+        "<script>alert(1)</script> 请 [张三](USER_123456) [李四](123-456) "
+        "[王五](123456789012345678) 处理 "
         "[外部](https://evil.example) [相对](/approvals/123) "
-        "[文档](README.md) [普通文档](README) [无数字](USER_NAME) "
-        "[张[三](USER_123) [文件](ftp://host/file) **加粗**"
+        "[文档](README.md) [普通文档](README2) [版本](v2) [短号](123) "
+        "[数字不足](USER_123) [无数字](USER_NAME) "
+        "[张[三](USER_123456) [文件](ftp://host/file) **加粗**"
     )
     item = service._timeline({
         "operationRecords": [{
@@ -598,12 +683,15 @@ def test_timeline_parses_only_internal_mentions_and_keeps_markup_as_plain_text()
         {"kind": "mention", "text": "张三"},
         {"kind": "text", "text": " "},
         {"kind": "mention", "text": "李四"},
+        {"kind": "text", "text": " "},
+        {"kind": "mention", "text": "王五"},
         {
             "kind": "text",
             "text": (
                 " 处理 [外部](https://evil.example) [相对](/approvals/123) "
-                "[文档](README.md) [普通文档](README) [无数字](USER_NAME) "
-                "[张[三](USER_123) [文件](ftp://host/file) **加粗**"
+                "[文档](README.md) [普通文档](README2) [版本](v2) [短号](123) "
+                "[数字不足](USER_123) [无数字](USER_NAME) "
+                "[张[三](USER_123456) [文件](ftp://host/file) **加粗**"
             ),
         },
     ]
@@ -614,7 +702,7 @@ def test_timeline_parses_only_internal_mentions_and_keeps_markup_as_plain_text()
 def test_timeline_keeps_large_unclosed_mention_markup_as_one_text_segment() -> None:
     from overseas_costing.services import dingtalk_approval_service as service
 
-    remark = "[" + ("a" * 200_000) + "(USER_123"
+    remark = "[" * 200_000
 
     segments = service._remark_segments(remark)
 
@@ -639,7 +727,7 @@ def test_timeline_mention_parser_handles_large_unclosed_numeric_target_linearly(
 def test_timeline_does_not_parse_mentions_inside_unclosed_outer_label() -> None:
     from overseas_costing.services import dingtalk_approval_service as service
 
-    remark = "[[坏](USER_1) [好](USER_2)"
+    remark = "[[坏](USER_123456) [好](USER_234567)"
 
     segments = service._remark_segments(remark)
 

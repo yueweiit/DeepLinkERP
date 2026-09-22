@@ -81,25 +81,20 @@ def _approval_matches_batch(batch: dict, payload: dict) -> bool:
     )
 
 
+AUTH_FORM_VALUE_KEYS = (
+    "accessToken", "access_token", "token", "signature", "sig",
+    "credential", "auth", "authorization", "authCode", "authMediaId",
+)
 FORM_VALUE_PRIVATE_KEYS = {
     "authcode",
     "authmediaid",
-    "mediaid",
-    "fileid",
-    "spaceid",
-    "downloadurl",
-    "previewurl",
-    "url",
     "key",
     "rownumber",
-}
+} | {str(key).replace("_", "").lower() for key in AUTH_FORM_VALUE_KEYS}
+SENSITIVE_FORM_TEXT_PLACEHOLDER = "审批附件（敏感内容已隐藏）"
 
 
-def _safe_form_value(value):
-    if isinstance(value, list):
-        return [_safe_form_value(item) for item in value]
-    if not isinstance(value, dict):
-        return value
+def _attachment_alias_contract():
     from overseas_costing.scripts.import_oa_logistics import (
         ATTACHMENT_FILE_ID_KEYS,
         ATTACHMENT_FILE_NAME_KEYS,
@@ -108,24 +103,122 @@ def _safe_form_value(value):
         _looks_like_attachment_payload,
     )
 
-    if _looks_like_attachment_payload(value):
+    return {
+        "identity_keys": (
+            *ATTACHMENT_FILE_ID_KEYS,
+            *ATTACHMENT_FILE_URL_KEYS,
+            *ATTACHMENT_SPACE_ID_KEYS,
+        ),
+        "name_keys": ATTACHMENT_FILE_NAME_KEYS,
+        "specific_name_keys": tuple(
+            key for key in ATTACHMENT_FILE_NAME_KEYS if key not in {"name", "title"}
+        ),
+        "looks_like_attachment": _looks_like_attachment_payload,
+    }
+
+
+def _text_has_sensitive_auth_url(value: str) -> bool:
+    lowered = value.lower()
+    if "http://" not in lowered and "https://" not in lowered:
+        return False
+    exact_names = {
+        "access_token", "accesstoken", "token", "signature", "sig",
+        "credential", "auth", "authorization",
+    }
+    sensitive_suffixes = (
+        "-token", "_token", "-signature", "_signature",
+        "-credential", "_credential",
+    )
+    for query_part in re.split(r"[?&]", lowered)[1:]:
+        parameter_name, separator, _parameter_value = query_part.partition("=")
+        normalized_name = parameter_name.strip()
+        if separator and (
+            normalized_name in exact_names
+            or normalized_name.endswith(sensitive_suffixes)
+        ):
+            return True
+    return False
+
+
+def _safe_form_value(value, *, attachment_context: bool = False):
+    if isinstance(value, list):
+        return [
+            _safe_form_value(item, attachment_context=attachment_context)
+            for item in value
+        ]
+    if isinstance(value, str):
+        return SENSITIVE_FORM_TEXT_PLACEHOLDER if _text_has_sensitive_auth_url(value) else value
+    if not isinstance(value, dict):
+        return value
+
+    aliases = _attachment_alias_contract()
+    identity_keys = aliases["identity_keys"]
+    specific_name_keys = aliases["specific_name_keys"]
+    has_specific_name = any(key in value for key in specific_name_keys)
+    has_attachment_identity = any(
+        value.get(key) not in (None, "") for key in identity_keys
+    )
+    is_attachment = has_specific_name and has_attachment_identity
+    if attachment_context and aliases["looks_like_attachment"](value):
+        is_attachment = True
+    if is_attachment:
+        name_keys = aliases["name_keys"] if attachment_context else specific_name_keys
         file_name = next(
-            (value.get(key) for key in ATTACHMENT_FILE_NAME_KEYS if value.get(key) not in (None, "")),
+            (value.get(key) for key in name_keys if value.get(key) not in (None, "")),
             "",
         )
-        return file_name if isinstance(file_name, str) else "审批附件"
-    private_keys = FORM_VALUE_PRIVATE_KEYS | {
-        str(key).replace("_", "").lower()
-        for key in (*ATTACHMENT_FILE_ID_KEYS, *ATTACHMENT_FILE_URL_KEYS, *ATTACHMENT_SPACE_ID_KEYS)
-    }
+        if not isinstance(file_name, str) or not file_name.strip():
+            return "审批附件"
+        return (
+            SENSITIVE_FORM_TEXT_PLACEHOLDER
+            if _text_has_sensitive_auth_url(file_name)
+            else file_name
+        )
+
+    generic_identity_keys = {"id", "url"}
+    specific_identity_keys = tuple(key for key in identity_keys if key not in generic_identity_keys)
+    has_attachment_marker = attachment_context or has_specific_name or any(
+        key in value for key in specific_identity_keys
+    )
+    private_keys = set(FORM_VALUE_PRIVATE_KEYS)
+    if has_attachment_marker:
+        private_keys.update(
+            str(key).replace("_", "").lower() for key in identity_keys
+        )
     return {
-        str(key): _safe_form_value(item)
+        str(key): _safe_form_value(item, attachment_context=attachment_context)
         for key, item in value.items()
         if str(key).replace("_", "").lower() not in private_keys
     }
 
 
-def _display_value(value) -> str:
+def _unparsed_form_text_is_sensitive(value: str) -> bool:
+    aliases = _attachment_alias_contract()
+    generic_identity_keys = {"id", "url"}
+    specific_identity_keys = tuple(
+        key for key in aliases["identity_keys"] if key not in generic_identity_keys
+    )
+    auth_keys = AUTH_FORM_VALUE_KEYS
+    sensitive_keys = (*specific_identity_keys, *auth_keys)
+    key_pattern = "|".join(re.escape(key) for key in sensitive_keys)
+    if re.search(rf"(?i)(?<![A-Za-z0-9_])[\"']?(?:{key_pattern})[\"']?\s*[:=]", value):
+        return True
+    specific_name_pattern = "|".join(re.escape(key) for key in aliases["specific_name_keys"])
+    has_specific_name = bool(
+        re.search(
+            rf"(?i)(?<![A-Za-z0-9_])[\"']?(?:{specific_name_pattern})[\"']?\s*[:=]",
+            value,
+        )
+    )
+    has_generic_identity = bool(
+        re.search(r"(?i)(?<![A-Za-z0-9_])[\"']?(?:id|url)[\"']?\s*[:=]", value)
+    )
+    if has_specific_name and has_generic_identity:
+        return True
+    return _text_has_sensitive_auth_url(value)
+
+
+def _display_value(value, *, attachment_context: bool = False) -> str:
     if value is None:
         return ""
     decoded = value
@@ -133,8 +226,8 @@ def _display_value(value) -> str:
         try:
             decoded = json.loads(value)
         except (TypeError, ValueError):
-            return value
-    sanitized = _safe_form_value(decoded)
+            return SENSITIVE_FORM_TEXT_PLACEHOLDER if _unparsed_form_text_is_sensitive(value) else value
+    sanitized = _safe_form_value(decoded, attachment_context=attachment_context)
     if sanitized is None:
         return ""
     if isinstance(sanitized, list):
@@ -208,7 +301,10 @@ def _form_fields(payload: dict) -> list[dict]:
         if not isinstance(row, dict):
             continue
         component_type = str(row.get("componentType") or row.get("component_type") or "")
-        value = _display_value(row.get("value"))
+        value = _display_value(
+            row.get("value"),
+            attachment_context=component_type.strip().lower() == "ddattachment",
+        )
         table = _table_value(row.get("value")) if component_type == "TableField" else None
         result.append({
             "label": str(row.get("name") or row.get("label") or row.get("componentName") or "未命名字段"),
@@ -318,7 +414,7 @@ def _actor_identity(
 
 
 _MENTION_PATTERN = re.compile(
-    r"\[([^\[\]\r\n]+)\]\(([A-Za-z_-]*[0-9][A-Za-z0-9_-]*)\)",
+    r"\[([^\[\]\r\n]+)\]\(([A-Za-z0-9_-]+)\)",
 )
 
 
@@ -336,6 +432,9 @@ def _remark_segments(remark: str) -> list[dict[str, str]]:
             elif character == "]" and bracket_depth:
                 bracket_depth -= 1
         if bracket_depth:
+            cursor = match.end()
+            continue
+        if sum(character.isdigit() for character in match.group(2)) < 6:
             cursor = match.end()
             continue
         if match.start() > text_start:
