@@ -84,7 +84,7 @@ console.log(JSON.stringify({{message:workspace.materialAIErrorMessage(new Error(
 def test_plain_business_error_remains_readable_while_preview_uses_safe_server_failure_copy():
     result = _fee_workspace_result(FIXTURE + r"""
 const business=workspace.materialAIErrorMessage(new Error('资料与当前批次不一致'),'默认提示');
-state.aiFill={status:'READY',run_id:'R1',row_review:{policy:'p',fingerprint:'f',rows:[],fees:[]}};
+state.aiFill={status:'READY',run_id:'R1',row_review:{policy:'ai-field-review-7',fingerprint:'f',rows:[],fees:[],stage_snapshots:[],fee_stage_snapshots:[]}};
 workspace.ensureMaterialAIRowSelection(state.aiFill);
 workspace.renderMaterialAIReviewDialog=()=>{};
 workspace.call=async()=>{throw {status:500,responseText:'<html><body><h1>Internal Server Error</h1></body></html>'}};

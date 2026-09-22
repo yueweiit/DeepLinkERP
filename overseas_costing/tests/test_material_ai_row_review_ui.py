@@ -340,25 +340,36 @@ assert(evidence.includes('两个流程的毛重不一致，请核对。'));
 """)
 
 
-def test_current_policy_without_either_stage_snapshot_requires_reanalysis_and_never_previews_or_confirms():
+def test_every_policy_without_any_required_stage_snapshot_is_stale_and_never_previews_or_confirms():
     run_ui(r"""
 const packingSnapshots=[{stage:'payment',rows:[],processes:[]}];
 const feeSnapshots=[{stage:'payment',fees:[],processes:[]}];
-catalog.policy='ai-field-review-7';catalog.stage_snapshots=packingSnapshots;catalog.fee_stage_snapshots=feeSnapshots;
-const fill=ready();
-for(const missing of ['packing','fees']){
- fill.row_review.stage_snapshots=missing==='packing'?undefined:packingSnapshots;
- fill.row_review.fee_stage_snapshots=missing==='fees'?undefined:feeSnapshots;
- const selection=fill.rowSelection;
+const policies=['ai-field-review-7','ai-row-review-4',''];
+const missingCases=[
+ {label:'packing',stage_snapshots:undefined,fee_stage_snapshots:feeSnapshots},
+ {label:'fees',stage_snapshots:packingSnapshots,fee_stage_snapshots:undefined},
+ {label:'both',stage_snapshots:undefined,fee_stage_snapshots:undefined},
+];
+for(const policy of policies)for(const missing of missingCases){
+ const label=`${policy||'empty'}:${missing.label}`;
+ const fill=w.initializeMaterialAIDraft({status:'READY',run_id:`run-${label}`,row_review:{...catalog,policy,
+  stage_snapshots:missing.stage_snapshots,fee_stage_snapshots:missing.fee_stage_snapshots}});
+ state.aiFill=fill;
+ assert.equal(fill.rowSelection,undefined,`${label} initialization must not create hidden defaults`);
+ let autoPreviews=0;const schedule=w.scheduleMaterialAIRowPreview;
+ w.scheduleMaterialAIRowPreview=()=>{autoPreviews+=1};w.showMaterialAIReadyDraft();w.scheduleMaterialAIRowPreview=schedule;
+ assert.equal(autoPreviews,0,`${label} must not schedule an automatic preview`);
+ const selection={mode:'update_selected',rows:new Set(['source']),fields:new Map(),packingAssignments:new Map(),fees:new Set(['fee']),request:0,loading:false,preview:null,error:'',timer:null};
+ fill.rowSelection=selection;
  selection.loading=false;selection.preview={id:'P',revision:'R',can_apply:true,rows:[]};selection.previewKey=w.materialAIRowSelectionKey(fill);
- assert.equal(w.canConfirmMaterialAIRowSelection(fill),false,missing);
+ assert.equal(w.canConfirmMaterialAIRowSelection(fill),false,label);
  const html=w.renderMaterialAIReviewDialogContent();
- assert(html.includes('资料处理规则已更新，请重新分析资料'),missing);
- assert(!html.includes('data-mf-ai-source-group='),missing);assert(!html.includes('优先级'),missing);
- const apply=html.match(/data-action="mf-ai-apply"([^>]*)>/);assert(apply&&apply[1].includes('disabled'),missing);
+ assert(html.includes('资料处理规则已更新，请重新分析资料'),label);
+ assert(!html.includes('data-mf-ai-source-group='),label);assert(!html.includes('优先级'),label);
+ const apply=html.match(/data-action="mf-ai-apply"([^>]*)>/);assert(apply&&apply[1].includes('disabled'),label);
  calls.length=0;w.call=async(method,args)=>{calls.push({method,args});return {ok:true,preview:{id:'HIDDEN',revision:1,can_apply:true}}};
  await w.previewMaterialAIRowSelection();await w.confirmMaterialAIRowSelection();
- assert.deepEqual(calls,[],`${missing} snapshot absence must not submit hidden defaults`);
+ assert.deepEqual(calls,[],`${label} snapshot absence must not submit hidden defaults`);
 }
 """)
 
