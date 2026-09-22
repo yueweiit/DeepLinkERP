@@ -323,6 +323,8 @@ console.log(JSON.stringify({html}));
         assert text in html
     assert 'data-primary-action="recalculate"' in html
     assert 'data-action="confirm-calculation-result"' in html
+    assert "本次试算所需资料已采用" in html
+    assert "仍有资料需处理已完成" not in html
     for removed in ("确认状态", "回写状态", "查看资料与费用", "查看钉钉审批"):
         assert removed not in html
 

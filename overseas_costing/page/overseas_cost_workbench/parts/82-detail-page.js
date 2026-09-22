@@ -297,8 +297,9 @@
       pending: "未开始",
       error: "失败待重试",
     };
+    const documentsReady = model.documents.every((row) => ["ready", "unused"].includes(row.state));
     const flowSteps = [
-      { key: "documents", label: "资料补充", detail: model.documents.every((row) => ["ready", "unused"].includes(row.state)) ? "物料与费用资料已具备" : "仍有资料需处理" },
+      { key: "documents", label: "资料补充", detail: model.flow.documents === "done" ? "本次试算所需资料已采用" : documentsReady ? "物料与费用资料已具备" : "仍有资料需处理" },
       { key: "trial", label: "成本试算", detail: model.statusInfo.label || (model.hasCurrentTrial ? "已试算" : "待试算") },
       { key: "erp", label: "推送 ERP", detail: model.writebackInfo.label || "未开始" },
     ];
