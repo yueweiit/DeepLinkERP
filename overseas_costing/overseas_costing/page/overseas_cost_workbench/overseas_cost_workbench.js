@@ -13146,7 +13146,7 @@ class OverseasCostWorkbench {
   }
 
   materialAIReviewCanUseSelection(fill) {
-    return Boolean(fill?.row_review) && (this.materialAIReviewHasStageSnapshots(fill) || String(fill.row_review.policy || "") !== "ai-field-review-7");
+    return this.materialAIReviewHasStageSnapshots(fill);
   }
 
   renderMaterialAIReanalysisRequired({ legacy = false } = {}) {
