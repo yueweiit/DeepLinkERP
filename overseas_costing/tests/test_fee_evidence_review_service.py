@@ -2347,7 +2347,7 @@ class _StartRepository:
     def lock_batch(self, _batch_name):
         return None
 
-    def get_attachment(self, batch_name, attachment_name):
+    def get_attachment(self, batch_name, attachment_name, version_name=None):
         return {"name": attachment_name, "batch": batch_name, "file_name": "关税.pdf", "modified": "m1", "file_url": "/files/tax.pdf", "parse_status": "Parsed", "parse_result_json": "{}", "mapped_result_json": "{}"}
 
     def materialize_fee_rule(self, _batch_name, _version_name, logical_fee_key):
@@ -2429,7 +2429,7 @@ def test_execute_passes_persisted_evidence_role_to_draft(monkeypatch) -> None:
         def get_context(self, _batch, _version):
             return {"batch": "B1", "version": "V1", "fx_context": {}}
 
-        def get_attachment(self, _batch, _attachment):
+        def get_attachment(self, _batch, _attachment, _version=None):
             return {
                 "name": "ATT-1",
                 "file_name": "退款.pdf",
@@ -2512,7 +2512,7 @@ def test_execute_rechecks_final_draft_size_after_adding_source_context(
                 "effective_source": {},
             }
 
-        def get_attachment(self, _batch, _attachment):
+        def get_attachment(self, _batch, _attachment, _version=None):
             return {
                 "name": "ATT-1",
                 "file_name": "tax.pdf",
@@ -2615,7 +2615,7 @@ def test_execute_loads_current_evidence_components_for_material_matrix(monkeypat
         def get_context(self, _batch, _version):
             return {"batch": "B1", "version": "V1", "fx_context": {}}
 
-        def get_attachment(self, _batch, _attachment):
+        def get_attachment(self, _batch, _attachment, _version=None):
             return {
                 "name": "ATT-1",
                 "file_name": "完税凭证.pdf",
@@ -3034,7 +3034,7 @@ def test_execute_uses_repository_item_views_once(monkeypatch) -> None:
         def get_context(self, _batch, _version):
             return {"batch": "B1", "version": "V1", "fx_context": {}}
 
-        def get_attachment(self, _batch, _attachment):
+        def get_attachment(self, _batch, _attachment, _version=None):
             return {
                 "name": "ATT-1",
                 "file_name": "完税凭证.pdf",
@@ -3359,7 +3359,7 @@ class _ApplyRepository:
     def assert_batch_write(self, _batch_name, _version_name, **_kwargs):
         self.calls.append(("permission",))
 
-    def get_attachment(self, _batch_name, _attachment_name):
+    def get_attachment(self, _batch_name, _attachment_name, _version_name=None):
         return self.attachment
 
     def list_duplicate_evidence_candidates(self, *_args):
@@ -4534,7 +4534,7 @@ def test_end_to_end_mixed_customs_review_applies_only_confirmed_draft(monkeypatc
         def lock_batch(self, _batch_name):
             return None
 
-        def get_attachment(self, _batch_name, _attachment_name):
+        def get_attachment(self, _batch_name, _attachment_name, _version_name=None):
             return self.attachment
 
         def get_items(self, _batch_name, _version_name):

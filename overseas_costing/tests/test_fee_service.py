@@ -1,5 +1,7 @@
 """费用修改、默认清单和凭证关联事务测试。"""
 
+import json
+
 import pytest
 
 from overseas_costing.services import fee_service
@@ -170,8 +172,7 @@ def test_estimate_to_actual_updates_one_logical_fee_instead_of_adding() -> None:
             "name": "RULE-1",
             "logical_fee_key": "FREIGHT",
             "amount": "100",
-            "amount_status": "ESTIMATED",
-            "amount_revision": "A1",
+            "amount_status": "ESTIMATED",            "amount_revision": "A1",
             "scope_type": "ALL_ITEMS",
             "allocation_basis": "gross_weight",
         }
@@ -410,3 +411,53 @@ def test_worklist_and_preview_agree_when_foreign_currency_has_no_fx(monkeypatch,
     assert preview["summary"]["included_fee_count"] == (1 if amount == "0" else 0)
     if amount != "0":
         assert worklist["fees"][0]["todos"][0]["code"] == preview["excluded_fees"][0]["reason_code"] == "FX_RATE_MISSING"
+
+
+@pytest.mark.parametrize(
+    "descriptor,expected_stage",
+    [
+        ({"approval_role": "purchase"}, "purchase"),
+        ({"approval_role": "international_logistics"}, "international_logistics"),
+        ({"approval_role": "payment"}, "payment"),
+    ],
+)
+def test_evidence_candidates_expose_the_three_pullable_workflow_stages(descriptor, expected_stage) -> None:
+    """采购、国际物流、费用申请三类凭证都必须带上服务端判定的流程阶段。"""
+
+    attachments = [
+        {
+            "name": "ATT-STAGE",
+            "file_name": "evidence.pdf",
+            "source_type": "OA",
+            "parse_status": "Parsed",
+            "parse_result_json": json.dumps({"classification": {"code": "expense"}, **descriptor}),
+            "mapped_result_json": "{}",
+        }
+    ]
+
+    candidate = build_evidence_candidates(attachments)[0]
+
+    assert candidate["workflow_stage"] == expected_stage
+    assert candidate["workflow_label"]
+    # 金额候选不再因为流程不同而被清空，来源优先级只决定默认值。
+    assert "audit_only" in candidate
+
+
+def test_evidence_candidates_without_stage_identity_stay_out_of_the_three_processes() -> None:
+    """无法判定流程的资料归入其他来源，不能被冒名为三类流程之一。"""
+
+    attachments = [
+        {
+            "name": "ATT-UNKNOWN",
+            "file_name": "misc.pdf",
+            "source_type": "",
+            "parse_status": "Parsed",
+            "parse_result_json": "{}",
+            "mapped_result_json": "{}",
+        }
+    ]
+
+    candidate = build_evidence_candidates(attachments)[0]
+
+    assert candidate["workflow_stage"] == "other"
+    assert candidate["workflow_label"] == "其他来源"

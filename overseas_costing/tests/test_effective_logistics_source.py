@@ -282,18 +282,75 @@ def test_schema_contains_source_context_and_cost_version():
         assert fields['source_context_json']['read_only'] == 1
 
 
-def test_fee_evidence_rejects_old_attachment_before_reading_file(monkeypatch, setup):
+def test_fee_evidence_allows_other_process_attachments_but_marks_current_source(monkeypatch, setup):
+    """采购、费用申请、国际物流三流程的凭证都可进入解析。
+
+    当前采购支出范围之外的候选不再整体拒绝：权威性由来源优先级与审核草稿
+    确认。仅跨批次等硬性问题仍然拒绝，且必须在该附件进入当前范围时标注来源上下文。
+    """
+
     from overseas_costing.services import effective_logistics_source as effective, fee_evidence_review_service as fee
     store, ledger, batch, version, *_ = setup
     bundle = effective.load_source_bundle(batch['name'], store=store, ledger=ledger)
     monkeypatch.setattr(effective, 'current_source_bundle', lambda *a, **kw: bundle)
-    row = {'name': 'OLD', 'batch': batch['name'], 'version': version['name'], 'source_type': 'OA', 'file_url': '/old'}
+    monkeypatch.setattr(effective, 'require_readable', lambda *a, **kw: None)
+    monkeypatch.setattr(effective, 'attachment_allowed', lambda *a, **kw: False)
+    row = {'name': 'OTHER-PROCESS', 'batch': batch['name'], 'version': version['name'], 'source_type': 'OA', 'file_url': '/other'}
+    monkeypatch.setattr(fee, 'frappe', SimpleNamespace(db=SimpleNamespace(get_value=lambda *a, **kw: row)))
+
+    resolved = fee.FrappeFeeEvidenceReviewRepository().get_attachment(batch['name'], 'OTHER-PROCESS')
+
+    assert resolved['in_current_source'] is False
+    assert 'source_context' not in resolved
+
+
+def test_fee_evidence_still_rejects_attachment_from_another_batch(monkeypatch, setup):
+    """跨批次附件仍然必须先拒绝，不能因为放开三流程而读入其他批次资料。"""
+
+    from overseas_costing.services import effective_logistics_source as effective, fee_evidence_review_service as fee
+    store, ledger, batch, version, *_ = setup
+    bundle = effective.load_source_bundle(batch['name'], store=store, ledger=ledger)
+    monkeypatch.setattr(effective, 'current_source_bundle', lambda *a, **kw: bundle)
+    row = {'name': 'FOREIGN', 'batch': 'OTHER-BATCH', 'version': version['name'], 'source_type': 'OA', 'file_url': '/foreign'}
     def get_value(doctype, *a, **kw):
-        assert doctype != 'File', 'old file was read'
+        assert doctype != 'File', 'foreign file was read'
         return row
     monkeypatch.setattr(fee, 'frappe', SimpleNamespace(db=SimpleNamespace(get_value=get_value)))
-    with pytest.raises(ValueError, match='当前'):
-        fee.FrappeFeeEvidenceReviewRepository().get_attachment(batch['name'], 'OLD')
+    with pytest.raises(ValueError, match='批次'):
+        fee.FrappeFeeEvidenceReviewRepository().get_attachment(batch['name'], 'FOREIGN')
+
+
+def test_fee_evidence_rejects_attachment_from_a_historical_version(monkeypatch, setup):
+    """同批次历史版本的附件不能冒名参与当前版本的凭证解析。"""
+
+    from overseas_costing.services import effective_logistics_source as effective, fee_evidence_review_service as fee
+    store, ledger, batch, version, *_ = setup
+    bundle = effective.load_source_bundle(batch['name'], store=store, ledger=ledger)
+    monkeypatch.setattr(effective, 'current_source_bundle', lambda *a, **kw: bundle)
+    row = {'name': 'OLD-VERSION', 'batch': batch['name'], 'version': 'VERSION-OLD', 'source_type': 'OA', 'file_url': '/old'}
+    def get_value(doctype, *a, **kw):
+        assert doctype != 'File', 'historical file was read'
+        return row
+    monkeypatch.setattr(fee, 'frappe', SimpleNamespace(db=SimpleNamespace(get_value=get_value)))
+    with pytest.raises(ValueError, match='成本版本'):
+        fee.FrappeFeeEvidenceReviewRepository().get_attachment(batch['name'], 'OLD-VERSION', version['name'])
+
+
+def test_fee_evidence_allows_versionless_manual_attachment(monkeypatch, setup):
+    """未绑定版本的手工凭证仍可用于当前版本，版本守卫只拦历史版本。"""
+
+    from overseas_costing.services import effective_logistics_source as effective, fee_evidence_review_service as fee
+    store, ledger, batch, version, *_ = setup
+    bundle = effective.load_source_bundle(batch['name'], store=store, ledger=ledger)
+    monkeypatch.setattr(effective, 'current_source_bundle', lambda *a, **kw: bundle)
+    monkeypatch.setattr(effective, 'require_readable', lambda *a, **kw: None)
+    monkeypatch.setattr(effective, 'attachment_allowed', lambda *a, **kw: False)
+    row = {'name': 'MANUAL', 'batch': batch['name'], 'version': '', 'source_type': 'Other', 'file_url': '/manual'}
+    monkeypatch.setattr(fee, 'frappe', SimpleNamespace(db=SimpleNamespace(get_value=lambda *a, **kw: row)))
+
+    resolved = fee.FrappeFeeEvidenceReviewRepository().get_attachment(batch['name'], 'MANUAL', version['name'])
+
+    assert resolved['name'] == 'MANUAL'
 
 
 def test_fee_evidence_fingerprint_tracks_context_even_same_bytes():

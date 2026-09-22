@@ -316,7 +316,17 @@ def _extract_amount_candidates(payload: dict) -> list[dict]:
 
 
 def build_evidence_candidates(attachments: list[dict], *, version_name: str | None = None) -> list[dict]:
-    """Expose parser values as candidates only; never synthesize fee records."""
+    """Expose parser values as candidates only; never synthesize fee records.
+
+    每个候选都带上服务端判定的 ``workflow_stage``，前端据此按采购、费用申请、
+    国际物流三流程分组展示，避免浏览器私造流程真相。
+    """
+
+    from overseas_costing.services.source_priority_service import (
+        classify_evidence_kind,
+        classify_workflow_stage,
+        WORKFLOW_LABELS,
+    )
 
     result = []
     for attachment in attachments or []:
@@ -327,6 +337,8 @@ def build_evidence_candidates(attachments: list[dict], *, version_name: str | No
         if descriptor and version_name and attachment.get("version") not in (None, "", version_name):
             continue
         classification = parsed.get("classification") if isinstance(parsed.get("classification"), dict) else {}
+        evidence_source = _evidence_candidate_source(attachment, parsed, mapped)
+        workflow_stage = classify_workflow_stage(evidence_source)
         result.append(
             {
                 "attachment": str(attachment.get("name") or ""),
@@ -338,11 +350,34 @@ def build_evidence_candidates(attachments: list[dict], *, version_name: str | No
                 "classification": classification,
                 "version": attachment.get("version"),
                 "settlement_document": descriptor,
+                "workflow_stage": workflow_stage,
+                "workflow_label": WORKFLOW_LABELS.get(workflow_stage, WORKFLOW_LABELS["other"]),
+                "evidence_kind": classify_evidence_kind(evidence_source),
                 "audit_only": bool(descriptor and descriptor.get("audit_only")),
                 "amount_candidates": [] if descriptor else _extract_amount_candidates({**parsed, **mapped}),
             }
         )
     return result
+
+
+def _evidence_candidate_source(attachment: dict, parsed: dict, mapped: dict) -> dict:
+    """Project one attachment onto the shared workflow classifier's input contract."""
+
+    descriptor = parsed.get("settlement_document") or mapped.get("settlement_document")
+    descriptor = descriptor if isinstance(descriptor, dict) else {}
+    form_fields = parsed.get("form_fields") or mapped.get("form_fields")
+    return {
+        "source_kind": "approval_attachment" if attachment.get("source_type") else "",
+        "source_label": attachment.get("file_name") or attachment.get("name"),
+        "file_name": attachment.get("file_name"),
+        "attachment_type": attachment.get("attachment_type"),
+        "approval_role": descriptor.get("approval_role") or parsed.get("approval_role") or "",
+        "approval_title": descriptor.get("approval_title") or parsed.get("approval_title") or "",
+        "process_title": descriptor.get("process_title") or parsed.get("process_title") or "",
+        "process_name": descriptor.get("process_name") or parsed.get("process_name") or "",
+        "expense_type": descriptor.get("expense_type") or parsed.get("expense_type") or "",
+        "form_fields": form_fields if isinstance(form_fields, dict) else {},
+    }
 
 
 def _load_dict(value) -> dict:
@@ -1073,11 +1108,15 @@ def get_fee_worklist(batch_name: str, version_name: str | None = None) -> dict:
     candidates = build_evidence_candidates(attachments, version_name=version)
     if source_context.get('root_kind') == 'expense' and not source_context.get('separate_adoption'):
         from overseas_costing.services.effective_logistics_source import current_source_bundle, attachment_allowed
+        from overseas_costing.services.source_priority_service import is_selectable_source_stage
         bundle = current_source_bundle(batch_name, version)
         current_names = {row['name'] for row in attachments if bundle and attachment_allowed(row, bundle)}
         for candidate in candidates:
-            if candidate['attachment'] not in current_names:
-                candidate.update(audit_only=True, amount_candidates=[])
+            # 采购、费用申请、国际物流三流程的资料都可被关联解析，且都保留金额
+            # 候选（来源优先级只决定逐字段默认值）。这里只标注该候选是否落在当前
+            # 采购支出范围内，供前端提示，不再整体降级为审计资料。
+            candidate['in_current_source'] = candidate['attachment'] in current_names
+            candidate['stage_selectable'] = is_selectable_source_stage(candidate.get('workflow_stage'))
         if not statuses or not source_context.get('approved') or source_context.get('invalid') or not source_context.get('available'):
             summary.update(all_requirements_satisfied=False, source_pending=True,
                            source_message='当前采购支出费用尚未有效采用，请先核对采购支出资料。')

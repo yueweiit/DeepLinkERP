@@ -2302,7 +2302,7 @@ class FrappeFeeEvidenceReviewRepository:
             },
         }
 
-    def get_attachment(self, batch_name: str, attachment_name: str) -> dict:
+    def get_attachment(self, batch_name: str, attachment_name: str, version_name: str | None = None) -> dict:
         row = frappe.db.get_value(
             "Overseas Cost Attachment",
             attachment_name,
@@ -2314,12 +2314,20 @@ class FrappeFeeEvidenceReviewRepository:
         ) or {}
         if str(row.get("batch") or "") != str(batch_name or ""):
             raise ValueError("凭证附件不属于当前批次。")
+        # 附件自带的版本必须落在正在审核的成本版本内：历史版本的附件不能
+        # 冒名参与当前版本的凭证解析。空版本视为未绑定版本的手工凭证，允许通过。
+        attachment_version = str(row.get("version") or "")
+        if version_name and attachment_version and attachment_version != str(version_name):
+            raise ValueError("凭证附件不属于当前成本版本。")
         bundle = effective_source.current_source_bundle(batch_name)
         if bundle and bundle['context']['root_kind'] == 'expense':
             effective_source.require_readable(bundle['context'])
-            if not effective_source.attachment_allowed(row, bundle, for_analysis=True):
-                raise ValueError('凭证附件不属于当前采购支出及成本版本。')
-            row['source_context'] = bundle['context']
+            # 采购、费用申请、国际物流三流程的凭证都允许进入解析。当前采购支出
+            # 范围之外的候选不阻断解析：其权威性由来源优先级和审核草稿确认，
+            # 只有跨批次、不可读、已归档等硬性检查仍然拒绝。
+            row['in_current_source'] = bool(effective_source.attachment_allowed(row, bundle, for_analysis=True))
+            if row['in_current_source']:
+                row['source_context'] = bundle['context']
         file_url = str(row.get("file_url") or "")
         content_sha256 = ""
         if file_url:
@@ -3126,7 +3134,7 @@ def start_fee_evidence_review(
             expected_modified=expected_modified,
         )
     repo.lock_batch(context["batch"])
-    attachment_row = repo.get_attachment(context["batch"], str(attachment))
+    attachment_row = repo.get_attachment(context["batch"], str(attachment), context["version"])
     fee = repo.materialize_fee_rule(
         context["batch"], context["version"], str(logical_fee_key)
     )
@@ -3286,7 +3294,7 @@ def execute_fee_evidence_review(run_id: str, *, repository: Any | None = None) -
 
     try:
         context = repo.get_context(str(_run_value(run, "batch")), str(_run_value(run, "version")))
-        attachment = repo.get_attachment(context["batch"], str(_run_value(run, "attachment")))
+        attachment = repo.get_attachment(context["batch"], str(_run_value(run, "attachment")), context["version"])
         initial_fingerprint = build_input_fingerprint(batch_name=context['batch'], version_name=context['version'],
             logical_fee_key=str(_run_value(run, 'logical_fee_key') or ''), attachment=attachment,
             evidence_role=str(_run_value(run, 'evidence_role') or ''))
@@ -3312,7 +3320,7 @@ def execute_fee_evidence_review(run_id: str, *, repository: Any | None = None) -
         parsed, parse_warning = _parse_attachment_for_review(attachment, context["batch"])
         if parsed and not _json_dict(attachment.get("parse_result_json")):
             repo.save_attachment_parse(attachment["name"], parsed)
-            attachment = repo.get_attachment(context["batch"], attachment["name"])
+            attachment = repo.get_attachment(context["batch"], attachment["name"], context["version"])
         progress[0].update(
             {
                 "status": "PARSED" if parsed else "FAILED",
@@ -4329,7 +4337,7 @@ def apply_fee_evidence_review(
         if str(_run_value(run, "status") or "") != "READY":
             raise ValueError("费用凭证审核草稿尚未准备完成或已经处理。")
         attachment = repo.get_attachment(
-            context["batch"], str(_run_value(run, "attachment"))
+            context["batch"], str(_run_value(run, "attachment")), context["version"]
         )
         current_input = build_input_fingerprint(batch_name=context['batch'], version_name=context['version'],
             logical_fee_key=str(_run_value(run, 'logical_fee_key') or ''), attachment=attachment,

@@ -4482,7 +4482,7 @@
     const linked = new Set((fee.evidence || []).map((row) => row.attachment));
     const dialog = new frappe.ui.Dialog({
       title: `关联并解析凭证：${fee.expense_category || fee.logical_fee_key}`,
-      fields: [{ fieldtype: "HTML", fieldname: "evidence", options: `<div class="ocw-mf-evidence-picker"><div class="ocw-mf-dialog-note">可先选凭证，系统再提取金额、币种、费用类别及 SKU／税种关系。所有结果都要在审核草稿中确认。</div>${candidates.length ? candidates.map((candidate) => `<label class="ocw-mf-evidence-option"><input type="radio" name="mf-evidence-attachment" data-mf-evidence-attachment="${this.escape(candidate.attachment || "")}"/><span><strong>${this.escape(candidate.file_name || candidate.attachment || "--")}</strong><small>${this.escape(candidate.source_type || "附件")} · ${this.escape(candidate.parse_status || "Draft")}${linked.has(candidate.attachment) ? " · 已关联，可重新解析" : ""}</small></span></label>`).join("") : `<div class="ocw-detail-empty"><strong>暂无可关联资料</strong><span>可先上传新凭证。</span></div>`}<button class="ocw-outline-btn" type="button" data-action="mf-upload-evidence">上传新凭证并解析</button></div>` }],
+      fields: [{ fieldtype: "HTML", fieldname: "evidence", options: this.renderMaterialFeeEvidencePicker(candidates, linked) }],
       primary_action_label: "开始解析所选凭证",
       primary_action: () => this.linkSelectedMaterialFeeEvidence(dialog, fee),
     });
@@ -4491,6 +4491,37 @@
     dialog.$wrapper.on("click", "[data-action='mf-upload-evidence']", () => {
       this.uploadMaterialFeeEvidence(dialog, fee);
     });
+  }
+
+  renderMaterialFeeEvidencePicker(candidates, linked) {
+    const rows = Array.isArray(candidates) ? candidates : [];
+    const groups = this.evidenceSourceGroups(rows);
+    const cards = groups.map((group) => {
+      const records = group.rows.map((candidate) => {
+        const scopeNote = candidate.in_current_source === false && candidate.stage_selectable
+          ? `<em>不在当前采购支出范围，解析后需人工确认</em>` : "";
+        return `<label class="ocw-mf-evidence-option"><input type="radio" name="mf-evidence-attachment" data-mf-evidence-attachment="${this.escape(candidate.attachment || "")}"/><span><strong>${this.escape(candidate.file_name || candidate.attachment || "--")}</strong><small>${this.escape(candidate.source_type || "附件")} · ${this.escape(candidate.parse_status || "Draft")}${linked.has(candidate.attachment) ? " · 已关联，可重新解析" : ""}</small>${scopeNote}</span></label>`;
+      }).join("");
+      return `<section class="ocw-mf-evidence-source-group"><header><strong>${this.escape(group.label)}</strong><b>${group.rows.length} 份</b></header>${records}</section>`;
+    }).join("");
+    return `<div class="ocw-mf-evidence-picker"><div class="ocw-mf-dialog-note">可先选凭证，系统再提取金额、币种、费用类别及 SKU／税种关系。采购、费用申请、国际物流三类资料都可关联，所有结果都要在审核草稿中确认。</div>${cards || `<div class="ocw-detail-empty"><strong>暂无可关联资料</strong><span>可先上传新凭证。</span></div>`}<button class="ocw-outline-btn" type="button" data-action="mf-upload-evidence">上传新凭证并解析</button></div>`;
+  }
+
+  evidenceSourceGroups(candidates) {
+    const order = ["payment", "international_logistics", "purchase", "other"];
+    const labels = {
+      payment: "费用申请",
+      international_logistics: "国际物流",
+      purchase: "采购",
+      other: "其他资料",
+    };
+    const grouped = new Map();
+    (Array.isArray(candidates) ? candidates : []).forEach((candidate, index) => {
+      const stage = order.includes(String(candidate.workflow_stage || "")) ? String(candidate.workflow_stage) : "other";
+      if (!grouped.has(stage)) grouped.set(stage, { stage, label: candidate.workflow_label || labels[stage], rows: [] });
+      grouped.get(stage).rows.push(candidate);
+    });
+    return order.filter((stage) => grouped.has(stage)).map((stage) => grouped.get(stage));
   }
 
   async linkSelectedMaterialFeeEvidence(dialog, fee) {

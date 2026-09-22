@@ -524,3 +524,38 @@ def test_review_task_actions_do_not_calculate_confirm_or_push_erp() -> None:
     assert "calculate_comprehensive_cost" not in review_source
     assert "confirm_" not in review_source
     assert "erp" not in review_source.lower()
+
+
+def test_evidence_picker_groups_the_three_pullable_processes() -> None:
+    """费用申请、国际物流、采购三类资料都必须出现在关联凭证弹窗中。"""
+
+    source = PART.read_text(encoding="utf-8")
+    picker = source.split("renderMaterialFeeEvidencePicker(candidates, linked)", 1)[1].split(
+        "evidenceSourceGroups(candidates)", 1
+    )[0]
+    groups = source.split("evidenceSourceGroups(candidates)", 1)[1].split("async linkSelectedMaterialFeeEvidence", 1)[0]
+
+    # 三类来源在服务端判定的 workflow_stage 上分组，前端不私造流程顺序。
+    for stage in ("payment", "international_logistics", "purchase"):
+        assert f'"{stage}"' in groups
+    assert "workflow_stage" in groups
+    # 分组标签面向业务，而不是直接展示英文阶段名。
+    for label in ("费用申请", "国际物流", "采购"):
+        assert label in groups
+    # 弹窗仍提供上传兜底，且候选为空时不渲染空分组。
+    assert "mf-upload-evidence" in picker
+    assert "上传新凭证并解析" in picker
+
+
+def test_evidence_picker_keeps_scope_warning_instead_of_hiding_candidates() -> None:
+    """不在当前采购支出范围的候选只做提示，不再被隐藏或整体降级。"""
+
+    source = PART.read_text(encoding="utf-8")
+    picker = source.split("renderMaterialFeeEvidencePicker(candidates, linked)", 1)[1].split(
+        "evidenceSourceGroups(candidates)", 1
+    )[0]
+
+    assert "in_current_source" in picker
+    assert "stage_selectable" in picker
+    assert "不在当前采购支出范围" in picker
+    assert "audit_only" not in picker

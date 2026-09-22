@@ -90,6 +90,11 @@ WORKFLOW_LABELS = {
     "purchase": "商品采购支出",
     "other": "其他来源",
 }
+# 采购、费用申请、国际物流三流程的资料都可被关联解析，且都保留各自的金额候选：
+# 来源优先级（见 docs/source-field-priority.md）只决定逐字段默认值，低优先级来源的
+# 合法值始终保留为候选供人工改选。这里的集合仅用于判定“是否属于本次核算可采用的
+# 流程范围”，不用于剥夺任何流程的金额候选。
+SELECTABLE_SOURCE_STAGES = frozenset({"payment", "international_logistics", "purchase"})
 EVIDENCE_LABELS = {
     "dedicated_attachment": "专用附件",
     "approval_form": "审批正文",
@@ -97,6 +102,17 @@ EVIDENCE_LABELS = {
     "comment": "评论",
     "other": "其他证据",
 }
+
+
+def is_selectable_source_stage(workflow_stage: str | None) -> bool:
+    """Return whether a workflow stage is one of the three pullable processes.
+
+    The stage vocabulary is shared with :func:`classify_workflow_stage`. An
+    unknown or missing stage is not selectable, so a browser cannot promote an
+    unclassified attachment by omitting the field.
+    """
+
+    return str(workflow_stage or "").strip() in SELECTABLE_SOURCE_STAGES
 
 _PAYMENT_TITLE_MARKERS = (
     "运营支出", "月结付款", "月结", "费用支出", "付款申请", "支付申请", "报销",
