@@ -430,6 +430,81 @@ def test_display_value_uses_attachment_context_for_malformed_generic_attachment_
     ) == "审批附件（敏感内容已隐藏）"
 
 
+@pytest.mark.parametrize(
+    "malformed_attachment",
+    [
+        '{"id":"SECRET-ID"',
+        '{"url":"https://private.example/file"',
+    ],
+)
+def test_display_value_hides_lone_attachment_identity_in_attachment_context(
+    malformed_attachment,
+) -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    assert service._display_value(
+        malformed_attachment,
+        attachment_context=True,
+    ) == "审批附件（敏感内容已隐藏）"
+
+
+@pytest.mark.parametrize(
+    "malformed_credential",
+    [
+        '{"auth_code":"SECRET"',
+        '{"auth_media_id":"SECRET"',
+        '{"access-token":"SECRET"',
+        '{"auth-code":"SECRET"',
+        ' auth_code=SECRET',
+        '\n\tauth_code=SECRET',
+        '  "auth-code":"SECRET"',
+    ],
+)
+def test_display_value_normalizes_truncated_technical_credential_keys(
+    malformed_credential,
+) -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    assert service._display_value(
+        malformed_credential,
+    ) == "审批附件（敏感内容已隐藏）"
+
+
+def test_safe_form_value_normalizes_structured_hyphenated_technical_keys() -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    sanitized = service._safe_form_value({
+        "name": "普通业务",
+        "access-token": "SECRET-ACCESS",
+        "auth-code": "SECRET-AUTH",
+    })
+
+    assert sanitized == {"name": "普通业务"}
+
+
+def test_unparsed_key_extraction_is_linear_without_key_value_separator() -> None:
+    import time
+
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    malformed_business = "a-" * 16_000
+
+    started_at = time.perf_counter()
+    displayed = service._display_value(malformed_business)
+    elapsed = time.perf_counter() - started_at
+
+    assert displayed == malformed_business
+    assert elapsed < 0.5
+
+
+def test_display_value_keeps_truncated_business_text_without_sensitive_keys() -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    malformed_business = '{"name":"项目 A","status":"approved"'
+
+    assert service._display_value(malformed_business) == malformed_business
+
+
 def test_safe_form_value_only_hides_global_technical_credentials_and_signed_urls() -> None:
     from overseas_costing.services import dingtalk_approval_service as service
 

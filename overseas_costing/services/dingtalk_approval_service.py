@@ -209,25 +209,26 @@ def _safe_form_value(value, *, attachment_context: bool = False):
     private_keys = set(FORM_VALUE_PRIVATE_KEYS)
     if has_attachment_marker:
         private_keys.update(
-            str(key).replace("_", "").lower() for key in identity_keys
+            _normalized_sensitive_key(key) for key in identity_keys
         )
         private_keys.update(CONTEXTUAL_CREDENTIAL_KEYS)
     return {
         str(key): _safe_form_value(item, attachment_context=attachment_context)
         for key, item in value.items()
-        if str(key).replace("_", "").lower() not in private_keys
+        if _normalized_sensitive_key(key) not in private_keys
     }
 
 
-def _unparsed_form_text_has_key(value: str, keys) -> bool:
-    key_pattern = "|".join(re.escape(key) for key in keys)
-    return bool(
-        key_pattern
-        and re.search(
-            rf"(?i)(?<![A-Za-z0-9_])[\"']?(?:{key_pattern})[\"']?\s*[:=]",
-            value,
-        )
-    )
+_UNPARSED_FORM_KEY_PATTERN = re.compile(
+    r"(?i)(?:^\s*|[,{]\s*)[\"']?([A-Za-z][A-Za-z0-9_-]*)[\"']?\s*[:=]"
+)
+
+
+def _unparsed_form_text_keys(value: str) -> set[str]:
+    return {
+        _normalized_sensitive_key(match.group(1))
+        for match in _UNPARSED_FORM_KEY_PATTERN.finditer(value)
+    }
 
 
 def _unparsed_form_text_is_sensitive(
@@ -236,25 +237,29 @@ def _unparsed_form_text_is_sensitive(
     attachment_context: bool = False,
 ) -> bool:
     aliases = _attachment_alias_contract()
-    generic_identity_keys = {"id", "url"}
-    specific_identity_keys = tuple(
-        key for key in aliases["identity_keys"] if key not in generic_identity_keys
-    )
+    extracted_keys = _unparsed_form_text_keys(value)
+    identity_keys = {
+        _normalized_sensitive_key(key) for key in aliases["identity_keys"]
+    }
+    generic_identity_keys = {
+        _normalized_sensitive_key(key) for key in ("id", "url")
+    }
+    specific_identity_keys = identity_keys - generic_identity_keys
     credential_keys = {
-        alias
+        _normalized_sensitive_key(alias)
         for rule in CREDENTIAL_KEY_RULES
         if rule["global"] or attachment_context
         for alias in rule["aliases"]
     }
-    if _unparsed_form_text_has_key(
-        value,
-        (*specific_identity_keys, *credential_keys),
-    ):
+    if extracted_keys & (specific_identity_keys | credential_keys):
+        return True
+    if attachment_context and extracted_keys & identity_keys:
         return True
     name_keys = aliases["name_keys"] if attachment_context else aliases["specific_name_keys"]
-    has_attachment_name = _unparsed_form_text_has_key(value, name_keys)
-    has_attachment_identity = _unparsed_form_text_has_key(value, aliases["identity_keys"])
-    if has_attachment_name and has_attachment_identity:
+    normalized_name_keys = {
+        _normalized_sensitive_key(key) for key in name_keys
+    }
+    if extracted_keys & normalized_name_keys and extracted_keys & identity_keys:
         return True
     return _text_has_sensitive_auth_url(value)
 
