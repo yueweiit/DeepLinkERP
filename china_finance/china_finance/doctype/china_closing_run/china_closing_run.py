@@ -25,6 +25,8 @@ class ChinaClosingRun(Document):
 		return
 
 	def validate(self):
+		from china_finance.services.month_end import protect_run_fields
+		protect_run_fields(self)
 		self._remove_empty_check_rows()
 		if self.from_date > self.to_date:
 			frappe.throw(_("起始日期不能晚于截止日期"))
@@ -51,6 +53,15 @@ class ChinaClosingRun(Document):
 			self.set("checks", populated_rows)
 
 	def before_submit(self):
+		from china_finance.services.month_end import lock_company
+		lock_company(self.company)
+		if frappe.db.count("Journal Entry", {"company": self.company, "docstatus": 0,
+			"posting_date": ["between", [self.from_date, self.to_date]]}):
+			frappe.throw(_("本期还有未记账凭证，请先完成统一记账"))
+		if self.get("preparation_state") and frappe.db.get_value(
+			"Period Closing Voucher", self.period_closing_voucher, "gle_processing_status"
+		) != "Completed":
+			frappe.throw(_("损益结转总账处理尚未完成"))
 		if self.period_closing_voucher and frappe.db.get_value(
 			"Period Closing Voucher", self.period_closing_voucher, "docstatus"
 		) != 1:

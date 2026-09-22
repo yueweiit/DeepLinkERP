@@ -1,0 +1,284 @@
+{
+ "doctype": "DocType",
+ "name": "China Bank Receipt",
+ "module": "China Finance",
+ "engine": "InnoDB",
+ "field_order": [
+  "company",
+  "bank_account",
+  "posting_date",
+  "transaction_id",
+  "receipt_number",
+  "direction",
+  "currency",
+  "amount",
+  "summary",
+  "counterparty",
+  "business_type",
+  "page_number",
+  "position",
+  "details",
+  "raw_data",
+  "identity_key",
+  "source_file",
+  "source_hash",
+  "parser_version",
+  "bank_transaction",
+  "voucher_type",
+  "voucher_name",
+  "status",
+  "process_note",
+  "processed_by",
+  "processed_on"
+ ],
+ "fields": [
+  {
+   "fieldname": "company",
+   "label": "公司",
+   "fieldtype": "Link",
+   "options": "Company",
+   "reqd": 1,
+   "in_list_view": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "bank_account",
+   "label": "银行账户",
+   "fieldtype": "Link",
+   "options": "Bank Account",
+   "reqd": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "posting_date",
+   "label": "交易日期",
+   "fieldtype": "Date",
+   "read_only": 1
+  },
+  {
+   "fieldname": "transaction_id",
+   "label": "交易流水号",
+   "fieldtype": "Data",
+   "read_only": 1
+  },
+  {
+   "fieldname": "receipt_number",
+   "label": "回单编号",
+   "fieldtype": "Data",
+   "read_only": 1
+  },
+  {
+   "fieldname": "direction",
+   "label": "收支方向",
+   "fieldtype": "Select",
+   "options": "收入\n支出",
+   "read_only": 1
+  },
+  {
+   "fieldname": "currency",
+   "label": "币种",
+   "fieldtype": "Link",
+   "options": "Currency",
+   "default": "CNY",
+   "read_only": 1
+  },
+  {
+   "fieldname": "amount",
+   "label": "交易金额",
+   "fieldtype": "Currency",
+   "options": "currency",
+   "read_only": 1
+  },
+  {
+   "fieldname": "summary",
+   "label": "摘要",
+   "fieldtype": "Small Text",
+   "read_only": 1
+  },
+  {
+   "fieldname": "counterparty",
+   "label": "对方名称",
+   "fieldtype": "Data",
+   "read_only": 1
+  },
+  {
+   "fieldname": "business_type",
+   "label": "业务类型",
+   "fieldtype": "Data",
+   "read_only": 1
+  },
+  {
+   "fieldname": "page_number",
+   "label": "原件页码",
+   "fieldtype": "Int",
+   "read_only": 1
+  },
+  {
+   "fieldname": "position",
+   "label": "页内位置",
+   "fieldtype": "Int",
+   "read_only": 1
+  },
+  {
+   "fieldname": "details",
+   "label": "收付款方及费用明细",
+   "fieldtype": "HTML"
+  },
+  {
+   "fieldname": "raw_data",
+   "label": "完整识别数据",
+   "fieldtype": "Code",
+   "options": "JSON",
+   "hidden": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "identity_key",
+   "label": "交易身份",
+   "fieldtype": "Data",
+   "unique": 1,
+   "reqd": 1,
+   "hidden": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "source_file",
+   "label": "首次回单原件",
+   "fieldtype": "Data",
+   "reqd": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "source_hash",
+   "label": "原件 SHA-256",
+   "fieldtype": "Data",
+   "read_only": 1,
+   "hidden": 1
+  },
+  {
+   "fieldname": "parser_version",
+   "label": "解析版本",
+   "fieldtype": "Data",
+   "read_only": 1,
+   "hidden": 1
+  },
+  {
+   "fieldname": "bank_transaction",
+   "label": "银行交易",
+   "fieldtype": "Link",
+   "options": "Bank Transaction",
+   "read_only": 1
+  },
+  {
+   "fieldname": "voucher_type",
+   "label": "凭证类型",
+   "fieldtype": "Link",
+   "options": "DocType",
+   "read_only": 1
+  },
+  {
+   "fieldname": "voucher_name",
+   "label": "关联凭证",
+   "fieldtype": "Dynamic Link",
+   "options": "voucher_type",
+   "read_only": 1
+  },
+  {
+   "fieldname": "status",
+   "label": "处理状态",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "process_note",
+   "label": "处理说明",
+   "fieldtype": "Small Text",
+   "read_only": 1
+  },
+  {
+   "fieldname": "processed_by",
+   "label": "处理人",
+   "fieldtype": "Link",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "processed_on",
+   "label": "处理时间",
+   "fieldtype": "Datetime",
+   "read_only": 1
+  }
+ ],
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "Accounts Manager",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "Accounts User",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "China Finance Manager",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "China Voucher Maker",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "China Finance Auditor",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "China Archive User",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "China Voucher Reviewer",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "China Voucher Poster",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  }
+ ],
+ "istable": 0,
+ "track_changes": 1,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "autoname": "field:identity_key",
+ "title_field": "summary"
+}

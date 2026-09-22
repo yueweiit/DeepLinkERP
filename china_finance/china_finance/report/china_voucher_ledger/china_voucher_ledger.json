@@ -7,15 +7,16 @@
   {"fieldname":"to_date","fieldtype":"Date","label":"截止日期","mandatory":1},
   {"fieldname":"accounting_period","fieldtype":"Data","label":"会计期间"},
   {"fieldname":"voucher_word","fieldtype":"Data","label":"凭证字"},
-  {"fieldname":"voucher_status","fieldtype":"Select","label":"状态","options":"\n已记账\n已冲销","default":"已记账"},
+  {"fieldname":"voucher_status","fieldtype":"Select","label":"状态","options":"全部有效凭证\n未记账\n待记账\n已记账\n已冲销","default":"全部有效凭证"},
   {"fieldname":"source_doctype","fieldtype":"Link","label":"来源类型","options":"DocType"},
   {"fieldname":"source_name","fieldtype":"Data","label":"来源单据"},
   {"fieldname":"source_event","fieldtype":"Data","label":"来源事件"},
   {"fieldname":"account","fieldtype":"Link","label":"科目","options":"Account"},
   {"fieldname":"party_type","fieldtype":"Link","label":"往来类型","options":"DocType"},
   {"fieldname":"party","fieldtype":"Dynamic Link","label":"往来单位","options":"party_type"},
-  {"fieldname":"search_text","fieldtype":"Data","label":"关键字"}
+  {"fieldname":"search_text","fieldtype":"Data","label":"关键字"},
+  {"fieldname":"receipt_import","fieldtype":"Link","options":"China Bank Receipt Import","label":"回单批次"}
  ],
- "is_standard":"Yes", "modified":"2026-07-17 00:00:00.000000", "modified_by":"Administrator", "module":"China Finance", "name":"China Voucher Ledger", "owner":"Administrator", "prepared_report":0, "ref_doctype":"China Accounting Voucher", "report_name":"China Voucher Ledger", "report_type":"Script Report",
- "roles":[{"role":"Accounts Manager"},{"role":"Accounts User"},{"role":"China Finance Auditor"},{"role":"System Manager"}]
+ "is_standard":"Yes", "modified":"2026-07-17 00:00:00.000000", "modified_by":"Administrator", "module":"China Finance", "name":"China Voucher Ledger", "owner":"Administrator", "prepared_report":0, "ref_doctype":"Journal Entry", "report_name":"China Voucher Ledger", "report_type":"Script Report",
+ "roles":[{"role":"Accounts Manager"},{"role":"Accounts User"},{"role":"China Finance Auditor"},{"role":"System Manager"},{"role":"China Finance Manager"},{"role":"China Finance User"},{"role":"China Voucher Maker"},{"role":"China Voucher Reviewer"},{"role":"China Voucher Poster"}]
 }

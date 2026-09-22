@@ -73,6 +73,8 @@ def get_company(doc):
 
 
 def validate_source_approval(doc, method=None):
+	from china_finance.services.voucher_preparation import guard_submission
+	guard_submission(doc)
 	settings = get_company_settings(get_company(doc))
 	if not settings or not settings.enforce_role_separation:
 		return
@@ -195,7 +197,8 @@ def _complete_voucher_workflow(doc):
 	if current_state not in ("Draft", "Pending Review", "Approved"):
 		frappe.throw(_("凭证 {0} 当前状态为 {1}，不能使用批量审核并记账").format(doc.name, current_state))
 
-	for next_state in IMPORT_BATCH_WORKFLOW_STATES:
+	states = ("Draft", *IMPORT_BATCH_WORKFLOW_STATES)
+	for next_state in states[states.index(current_state) + 1:]:
 		if current_state == next_state:
 			continue
 		transition = _get_import_batch_transition(doc, workflow, next_state)

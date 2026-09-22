@@ -6,7 +6,7 @@
  "engine": "InnoDB",
  "field_order": [
   "company","currency", "enabled", "activation_date", "accounting_standard", "taxpayer_type", "coa_section", "coa_template", "coa_version", "coa_hash", "coa_initialized_on", "coa_last_checked_on", "coa_integrity_status", "coa_integrity_details",
-  "voucher_section", "voucher_mode", "default_voucher_word", "sequence_reset", "enforce_role_separation", "enable_import_batch_posting",
+  "voucher_section", "voucher_mode", "default_voucher_word", "sequence_reset", "enforce_role_separation", "enable_import_batch_posting", "enable_voucher_preparation", "preparation_from_date",
   "sales_settlement_section", "sales_settlement_mode", "sales_settlement_activation_date", "auto_submit_sales_invoice", "auto_submit_purchase_invoice",
   "cash_flow_section", "cash_flow_assignment_activation_date", "statutory_reporting_section", "statutory_reporting_activation_date", "statement_mapping_activation_date", "report_amount_unit",
   "closing_section", "profit_loss_account", "retained_earnings_account", "freeze_on_close", "reconciliation_tolerance",
@@ -57,7 +57,9 @@
   {"fieldname":"archive_section","fieldtype":"Section Break","label":"电子档案"},
   {"default":"30","fieldname":"archive_retention_years","fieldtype":"Int","label":"默认保管年限","reqd":1},
   {"default":"1","fieldname":"require_file_hash","fieldtype":"Check","label":"归档文件必须计算哈希"},
-  {"fieldname":"notes","fieldtype":"Small Text","label":"备注"}
+  {"fieldname":"notes","fieldtype":"Small Text","label":"备注"},
+  {"fieldname":"enable_voucher_preparation","fieldtype":"Check","label":"启用凭证准备与月末记账","default":"0","description":"草稿可在查凭证中编辑，核对完成后才能记账。已记账历史保持原状态。"},
+  {"fieldname":"preparation_from_date","fieldtype":"Date","label":"凭证准备模式生效日期","depends_on":"eval:doc.enable_voucher_preparation","mandatory_depends_on":"eval:doc.enable_voucher_preparation"}
  ],
  "index_web_pages_for_search": 1,
  "links": [],

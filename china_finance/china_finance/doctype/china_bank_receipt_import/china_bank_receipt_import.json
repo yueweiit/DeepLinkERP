@@ -1,0 +1,205 @@
+{
+ "doctype": "DocType",
+ "name": "China Bank Receipt Import",
+ "module": "China Finance",
+ "engine": "InnoDB",
+ "field_order": [
+  "company",
+  "bank_account",
+  "mode",
+  "source_file",
+  "status",
+  "source_hash",
+  "parser_version",
+  "currency",
+  "deposit_total",
+  "withdrawal_total",
+  "parse_errors",
+  "preview",
+  "rows",
+  "abandon_reason"
+ ],
+ "fields": [
+  {
+   "fieldname": "company",
+   "label": "公司",
+   "fieldtype": "Link",
+   "options": "Company",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "bank_account",
+   "label": "银行账户",
+   "fieldtype": "Link",
+   "options": "Bank Account",
+   "reqd": 1
+  },
+  {
+   "fieldname": "mode",
+   "label": "用途",
+   "fieldtype": "Select",
+   "options": "历史补回单\n新业务制证",
+   "default": "历史补回单",
+   "reqd": 1
+  },
+  {
+   "fieldname": "source_file",
+   "label": "招商银行回单 PDF",
+   "fieldtype": "Attach",
+   "reqd": 1
+  },
+  {
+   "fieldname": "status",
+   "label": "批次状态",
+   "fieldtype": "Data",
+   "read_only": 1,
+   "default": "待识别",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "source_hash",
+   "label": "原件 SHA-256",
+   "fieldtype": "Data",
+   "read_only": 1,
+   "hidden": 1
+  },
+  {
+   "fieldname": "parser_version",
+   "label": "解析版本",
+   "fieldtype": "Data",
+   "read_only": 1,
+   "hidden": 1
+  },
+  {
+   "fieldname": "currency",
+   "label": "币种",
+   "fieldtype": "Link",
+   "options": "Currency",
+   "default": "CNY",
+   "read_only": 1
+  },
+  {
+   "fieldname": "deposit_total",
+   "label": "收入合计",
+   "fieldtype": "Currency",
+   "options": "currency",
+   "read_only": 1
+  },
+  {
+   "fieldname": "withdrawal_total",
+   "label": "支出合计",
+   "fieldtype": "Currency",
+   "options": "currency",
+   "read_only": 1
+  },
+  {
+   "fieldname": "parse_errors",
+   "label": "识别问题",
+   "fieldtype": "Code",
+   "options": "JSON",
+   "read_only": 1,
+   "hidden": 1
+  },
+  {
+   "fieldname": "preview",
+   "label": "识别与处理",
+   "fieldtype": "HTML"
+  },
+  {
+   "fieldname": "rows",
+   "label": "回单明细",
+   "fieldtype": "Table",
+   "options": "China Bank Receipt Import Row",
+   "read_only": 1,
+   "hidden": 1
+  },
+  {
+   "fieldname": "abandon_reason",
+   "label": "作废原因",
+   "fieldtype": "Small Text",
+   "read_only": 1
+  }
+ ],
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "create": 1,
+   "write": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "Accounts Manager",
+   "read": 1,
+   "create": 1,
+   "write": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "Accounts User",
+   "read": 1,
+   "create": 1,
+   "write": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "China Finance Manager",
+   "read": 1,
+   "create": 1,
+   "write": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "China Voucher Maker",
+   "read": 1,
+   "create": 1,
+   "write": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "China Finance Auditor",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "China Archive User",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "China Voucher Reviewer",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "China Voucher Poster",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  }
+ ],
+ "istable": 0,
+ "track_changes": 1,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "autoname": "format:CBRI-{YYYY}-{#####}",
+ "title_field": "bank_account"
+}

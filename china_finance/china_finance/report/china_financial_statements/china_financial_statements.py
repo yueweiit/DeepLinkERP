@@ -36,7 +36,17 @@ def _apply_default_period(filters):
 
 def execute(filters=None):
 	filters = frappe._dict(filters or {})
+	_apply_default_period(filters)
 	columns, rows, *rest = _execute(filters)
+	if frappe.has_permission("Journal Entry", "read"):
+		pending = frappe.get_list("Journal Entry", filters={"company": filters.company, "docstatus": 0,
+			"posting_date": ["between", [filters.from_date, filters.to_date]]}, fields=[{"COUNT": "name", "as": "total"}])[0].total
+		if pending:
+			message = _("本期另有 {0} 张未记账凭证，尚未计入本报表。记账前可在查凭证中查看未记账试算。").format(pending)
+			if rest:
+				rest[0] = (rest[0] or "") + "<br>" + message
+			else:
+				rest.append(message)
 	bind_report_currency(columns, rows, filters.company, force_company=True)
 	if len(rest) > 1 and isinstance(rest[1], dict):
 		rest[1]["currency"] = company_currency(filters.company)

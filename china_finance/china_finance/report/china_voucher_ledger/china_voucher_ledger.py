@@ -11,6 +11,11 @@ from china_finance.services.account_display import (
 
 def execute(filters=None):
 	filters = frappe._dict(filters or {})
+	from china_finance.services.voucher_preparation import check_company, get_draft_ledger_rows
+	check_company(filters.company)
+	draft_rows = get_draft_ledger_rows(filters)
+	allowed = frappe.get_list("China Accounting Voucher", filters={"company": filters.company}, pluck="name", limit_page_length=0) if frappe.has_permission("China Accounting Voucher", "read") else []
+	filters.allowed_snapshots = allowed or [""]
 	display_number_filter = filters.get("voucher_word")
 	effective_posting_date = """CASE
 		WHEN v.source_doctype='Period Closing Voucher' THEN pcv.period_end_date
@@ -25,6 +30,7 @@ def execute(filters=None):
 		"v.company=%(company)s",
 		f"{effective_posting_date} BETWEEN %(from_date)s AND %(to_date)s",
 		"v.docstatus=1",
+		"v.name IN %(allowed_snapshots)s",
 		"v.status IN ('Posted', 'Reversed')",
 		"v.source_doctype IN ('Journal Entry', 'Payment Entry', 'Period Closing Voucher')",
 		"v.source_event='Posting'",
@@ -36,7 +42,7 @@ def execute(filters=None):
 	]
 	for fieldname, column in (
 		("accounting_period", effective_accounting_period),
-		("voucher_status", "v.status"),
+
 		("account", "e.account"),
 		("party_type", "e.party_type"),
 		("party", "e.party"),
@@ -47,6 +53,10 @@ def execute(filters=None):
 		if filters.get(fieldname):
 			conditions.append(f"{column}=%({fieldname})s")
 	status_filter = filters.get("voucher_status")
+	if status_filter in ("未记账", "待记账"):
+		conditions.append("1=0")
+	elif not status_filter or status_filter == "全部有效凭证":
+		conditions.append("v.status='Posted'")
 	if status_filter:
 		status_value = {
 			"已记账": "Posted",
@@ -57,6 +67,7 @@ def execute(filters=None):
 		}.get(status_filter)
 		if status_value:
 			filters.voucher_status = status_value
+			conditions.append("v.status=%(voucher_status)s")
 	if display_number_filter and not re.search(r"\d+$", str(display_number_filter)):
 		conditions.append("v.voucher_word=%(voucher_word)s")
 	if filters.get("voucher_number"):
@@ -107,6 +118,17 @@ def execute(filters=None):
 		filters,
 		as_dict=True,
 	)
+	# Source permissions also apply when viewing an accounting snapshot.
+	entries = [entry for entry in entries if frappe.has_permission(entry.source_doctype, "read", entry.source_name)]
+	entries.extend(draft_rows)
+	if filters.get("receipt_import"):
+		batch = frappe.get_doc("China Bank Receipt Import", filters.receipt_import)
+		batch.check_permission("read")
+		if batch.company != filters.company:
+			frappe.throw("回单批次与公司不一致")
+		linked = set(frappe.get_all("China Bank Receipt", filters={"name": ["in", [r.receipt for r in batch.rows if r.receipt] or [""]]}, pluck="voucher_name"))
+		entries = [entry for entry in entries if entry.source_name in linked]
+	entries.sort(key=lambda e: (str(e.posting_date), e.source_doctype == "Period Closing Voucher", e.source_name, e.entry_idx))
 	_format_account_labels(entries, filters.company)
 	if display_number_filter and re.search(r"\d+$", str(display_number_filter)):
 		entries = [entry for entry in entries if entry.get("statutory_number") == display_number_filter]

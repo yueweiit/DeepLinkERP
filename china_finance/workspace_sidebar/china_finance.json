@@ -94,9 +94,9 @@
    "collapsible": 1,
    "indent": 0,
    "keep_closed": 0,
-   "label": "\u8bb0\u8d26\u51ed\u8bc1",
-   "link_to": "Journal Entry",
-   "link_type": "DocType",
+   "label": "\u67e5\u51ed\u8bc1",
+   "link_to": "China Voucher Ledger",
+   "link_type": "Report",
    "route_options": "{\"sidebar\": \"China Finance\"}",
    "show_arrow": 0,
    "type": "Link"
@@ -106,31 +106,7 @@
    "collapsible": 1,
    "indent": 0,
    "keep_closed": 0,
-   "label": "\u4e2d\u56fd\u4f1a\u8ba1\u51ed\u8bc1",
-   "link_to": "China Accounting Voucher",
-   "link_type": "DocType",
-   "route_options": "{\"sidebar\": \"China Finance\"}",
-   "show_arrow": 0,
-   "type": "Link"
-  },
-  {
-   "child": 1,
-   "collapsible": 1,
-   "indent": 0,
-   "keep_closed": 0,
-   "label": "\u671f\u672b\u7ed3\u8d26",
-   "link_to": "Period Closing Voucher",
-   "link_type": "DocType",
-   "route_options": "{\"sidebar\": \"China Finance\"}",
-   "show_arrow": 0,
-   "type": "Link"
-  },
-  {
-   "child": 1,
-   "collapsible": 1,
-   "indent": 0,
-   "keep_closed": 0,
-   "label": "\u671f\u672b\u667a\u80fd\u7ed3\u8f6c",
+   "label": "\u6708\u672b\u5904\u7406",
    "link_to": "China Closing Run",
    "link_type": "DocType",
    "route_options": "{\"sidebar\": \"China Finance\"}",
@@ -147,18 +123,6 @@
    "link_type": "DocType",
    "show_arrow": 0,
    "type": "Section Break"
-  },
-  {
-   "child": 1,
-   "collapsible": 1,
-   "indent": 0,
-   "keep_closed": 0,
-   "label": "\u67e5\u51ed\u8bc1",
-   "link_to": "China Voucher Ledger",
-   "link_type": "Report",
-   "route_options": "{\"sidebar\": \"China Finance\"}",
-   "show_arrow": 0,
-   "type": "Link"
   },
   {
    "child": 1,
@@ -182,6 +146,30 @@
    "link_type": "DocType",
    "show_arrow": 0,
    "type": "Section Break"
+  },
+  {
+   "child": 1,
+   "collapsible": 1,
+   "indent": 0,
+   "keep_closed": 0,
+   "label": "\u94f6\u884c\u56de\u5355\u5bfc\u5165",
+   "link_to": "China Bank Receipt Import",
+   "link_type": "DocType",
+   "route_options": "{\"sidebar\": \"China Finance\"}",
+   "show_arrow": 0,
+   "type": "Link"
+  },
+  {
+   "child": 1,
+   "collapsible": 1,
+   "indent": 0,
+   "keep_closed": 0,
+   "label": "\u94f6\u884c\u56de\u5355",
+   "link_to": "China Bank Receipt",
+   "link_type": "DocType",
+   "route_options": "{\"sidebar\": \"China Finance\"}",
+   "show_arrow": 0,
+   "type": "Link"
   },
   {
    "child": 1,
@@ -217,6 +205,53 @@
    "link_type": "DocType",
    "show_arrow": 0,
    "type": "Section Break"
+  },
+  {
+   "child": 0,
+   "collapsible": 1,
+   "icon": "notebook-pen",
+   "indent": 1,
+   "keep_closed": 1,
+   "label": "\u51ed\u8bc1\u660e\u7ec6\u4e0e\u5386\u53f2",
+   "link_type": "DocType",
+   "show_arrow": 0,
+   "type": "Section Break"
+  },
+  {
+   "child": 1,
+   "collapsible": 1,
+   "indent": 0,
+   "keep_closed": 0,
+   "label": "\u8bb0\u8d26\u51ed\u8bc1\u660e\u7ec6",
+   "link_to": "Journal Entry",
+   "link_type": "DocType",
+   "route_options": "{\"sidebar\": \"China Finance\"}",
+   "show_arrow": 0,
+   "type": "Link"
+  },
+  {
+   "child": 1,
+   "collapsible": 1,
+   "indent": 0,
+   "keep_closed": 0,
+   "label": "\u4e2d\u56fd\u4f1a\u8ba1\u51ed\u8bc1\u5feb\u7167",
+   "link_to": "China Accounting Voucher",
+   "link_type": "DocType",
+   "route_options": "{\"sidebar\": \"China Finance\"}",
+   "show_arrow": 0,
+   "type": "Link"
+  },
+  {
+   "child": 1,
+   "collapsible": 1,
+   "indent": 0,
+   "keep_closed": 0,
+   "label": "\u635f\u76ca\u7ed3\u8f6c\u51ed\u8bc1",
+   "link_to": "Period Closing Voucher",
+   "link_type": "DocType",
+   "route_options": "{\"sidebar\": \"China Finance\"}",
+   "show_arrow": 0,
+   "type": "Link"
   },
   {
    "child": 0,
@@ -275,6 +310,18 @@
    "link_type": "DocType",
    "show_arrow": 0,
    "type": "Section Break"
+  },
+  {
+   "child": 1,
+   "collapsible": 1,
+   "indent": 0,
+   "keep_closed": 0,
+   "label": "\u94f6\u884c\u56de\u5355\u79d1\u76ee\u89c4\u5219",
+   "link_to": "China Bank Receipt Rule",
+   "link_type": "DocType",
+   "route_options": "{\"sidebar\": \"China Finance\"}",
+   "show_arrow": 0,
+   "type": "Link"
   },
   {
    "child": 1,
@@ -455,7 +502,7 @@
    "type": "Link"
   }
  ],
- "modified": "2026-09-11 12:28:54.747242",
+ "modified": "2026-09-21 15:40:08.109837",
  "modified_by": "Administrator",
  "module": "China Finance",
  "name": "China Finance",

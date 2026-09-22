@@ -1,6 +1,7 @@
 function china_finance_can_direct_post(frm) {
 	return Boolean(
-		frm.is_new()
+		frm.__china_preparation_mode === false
+		&& frm.is_new()
 		&& frm.doc.docstatus === 0
 		&& !frm.doc.custom_china_bank_transaction
 		&& !String(frm.doc.title || "").trim().startsWith("Excel导入：")
@@ -65,7 +66,22 @@ function china_finance_save_and_post(frm) {
 }
 
 frappe.ui.form.on("Journal Entry", {
-	refresh(frm) {
+	async refresh(frm) {
+		$(frm.wrapper).off("dirty.china_finance_direct_post");
+		if (frm.doc.company) {
+			const response = await frappe.call({method: "china_finance.services.voucher_preparation.get_mode", args: {company: frm.doc.company, posting_date: frm.doc.posting_date}});
+			frm.__china_preparation_mode = !!response.message?.enabled;
+		}
+		if (frm.__china_preparation_mode && frm.doc.docstatus === 0) {
+			frm.page.set_primary_action(__("保存草稿"), () => frm.save());
+			if (!frm.is_new()) frm.add_custom_button(__("核对完成，待记账"), async () => {
+				if (frm.is_dirty()) await frm.save();
+				await frappe.require("/assets/china_finance/js/voucher_preparation.js");
+				await china_finance.preparation.review([frm.doc.name]);
+				frm.reload_doc();
+			});
+			return;
+		}
 		if (!china_finance_can_direct_post(frm)) return;
 		frm.__china_finance_draft_save_button_added = false;
 

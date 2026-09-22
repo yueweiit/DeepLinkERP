@@ -199,8 +199,16 @@ async function submit_and_complete_closing(frm) {
 }
 
 frappe.ui.form.on("China Closing Run", {
-	refresh(frm) {
+	async refresh(frm) {
 		initialize_amended_closing_run(frm);
+		if (frm.doc.company && frm.doc.from_date && frm.doc.to_date && frm.doc.docstatus === 0) {
+			const response = await frappe.call({method: "china_finance.services.voucher_preparation.get_mode", args: {company: frm.doc.company, posting_date: frm.doc.from_date}});
+			if (response.message?.enabled && frm.doc.closing_type === "Monthly") {
+				await frappe.require("/assets/china_finance/js/month_end.js");
+				china_finance.month_end.render(frm);
+				return;
+			}
+		}
 		lock_check_grid(frm);
 		if (frm.doc.company && frm.doc.from_date && frm.doc.to_date && frm.doc.docstatus === 0) {
 			if (!frm.is_new()) {
@@ -226,6 +234,12 @@ frappe.ui.form.on("China Closing Run", {
 			frm.add_custom_button(__("运行结账检查"), () => run_closing_checks(frm), __("对账"));
 		}
 		if (frm.doc.docstatus === 1 && frm.doc.status === "Closed") {
+			frm.set_intro(frm.doc.archive_package ? __("已结账，归档包已生成") : __("已结账，归档包尚未就绪，可刷新或重试归档"), "green");
+			if (!frm.doc.archive_package) frm.add_custom_button(__("重试归档"), async () => {
+				const response = await frappe.call({method: "china_finance.services.month_end.retry_archive", args: {name: frm.doc.name}, type: "POST"});
+				frappe.msgprint(response.message?.message || __("归档包已就绪"));
+				frm.reload_doc();
+			});
 			frm.add_custom_button(__("重新开账（含后续期间）"), () => {
 				frappe.prompt(
 					[{ fieldname: "reason", fieldtype: "Small Text", label: __("重新开账原因"), reqd: 1 }],

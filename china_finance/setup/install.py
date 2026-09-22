@@ -21,18 +21,17 @@ DAILY_NAVIGATION = (
 )
 
 VOUCHER_NAVIGATION = (
-	("Journal Entry", "记账凭证", "DocType"),
-	("China Accounting Voucher", "中国会计凭证", "DocType"),
-	("Period Closing Voucher", "期末结账", "DocType"),
-	("China Closing Run", "期末智能结转", "DocType"),
+	("China Voucher Ledger", "查凭证", "Report"),
+	("China Closing Run", "月末处理", "DocType"),
 )
 
 REPORT_NAVIGATION = (
-	("China Voucher Ledger", "查凭证", "Report"),
 	("China Financial Statements", "中国财务报表", "Report"),
 )
 
 BANK_NAVIGATION = (
+	("China Bank Receipt Import", "银行回单导入", "DocType"),
+	("China Bank Receipt", "银行回单", "DocType"),
 	("china-banking", "银行对账", "Page"),
 	("China Reconciliation Statement", "对账单", "DocType"),
 )
@@ -47,6 +46,11 @@ NAVIGATION_SECTIONS = (
 )
 
 ADMIN_NAVIGATION_GROUPS = (
+	("凭证明细与历史", "notebook-pen", (
+		("Journal Entry", "记账凭证明细", "DocType"),
+		("China Accounting Voucher", "中国会计凭证快照", "DocType"),
+		("Period Closing Voucher", "损益结转凭证", "DocType"),
+	)),
 	(
 		"启用与基础设置", "settings", (
 			("China Finance Settings", "中国财务设置", "DocType"),
@@ -56,6 +60,7 @@ ADMIN_NAVIGATION_GROUPS = (
 	),
 	(
 		"业务控制规则", "sliders-horizontal", (
+			("China Bank Receipt Rule", "银行回单科目规则", "DocType"),
 			("China Sales Settlement Rule", "销售结算规则", "DocType"),
 			("China Invoice Control Rule", "开票控制规则", "DocType"),
 			("China Purchase Reconciliation Rule", "采购应付对账规则", "DocType"),
@@ -445,6 +450,7 @@ def sync_china_accounting_voucher_print_format():
 
 def sync_sales_settlement_custom_fields():
 	"""Install additive metadata for ERPNext and China Finance documents."""
+	from china_finance.setup.preparation import PREPARATION_FIELDS
 	from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 
 	create_custom_fields({
@@ -463,6 +469,7 @@ def sync_sales_settlement_custom_fields():
 			},
 		],
 		"Journal Entry": [
+			*PREPARATION_FIELDS,
 			{"fieldname": "custom_china_voucher_number", "label": "凭证字号", "fieldtype": "Data", "read_only": 1, "in_list_view": 1, "insert_before": "name"},
 			{"fieldname": "custom_china_bank_transaction", "label": "银行流水来源", "fieldtype": "Link", "options": "Bank Transaction", "read_only": 1, "insert_after": "cheque_no"},
 		],

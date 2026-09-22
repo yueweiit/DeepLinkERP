@@ -6,6 +6,14 @@ from frappe.utils import getdate
 
 class ChinaFinanceSettings(Document):
 	def validate(self):
+		old = self.get_doc_before_save()
+		if old and any(self.get(f) != old.get(f) for f in ("enabled", "enable_voucher_preparation", "preparation_from_date")):
+			if frappe.db.has_column("China Closing Run", "preparation_state") and frappe.db.exists("China Closing Run", {
+				"company": self.company, "docstatus": 0, "preparation_state": ["in", ["Posting", "Checking", "Closing"]],
+			}):
+				frappe.throw(_("请先暂停进行中的月末处理，再调整凭证准备模式"))
+		if self.get("enable_voucher_preparation") and not self.get("preparation_from_date"):
+			frappe.throw(_("请设置凭证准备模式生效日期"))
 		if self.activation_date:
 			self.activation_date = getdate(self.activation_date)
 		if self.archive_retention_years and self.archive_retention_years < 10:

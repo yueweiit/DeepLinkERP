@@ -1,6 +1,6 @@
 {
  "actions":[], "autoname":"naming_series:", "creation":"2026-07-17 00:00:00.000000", "doctype":"DocType", "engine":"InnoDB",
- "field_order":["naming_series","amended_from","company","closing_type","from_date","to_date","period_closing_voucher","status","archive_package","previous_frozen_date","closed_by","closed_on","reopened_by","reopened_on","reopen_reason","checks_section","checks","notes"],
+ "field_order":["naming_series","amended_from","company","closing_type","from_date","to_date","period_closing_voucher","status","archive_package","previous_frozen_date","closed_by","closed_on","reopened_by","reopened_on","reopen_reason","preparation_section","preparation_state","preparation_message","preparation_data","preparation_preview","checks_section","checks","notes"],
  "fields":[
   {"default":"CNC-.YYYY.-.#####","fieldname":"naming_series","fieldtype":"Select","label":"编号规则","options":"CNC-.YYYY.-.#####","reqd":1},
   {"fieldname":"amended_from","fieldtype":"Link","ignore_user_permissions":1,"label":"修订自","no_copy":1,"options":"China Closing Run","print_hide":1,"read_only":1,"search_index":1},
@@ -8,7 +8,7 @@
   {"default":"Monthly","fieldname":"closing_type","fieldtype":"Select","label":"结账类型","options":"Monthly\nYear End","reqd":1},
   {"fieldname":"from_date","fieldtype":"Date","label":"起始日期","reqd":1},
   {"fieldname":"to_date","fieldtype":"Date","in_list_view":1,"label":"截止日期","reqd":1},
-  {"fieldname":"period_closing_voucher","fieldtype":"Link","label":"ERPNext 损益结转凭证","options":"Period Closing Voucher","reqd":1},
+  {"fieldname":"period_closing_voucher","fieldtype":"Link","label":"ERPNext 损益结转凭证","options":"Period Closing Voucher","reqd":0},
   {"default":"Draft","fieldname":"status","fieldtype":"Select","in_list_view":1,"label":"状态","options":"Draft\nClosed\nReopened","read_only":1,"allow_on_submit":1},
   {"fieldname":"archive_package","fieldtype":"Attach","label":"电子档案包","read_only":1,"allow_on_submit":1},
   {"fieldname":"previous_frozen_date","fieldtype":"Date","label":"结账前冻结日期","read_only":1},
@@ -19,7 +19,12 @@
   {"fieldname":"reopen_reason","fieldtype":"Small Text","label":"重新开账原因","allow_on_submit":1},
   {"fieldname":"checks_section","fieldtype":"Section Break","label":"结账检查"},
   {"fieldname":"checks","fieldtype":"Table","label":"结账检查","options":"China Closing Check"},
-  {"fieldname":"notes","fieldtype":"Small Text","label":"备注"}
+  {"fieldname":"notes","fieldtype":"Small Text","label":"备注"},
+  {"fieldname":"preparation_section","fieldtype":"Section Break","label":"月末统一处理"},
+  {"fieldname":"preparation_state","fieldtype":"Data","label":"处理阶段","read_only":1},
+  {"fieldname":"preparation_message","fieldtype":"Small Text","label":"处理进度","read_only":1},
+  {"fieldname":"preparation_data","fieldtype":"Long Text","label":"处理记录","read_only":1,"hidden":1},
+  {"fieldname":"preparation_preview","fieldtype":"HTML","label":"月末处理"}
  ],
  "is_submittable":1, "modified":"2026-07-17 00:00:00.000000", "modified_by":"Administrator", "module":"China Finance", "name":"China Closing Run", "naming_rule":"By \"Naming Series\" field", "owner":"Administrator",
  "permissions":[

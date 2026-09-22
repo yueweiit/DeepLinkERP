@@ -52,6 +52,8 @@ app_include_css = "/assets/china_finance/css/china_finance.css"
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
 
 doctype_js = {
+	"China Bank Receipt Import": "public/js/bank_receipt_details.js",
+	"China Bank Receipt": "public/js/bank_receipt_details.js",
 	"Bank Account": "public/js/bank_account.js",
 	"Bank Statement Import": "public/js/bank_statement_import.js",
 	"Sales Invoice": ["public/js/sales_invoice_invoice_control.js", "public/js/gl_source_snapshot.js"],
@@ -61,9 +63,11 @@ doctype_js = {
 		"public/js/gl_source_snapshot.js",
 		"public/js/journal_entry_direct_post.js",
 		"public/js/source_voucher_amendment.js",
+		"public/js/voucher_bank_receipts.js",
 	],
 	"Payment Entry": [
 		"public/js/payment_entry_invoice_selector.js",
+		"public/js/voucher_bank_receipts.js",
 		"public/js/gl_source_snapshot.js",
 		"public/js/source_voucher_amendment.js",
 	],
@@ -240,6 +244,7 @@ _journal_entry_events = {
 	"on_submit": [
 		"china_finance.services.voucher.on_gl_source_submit",
 		"china_finance.services.bank_reconciliation.on_journal_entry_submit",
+		"china_finance.services.bank_receipt_import.update_receipt_status",
 	],
 	"on_cancel": "china_finance.services.voucher.on_gl_source_cancel",
 }
@@ -249,6 +254,14 @@ _payment_entry_events = {
 	"on_submit": "china_finance.services.voucher.on_gl_source_submit",
 	"on_cancel": "china_finance.services.voucher.on_gl_source_cancel",
 }
+
+for _events in (_journal_entry_events, _payment_entry_events):
+	_events["validate"] = "china_finance.services.bank_receipt_import.validate_linked_voucher"
+	_events["before_cancel"] = [_events["before_cancel"], "china_finance.services.bank_receipt_import.allow_voucher_cancellation"]
+	for _event in ("on_cancel", "on_update"):
+		_existing = _events.get(_event)
+		_events[_event] = ([_existing] if _existing else []) + ["china_finance.services.bank_receipt_import.update_receipt_status"]
+_payment_entry_events["on_submit"] = [_payment_entry_events["on_submit"], "china_finance.services.bank_receipt_import.update_receipt_status"]
 
 doc_events = {
 	doctype: (
@@ -310,7 +323,23 @@ doc_events["*"] = {
 doc_events["Bank Transaction"] = {
 	"before_insert": "china_finance.services.bank_reconciliation.prepare_bank_transaction",
 	"on_submit": "china_finance.services.bank_reconciliation.auto_create_voucher_on_submit",
+	"on_update_after_submit": "china_finance.services.bank_receipt_import.update_receipt_status",
+	"on_cancel": "china_finance.services.bank_receipt_import.update_receipt_status",
 }
+
+doc_events["File"] = {
+	"before_validate": "china_finance.services.bank_receipt_import.protect_receipt_file",
+	"on_trash": "china_finance.services.bank_receipt_import.protect_receipt_file",
+}
+
+# Share a company/period gate across normal forms, imports, APIs and month-end steps.
+doc_events["*"]["before_validate"] = "china_finance.services.month_end.guard_period_write"
+doc_events["*"]["before_cancel"] = "china_finance.services.month_end.guard_period_write"
+doc_events["*"]["on_trash"] = "china_finance.services.month_end.guard_period_write"
+_journal_entry_events["validate"] = [
+	"china_finance.services.bank_receipt_import.validate_linked_voucher",
+	"china_finance.services.voucher_preparation.validate_preparation",
+]
 
 # Scheduled Tasks
 # ---------------

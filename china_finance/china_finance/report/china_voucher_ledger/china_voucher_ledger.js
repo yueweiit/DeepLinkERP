@@ -1,5 +1,6 @@
 frappe.query_reports["China Voucher Ledger"] = {
 	filters: [
+		{fieldname: "receipt_import", label: __("回单批次"), fieldtype: "Link", options: "China Bank Receipt Import"},
 		{
 			fieldname: "company",
 			label: __("公司"),
@@ -25,8 +26,8 @@ frappe.query_reports["China Voucher Ledger"] = {
 			fieldname: "voucher_status",
 			label: __("状态"),
 			fieldtype: "Select",
-			options: ["", __("已记账"), __("已冲销")],
-			default: __("已记账"),
+			options: [__("全部有效凭证"), __("未记账"), __("待记账"), __("已记账"), __("已冲销")],
+			default: __("全部有效凭证"),
 		},
 		{ fieldname: "accounting_period", label: __("会计期间"), fieldtype: "Data" },
 		{
@@ -51,13 +52,15 @@ frappe.query_reports["China Voucher Ledger"] = {
 	get_datatable_options(datatable_options) {
 		// Keep one fixed width for each column so every row stays aligned.
 		datatable_options.layout = "fixed";
+		datatable_options.checkboxColumn = true;
 		return datatable_options;
 	},
 	formatter(value, row, column, data, default_formatter) {
 		const formatted = default_formatter(value, row, column, data);
 		if (column.fieldname === "voucher_status" && data?.voucher_status !== undefined && data?.voucher_status !== null) {
 			const status = {
-				0: [__("草稿"), "orange"],
+				0: [__("未记账"), "orange"],
+				3: [__("待记账"), "blue"],
 				1: [__("已记账"), "green"],
 				2: [__("已冲销"), "red"],
 			}[data.voucher_status];
@@ -75,7 +78,7 @@ frappe.query_reports["China Voucher Ledger"] = {
 			editable_source_doctypes.includes(data.source_doctype) &&
 			data?.source_name
 		) {
-			return `<button type="button" class="btn btn-xs btn-default china-voucher-edit-source" data-source-doctype="${encodeURIComponent(data.source_doctype)}" data-source-name="${encodeURIComponent(data.source_name)}">${__("编辑来源凭证")}</button>`;
+			return `<button type="button" class="btn btn-xs btn-default china-voucher-edit-source" data-source-doctype="${encodeURIComponent(data.source_doctype)}" data-source-name="${encodeURIComponent(data.source_name)}">${__([0, 3].includes(data.voucher_status) ? "编辑草稿" : "受控更正")}</button>`;
 		}
 		if (!data || !["posting_date", "statutory_number", "accounting_period"].includes(column.fieldname)) {
 			return formatted;
@@ -86,6 +89,7 @@ frappe.query_reports["China Voucher Ledger"] = {
 		return formatted;
 	},
 	onload(report) {
+		frappe.require("/assets/china_finance/js/voucher_preparation.js", () => china_finance.preparation.bind_report(report));
 		report.page.wrapper.addClass("china-voucher-ledger-report");
 		ensure_voucher_ledger_styles();
 		report.page.wrapper.on("click", ".china-voucher-link", (event) => {
@@ -177,7 +181,7 @@ function edit_source_voucher(report, button) {
 				return;
 			}
 			if (status.action === "open_draft") {
-				frappe.set_route("Form", source_doctype, source_name);
+				frappe.require("/assets/china_finance/js/voucher_preparation.js", () => china_finance.preparation.edit(source_name, () => report.refresh()));
 				return;
 			}
 

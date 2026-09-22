@@ -1,0 +1,206 @@
+{
+ "doctype": "DocType",
+ "name": "China Bank Receipt Rule",
+ "module": "China Finance",
+ "engine": "InnoDB",
+ "field_order": [
+  "company",
+  "enabled",
+  "priority",
+  "direction",
+  "rule_type",
+  "effective_from",
+  "effective_to",
+  "business_type",
+  "keyword",
+  "account",
+  "personal_account",
+  "accrual_account",
+  "injury_company_percent",
+  "pension_company_percent",
+  "medical_company_percent",
+  "unemployment_company_percent",
+  "notes"
+ ],
+ "fields": [
+  {
+   "fieldname": "company",
+   "label": "公司",
+   "fieldtype": "Link",
+   "options": "Company",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "enabled",
+   "label": "启用",
+   "fieldtype": "Check",
+   "default": 1
+  },
+  {
+   "fieldname": "priority",
+   "label": "优先级（数字越小越优先）",
+   "fieldtype": "Int",
+   "default": 10
+  },
+  {
+   "fieldname": "direction",
+   "label": "收支方向",
+   "fieldtype": "Select",
+   "options": "收入\n支出",
+   "reqd": 1
+  },
+  {
+   "fieldname": "business_type",
+   "label": "业务类型（精确匹配）",
+   "fieldtype": "Data"
+  },
+  {
+   "fieldname": "keyword",
+   "label": "摘要或税费明细包含",
+   "fieldtype": "Data"
+  },
+  {
+   "fieldname": "account",
+   "label": "建议科目 / 社保公司承担科目",
+   "fieldtype": "Link",
+   "options": "Account",
+   "reqd": 1
+  },
+  {
+   "fieldname": "notes",
+   "label": "匹配说明",
+   "fieldtype": "Small Text",
+   "reqd": 1
+  },
+  {
+   "fieldname": "rule_type",
+   "label": "处理方式",
+   "fieldtype": "Select",
+   "options": "单一科目\n社保分摊",
+   "default": "单一科目",
+   "reqd": 1
+  },
+  {
+   "fieldname": "effective_from",
+   "label": "交易日期起",
+   "fieldtype": "Date"
+  },
+  {
+   "fieldname": "effective_to",
+   "label": "交易日期止",
+   "fieldtype": "Date"
+  },
+  {
+   "fieldname": "personal_account",
+   "label": "个人承担科目（其他应收款-社保）",
+   "fieldtype": "Link",
+   "options": "Account",
+   "depends_on": "eval:doc.rule_type==\"社保分摊\"",
+   "mandatory_depends_on": "eval:doc.rule_type==\"社保分摊\""
+  },
+  {
+   "fieldname": "accrual_account",
+   "label": "社保计提及支付的应付科目",
+   "fieldtype": "Link",
+   "options": "Account",
+   "depends_on": "eval:doc.rule_type==\"社保分摊\"",
+   "mandatory_depends_on": "eval:doc.rule_type==\"社保分摊\"",
+   "description": "按既有凭证格式可选择 221101 应付职工薪酬－工资；计提贷方和支付借方使用同一科目。"
+  },
+  {
+   "fieldname": "injury_company_percent",
+   "label": "工伤保险公司承担（%）",
+   "fieldtype": "Percent",
+   "precision": "2",
+   "default": 100,
+   "depends_on": "eval:doc.rule_type==\"社保分摊\""
+  },
+  {
+   "fieldname": "pension_company_percent",
+   "label": "养老保险公司承担（%）",
+   "fieldtype": "Percent",
+   "precision": "2",
+   "default": 66.67,
+   "depends_on": "eval:doc.rule_type==\"社保分摊\""
+  },
+  {
+   "fieldname": "medical_company_percent",
+   "label": "医疗保险公司承担（%）",
+   "fieldtype": "Percent",
+   "precision": "2",
+   "default": 86.3,
+   "depends_on": "eval:doc.rule_type==\"社保分摊\""
+  },
+  {
+   "fieldname": "unemployment_company_percent",
+   "label": "失业保险公司承担（%）",
+   "fieldtype": "Percent",
+   "precision": "2",
+   "default": 80,
+   "depends_on": "eval:doc.rule_type==\"社保分摊\""
+  }
+ ],
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "create": 1,
+   "write": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "Accounts Manager",
+   "read": 1,
+   "create": 1,
+   "write": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "China Finance Manager",
+   "read": 1,
+   "create": 1,
+   "write": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "China Finance Auditor",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "China Archive User",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "China Voucher Reviewer",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "China Voucher Poster",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  }
+ ],
+ "istable": 0,
+ "track_changes": 1,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "autoname": "hash"
+}

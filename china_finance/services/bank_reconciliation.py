@@ -145,6 +145,8 @@ def prepare_bank_transaction(doc, method=None):
 		doc.transaction_id = str(doc.reference_number).strip()
 
 	if doc.transaction_id and doc.bank_account:
+		# Serialize receipt imports and statement imports against the same account.
+		frappe.db.sql("SELECT name FROM `tabBank Account` WHERE name=%s FOR UPDATE", doc.bank_account)
 		existing = frappe.db.get_value(
 			"Bank Transaction",
 			{
@@ -153,6 +155,7 @@ def prepare_bank_transaction(doc, method=None):
 				"transaction_id": doc.transaction_id,
 			},
 			"name",
+			for_update=True,
 		)
 		if not existing:
 			existing = frappe.db.get_value(
@@ -163,6 +166,7 @@ def prepare_bank_transaction(doc, method=None):
 					"reference_number": doc.reference_number,
 				},
 				"name",
+				for_update=True,
 			)
 		if existing and existing != doc.name:
 			frappe.throw(_("银行流水 {0} 已导入为 {1}，请勿重复导入。" ).format(doc.transaction_id, existing))
@@ -422,6 +426,10 @@ def auto_create_voucher_on_submit(doc, method=None):
 	- The bank transaction has no allocated amount yet
 	- A matching bank account GL account exists
 	"""
+	from china_finance.services.bank_receipt_import import reuse_receipt_for_transaction
+
+	if doc.flags.china_receipt_explicit_voucher or reuse_receipt_for_transaction(doc):
+		return
 	if flt(doc.allocated_amount) > 0:
 		return
 	if (
@@ -559,6 +567,12 @@ def repair_draft_bank_journal_entry_summaries(company, from_date=None, to_date=N
 			skipped += 1
 			continue
 		journal_entry = frappe.get_doc("Journal Entry", journal_entry_name)
+		from china_finance.services.bank_receipt_import import has_social_receipt_lines
+
+		if has_social_receipt_lines(journal_entry):
+			# Keep receipt-period accrual/payment summaries on their individual lines.
+			skipped += 1
+			continue
 		if journal_entry.docstatus != 0:
 			# Posted vouchers must be amended through the normal accounting flow.
 			skipped += 1

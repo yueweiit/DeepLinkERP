@@ -78,6 +78,11 @@ def run_closing_checks(company, from_date, to_date, period_closing_voucher=None,
 	def add(code, description, passed, details="", severity="Blocking"):
 		checks.append({"check_code": code, "description": description, "passed": int(bool(passed)), "details": details, "severity": severity})
 
+	from china_finance.services.bank_receipt_import import pending_receipts
+	unfinished_receipts = pending_receipts(company, from_date, to_date)
+	add("BANK_RECEIPTS_PROCESSED", "本期银行回单已处理并记账", not unfinished_receipts,
+		"、".join(r.transaction_id for r in unfinished_receipts[:20]))
+
 	configuration_errors = []
 	role_separation_warning = False
 	if not settings.enforce_role_separation:
@@ -630,6 +635,10 @@ def create_period_closing_voucher(company, from_date, to_date, closing_type="Mon
 	elif to_date != fiscal_year_end:
 		frappe.throw(_("年度结转截止日期必须是会计年度结束日 {0}").format(fiscal_year_end))
 
+	from china_finance.services.bank_receipt_import import pending_receipts
+	unfinished_receipts = pending_receipts(company, from_date, to_date)
+	if unfinished_receipts:
+		frappe.throw("本期还有未处理或未记账的银行回单：" + "、".join(r.transaction_id for r in unfinished_receipts[:20]))
 	pending_bank_vouchers = get_pending_bank_vouchers(company, from_date, to_date)
 	if pending_bank_vouchers:
 		references = [row.reference_number or row.name for row in pending_bank_vouchers[:10]]

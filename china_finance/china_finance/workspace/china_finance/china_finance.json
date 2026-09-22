@@ -55,55 +55,6 @@
    "hidden": 0,
    "is_query_report": 0,
    "label": "\u51ed\u8bc1\u4e0e\u7ed3\u8d26",
-   "link_count": 4,
-   "link_type": "DocType",
-   "onboard": 0,
-   "type": "Card Break"
-  },
-  {
-   "hidden": 0,
-   "is_query_report": 0,
-   "label": "\u8bb0\u8d26\u51ed\u8bc1",
-   "link_count": 0,
-   "link_to": "Journal Entry",
-   "link_type": "DocType",
-   "onboard": 0,
-   "type": "Link"
-  },
-  {
-   "hidden": 0,
-   "is_query_report": 0,
-   "label": "\u4e2d\u56fd\u4f1a\u8ba1\u51ed\u8bc1",
-   "link_count": 0,
-   "link_to": "China Accounting Voucher",
-   "link_type": "DocType",
-   "onboard": 0,
-   "type": "Link"
-  },
-  {
-   "hidden": 0,
-   "is_query_report": 0,
-   "label": "\u671f\u672b\u7ed3\u8d26",
-   "link_count": 0,
-   "link_to": "Period Closing Voucher",
-   "link_type": "DocType",
-   "onboard": 0,
-   "type": "Link"
-  },
-  {
-   "hidden": 0,
-   "is_query_report": 0,
-   "label": "\u671f\u672b\u667a\u80fd\u7ed3\u8f6c",
-   "link_count": 0,
-   "link_to": "China Closing Run",
-   "link_type": "DocType",
-   "onboard": 0,
-   "type": "Link"
-  },
-  {
-   "hidden": 0,
-   "is_query_report": 0,
-   "label": "\u62a5\u8868\u4e0e\u67e5\u8be2",
    "link_count": 2,
    "link_type": "DocType",
    "onboard": 0,
@@ -121,6 +72,25 @@
   },
   {
    "hidden": 0,
+   "is_query_report": 0,
+   "label": "\u6708\u672b\u5904\u7406",
+   "link_count": 0,
+   "link_to": "China Closing Run",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "\u62a5\u8868\u4e0e\u67e5\u8be2",
+   "link_count": 1,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
    "is_query_report": 1,
    "label": "\u4e2d\u56fd\u8d22\u52a1\u62a5\u8868",
    "link_count": 0,
@@ -133,10 +103,30 @@
    "hidden": 0,
    "is_query_report": 0,
    "label": "\u94f6\u884c\u4e0e\u5bf9\u8d26",
-   "link_count": 2,
+   "link_count": 4,
    "link_type": "DocType",
    "onboard": 0,
    "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "\u94f6\u884c\u56de\u5355\u5bfc\u5165",
+   "link_count": 0,
+   "link_to": "China Bank Receipt Import",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "\u94f6\u884c\u56de\u5355",
+   "link_count": 0,
+   "link_to": "China Bank Receipt",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
   },
   {
    "hidden": 0,
@@ -154,6 +144,45 @@
    "label": "\u5bf9\u8d26\u5355",
    "link_count": 0,
    "link_to": "China Reconciliation Statement",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "\u51ed\u8bc1\u660e\u7ec6\u4e0e\u5386\u53f2",
+   "link_count": 3,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "\u8bb0\u8d26\u51ed\u8bc1\u660e\u7ec6",
+   "link_count": 0,
+   "link_to": "Journal Entry",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "\u4e2d\u56fd\u4f1a\u8ba1\u51ed\u8bc1\u5feb\u7167",
+   "link_count": 0,
+   "link_to": "China Accounting Voucher",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "\u635f\u76ca\u7ed3\u8f6c\u51ed\u8bc1",
+   "link_count": 0,
+   "link_to": "Period Closing Voucher",
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link"
@@ -201,10 +230,20 @@
    "hidden": 0,
    "is_query_report": 0,
    "label": "\u4e1a\u52a1\u63a7\u5236\u89c4\u5219",
-   "link_count": 3,
+   "link_count": 4,
    "link_type": "DocType",
    "onboard": 0,
    "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "\u94f6\u884c\u56de\u5355\u79d1\u76ee\u89c4\u5219",
+   "link_count": 0,
+   "link_to": "China Bank Receipt Rule",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
   },
   {
    "hidden": 0,
@@ -365,7 +404,7 @@
    "type": "Link"
   }
  ],
- "modified": "2026-08-25 07:28:21.836381",
+ "modified": "2026-09-21 15:40:08.200610",
  "modified_by": "Administrator",
  "module": "China Finance",
  "name": "China Finance",
