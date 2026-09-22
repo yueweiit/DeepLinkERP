@@ -5,11 +5,15 @@
 
 from __future__ import annotations
 
+import unicodedata
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
 
 DEFAULT_SITE_CODE = "DEEPLINKERP"
+LEGACY_PROJECT_IDENTITIES = {
+    "yueweimx核心制造": "ywfabricacionmx核心制造",
+}
 
 
 def resolve_item_routes(
@@ -29,7 +33,7 @@ def resolve_item_routes(
     for route in active_routes:
         project = _text(route.get("project_collection"))
         if project:
-            by_project.setdefault(project, []).append(route)
+            by_project.setdefault(project_route_identity(project), []).append(route)
 
     by_item: dict[str, dict] = {}
     blocking_reasons: list[str] = []
@@ -46,7 +50,7 @@ def resolve_item_routes(
             }
             by_item[item_key] = {"stable_line_key": item_key, "project_collection": project, **result}
             continue
-        candidates = by_project.get(project, []) if project else []
+        candidates = by_project.get(project_route_identity(project), []) if project else []
         targets = {_route_target(route) for route in candidates}
 
         if not project:
@@ -171,6 +175,18 @@ def normalize_currency(value) -> str:
     text = _text(value).upper().replace("人民币", "CNY").replace("RMB", "CNY")
     text = text.replace("美元", "USD").replace("美金", "USD").replace("墨西哥比索", "MXN").replace("比索", "MXN")
     return text or "CNY"
+
+
+def project_route_identity(value) -> str:
+    """Match harmless spelling changes and named legacy departments without rewriting stored history."""
+
+    normalized = unicodedata.normalize("NFKD", _text(value))
+    identity = "".join(
+        character.lower()
+        for character in normalized
+        if not unicodedata.combining(character) and character.isalnum()
+    )
+    return LEGACY_PROJECT_IDENTITIES.get(identity, identity)
 
 
 def resolve_item_uom(item: dict, fallback: str = "") -> str:

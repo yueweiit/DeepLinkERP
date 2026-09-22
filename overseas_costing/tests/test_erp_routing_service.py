@@ -35,6 +35,29 @@ def test_route_without_explicit_site_uses_shared_deeplinkerp_connection() -> Non
     assert result["by_item"]["P1"]["site_code"] == "DEEPLINKERP"
 
 
+def test_historical_project_names_resolve_to_current_company_routes_without_rewriting_rows() -> None:
+    result = resolve_item_routes(
+        [
+            {"stable_line_key": "GZ", "project_collection": "Guangzhou Lingxiang广州凌翔"},
+            {"stable_line_key": "LATIN", "project_collection": "LatínGo拉丁购"},
+            {"stable_line_key": "MX", "project_collection": "YUEWEI MX核心制造"},
+        ],
+        [
+            {"project_collection": "Guangzhou Lingxiang 广州凌翔", "subsidiary_code": "GZ COMPANY", "enabled": 1},
+            {"project_collection": "LatinGo拉丁购", "subsidiary_code": "LATIN COMPANY", "enabled": 1},
+            {"project_collection": "YW Fabricación MX 核心制造", "subsidiary_code": "MX COMPANY", "enabled": 1},
+        ],
+    )
+
+    assert result["ready"] is True
+    assert {key: row["subsidiary_code"] for key, row in result["by_item"].items()} == {
+        "GZ": "GZ COMPANY",
+        "LATIN": "LATIN COMPANY",
+        "MX": "MX COMPANY",
+    }
+    assert result["by_item"]["MX"]["project_collection"] == "YUEWEI MX核心制造"
+
+
 def test_ambiguous_project_mapping_never_chooses_first_route() -> None:
     result = resolve_item_routes(
         [{"stable_line_key": "P1", "project_collection": "项目A"}],
