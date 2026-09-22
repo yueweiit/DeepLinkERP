@@ -19082,17 +19082,82 @@ class OverseasCostWorkbench {
 
   renderDingtalkFormFields(fields = []) {
     if (!fields.length) return `<div class="ocw-purchase-empty-line">无可展示表单字段</div>`;
-    return `<dl class="ocw-dingtalk-form-fields">${fields.map((field) => `<div><dt>${this.escape(field.label || "未命名字段")}</dt><dd>${this.escape(field.value || "--")}</dd></div>`).join("")}</dl>`;
+    const scalarFields = [];
+    const tableFields = [];
+    const emptyFields = [];
+    fields.forEach((field) => {
+      const table = field.table || {};
+      const isTable = field.display_kind === "table"
+        && Array.isArray(table.columns)
+        && Array.isArray(table.rows);
+      const isEmpty = Boolean(field.is_empty) || (!isTable && !String(field.value == null ? "" : field.value).trim());
+      if (isEmpty) emptyFields.push(field);
+      else if (isTable) tableFields.push(field);
+      else scalarFields.push(field);
+    });
+    const scalars = scalarFields.length ? `<dl class="ocw-dingtalk-form-grid">${scalarFields.map((field) => {
+      const value = String(field.value == null ? "" : field.value);
+      const componentType = String(field.component_type || "").toLowerCase();
+      const isLong = componentType.includes("textarea") || value.includes("\n") || value.length > 80;
+      return `<div class="ocw-dingtalk-field${isLong ? " is-long" : ""}"><dt>${this.escape(field.label || "未命名字段")}</dt><dd>${this.escape(value)}</dd></div>`;
+    }).join("")}</dl>` : "";
+    const tables = tableFields.map((field) => this.renderDingtalkFormTable(field)).join("");
+    const empty = emptyFields.length ? `<details class="ocw-dingtalk-empty-fields"><summary>查看未填写字段（${this.escape(String(emptyFields.length))}）</summary><dl>${emptyFields.map((field) => `<div><dt>${this.escape(field.label || "未命名字段")}</dt><dd>未填写</dd></div>`).join("")}</dl></details>` : "";
+    return `<div class="ocw-dingtalk-form-layout">${scalars}${tables}${empty}</div>`;
+  }
+
+  renderDingtalkFormTable(field = {}) {
+    const table = field.table || {};
+    const columns = Array.isArray(table.columns) ? table.columns : [];
+    const rows = Array.isArray(table.rows) ? table.rows : [];
+    const displayCell = (row, index) => {
+      const value = Array.isArray(row) ? row[index] : "";
+      return value == null || value === "" ? "--" : value;
+    };
+    const desktop = `<div class="ocw-dingtalk-table-scroll"><table class="ocw-dingtalk-goods-table"><thead><tr>${columns.map((column, index) => `<th scope="col"${index === 0 ? ` class="ocw-dingtalk-goods-code"` : ""}>${this.escape(column || "--")}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr>${columns.map((_, index) => `<td${index === 0 ? ` class="ocw-dingtalk-goods-code"` : ""}>${this.escape(displayCell(row, index))}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+    const mobile = `<div class="ocw-dingtalk-goods-cards">${rows.map((row, rowIndex) => `<article><strong>物料 ${this.escape(String(rowIndex + 1))}</strong><dl>${columns.map((column, index) => `<div><dt>${this.escape(column || "--")}</dt><dd>${this.escape(displayCell(row, index))}</dd></div>`).join("")}</dl></article>`).join("")}</div>`;
+    return `<section class="ocw-dingtalk-table-field"><h5>${this.escape(field.label || "未命名表格")}</h5>${desktop}${mobile}</section>`;
   }
 
   renderDingtalkTimeline(items = [], allowCostSource = true) {
     if (!items.length) return `<div class="ocw-purchase-empty-line">无操作或评论记录</div>`;
-    return `<ol class="ocw-dingtalk-timeline">${items.map((item) => `
-      <li>
-        <div>${this.renderDingtalkActor(item.user_name, item.user_id, item.user_name_source, item.user_name_unresolved)}<span>${this.escape(this.formatDateTimeMinute(item.operation_time) || item.operation_time || "--")}</span></div>
-        <p>${this.escape(item.remark || [item.operation_type, item.result].filter(Boolean).join(" / ") || "--")}</p>
-        ${allowCostSource && item.packing_candidate && item.source_id ? `<button class="ocw-link-btn" type="button" data-action="use-dingtalk-packing-source" data-source-kind="comment" data-source-id="${this.escape(item.source_id)}">作为装箱信息预览</button>` : ""}
-      </li>`).join("")}</ol>`;
+    const sorted = items.map((item, index) => ({ item, index })).sort((left, right) => {
+      const leftTime = Date.parse(left.item.operation_time || "") || 0;
+      const rightTime = Date.parse(right.item.operation_time || "") || 0;
+      return rightTime - leftTime || left.index - right.index;
+    }).map((entry) => entry.item);
+    const primary = sorted.filter((item) => item.event_kind === "comment" || item.event_kind === "decision");
+    const system = sorted.filter((item) => item.event_kind !== "comment" && item.event_kind !== "decision");
+    const primaryHtml = primary.length
+      ? `<ol class="ocw-dingtalk-timeline">${primary.map((item) => this.renderDingtalkTimelineItem(item, allowCostSource)).join("")}</ol>`
+      : `<div class="ocw-purchase-empty-line">无评论或审批处理记录</div>`;
+    const systemHtml = system.length
+      ? `<details class="ocw-dingtalk-system-records"><summary>展开 ${this.escape(String(system.length))} 条系统记录</summary><ol class="ocw-dingtalk-timeline is-system">${system.map((item) => this.renderDingtalkTimelineItem(item, false)).join("")}</ol></details>`
+      : "";
+    return `<div class="ocw-dingtalk-timeline-layout">${primaryHtml}${systemHtml}</div>`;
+  }
+
+  renderDingtalkTimelineItem(item = {}, allowCostSource = true) {
+    const actor = String(item.user_name || "").trim() || (item.user_name_unresolved ? "姓名未同步" : "系统");
+    const segments = Array.isArray(item.remark_segments) && item.remark_segments.length
+      ? item.remark_segments
+      : (item.remark ? [{ kind: "text", text: item.remark }] : []);
+    const remark = segments.length
+      ? segments.map((segment) => segment.kind === "mention"
+        ? `<span class="ocw-dingtalk-mention">${this.escape(segment.text || "")}</span>`
+        : this.escape(segment.text || "")).join("")
+      : `<span class="ocw-dingtalk-no-remark">无补充说明</span>`;
+    const auditRows = [
+      ["操作原始码", item.operation_type],
+      ["原始结果", item.result],
+      ["用户 ID", item.user_id],
+    ];
+    return `<li class="ocw-dingtalk-timeline-item">
+      <div class="ocw-dingtalk-timeline-head"><span><strong>${this.escape(actor)}</strong><em>${this.escape(item.display_label || "其他流程记录")}</em></span><time>${this.escape(this.formatDateTimeMinute(item.operation_time) || item.operation_time || "--")}</time></div>
+      <p>${remark}</p>
+      ${allowCostSource && item.packing_candidate && item.source_id ? `<button class="ocw-link-btn" type="button" data-action="use-dingtalk-packing-source" data-source-kind="comment" data-source-id="${this.escape(item.source_id)}">作为装箱信息预览</button>` : ""}
+      <details class="ocw-dingtalk-timeline-audit"><summary>审计详情</summary><dl>${auditRows.map(([label, value]) => `<div><dt>${this.escape(label)}</dt><dd>${this.escape(value || "--")}</dd></div>`).join("")}</dl></details>
+    </li>`;
   }
 
   dingtalkArchiveStatus(item = {}) {
@@ -19111,20 +19176,72 @@ class OverseasCostWorkbench {
   renderDingtalkAttachments(items = [], allowCostSource = true) {
     if (!items.length) return `<div class="ocw-purchase-empty-line">无附件</div>`;
     return `<div class="ocw-dingtalk-attachments">${items.map((item) => {
-      const canFetch = Boolean(item.downloadable);
+      const previewUrl = this.dingtalkAttachmentPreviewUrl(item);
+      const isImage = /\.(?:avif|gif|jpe?g|png|webp)$/i.test(String(item.file_name || ""));
+      const canPreview = Boolean(item.previewable || item.downloadable);
+      const canDownload = Boolean(item.downloadable);
       const actions = [];
-      if (canFetch) {
-        actions.push(`<button class="ocw-link-btn" type="button" data-action="preview-dingtalk-attachment" data-attachment-name="${this.escape(item.attachment_name || "")}" data-process-instance-id="${this.escape(item.process_instance_id || "")}" data-file-id="${this.escape(item.file_id || "")}" data-file-url="${this.escape(item.file_url || "")}" data-file-name="${this.escape(item.file_name || "")}">预览</button>`);
+      if (canPreview) {
+        actions.push(`<button class="ocw-link-btn" type="button" data-action="preview-dingtalk-attachment" data-attachment-name="${this.escape(item.attachment_name || "")}" data-process-instance-id="${this.escape(item.process_instance_id || "")}" data-file-id="${this.escape(item.file_id || "")}" data-file-url="${this.escape(previewUrl)}" data-file-name="${this.escape(item.file_name || "")}">预览</button>`);
+      }
+      if (canDownload) {
         actions.push(`<button class="ocw-link-btn" type="button" data-action="download-dingtalk-attachment" data-attachment-name="${this.escape(item.attachment_name || "")}" data-process-instance-id="${this.escape(item.process_instance_id || "")}" data-file-id="${this.escape(item.file_id || "")}">下载</button>`);
       }
       if (allowCostSource && item.packing_candidate && item.downloadable) {
         actions.push(`<button class="ocw-link-btn" type="button" data-action="use-dingtalk-packing-source" data-source-kind="attachment" data-source-id="${this.escape(item.attachment_name || "")}" data-process-instance-id="${this.escape(item.process_instance_id || "")}" data-file-id="${this.escape(item.file_id || "")}">作为装箱单使用</button>`);
       }
-      return `<div class="ocw-dingtalk-attachment-row">
-        <div><strong>${this.escape(item.file_name || item.file_id || "--")}</strong><span>${this.escape(item.origin === "Comment" ? "评论附件" : "表单附件")} · ${this.escape(this.dingtalkArchiveStatus(item))}</span>${item.origin === "Comment" && (item.comment_user_name || item.comment_user_id) ? this.renderDingtalkActor(item.comment_user_name, item.comment_user_id, item.comment_user_name_source, item.comment_user_name_unresolved) : ""}${item.comment_remark ? `<em>${this.escape(item.comment_remark)}</em>` : ""}${item.failure_reason ? `<em class="is-error">${this.escape(item.failure_reason)}</em>` : ""}</div>
+      const suffix = String(item.file_name || "").split(".").pop().slice(0, 4).toUpperCase() || "FILE";
+      const preview = isImage && previewUrl
+        ? `<img class="ocw-dingtalk-attachment-thumb" loading="lazy" src="${this.escape(previewUrl)}" alt="">`
+        : `<span class="ocw-dingtalk-file-icon" aria-hidden="true">${this.escape(suffix)}</span>`;
+      return `<article class="ocw-dingtalk-attachment-card">
+        ${preview}
+        <div class="ocw-dingtalk-attachment-copy"><strong>${this.escape(item.file_name || item.file_id || "--")}</strong><span>${this.escape(item.origin === "Comment" ? "评论附件" : "表单附件")} · ${this.escape(this.dingtalkArchiveStatus(item))}</span>${item.origin === "Comment" && (item.comment_user_name || item.comment_user_id) ? this.renderDingtalkActor(item.comment_user_name, item.comment_user_id, item.comment_user_name_source, item.comment_user_name_unresolved) : ""}${item.comment_remark ? `<em>${this.escape(item.comment_remark)}</em>` : ""}${item.failure_reason ? `<em class="is-error">${this.escape(item.failure_reason)}</em>` : ""}</div>
         <div class="ocw-attachment-actions">${actions.join("") || `<span class="ocw-purchase-source-disabled">暂不可下载</span>`}</div>
-      </div>`;
+      </article>`;
     }).join("")}</div>`;
+  }
+
+  dingtalkAttachmentPreviewUrl(item = {}) {
+    const value = String(item.preview_url || item.file_url || "");
+    if (!value || value !== value.trim() || /[\\\u0000-\u001f\u007f]/.test(value)) return "";
+    let resolved;
+    try {
+      resolved = new URL(value, "https://ocw.local");
+    } catch (_error) {
+      return "";
+    }
+    const path = resolved.pathname;
+    if (resolved.origin !== "https://ocw.local" || resolved.search || resolved.hash) return "";
+    if (!(path.startsWith("/files/") || path.startsWith("/private/files/"))) return "";
+    for (const segment of value.split("/")) {
+      let decoded = segment;
+      let settled = false;
+      for (let pass = 0; pass < 4; pass += 1) {
+        let next;
+        try {
+          next = decodeURIComponent(decoded);
+        } catch (_error) {
+          return "";
+        }
+        if (next === decoded) {
+          settled = true;
+          break;
+        }
+        decoded = next;
+      }
+      if (!settled) {
+        let next;
+        try {
+          next = decodeURIComponent(decoded);
+        } catch (_error) {
+          return "";
+        }
+        if (next !== decoded) return "";
+      }
+      if (decoded === "." || decoded === ".." || /[\/\\\u0000-\u001f\u007f]/.test(decoded)) return "";
+    }
+    return value;
   }
 
   async ensureDingtalkLocalAttachment(attachmentName, processInstanceId, fileId) {
