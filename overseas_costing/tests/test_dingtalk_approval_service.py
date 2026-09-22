@@ -613,6 +613,47 @@ def test_form_fields_expose_six_row_table_with_bilingual_columns_in_source_order
     assert "PRIVATE" not in json.dumps(fields, ensure_ascii=False)
 
 
+def test_form_fields_skip_historical_table_header_placeholder_row() -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    columns = [
+        "物料编码 Código de material",
+        "物料名称（中文）Nombre del material (chino)",
+        "数量Cantidad",
+    ]
+    rows = [
+        {
+            "rowNumber": "TableField_HEADER",
+            "rowValue": [
+                {"label": columns[0], "value": "物料编码"},
+                {"label": columns[1], "value": "物料名称中文"},
+                {"label": columns[2], "value": "数量"},
+            ],
+        },
+        {
+            "rowNumber": "TableField_1",
+            "rowValue": [
+                {"label": columns[0], "value": "YL000097"},
+                {"label": columns[1], "value": "连接器"},
+                {"label": columns[2], "value": "6"},
+            ],
+        },
+    ]
+
+    fields = service._form_fields({
+        "formComponentValues": [{
+            "name": "货物信息 Bienes",
+            "componentType": "TableField",
+            "value": json.dumps(rows, ensure_ascii=False),
+        }],
+    })
+
+    assert fields[0]["table"] == {
+        "columns": columns,
+        "rows": [["YL000097", "连接器", "6"]],
+    }
+
+
 def test_form_fields_mark_empty_scalar_values_without_changing_display_text() -> None:
     from overseas_costing.services import dingtalk_approval_service as service
 

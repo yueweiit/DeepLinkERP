@@ -313,6 +313,8 @@ def _display_value(value, *, attachment_context: bool = False) -> str:
 
 
 def _table_value(value) -> dict | None:
+    from overseas_costing.scripts.import_oa_logistics import _is_oa_goods_placeholder_row
+
     decoded = value
     if isinstance(value, str):
         try:
@@ -343,6 +345,14 @@ def _table_value(value) -> dict | None:
             columns = row_columns
         elif row_columns != columns:
             return None
+        raw_row = decoded[row_index] if isinstance(decoded[row_index], dict) else {}
+        row_number = str(raw_row.get("rowNumber") or raw_row.get("row_number") or "").strip()
+        placeholder_row = dict(zip(row_columns, row_values))
+        if (
+            row_number.upper() == "TABLEFIELD_HEADER"
+            or _is_oa_goods_placeholder_row(placeholder_row)
+        ):
+            continue
         rows.append(row_values)
     return {"columns": columns, "rows": rows}
 
