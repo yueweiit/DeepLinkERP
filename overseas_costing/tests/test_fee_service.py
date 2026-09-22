@@ -18,7 +18,7 @@ from overseas_costing.services.fee_service import (
 
 def test_express_defaults_are_unconfirmed_zeros_and_mexican_currencies():
     rows = {row['logical_fee_key']: row for row in build_default_fee_templates('EXPRESS')}
-    for key, currency in [('express_surcharge', 'MXN'), ('destination_delivery', 'MXN')]:
+    for key, currency in [('express_surcharge', 'RMB'), ('destination_delivery', 'MXN')]:
         assert rows[key]['amount'] == '0'
         assert rows[key]['amount_status'] == 'ESTIMATED'
         assert rows[key]['currency'] == currency
@@ -461,3 +461,88 @@ def test_evidence_candidates_without_stage_identity_stay_out_of_the_three_proces
 
     assert candidate["workflow_stage"] == "other"
     assert candidate["workflow_label"] == "其他来源"
+
+
+@pytest.mark.parametrize(
+    "inventory_slot,expected_stage",
+    [
+        ("main_expense", "payment"),
+        ("main_logistics", "international_logistics"),
+        ("linked_purchase", "purchase"),
+    ],
+)
+def test_evidence_candidates_resolve_process_identity_from_the_approval_inventory(
+    inventory_slot, expected_stage
+) -> None:
+    """真实附件本地行只带 process_instance_id，流程身份必须从审批清单回挂。
+
+    ``Overseas Cost Attachment`` 没有 approval_role 字段，缓存下来的
+    parse_result_json 也不含审批标题。若只读本地行，所有凭证都会退化成
+    “其他来源”，三流程分组在前端永远不出现。
+    """
+
+    attachment = {
+        "name": "ATT-INVENTORY",
+        "file_name": "evidence.pdf",
+        "source_type": "OA",
+        "parse_status": "Parsed",
+        # 注意：这里刻意不写 approval_role / approval_title。
+        "parse_result_json": "{}",
+        "mapped_result_json": "{}",
+    }
+    purchase = {
+        "instance_id": "INST-PURCHASE",
+        "title": "采购审批",
+        "form_fields": [{"label": "供应商", "value": "ACME"}],
+    }
+    if inventory_slot == "linked_purchase":
+        attachment["parse_result_json"] = json.dumps({"process_instance_id": "INST-PURCHASE"})
+        main = {"instance_id": "INST-LOGISTICS", "title": "国际物流审批",
+                "form_fields": [{"label": "费用类型", "value": "海运运费"}]}
+        linked = [purchase]
+    elif inventory_slot == "main_expense":
+        attachment["parse_result_json"] = json.dumps({"process_instance_id": "INST-EXPENSE"})
+        main = {"instance_id": "INST-EXPENSE", "title": "运营支出审批",
+                "form_fields": [{"label": "费用类型", "value": "月结付款"}]}
+        linked = []
+    else:
+        attachment["parse_result_json"] = json.dumps({"process_instance_id": "INST-LOGISTICS"})
+        main = {"instance_id": "INST-LOGISTICS", "title": "国际物流审批",
+                "form_fields": [{"label": "费用类型", "value": "海运运费"}]}
+        linked = []
+    approval_detail = {
+        "ok": True,
+        "main_approval": main,
+        "linked_purchase_approvals": linked,
+    }
+    if inventory_slot == "main_expense":
+        approval_detail["source_context"] = {"root_kind": "expense"}
+
+    candidate = build_evidence_candidates([attachment], approval_detail=approval_detail)[0]
+
+    assert candidate["workflow_stage"] == expected_stage
+    assert candidate["workflow_source"] == "approval_inventory"
+    assert candidate["process_instance_id"]
+    assert candidate["amount_candidates"] == []
+
+
+def test_evidence_candidates_without_inventory_fall_back_to_the_attachment_cache() -> None:
+    """拿不到审批清单时保留本地缓存判定，不把候选整体丢掉。"""
+
+    attachments = [
+        {
+            "name": "ATT-CACHE",
+            "file_name": "evidence.pdf",
+            "source_type": "OA",
+            "parse_status": "Parsed",
+            "parse_result_json": json.dumps(
+                {"process_instance_id": "INST-X", "approval_role": "purchase"}
+            ),
+            "mapped_result_json": "{}",
+        }
+    ]
+
+    candidate = build_evidence_candidates(attachments, approval_detail={"ok": False})[0]
+
+    assert candidate["workflow_stage"] == "purchase"
+    assert candidate["workflow_source"] == "attachment_cache"

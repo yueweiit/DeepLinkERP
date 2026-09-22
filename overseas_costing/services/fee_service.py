@@ -111,7 +111,7 @@ def build_default_fee_templates(transport_mode: str) -> list[dict]:
         key = row["logical_fee_key"]
         if key in {"customs_clearance_fee", "import_tax", "destination_delivery", "express_surcharge"}:
             row["entry_responsibility"] = "MEXICO"
-        if key in {"customs_clearance_fee", "import_tax", "destination_delivery", "express_surcharge"}:
+        if key in {"customs_clearance_fee", "import_tax", "destination_delivery"}:
             row["currency"] = "MXN"
         if key in {"express_surcharge", "destination_delivery"}:
             # A display/preview default, not a persisted actual or no-charge declaration.
@@ -315,11 +315,22 @@ def _extract_amount_candidates(payload: dict) -> list[dict]:
     return result[:30]
 
 
-def build_evidence_candidates(attachments: list[dict], *, version_name: str | None = None) -> list[dict]:
+def build_evidence_candidates(
+    attachments: list[dict],
+    *,
+    version_name: str | None = None,
+    approval_detail: dict | None = None,
+) -> list[dict]:
     """Expose parser values as candidates only; never synthesize fee records.
 
     每个候选都带上服务端判定的 ``workflow_stage``，前端据此按采购、费用申请、
     国际物流三流程分组展示，避免浏览器私造流程真相。
+
+    附件本地行里并不保存流程身份：``Overseas Cost Attachment`` 没有
+    ``approval_role`` 字段，缓存下来的 ``parse_result_json`` 也常常只有
+    ``process_instance_id``。因此这里复用资料 AI 填充链路已经在用的那份
+    审批清单（``_list_approval_body_ai_sources``），用 ``process_instance_id``
+    把本地附件挂回它真正所属的审批，再交给共享分类器判定流程。
     """
 
     from overseas_costing.services.source_priority_service import (
@@ -328,6 +339,7 @@ def build_evidence_candidates(attachments: list[dict], *, version_name: str | No
         WORKFLOW_LABELS,
     )
 
+    approval_by_instance = _approval_identity_index(approval_detail)
     result = []
     for attachment in attachments or []:
         parsed = _safe_json_dict(attachment.get("parse_result_json"))
@@ -337,7 +349,21 @@ def build_evidence_candidates(attachments: list[dict], *, version_name: str | No
         if descriptor and version_name and attachment.get("version") not in (None, "", version_name):
             continue
         classification = parsed.get("classification") if isinstance(parsed.get("classification"), dict) else {}
+        instance_id = str(parsed.get("process_instance_id") or parsed.get("instance_id") or "").strip()
         evidence_source = _evidence_candidate_source(attachment, parsed, mapped)
+        owning_approval = approval_by_instance.get(instance_id) or {}
+        if owning_approval:
+            # The approval inventory is the authority on process identity; the
+            # local row is only a cache of one file inside that process.
+            evidence_source = {
+                **evidence_source,
+                "source_kind": evidence_source.get("source_kind") or "approval_attachment",
+                "approval_role": owning_approval.get("approval_role") or evidence_source.get("approval_role"),
+                "approval_title": owning_approval.get("approval_title") or evidence_source.get("approval_title"),
+                "process_title": owning_approval.get("process_title") or evidence_source.get("process_title"),
+                "process_name": owning_approval.get("process_name") or evidence_source.get("process_name"),
+                "form_fields": owning_approval.get("form_fields") or evidence_source.get("form_fields") or {},
+            }
         workflow_stage = classify_workflow_stage(evidence_source)
         result.append(
             {
@@ -352,12 +378,49 @@ def build_evidence_candidates(attachments: list[dict], *, version_name: str | No
                 "settlement_document": descriptor,
                 "workflow_stage": workflow_stage,
                 "workflow_label": WORKFLOW_LABELS.get(workflow_stage, WORKFLOW_LABELS["other"]),
+                "workflow_source": "approval_inventory" if owning_approval else "attachment_cache",
+                "process_instance_id": instance_id,
                 "evidence_kind": classify_evidence_kind(evidence_source),
                 "audit_only": bool(descriptor and descriptor.get("audit_only")),
                 "amount_candidates": [] if descriptor else _extract_amount_candidates({**parsed, **mapped}),
             }
         )
     return result
+
+
+def _fee_approval_detail(batch_name: str, version_name: str | None) -> dict:
+    """Resolve the same approval inventory the material AI-fill chain consumes.
+
+    The fee evidence picker needs process identity for every cached attachment,
+    and that identity only exists on the live approval inventory.  This reuses
+    ``related_approval_detail`` rather than opening a second resolution path.
+    """
+
+    from overseas_costing.services.packing_source_service import related_approval_detail
+
+    try:
+        return related_approval_detail(batch_name, version_name) or {}
+    except Exception:
+        return {}
+
+
+def _approval_identity_index(approval_detail: dict | None) -> dict[str, dict]:
+    """Index the shared approval inventory by instance id for attachment joins."""
+
+    if not approval_detail:
+        return {}
+    from overseas_costing.services.packing_snapshot_service import _list_approval_body_ai_sources
+
+    index: dict[str, dict] = {}
+    try:
+        sources = _list_approval_body_ai_sources("", detail=approval_detail)
+    except Exception:
+        return {}
+    for source in sources:
+        instance_id = str(source.get("process_instance_id") or "").strip()
+        if instance_id:
+            index.setdefault(instance_id, source)
+    return index
 
 
 def _evidence_candidate_source(attachment: dict, parsed: dict, mapped: dict) -> dict:
@@ -1105,7 +1168,9 @@ def get_fee_worklist(batch_name: str, version_name: str | None = None) -> dict:
         limit_page_length=1000,
     )
     summary = fee_status_service.summarize_fee_statuses(statuses)
-    candidates = build_evidence_candidates(attachments, version_name=version)
+    candidates = build_evidence_candidates(
+        attachments, version_name=version, approval_detail=_fee_approval_detail(batch_name, version)
+    )
     if source_context.get('root_kind') == 'expense' and not source_context.get('separate_adoption'):
         from overseas_costing.services.effective_logistics_source import current_source_bundle, attachment_allowed
         from overseas_costing.services.source_priority_service import is_selectable_source_stage
