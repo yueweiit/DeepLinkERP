@@ -8,6 +8,7 @@ from crm_integration.crm_integration.sales_order import (
 	CRM_STATUS_CONFIRMED_DEPOSIT_PUSH_PRODUCTION,
 	CRM_STATUS_IN_PRODUCTION,
 	PENDING_PRODUCTION,
+	build_mes_sales_order_payload,
 	confirm_deposit_and_push_to_mes_job,
 	confirm_deposit_and_push_to_mes,
 	enqueue_confirm_deposit_and_push_to_mes,
@@ -18,6 +19,37 @@ from crm_integration.crm_integration.sales_order import (
 	reject_sales_order,
 	run_confirm_deposit_sync,
 )
+
+
+class TestMESSalesOrderPayload(UnitTestCase):
+	def test_versions_are_preserved_per_sales_order_line(self):
+		order = frappe._dict(
+			name="SO-001",
+			custom_crm_order_no="CRM-001",
+			items=[
+				frappe._dict(name="SOI-PRINT", item_code="ITEM-001", qty=100, custom_version="PC_PRINT"),
+				frappe._dict(name="SOI-OTHER", item_code="ITEM-001", qty=50, custom_version="OTHER_VERSION"),
+			],
+		)
+
+		payload = build_mes_sales_order_payload(order)
+		self.assertEqual(
+			[(row["name"], row["custom_version"]) for row in payload["data"]["items"]],
+			[("SOI-PRINT", "PC_PRINT"), ("SOI-OTHER", "OTHER_VERSION")],
+		)
+
+	def test_orders_without_versions_keep_optional_field_absent(self):
+		for version_fields in ({}, {"custom_version": None}, {"custom_version": ""}):
+			with self.subTest(version_fields=version_fields):
+				order = frappe._dict(
+					name="SO-001",
+					custom_crm_order_no="CRM-001",
+					items=[frappe._dict(item_code="ITEM-001", qty=100, **version_fields)],
+				)
+
+				payload = build_mes_sales_order_payload(order)
+				self.assertEqual(len(payload["data"]["items"]), 1)
+				self.assertNotIn("custom_version", payload["data"]["items"][0])
 
 
 class TestSalesOrderPermissions(UnitTestCase):

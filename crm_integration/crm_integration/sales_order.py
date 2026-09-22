@@ -675,6 +675,7 @@ def build_mes_sales_order_items(sales_order):
 			"item_name": row.get("item_name"),
 			"description": row.get("description"),
 			"color": row.get("custom_specifications"),
+			"custom_version": row.get("custom_version"),
 			"qty": flt(row.get("qty")),
 			"uom": row.get("uom"),
 			"rate": flt(row.get("rate")),

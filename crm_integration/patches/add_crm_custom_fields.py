@@ -83,6 +83,13 @@ def create_crm_custom_fields():
 					"label": "Specifications",
 					"insert_after": "custom_product",
 				},
+				{
+					"fieldname": "custom_version",
+					"fieldtype": "Data",
+					"label": "Version",
+					"length": 64,
+					"insert_after": "custom_specifications",
+				},
 			],
 		},
 		update=True,
