@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -129,13 +130,17 @@ def _display_value(value) -> str:
                 break
             pairs = []
             for cell in cells:
-                if not isinstance(cell, dict):
-                    continue
-                label = str(cell.get("label") or "字段")
+                if not isinstance(cell, dict) or not str(cell.get("label") or "").strip():
+                    table_rows = []
+                    pairs = []
+                    break
+                label = str(cell.get("label"))
                 cell_value = _display_value(cell.get("value"))
                 pairs.append(f"{label}：{cell_value or '--'}")
-            if pairs:
-                table_rows.append("；".join(pairs))
+            if not pairs:
+                table_rows = []
+                break
+            table_rows.append("；".join(pairs))
         if table_rows:
             return "\n".join(table_rows)
     if isinstance(sanitized, (dict, list)):
@@ -143,16 +148,59 @@ def _display_value(value) -> str:
     return str(sanitized)
 
 
+def _table_value(value) -> dict | None:
+    decoded = value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError):
+            return None
+    sanitized = _safe_form_value(decoded)
+    if not isinstance(sanitized, list) or not sanitized:
+        return None
+
+    columns: list[str] = []
+    rows: list[list[str]] = []
+    for row_index, row in enumerate(sanitized):
+        cells = row.get("rowValue") if isinstance(row, dict) else None
+        if not isinstance(cells, list) or not cells:
+            return None
+        row_columns = []
+        row_values = []
+        for cell in cells:
+            if not isinstance(cell, dict):
+                return None
+            label = str(cell.get("label") or "").strip()
+            if not label:
+                return None
+            row_columns.append(label)
+            row_values.append(_display_value(cell.get("value")))
+        if row_index == 0:
+            columns = row_columns
+        elif row_columns != columns:
+            return None
+        rows.append(row_values)
+    return {"columns": columns, "rows": rows}
+
+
 def _form_fields(payload: dict) -> list[dict]:
     fields = _json_list(payload.get("formComponentValues") or payload.get("form_component_values"))
-    return [
-        {
+    result = []
+    for row in fields:
+        if not isinstance(row, dict):
+            continue
+        component_type = str(row.get("componentType") or row.get("component_type") or "")
+        value = _display_value(row.get("value"))
+        table = _table_value(row.get("value")) if component_type == "TableField" else None
+        result.append({
             "label": str(row.get("name") or row.get("label") or row.get("componentName") or "未命名字段"),
-            "value": _display_value(row.get("value")),
-        }
-        for row in fields
-        if isinstance(row, dict)
-    ]
+            "value": value,
+            "component_type": component_type,
+            "display_kind": "table" if table else "scalar",
+            "is_empty": not value.strip(),
+            "table": table or {"columns": [], "rows": []},
+        })
+    return result
 
 
 def _attachment_field_records(payload: dict, process_instance_id: str = "") -> list[dict]:
@@ -251,6 +299,51 @@ def _actor_identity(
     }
 
 
+_MENTION_PATTERN = re.compile(
+    r"\[([^\]\r\n]+)\]\(([A-Za-z0-9]+(?:[_-][A-Za-z0-9]+)*)\)",
+)
+
+
+def _remark_segments(remark: str) -> list[dict[str, str]]:
+    if not remark:
+        return []
+    segments = []
+    cursor = 0
+    for match in _MENTION_PATTERN.finditer(remark):
+        if match.start() > cursor:
+            segments.append({"kind": "text", "text": remark[cursor:match.start()]})
+        segments.append({"kind": "mention", "text": match.group(1)})
+        cursor = match.end()
+    if cursor < len(remark):
+        segments.append({"kind": "text", "text": remark[cursor:]})
+    return segments
+
+
+def _timeline_presentation(operation_type: str, operation_result: str, remark: str) -> tuple[str, str]:
+    normalized_type = operation_type.strip().upper()
+    normalized_result = operation_result.strip().upper()
+    agreed = normalized_result in {"AGREE", "AGREED", "APPROVE", "APPROVED", "PASS", "PASSED", "同意", "通过"}
+    refused = normalized_result in {
+        "REFUSE", "REFUSED", "REJECT", "REJECTED", "DENY", "DENIED", "DISAGREE",
+        "拒绝", "驳回", "不同意", "不通过",
+    }
+    if normalized_type == "ADD_REMARK" and remark:
+        return "comment", "评论"
+    if agreed:
+        return "decision", "同意"
+    if refused:
+        return "decision", "拒绝"
+    if "EXECUTE_TASK" in normalized_type:
+        return "decision", "审批处理"
+    if "START" in normalized_type and ("PROCESS" in normalized_type or "INSTANCE" in normalized_type):
+        return "system", "发起审批"
+    if normalized_type == "PROCESS_CC" or normalized_type.endswith("_CC"):
+        return "system", "抄送"
+    if "SYNC" in normalized_type:
+        return "system", "同步"
+    return "system", "其他流程记录"
+
+
 def _timeline(payload: dict, instance_id: str, actors: dict | None = None) -> list[dict]:
     operations = _json_list(payload.get("operationRecords") or payload.get("operation_records") or payload.get("comments"))
     corp_id = str(payload.get("corpId") or payload.get("corp_id") or "")
@@ -261,6 +354,9 @@ def _timeline(payload: dict, instance_id: str, actors: dict | None = None) -> li
         user_id = str(row.get("userId") or row.get("user_id") or row.get("operatorUserId") or "")
         operation_time = str(row.get("date") or row.get("createTime") or row.get("operationTime") or "")
         remark = str(row.get("remark") or row.get("comment") or row.get("content") or "").strip()
+        operation_type = str(row.get("type") or row.get("operationType") or "comment")
+        operation_result = str(row.get("result") or "")
+        event_kind, display_label = _timeline_presentation(operation_type, operation_result, remark)
         packing = parse_packing_comment(remark)
         identity = _actor_identity(
             corp_id=corp_id,
@@ -269,13 +365,16 @@ def _timeline(payload: dict, instance_id: str, actors: dict | None = None) -> li
             actors=actors,
         )
         item = {
-            "operation_type": str(row.get("type") or row.get("operationType") or "comment"),
-            "result": str(row.get("result") or ""),
+            "operation_type": operation_type,
+            "result": operation_result,
             "user_id": user_id,
             **identity,
             "operation_time": operation_time,
             "remark": remark,
             "packing_candidate": bool(packing.get("is_candidate")),
+            "event_kind": event_kind,
+            "display_label": display_label,
+            "remark_segments": _remark_segments(remark),
         }
         if remark:
             item["source_id"] = build_comment_source_id(instance_id, operation_time, user_id, remark)

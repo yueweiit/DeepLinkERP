@@ -155,7 +155,14 @@ def test_batch_detail_normalizes_main_linked_comments_and_archives(monkeypatch) 
     result = service.get_batch_dingtalk_approval_detail("BATCH-1")
 
     assert source.calls == [["PROC-MAIN", "PROC-BUY"]]
-    assert result["main_approval"]["form_fields"] == [{"label": "物流方式", "value": "海运"}]
+    assert result["main_approval"]["form_fields"] == [{
+        "label": "物流方式",
+        "value": "海运",
+        "component_type": "",
+        "display_kind": "scalar",
+        "is_empty": False,
+        "table": {"columns": [], "rows": []},
+    }]
     assert result["main_approval"]["attachments"][0]["archive_method"] == "legacy_file_url"
     assert result["main_approval"]["attachments"][0]["comment_user_name"] == ""
     assert result["main_approval"]["timeline"][0]["packing_candidate"] is True
@@ -288,11 +295,214 @@ def test_form_fields_render_structured_values_without_download_credentials() -> 
     })
 
     assert fields == [
-        {"label": "装箱单附件", "value": "装箱计划.xlsx"},
-        {"label": "货物信息", "value": "物料编码：FL000429；数量：100000"},
+        {
+            "label": "装箱单附件",
+            "value": "装箱计划.xlsx",
+            "component_type": "",
+            "display_kind": "scalar",
+            "is_empty": False,
+            "table": {"columns": [], "rows": []},
+        },
+        {
+            "label": "货物信息",
+            "value": "物料编码：FL000429；数量：100000",
+            "component_type": "",
+            "display_kind": "scalar",
+            "is_empty": False,
+            "table": {"columns": [], "rows": []},
+        },
     ]
     rendered = json.dumps(fields, ensure_ascii=False)
     assert "SECRET" not in rendered
+
+
+def test_form_fields_expose_six_row_table_with_bilingual_columns_in_source_order() -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    columns = [
+        "物料编码 Código de material",
+        "物料名称 Nombre del material",
+        "数量 Cantidad",
+    ]
+    rows = []
+    for index in range(1, 7):
+        rows.append({
+            "rowNumber": f"PRIVATE-ROW-{index}",
+            "rowValue": [
+                {"label": columns[0], "value": f"MAT-{index}", "key": f"PRIVATE-CODE-{index}"},
+                {"label": columns[1], "value": f"物料 {index}", "authMediaId": f"PRIVATE-AUTH-{index}"},
+                {"label": columns[2], "value": str(index * 10)},
+            ],
+        })
+
+    fields = service._form_fields({
+        "formComponentValues": [{
+            "name": "货物信息 Bienes",
+            "componentType": "TableField",
+            "value": json.dumps(rows, ensure_ascii=False),
+        }],
+    })
+
+    assert fields[0]["component_type"] == "TableField"
+    assert fields[0]["display_kind"] == "table"
+    assert fields[0]["is_empty"] is False
+    assert fields[0]["table"] == {
+        "columns": columns,
+        "rows": [
+            ["MAT-1", "物料 1", "10"],
+            ["MAT-2", "物料 2", "20"],
+            ["MAT-3", "物料 3", "30"],
+            ["MAT-4", "物料 4", "40"],
+            ["MAT-5", "物料 5", "50"],
+            ["MAT-6", "物料 6", "60"],
+        ],
+    }
+    assert "PRIVATE" not in json.dumps(fields, ensure_ascii=False)
+
+
+def test_form_fields_mark_empty_scalar_values_without_changing_display_text() -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    fields = service._form_fields({
+        "formComponentValues": [
+            {"name": "备注", "componentType": "TextareaField", "value": None},
+            {"name": "金额", "component_type": "MoneyField", "value": 0},
+        ],
+    })
+
+    assert fields == [
+        {
+            "label": "备注",
+            "value": "",
+            "component_type": "TextareaField",
+            "display_kind": "scalar",
+            "is_empty": True,
+            "table": {"columns": [], "rows": []},
+        },
+        {
+            "label": "金额",
+            "value": "0",
+            "component_type": "MoneyField",
+            "display_kind": "scalar",
+            "is_empty": False,
+            "table": {"columns": [], "rows": []},
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    "malformed_value",
+    [
+        "not-json table source",
+        json.dumps([
+            {
+                "rowNumber": "PRIVATE-ROW",
+                "rowValue": [
+                    {"label": "物料编码", "value": "MAT-1", "key": "PRIVATE-KEY"},
+                ],
+            },
+            {"unexpected": "保留这段原文"},
+        ], ensure_ascii=False),
+        json.dumps([{
+            "rowValue": [
+                {"label": "物料编码", "value": "MAT-1"},
+                "必须保留的原文",
+            ],
+        }], ensure_ascii=False),
+    ],
+)
+def test_malformed_table_falls_back_to_existing_scalar_text_without_private_keys(
+    malformed_value,
+) -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    field = service._form_fields({
+        "formComponentValues": [{
+            "name": "货物信息",
+            "componentType": "TableField",
+            "value": malformed_value,
+        }],
+    })[0]
+
+    assert field["component_type"] == "TableField"
+    assert field["display_kind"] == "scalar"
+    assert field["table"] == {"columns": [], "rows": []}
+    assert field["value"] == service._display_value(malformed_value)
+    assert field["is_empty"] is False
+    assert "PRIVATE" not in json.dumps(field, ensure_ascii=False)
+    if "保留这段原文" in malformed_value:
+        assert "保留这段原文" in field["value"]
+    if "必须保留的原文" in malformed_value:
+        assert "必须保留的原文" in field["value"]
+
+
+def test_timeline_classifies_comment_decisions_system_and_unknown_in_source_order() -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    timeline = service._timeline({
+        "operationRecords": [
+            {"type": "ADD_REMARK", "remark": "请补充资料", "userId": "U-1", "date": "1"},
+            {"type": "EXECUTE_TASK_NORMAL", "result": "AGREE", "remark": "同意", "userId": "U-2", "date": "2"},
+            {"type": "EXECUTE_TASK_NORMAL", "result": "REFUSE", "remark": "信息不全", "userId": "U-3", "date": "3"},
+            {"type": "START_PROCESS_INSTANCE", "userId": "U-4", "date": "4"},
+            {"type": "PROCESS_CC", "userId": "U-5", "date": "5"},
+            {"type": "SYNC", "userId": "bpms_system", "date": "6"},
+            {"type": "FUTURE_OPERATION", "remark": "新流程事件", "userId": "U-6", "date": "7"},
+        ],
+    }, "PROC-1")
+
+    assert [item["event_kind"] for item in timeline] == [
+        "comment", "decision", "decision", "system", "system", "system", "system",
+    ]
+    assert [item["display_label"] for item in timeline] == [
+        "评论", "同意", "拒绝", "发起审批", "抄送", "同步", "其他流程记录",
+    ]
+    assert [item["operation_type"] for item in timeline] == [
+        "ADD_REMARK",
+        "EXECUTE_TASK_NORMAL",
+        "EXECUTE_TASK_NORMAL",
+        "START_PROCESS_INSTANCE",
+        "PROCESS_CC",
+        "SYNC",
+        "FUTURE_OPERATION",
+    ]
+    assert timeline[0]["result"] == ""
+    assert timeline[0]["remark"] == "请补充资料"
+    assert timeline[0]["packing_candidate"] is False
+    assert len(timeline[0]["source_id"]) == 64
+    assert "source_id" not in timeline[3]
+
+
+def test_timeline_parses_only_internal_mentions_and_keeps_markup_as_plain_text() -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    remark = (
+        "<script>alert(1)</script> 请 [张三](USER_123) 处理 "
+        "[外部](https://evil.example) [相对](/approvals/123) "
+        "[文档](README.md) [文件](ftp://host/file) **加粗**"
+    )
+    item = service._timeline({
+        "operationRecords": [{
+            "type": "ADD_REMARK",
+            "remark": remark,
+            "userId": "U-1",
+            "date": "2026-09-22",
+        }],
+    }, "PROC-1")[0]
+
+    assert item["remark_segments"] == [
+        {"kind": "text", "text": "<script>alert(1)</script> 请 "},
+        {"kind": "mention", "text": "张三"},
+        {
+            "kind": "text",
+            "text": (
+                " 处理 [外部](https://evil.example) [相对](/approvals/123) "
+                "[文档](README.md) [文件](ftp://host/file) **加粗**"
+            ),
+        },
+    ]
+    assert {segment["kind"] for segment in item["remark_segments"]} <= {"text", "mention"}
+    assert "href" not in repr(item["remark_segments"])
 
 
 def test_attachment_item_keeps_workflow_field_identity_without_exposing_credentials() -> None:
