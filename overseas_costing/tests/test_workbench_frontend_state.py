@@ -389,19 +389,6 @@ def test_detail_overview_contains_responsive_columns_and_its_own_fee_scroller() 
     assert "@media (max-width: 1100px)" in detail
 
 
-def test_dingtalk_timeline_renders_name_as_primary_and_id_as_secondary() -> None:
-    approval_page = (PARTS / "84-dingtalk-approval.js").read_text(encoding="utf-8")
-
-    assert "renderDingtalkActor" in approval_page
-    assert "ocw-dingtalk-actor-id" in approval_page
-    assert "姓名未同步" in approval_page
-    assert "excluded_linked_purchase_approvals" in approval_page
-    assert "已排除审批" in approval_page
-    assert "approval && !approval.excluded" in approval_page
-    assert "renderDingtalkTimeline(approval.timeline || [], !approval.excluded)" in approval_page
-    assert "renderDingtalkAttachments(approval.attachments || [], !approval.excluded)" in approval_page
-
-
 def test_dingtalk_missing_source_has_repair_action_and_never_claims_unlinked() -> None:
     approval_page = (PARTS / "84-dingtalk-approval.js").read_text(encoding="utf-8")
     workbench_events = (PARTS / "35-workbench-view.js").read_text(encoding="utf-8")

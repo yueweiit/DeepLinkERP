@@ -2,8 +2,7 @@
 .ocw-dingtalk-health,
 .ocw-dingtalk-approval-card > header,
 .ocw-dingtalk-approval-card > summary,
-.ocw-dingtalk-attachment-row,
-.ocw-dingtalk-timeline > li > div {
+.ocw-dingtalk-timeline-head {
   display: flex;
   align-items: center;
 }
@@ -45,6 +44,7 @@
 .ocw-dingtalk-source-state.is-manual > strong { color: #b42318; }
 
 .ocw-dingtalk-approval-card {
+  min-width: 0;
   margin-bottom: 14px;
   border: 1px solid var(--ocw-border);
   border-radius: 12px;
@@ -76,10 +76,11 @@
 
 .ocw-dingtalk-approval-card h3,
 .ocw-dingtalk-linked h3,
-.ocw-dingtalk-subsection h4 { margin: 0; }
+.ocw-dingtalk-subsection h4,
+.ocw-dingtalk-table-field h5 { margin: 0; }
 .ocw-dingtalk-approval-card header span,
 .ocw-dingtalk-approval-card summary span { color: var(--ocw-muted); }
-.ocw-dingtalk-card-body { padding: 14px 16px; }
+.ocw-dingtalk-card-body { min-width: 0; padding: 14px 16px; }
 
 .ocw-dingtalk-summary-grid {
   display: grid;
@@ -88,7 +89,8 @@
 }
 
 .ocw-dingtalk-summary-grid > div,
-.ocw-dingtalk-form-fields > div {
+.ocw-dingtalk-field {
+  min-width: 0;
   padding: 9px 10px;
   border: 1px solid var(--ocw-border);
   border-radius: 8px;
@@ -96,54 +98,159 @@
 }
 
 .ocw-dingtalk-summary-grid span,
-.ocw-dingtalk-form-fields dt,
-.ocw-dingtalk-attachment-row span { display: block; color: var(--ocw-muted); font-size: 12px; }
-.ocw-dingtalk-subsection { margin-top: 16px; }
+.ocw-dingtalk-field dt,
+.ocw-dingtalk-empty-fields dt,
+.ocw-dingtalk-attachment-copy > span {
+  display: block;
+  color: var(--ocw-muted);
+  font-size: 12px;
+}
+.ocw-dingtalk-subsection { min-width: 0; margin-top: 16px; }
 .ocw-dingtalk-subsection h4 { margin-bottom: 8px; }
 .ocw-dingtalk-actor { display: inline-flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; }
 .ocw-dingtalk-actor-id { color: var(--ocw-muted); font-size: 11px; font-weight: 500; }
-.ocw-dingtalk-attachment-row .ocw-dingtalk-actor { display: flex; margin-top: 3px; }
+.ocw-dingtalk-attachment-copy .ocw-dingtalk-actor { display: flex; margin-top: 3px; }
 
-.ocw-dingtalk-form-fields {
+.ocw-dingtalk-form-layout { display: grid; min-width: 0; gap: 12px; }
+.ocw-dingtalk-form-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   margin: 0;
 }
-.ocw-dingtalk-form-fields dd { margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; }
+.ocw-dingtalk-field.is-long { grid-column: 1 / -1; }
+.ocw-dingtalk-field dd,
+.ocw-dingtalk-empty-fields dd { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 
-.ocw-dingtalk-timeline { margin: 0; padding-left: 22px; }
-.ocw-dingtalk-timeline > li { margin-bottom: 10px; padding-left: 4px; }
-.ocw-dingtalk-timeline > li > div { justify-content: space-between; gap: 12px; }
-.ocw-dingtalk-timeline p { margin: 4px 0; white-space: pre-wrap; word-break: break-word; }
-
-.ocw-dingtalk-attachment-row {
-  justify-content: space-between;
-  gap: 14px;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--ocw-border);
-}
-.ocw-dingtalk-attachment-row:last-child { border-bottom: 0; }
-.ocw-dingtalk-attachment-row em { display: block; margin-top: 3px; color: var(--ocw-muted); }
-.ocw-dingtalk-attachment-row em.is-error { color: #b42318; }
-
-.ocw-dingtalk-source-picker { display: grid; gap: 8px; margin-top: 12px; }
-.ocw-dingtalk-source-picker > button {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 3px;
-  padding: 11px 12px;
+.ocw-dingtalk-table-field { min-width: 0; }
+.ocw-dingtalk-table-field h5 { margin-bottom: 7px; font-size: 13px; }
+.ocw-dingtalk-table-scroll {
+  max-width: 100%;
+  max-height: min(560px, 65vh);
+  overflow-x: auto;
+  overflow-y: auto;
   border: 1px solid var(--ocw-border);
   border-radius: 9px;
-  background: #fff;
-  text-align: left;
+  overscroll-behavior-inline: contain;
 }
-.ocw-dingtalk-source-picker > button:hover { border-color: var(--ocw-accent); background: var(--ocw-accent-soft); }
-.ocw-dingtalk-source-picker span { color: var(--ocw-muted); font-size: 12px; }
+.ocw-dingtalk-goods-table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: separate;
+  border-spacing: 0;
+  background: #fff;
+  font-size: 12px;
+}
+.ocw-dingtalk-goods-table th,
+.ocw-dingtalk-goods-table td {
+  min-width: 120px;
+  padding: 8px 10px;
+  border-right: 1px solid var(--ocw-border);
+  border-bottom: 1px solid var(--ocw-border);
+  text-align: left;
+  vertical-align: top;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.ocw-dingtalk-goods-table th:last-child,
+.ocw-dingtalk-goods-table td:last-child { border-right: 0; }
+.ocw-dingtalk-goods-table tbody tr:last-child td { border-bottom: 0; }
+.ocw-dingtalk-goods-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+.ocw-dingtalk-goods-table th { background: #f4f7f8; color: var(--ocw-muted); font-weight: 700; white-space: nowrap; }
+.ocw-dingtalk-goods-code {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  min-width: 160px !important;
+  background: #fff;
+  box-shadow: 1px 0 var(--ocw-border);
+}
+.ocw-dingtalk-goods-table thead .ocw-dingtalk-goods-code { z-index: 3; background: #f4f7f8; }
+.ocw-dingtalk-goods-cards { display: none; }
 
-@media (max-width: 900px) {
+.ocw-dingtalk-empty-fields {
+  padding-top: 2px;
+  color: var(--ocw-muted);
+  font-size: 12px;
+}
+.ocw-dingtalk-empty-fields summary { width: fit-content; cursor: pointer; color: var(--ocw-accent-dark); }
+.ocw-dingtalk-empty-fields dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; margin: 8px 0 0; }
+.ocw-dingtalk-empty-fields dl > div { padding: 8px 9px; border-radius: 7px; background: #f7f9fa; }
+
+.ocw-dingtalk-timeline-layout { display: grid; gap: 10px; }
+.ocw-dingtalk-timeline { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.ocw-dingtalk-timeline-item {
+  min-width: 0;
+  padding: 10px 12px;
+  border-left: 3px solid #9cc9f5;
+  border-radius: 0 8px 8px 0;
+  background: #f8fbfe;
+}
+.ocw-dingtalk-timeline.is-system .ocw-dingtalk-timeline-item { border-left-color: #cbd5e1; background: #f8fafc; }
+.ocw-dingtalk-timeline-head { justify-content: space-between; gap: 12px; }
+.ocw-dingtalk-timeline-head > span { display: inline-flex; min-width: 0; flex-wrap: wrap; gap: 5px 8px; align-items: center; }
+.ocw-dingtalk-timeline-head em { padding: 2px 6px; border-radius: 999px; background: #eaf5ff; color: #076fbe; font-size: 11px; font-style: normal; }
+.ocw-dingtalk-timeline-head time { flex: 0 0 auto; color: var(--ocw-muted); font-size: 12px; }
+.ocw-dingtalk-timeline-item > p { margin: 7px 0 5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ocw-dingtalk-no-remark { color: var(--ocw-muted); }
+.ocw-dingtalk-mention { display: inline-block; margin: 0 2px; padding: 1px 6px; border-radius: 999px; background: #eaf5ff; color: #076fbe; }
+.ocw-dingtalk-system-records > summary,
+.ocw-dingtalk-timeline-audit > summary { width: fit-content; cursor: pointer; color: var(--ocw-muted); font-size: 12px; }
+.ocw-dingtalk-system-records > .ocw-dingtalk-timeline { margin-top: 8px; }
+.ocw-dingtalk-timeline-audit { margin-top: 5px; }
+.ocw-dingtalk-timeline-audit dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin: 7px 0 0; }
+.ocw-dingtalk-timeline-audit dl > div { min-width: 0; padding: 6px 8px; border-radius: 6px; background: #eef2f6; }
+.ocw-dingtalk-timeline-audit dt { color: var(--ocw-muted); font-size: 11px; }
+.ocw-dingtalk-timeline-audit dd { margin: 2px 0 0; overflow-wrap: anywhere; font-size: 12px; }
+
+.ocw-dingtalk-attachments { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.ocw-dingtalk-attachment-card {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  gap: 9px 10px;
+  align-items: center;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid var(--ocw-border);
+  border-radius: 9px;
+  background: #fbfdfd;
+}
+.ocw-dingtalk-attachment-thumb,
+.ocw-dingtalk-file-icon { width: 46px; height: 46px; border-radius: 7px; }
+.ocw-dingtalk-attachment-thumb { display: block; object-fit: cover; background: #eef2f6; }
+.ocw-dingtalk-file-icon { display: grid; place-items: center; background: #eaf5ff; color: #076fbe; font-size: 10px; font-weight: 800; }
+.ocw-dingtalk-attachment-copy { min-width: 0; }
+.ocw-dingtalk-attachment-copy > strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ocw-dingtalk-attachment-copy em { display: block; margin-top: 3px; color: var(--ocw-muted); overflow-wrap: anywhere; }
+.ocw-dingtalk-attachment-copy em.is-error { color: #b42318; }
+.ocw-dingtalk-attachment-card > .ocw-attachment-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; }
+
+@media (max-width: 768px) {
   .ocw-dingtalk-summary-grid,
-  .ocw-dingtalk-form-fields { grid-template-columns: 1fr; }
-  .ocw-dingtalk-attachment-row { align-items: flex-start; flex-direction: column; }
+  .ocw-dingtalk-form-grid,
+  .ocw-dingtalk-empty-fields dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ocw-dingtalk-attachments { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 700px) {
+  .ocw-dingtalk-summary-grid,
+  .ocw-dingtalk-form-grid,
+  .ocw-dingtalk-empty-fields dl,
+  .ocw-dingtalk-timeline-audit dl { grid-template-columns: 1fr; }
+  .ocw-dingtalk-goods-table { display: none; }
+  .ocw-dingtalk-goods-cards { display: grid; gap: 8px; }
+  .ocw-dingtalk-goods-cards article { min-width: 0; padding: 10px; border: 1px solid var(--ocw-border); border-radius: 9px; background: #fbfdfd; }
+  .ocw-dingtalk-goods-cards dl { display: grid; gap: 6px; margin: 8px 0 0; }
+  .ocw-dingtalk-goods-cards dl > div { display: grid; grid-template-columns: minmax(90px, 38%) minmax(0, 1fr); gap: 8px; }
+  .ocw-dingtalk-goods-cards dt { color: var(--ocw-muted); font-size: 11px; }
+  .ocw-dingtalk-goods-cards dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+  .ocw-dingtalk-table-scroll { overflow: visible; border: 0; }
+  .ocw-dingtalk-timeline-head { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .ocw-dingtalk-attachment-card { grid-template-columns: 40px minmax(0, 1fr); }
+  .ocw-dingtalk-attachment-thumb,
+  .ocw-dingtalk-file-icon { width: 40px; height: 40px; }
 }
