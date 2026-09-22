@@ -7581,7 +7581,6 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
 .ocw-mf-excluded-list { display: grid; gap: 8px; max-height: 420px; overflow: auto; }
 .ocw-mf-excluded-list > div { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) auto; align-items: center; gap: 12px; padding: 10px; border: 1px solid #d8e2ef; border-radius: 8px; }
 .ocw-mf-excluded-list small { color: #667085; }
-.ocw-mf-ai-source-priority-reason { margin: 8px 12px; color: #475467; font-size: 12px; }
 .ocw-mf-cell.is-shipment-valuation { padding-bottom: 4px; }
 .ocw-mf-cell.is-shipment-valuation > input { height: 34px; }
 .ocw-mf-cell .ocw-mf-valuation-status { position: static; display: block; padding: 0 8px 4px; color: #667085; font-size: 9px; line-height: 1.35; pointer-events: none; }
@@ -7852,13 +7851,6 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
 .ocw-mf-ai-unclassified td { max-width: 280px; white-space: normal; overflow-wrap: anywhere; }
 .ocw-mf-ai-unclassified td > select { width: 100%; min-width: 180px; min-height: 34px; padding: 5px 8px; border: 1px solid #b8c9df; border-radius: 6px; background: #fff; color: #1f344f; }
 .ocw-mf-ai-unclassified td > span { color: #667085; font-size: 10px; }
-.ocw-mf-ai-source-candidate-group { margin: 10px 0; border: 1px solid #d8e5f5; border-radius: 10px; background: #fff; overflow: hidden; }
-.ocw-mf-ai-source-candidate-group > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 14px; cursor: pointer; background: #f7faff; color: #344054; }
-.ocw-mf-ai-source-candidate-group > summary span { color: #667085; font-size: 12px; font-weight: 400; }
-.ocw-mf-ai-source-candidate-group.has-conflicts > summary { background: #fff8ed; }
-.ocw-mf-ai-source-candidate-group.is-current > summary { background: #f8f9fb; }
-.ocw-mf-ai-source-candidate-group .ocw-mf-ai-preview-table { border: 0; border-top: 1px solid #e5edf7; border-radius: 0; }
-.ocw-mf-ai-row-catalog tr.is-conflict td { background: #fff9ef; }
 .ocw-mf-recovery-preview .ocw-mf-ai-preview-table { max-height: 360px; margin: 12px 0; overflow: auto; }
 .ocw-mf-ai-preview-table { max-width: 100%; overflow-x: auto; border: 1px solid #dce6f2; border-radius: 8px; }
 .ocw-mf-ai-preview-table table { width: 100%; border-collapse: collapse; font-size: 12px; }

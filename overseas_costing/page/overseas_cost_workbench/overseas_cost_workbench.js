@@ -13018,7 +13018,7 @@ class OverseasCostWorkbench {
     state.aiPendingReady = null;
     state.aiProgressMinimized = false;
     this.renderMaterialAIReviewDialog();
-    if (state.aiFill.row_review && !state.aiFill.rowSelection?.preview && !state.aiFill.rowSelection?.loading) this.scheduleMaterialAIRowPreview();
+    if (this.materialAIReviewCanUseSelection(state.aiFill) && !state.aiFill.rowSelection?.preview && !state.aiFill.rowSelection?.loading) this.scheduleMaterialAIRowPreview();
   }
 
   materialAIReadStatusLabel(source) {
@@ -13137,7 +13137,23 @@ class OverseasCostWorkbench {
   renderMaterialAIReviewDialogContent() {
     const fill = this.ensureMaterialFeeState().aiFill || {};
     if (fill.row_review) return this.renderMaterialAIRowReview(fill);
-    return `<div class="ocw-mf-ai-review-dialog" data-mf-ai-review-host="1"><header><div><strong>草稿规则已升级</strong><span>旧版草稿不能按新规则确认。</span></div></header><main class="ocw-mf-ai-dialog-body"><div class="ocw-mf-ai-progress-warning"><strong>请重新分析资料</strong><span>重新分析后可在逐项预览中核对并确认，本次不会采用旧草稿中的字段。</span></div></main><footer class="ocw-mf-ai-dialog-footer"><span>确认前不会修改已保存数据</span><div><button class="ocw-outline-btn" type="button" data-action="mf-ai-review-cancel">取消</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-discard">放弃旧草稿</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-row-preview">重新分析</button></div></footer></div>`;
+    return this.renderMaterialAIReanalysisRequired({ legacy: true });
+  }
+
+  materialAIReviewHasStageSnapshots(fill) {
+    const catalog = fill?.row_review;
+    return Boolean(catalog && Array.isArray(catalog.stage_snapshots) && Array.isArray(catalog.fee_stage_snapshots));
+  }
+
+  materialAIReviewCanUseSelection(fill) {
+    return Boolean(fill?.row_review) && (this.materialAIReviewHasStageSnapshots(fill) || String(fill.row_review.policy || "") !== "ai-field-review-7");
+  }
+
+  renderMaterialAIReanalysisRequired({ legacy = false } = {}) {
+    const title = legacy ? "草稿规则已升级" : "填充预览";
+    const message = legacy ? "请重新分析资料" : "资料处理规则已更新，请重新分析资料";
+    const confirm = legacy ? "" : '<button class="ocw-primary-btn" type="button" data-action="mf-ai-apply" disabled>确认填充</button>';
+    return `<div class="ocw-mf-ai-review-dialog" data-mf-ai-review-host="1" data-mf-ai-review-stale="1"><header><div><strong>${title}</strong></div></header><main class="ocw-mf-ai-dialog-body"><div class="ocw-mf-ai-progress-warning"><strong>${message}</strong></div></main><footer class="ocw-mf-ai-dialog-footer"><span>确认前不会修改已保存数据</span><div><button class="ocw-outline-btn" type="button" data-action="mf-ai-review-cancel">取消</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-discard">放弃草稿</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-row-preview">重新分析</button>${confirm}</div></footer></div>`;
   }
 
   materialAIFeesOverlap(left, right) {
@@ -13252,7 +13268,7 @@ class OverseasCostWorkbench {
 
   changeMaterialAIRowSelection(kind, id, checked) {
     const fill = this.ensureMaterialFeeState().aiFill;
-    if (!fill?.row_review || fill.applying || fill.discarding) return;
+    if (!this.materialAIReviewCanUseSelection(fill) || fill.applying || fill.discarding) return;
     const candidateIndex = this.materialAIFieldCandidateIndex(fill.row_review.field_candidates);
     const selection = this.ensureMaterialAIRowSelection(fill, candidateIndex);
     const rows = fill.row_review.rows || [];
@@ -13317,7 +13333,7 @@ class OverseasCostWorkbench {
 
   scheduleMaterialAIRowPreview(candidateIndex = null) {
     const fill = this.ensureMaterialFeeState().aiFill;
-    if (!fill?.row_review || fill.applying || fill.discarding) return;
+    if (!this.materialAIReviewCanUseSelection(fill) || fill.applying || fill.discarding) return;
     const selection = this.ensureMaterialAIRowSelection(fill, candidateIndex);
     clearTimeout(selection.timer);
     selection.request += 1;
@@ -13333,7 +13349,7 @@ class OverseasCostWorkbench {
   async previewMaterialAIRowSelection() {
     const state = this.ensureMaterialFeeState();
     const fill = state.aiFill;
-    if (!fill?.row_review || fill.applying || fill.discarding) return;
+    if (!this.materialAIReviewCanUseSelection(fill) || fill.applying || fill.discarding) return;
     const candidateIndex = this.materialAIFieldCandidateIndex(fill.row_review.field_candidates);
     const selection = this.ensureMaterialAIRowSelection(fill, candidateIndex);
     const fieldChoices = {};
@@ -13382,6 +13398,7 @@ class OverseasCostWorkbench {
   }
 
   canConfirmMaterialAIRowSelection(fill) {
+    if (!this.materialAIReviewCanUseSelection(fill)) return false;
     const selection = this.ensureMaterialAIRowSelection(fill);
     return this.isMaterialAIReadyStatus(fill.status) && !this.isMaterialFeeCalculationBusy() && !fill.applying && !fill.discarding && !selection.loading
       && selection.preview?.can_apply === true && selection.previewKey === this.materialAIRowSelectionKey(fill);
@@ -13433,16 +13450,18 @@ class OverseasCostWorkbench {
   }
 
   materialAIStageUnreadableCount(stage) {
-    const failed = new Set(["SKIPPED", "UNREADABLE", "FAILED", "TIMEOUT", "FORBIDDEN", "MISSING", "UNSUPPORTED", "CORRUPT"]);
+    const failed = new Set(["UNREADABLE", "FAILED", "TIMEOUT", "FORBIDDEN", "MISSING", "UNSUPPORTED", "CORRUPT"]);
     const evidenceCount = (stage?.processes || []).reduce((count, process) => count + (process.evidence || [])
-      .filter(record => failed.has(String(record.read_status || "").toUpperCase())).length, 0);
-    return evidenceCount || (Array.isArray(stage?.warnings) ? stage.warnings.filter(Boolean).length : 0);
+      .filter(record => failed.has(String(record.read_status || record.status || "").toUpperCase())).length, 0);
+    return evidenceCount;
   }
 
   renderMaterialAIStageWarning(stage) {
     const count = this.materialAIStageUnreadableCount(stage);
-    if (!count) return "";
-    return `<p class="ocw-mf-ai-stage-warning"><span>${count} 份资料未读取</span><button type="button" class="ocw-link-btn" data-action="mf-ai-show-evidence">查看依据</button></p>`;
+    const needsReview = Array.isArray(stage?.warnings) && stage.warnings.some(Boolean);
+    if (!count && !needsReview) return "";
+    const labels = [count ? `${count} 份资料未读取` : "", needsReview ? "需核对" : ""].filter(Boolean).join(" · ");
+    return `<p class="ocw-mf-ai-stage-warning"><span>${labels}</span><button type="button" class="ocw-link-btn" data-action="mf-ai-show-evidence">查看依据</button></p>`;
   }
 
   materialAIStageMaterialRows(stage, candidatesById) {
@@ -13617,6 +13636,7 @@ class OverseasCostWorkbench {
   }
 
   renderMaterialAIRowReview(fill) {
+    if (!this.materialAIReviewHasStageSnapshots(fill)) return this.renderMaterialAIReanalysisRequired();
     const selection = this.ensureMaterialAIRowSelection(fill);
     const catalog = fill.row_review;
     const preview = selection.previewKey === this.materialAIRowSelectionKey(fill) ? selection.preview : null;
@@ -13666,7 +13686,6 @@ class OverseasCostWorkbench {
       }).join("");
     };
     const fieldLabels = Object.fromEntries(columns);
-    const fieldCandidates = Array.isArray(catalog.field_candidates) ? catalog.field_candidates : [];
     const fieldColumnOrder = [...columns, ["goods_value", "采购货值 RMB"], ["purchase_uom", "采购单位"], ["unit_price_uom", "单价单位"], ["volume_weight_kg", "体积重 kg"], ["chargeable_weight_kg", "计费重 kg"], ["weight_ratio", "重量占比"], ["packaging_type", "包装类型"]];
     fieldColumnOrder.forEach(([fieldname, label]) => { fieldLabels[fieldname] = label; });
     const currentItems = catalog.rows || [];
@@ -13676,48 +13695,21 @@ class OverseasCostWorkbench {
       const name = row?.values?.product_name;
       return [code, name && String(name) !== String(code) ? name : ""].filter(Boolean).join(" · ") || itemName;
     };
-    const fieldChoiceSection = Array.isArray(catalog.stage_snapshots)
-      ? this.renderMaterialAIPackingStages(fill, selection, fieldColumnOrder, fieldLabels, value, busy, itemLabel)
-      : "";
-    const renderCandidateRows = rows => rows.map(row => {
-      const allowed = selection.mode === "update_selected" ? row.can_update : selection.mode === "add_selected" ? row.can_add : row.can_fill;
-      const origin = row.origin === "current" ? "当前已有" : row.action === "add_candidate" ? "待新增" : "本次识别";
-      const conflicts = (row.conflict_fields || []).map(field => fieldLabels[field] || field);
-      const conflictReason = conflicts.length ? `与更高优先级来源存在差异：${conflicts.join("、")}。` : "";
-      const manualReason = conflicts.length && !row.default_update_selected ? "如手工勾选，将按整行采用。" : "";
-      const blockedReason = row.blocked_reason || (row.label === "待核对" ? row.label : "");
-      const reason = [row.default_selection_reason, conflictReason, manualReason, blockedReason].filter(Boolean).join(" ");
-      const needsReview = row.label === "待核对" || Boolean(row.blocked_reason) || conflicts.length > 0;
-      return `<tr class="${allowed ? conflicts.length ? "is-review is-conflict" : "" : "is-review"}"><td><input type="checkbox" data-mf-ai-row-select="${this.escape(row.row_id)}" ${!allowed || fill.applying ? "disabled" : ""} ${selection.rows.has(String(row.row_id)) ? "checked" : ""} aria-label="选择 ${this.escape(row.values?.product_name || row.values?.material_code || row.row_id)}"></td><td>${origin}${needsReview && row.origin !== "current" ? "<small>待核对</small>" : ""}</td>${cells(row.values || {})}<td>${value(reason)}</td></tr>`;
+    const fieldChoiceSection = this.renderMaterialAIPackingStages(fill, selection, fieldColumnOrder, fieldLabels, value, busy, itemLabel);
+    const addCandidateRows = (catalog.rows || []).filter(row => row.can_add).map(row => {
+      const reason = row.blocked_reason || row.default_selection_reason || "";
+      return `<tr><td><input type="checkbox" data-mf-ai-row-select="${this.escape(row.row_id)}" ${fill.applying ? "disabled" : ""} ${selection.rows.has(String(row.row_id)) ? "checked" : ""} aria-label="选择 ${this.escape(row.values?.product_name || row.values?.material_code || row.row_id)}"></td>${cells(row.values || {})}<td>${value(reason)}</td></tr>`;
     }).join("");
-    const renderCandidateTable = rows => `<div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-row-catalog"><thead><tr><th>选择</th><th>行来源</th>${columns.map(([, label]) => `<th>${label}</th>`).join("")}<th>核对提示</th></tr></thead><tbody>${renderCandidateRows(rows) || `<tr><td colspan="${columns.length + 3}">没有可选物料行</td></tr>`}</tbody></table></div>`;
-    const sourceGroups = Array.isArray(catalog.source_groups) ? [...catalog.source_groups].sort((left, right) => Number(left.priority || 999) - Number(right.priority || 999)) : [];
-    const rowsById = new Map((catalog.rows || []).map(row => [String(row.row_id), row]));
-    const groupedIds = new Set(sourceGroups.flatMap(group => group.row_ids || []).map(String));
-    const sourceTables = sourceGroups.map((group, index) => {
-      const groupRows = (group.row_ids || []).map(id => rowsById.get(String(id))).filter(Boolean);
-      const priorityReason = group.priority_reason ? `<p class="ocw-mf-ai-source-priority-reason">${this.escape(group.priority_reason)}</p>` : "";
-      return `<details class="ocw-mf-ai-source-candidate-group${group.has_conflicts ? " has-conflicts" : ""}" data-mf-ai-source-group="${this.escape(group.group_id)}" ${index === 0 ? "open" : ""}><summary><strong>来源 ${index + 1} · ${this.escape(group.source_label || group.source_id || "未命名来源")}</strong><span>优先级 ${Number(group.priority || index + 1)} · ${groupRows.length} 行${group.has_conflicts ? " · 有冲突" : ""}</span></summary>${priorityReason}${renderCandidateTable(groupRows)}</details>`;
-    }).join("");
-    const otherSourceRows = (catalog.rows || []).filter(row => row.origin === "source" && !groupedIds.has(String(row.row_id)));
-    const currentRows = (catalog.rows || []).filter(row => row.origin === "current");
+    const addCandidateTable = `<div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-row-catalog"><thead><tr><th>选择</th>${columns.map(([, label]) => `<th>${label}</th>`).join("")}<th>核对提示</th></tr></thead><tbody>${addCandidateRows || `<tr><td colspan="${columns.length + 2}">没有可新增的物料</td></tr>`}</tbody></table></div>`;
     const hasAddCandidates = (catalog.rows || []).some(row => row.can_add);
-    const groupedTables = sourceTables
-      + (otherSourceRows.length ? `<details class="ocw-mf-ai-source-candidate-group"><summary><strong>其他识别结果</strong><span>${otherSourceRows.length} 行</span></summary>${renderCandidateTable(otherSourceRows)}</details>` : "")
-      + (currentRows.length ? `<details class="ocw-mf-ai-source-candidate-group is-current"><summary><strong>当前已有</strong><span>${currentRows.length} 行 · 未选行保留</span></summary>${renderCandidateTable(currentRows)}</details>` : "");
     const feePolicy = this.materialAIReviewFeePolicy(fill);
-    const mainFees = feePolicy.mainFees;
-    const renderMainFee = fee => this.renderMaterialAIFeeChoiceRow(fee, selection, value, fill.applying);
-    const hasFeeStages = Array.isArray(catalog.fee_stage_snapshots);
-    const feeSection = hasFeeStages
-      ? this.renderMaterialAIFeeStages(fill, selection, feePolicy, value)
-      : `<section class="ocw-mf-ai-preview-section"><h4>费用 <span>已选 ${selection.fees.size} / ${mainFees.length}</span></h4><div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-fee-catalog"><thead><tr><th>选择</th><th>费用项目</th><th>金额</th></tr></thead><tbody>${mainFees.map(renderMainFee).join("") || '<tr><td colspan="3">本次没有费用候选</td></tr>'}</tbody></table></div></section>`;
+    const feeSection = this.renderMaterialAIFeeStages(fill, selection, feePolicy, value);
     const modeSummary = selection.mode === "update_selected" ? "将更新已选字段，不清空其他内容" : selection.mode === "add_selected" ? "仅新增已选物料，不同时更新费用" : "只补缺失字段，保留已有内容";
     const modeHelp = selection.mode === "update_selected" ? "更新已选字段，未选字段与其他行保留。" : selection.mode === "add_selected" ? "仅新增明确勾选的未匹配物料；本次不同时更新现有行或费用。" : "只补真正缺失的字段；已填金额、数量和 0 值保留。";
     const scopeNotice = '<p class="ocw-mf-ai-scope-summary" data-mf-ai-material-scope>定行依据：国际物流/支付申请/采购支出</p>';
     return `<div class="ocw-mf-ai-review-dialog" data-mf-ai-review-host="1"><header><div><strong>填充预览</strong><span>${modeSummary}</span></div></header>
       <main class="ocw-mf-ai-dialog-body"><details class="ocw-mf-ai-row-controls"><summary>更多设置</summary><div><label>填充方式 <select data-mf-ai-row-mode ${busy}><option value="update_selected" ${selection.mode === "update_selected" ? "selected" : ""}>更新所选行（默认）</option><option value="fill_missing" ${selection.mode === "fill_missing" ? "selected" : ""}>只补缺失</option>${hasAddCandidates ? `<option value="add_selected" ${selection.mode === "add_selected" ? "selected" : ""}>单独确认新增</option>` : ""}</select></label><p>${modeHelp}</p></div></details>
-      ${scopeNotice}${fieldChoiceSection}${selection.mode !== "add_selected" && (Array.isArray(catalog.stage_snapshots) || fieldCandidates.length) ? "" : `<section class="ocw-mf-ai-preview-section"><h4>物料行 <span>已选 ${selection.rows.size} / ${(catalog.rows || []).length}</span></h4><div class="ocw-mf-ai-row-toolbar"><button type="button" class="ocw-outline-btn" data-action="mf-ai-row-all" ${busy}>全选可用行</button><button type="button" class="ocw-outline-btn" data-action="mf-ai-row-none" ${busy}>全不选</button></div>${groupedTables || renderCandidateTable([])}</section>`}
+      ${scopeNotice}${fieldChoiceSection}${selection.mode === "add_selected" ? `<section class="ocw-mf-ai-preview-section"><h4>待新增物料 <span>已选 ${selection.rows.size} / ${addCandidateRows ? (catalog.rows || []).filter(row => row.can_add).length : 0}</span></h4><div class="ocw-mf-ai-row-toolbar"><button type="button" class="ocw-outline-btn" data-action="mf-ai-row-all" ${busy}>全选可用行</button><button type="button" class="ocw-outline-btn" data-action="mf-ai-row-none" ${busy}>全不选</button></div>${addCandidateTable}</section>` : ""}
       ${feeSection}
       ${mergedAmountSummary}${packingGroupSummary}<section class="ocw-mf-ai-preview-section" data-mf-ai-final-preview><h4>确认后物料清单</h4>${selection.loading ? '<p role="status">正在更新服务器预览…</p>' : preview ? `<p>最终 ${preview.rows?.length || 0} 行 · 新增 ${Number(preview.added_count || 0)} · 移除 ${Number(preview.removed_count || 0)} · 补充 ${Number(preview.updated_count || 0)} · 缺项 ${missingCount}</p><div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-final-table"><thead><tr>${columns.map(([, label]) => `<th>${label}</th>`).join("")}</tr></thead><tbody>${(preview.rows || []).map(row => `<tr>${finalCells(row)}</tr>`).join("")}</tbody></table></div>` : '<p>等待服务器预览。</p>'}${notices.length ? `<ul>${notices.map(row => `<li>${this.escape(typeof row === "string" ? row : row.message || row.reason || row.fieldname || "待核对")}</li>`).join("")}</ul>` : ""}</section>
       ${selection.error ? `<p class="ocw-mf-ai-review-error" role="alert">${this.escape(selection.error)}</p>` : ""}
@@ -14063,7 +14055,7 @@ class OverseasCostWorkbench {
     };
     if (fill.row_review) {
       fill.draftVisible = false;
-      this.ensureMaterialAIRowSelection(fill);
+      if (this.materialAIReviewCanUseSelection(fill)) this.ensureMaterialAIRowSelection(fill);
       return fill;
     }
     fill.proposals.filter((proposal) => proposal.proposal_type === "item_update" && proposal.default_selected).forEach((proposal) => {
