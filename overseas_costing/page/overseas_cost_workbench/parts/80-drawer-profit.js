@@ -171,24 +171,19 @@
   }
 
   renderBatchDrawerOverview(batch, items) {
-    const sourceStatus = batch.source_status || {};
+    const model = this.buildCostFlowPresentation(batch, items);
+    const sourceStatus = model.sourceStatus;
     const logisticsTextSummary = sourceStatus.logistics_text_summary || {};
     const logisticsTextBrief = this.formatLogisticsTextSummary(logisticsTextSummary);
-    const summary = batch.summary_snapshot || {};
-    const itemCount = items.length || Number(batch.item_count || 0);
-    const goodsValue = items.length ? this.sumRowsNumber(items, "goods_value") : Number(batch.total_goods_value || 0);
-    const totalCost = summary.calculation_schema === 2 ? Number(summary.total_cost_rmb || 0) : items.length
-      ? this.sumRowsNumber(items, "total_cost_rmb")
-      : Number((batch.summary_snapshot?.calculation_schema === 2 ? batch.summary_snapshot.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb) || 0);
     const fields = [
       ["报关/来源单号", batch.customs_no || batch.source_approval_no || batch.batch_no || "--"],
       ["运单/柜号", batch.waybill_no || "--"],
       ["运输方式", this.transportLabel(batch.transport_mode)],
       ["业务类型", this.businessTypeLabel(batch.business_type)],
-      ["状态", this.batchStatusInfo(batch.status, batch, itemCount).label],
-      ["物料行数", itemCount],
-      ["采购货值", `${this.formatMoney(goodsValue)} RMB`],
-      ["综合成本", `${this.formatMoney(totalCost || summary.total_cost_rmb)} RMB`],
+      ["状态", model.statusInfo.label],
+      ["物料行数", model.itemCount],
+      ["采购货值", `${this.formatMoney(model.goodsValueRmb)} RMB`],
+      ["综合成本", `${this.formatMoney(model.totalCostRmb)} RMB`],
       ["采购审批", this.purchaseApprovalStatusLabel(sourceStatus)],
       ["资料情况", this.sourceStatusLabel(sourceStatus, batch)],
     ];
@@ -211,6 +206,142 @@
       </div>
       ${erpFlowHtml}
     `;
+  }
+
+  buildCostFlowPresentation(batch = {}, items = []) {
+    const summary = batch.summary_snapshot || {};
+    const sourceStatus = batch.source_status || {};
+    const itemCount = items.length || Number(batch.item_count || 0);
+    const goodsValueRmb = summary.calculation_schema === 2
+      ? Number(summary.purchase_goods_value_rmb || 0)
+      : items.length
+        ? this.sumRowsNumber(items, "goods_value")
+        : Number(batch.total_goods_value || summary.purchase_goods_value_rmb || 0);
+    const totalCostRmb = summary.calculation_schema === 2
+      ? Number(summary.total_cost_rmb || 0)
+      : items.length
+        ? this.sumRowsNumber(items, "total_cost_rmb")
+        : Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || summary.total_cost_rmb || 0);
+    const hasFeeTotals = summary.direct_fees_rmb !== undefined || summary.allocated_fees_rmb !== undefined;
+    const feeTotalRmb = summary.calculation_schema === 2 && hasFeeTotals
+      ? Number(summary.direct_fees_rmb || 0) + Number(summary.allocated_fees_rmb || 0)
+      : totalCostRmb - goodsValueRmb;
+    const statusInfo = this.batchStatusInfo(batch.status, batch, itemCount);
+    const confirmed = this.isCalculationConfirmed(batch);
+    const writebackInfo = this.erpWritebackStatusInfo(batch);
+    const writebackLower = String(batch.writeback_status || "").toLowerCase();
+    const invalidBusiness = Boolean(sourceStatus.invalid_business);
+    const hasVersion = this.hasText(batch.current_version);
+    const hasCurrentTrial = hasVersion && !statusInfo.needsRecalculate && !batch.calculation_stale
+      && (String(batch.status || "").toLowerCase().includes("calculated") || confirmed);
+    const isCostReview = this.viewState?.task === "cost";
+    const canConfirm = isCostReview && batch.review_state === "ready" && hasVersion && !statusInfo.needsRecalculate && !invalidBusiness;
+    const flow = writebackLower.includes("success")
+      ? { documents: "done", trial: "done", erp: "done" }
+      : confirmed
+        ? { documents: "done", trial: "done", erp: writebackLower.includes("fail") ? "error" : "current" }
+        : hasCurrentTrial
+          ? { documents: "done", trial: "current", erp: "pending" }
+          : { documents: "current", trial: "pending", erp: "pending" };
+    return {
+      summary,
+      sourceStatus,
+      itemCount,
+      goodsValueRmb,
+      totalCostRmb,
+      feeTotalRmb,
+      statusInfo,
+      confirmed,
+      writebackInfo,
+      invalidBusiness,
+      hasVersion,
+      hasCurrentTrial,
+      isCostReview,
+      canConfirm,
+      canPreview: confirmed && !invalidBusiness,
+      feeRows: this.buildCostBreakdownRows(batch),
+      documents: this.buildDocumentChecklist(batch),
+      flow,
+    };
+  }
+
+  buildCostBreakdownRows(batch = {}) {
+    const comprehensive = (batch.summary_snapshot || {}).comprehensive_cost || {};
+    const groups = [
+      ["included_fees", "included"],
+      ["excluded_fees", "missing"],
+      ["ignored_fees", "unused"],
+    ];
+    const seen = new Set();
+    return groups.flatMap(([key, group]) => (Array.isArray(comprehensive[key]) ? comprehensive[key] : []).map((fee) => {
+      const feeKey = String(fee.fee_key || fee.logical_fee_key || fee.rule_code || fee.expense_category || "").trim();
+      if (!feeKey || seen.has(feeKey)) return null;
+      seen.add(feeKey);
+      const amountStatus = String(fee.amount_status || fee.status || "").toUpperCase();
+      const reasonCode = String(fee.reason_code || "").toUpperCase();
+      const state = group === "included"
+        ? (amountStatus.includes("ESTIMAT") ? "estimated" : "included")
+        : group === "unused" || reasonCode.includes("NOT_APPLICABLE")
+          ? "unused"
+          : "missing";
+      return {
+        key: feeKey,
+        label: fee.expense_category || fee.fee_label || fee.label || feeKey,
+        currency: String(fee.currency || "RMB").toUpperCase(),
+        amount: fee.amount,
+        amountRmb: fee.amount_rmb,
+        state,
+        stateLabel: { included: "已计入", estimated: "暂估", missing: "待补", unused: "未发生" }[state],
+      };
+    }).filter(Boolean));
+  }
+
+  buildDocumentChecklist(batch = {}) {
+    const sourceStatus = batch.source_status || {};
+    const allocationRules = Array.isArray(batch.allocation_rule_snapshot) ? batch.allocation_rule_snapshot : [];
+    const reviewWarnings = Array.isArray(batch.review_warnings) ? batch.review_warnings : [];
+    const logisticsCount = Number(sourceStatus.has_oa_logistics ? 1 : 0);
+    const purchaseCount = Number(sourceStatus.linked_purchase_count || 0);
+    const packingCount = Number(sourceStatus.packing_list_count || 0);
+    const parsedPackingCount = Number(sourceStatus.parsed_packing_list_count || 0);
+    const taxCount = Number(sourceStatus.tax_certificate_count || 0);
+    const parsedTaxCount = Number(sourceStatus.parsed_tax_certificate_count || 0);
+    const activeRules = allocationRules.filter((rule) => Number(rule.is_active ?? 1) !== 0 && Number(rule.is_enabled ?? 1) !== 0);
+    const validEvidenceCount = activeRules.filter((rule) => String(rule.evidence_status || "").toUpperCase() === "VALID").length;
+    const pendingEvidenceCount = activeRules.filter((rule) => ["PENDING", "UNLINKED", "INVALID"].includes(String(rule.evidence_status || "").toUpperCase())).length;
+    const evidenceMissing = reviewWarnings.some((warning) => String(warning.code || "").toUpperCase() === "EVIDENCE_MISSING");
+    const purchaseState = String(sourceStatus.purchase_approval_sync_state || "").toLowerCase();
+    const hasTaxFee = this.buildCostBreakdownRows(batch).some((fee) => /import[_ -]?tax|进口税|关税/i.test(`${fee.key} ${fee.label}`) && fee.state !== "unused");
+    const parsedDocumentState = (count, parsedCount) => parsedCount ? "ready" : count ? "pending" : "missing";
+    const purchaseDocumentState = purchaseState === "valid" && purchaseCount
+      ? "ready"
+      : ["invalid", "excluded"].includes(purchaseState)
+        ? "unused"
+        : purchaseCount || purchaseState === "pending" ? "pending" : "missing";
+    const feeEvidenceState = evidenceMissing && !activeRules.length
+      ? "missing"
+      : !activeRules.length
+        ? "unused"
+        : pendingEvidenceCount || evidenceMissing
+          ? "pending"
+          : validEvidenceCount === activeRules.length ? "ready" : "missing";
+    const taxDocumentState = taxCount ? parsedDocumentState(taxCount, parsedTaxCount) : hasTaxFee ? "missing" : "unused";
+    const document = (key, label, tab, state, count, detail) => ({
+      key,
+      label,
+      tab,
+      state,
+      count,
+      detail,
+      stateLabel: { ready: "已具备", pending: "待解析或待确认", missing: "待补", unused: "不适用" }[state],
+    });
+    return [
+      document("logistics", "国际物流审批", "dingtalk", logisticsCount ? "ready" : "missing", logisticsCount, logisticsCount ? "已读取国际物流审批" : "尚未关联国际物流审批"),
+      document("purchase", "采购审批", "dingtalk", purchaseDocumentState, purchaseCount, this.purchaseApprovalStatusLabel(sourceStatus)),
+      document("packing", "装箱资料", "documents", parsedDocumentState(packingCount, parsedPackingCount), packingCount, parsedPackingCount ? `${parsedPackingCount} 份已解析` : packingCount ? `${packingCount} 份待解析` : "尚未补充装箱资料"),
+      document("fee_evidence", "费用凭证", "documents", feeEvidenceState, validEvidenceCount, evidenceMissing && !activeRules.length ? "费用凭证尚未补齐" : !activeRules.length ? "当前无需凭证的费用" : `${validEvidenceCount}/${activeRules.length} 项已确认`),
+      document("tax", "完税凭证", "vouchers", taxDocumentState, taxCount, parsedTaxCount ? `${parsedTaxCount} 份已解析` : taxCount ? `${taxCount} 份待解析` : hasTaxFee ? "尚未补充完税凭证" : "当前无完税资料要求"),
+    ];
   }
 
   renderBatchDrawerItems(batch, items) {
@@ -481,19 +612,17 @@
   }
 
   renderErpFlowPanel(batch, items) {
-    const summary = batch.summary_snapshot || {};
-    const itemCount = items.length || Number(batch.item_count || 0);
-    const totalCost = summary.calculation_schema === 2 ? Number(summary.total_cost_rmb || 0) : items.length
-      ? this.sumRowsNumber(items, "total_cost_rmb")
-      : Number((summary.calculation_schema === 2 ? summary.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || summary.total_cost_rmb) || 0);
-    const statusInfo = this.batchStatusInfo(batch.status, batch, itemCount);
-    const hasVersion = this.hasText(batch.current_version);
-    const confirmed = this.isCalculationConfirmed(batch);
-    const writebackInfo = this.erpWritebackStatusInfo(batch);
-    const invalidBusiness = Boolean((batch.source_status || {}).invalid_business);
-    const isCostReview = this.viewState?.task === "cost";
-    const canConfirm = isCostReview && batch.review_state === "ready" && hasVersion && !statusInfo.needsRecalculate && !invalidBusiness;
-    const canPreview = confirmed && !invalidBusiness;
+    const model = this.buildCostFlowPresentation(batch, items);
+    const {
+      totalCostRmb: totalCost,
+      statusInfo,
+      confirmed,
+      writebackInfo,
+      invalidBusiness,
+      isCostReview,
+      canConfirm,
+      canPreview,
+    } = model;
     const note = invalidBusiness
       ? "关联采购审批已拒绝、撤销或终止，当前批次保留用于追溯，但不会进入成本确认或 ERP 推送。"
       : confirmed

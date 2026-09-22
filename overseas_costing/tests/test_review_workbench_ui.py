@@ -25,6 +25,7 @@ function makeView(task='cost') {{
  }};
  v.escape=x=>String(x??'').replaceAll('<','&lt;');
  v.formatMoney=x=>String(x);v.formatDateTimeMinute=x=>String(x||'');
+ v.hasText=x=>String(x??'').trim().length>0;v.isPositive=x=>Number(x)>0;
  v.businessTypeLabel=x=>x;v.businessTypeOptions=[];v.selectOptions={{business_type:[]}};
  v.exceptionCounts={{}};v.reviewCounts={{pending:2,confirmed:1,estimated:1,evidence_missing:2}};
  return v;
@@ -393,7 +394,7 @@ console.log(JSON.stringify({calls,rows:v.batches,counts:v.exceptionCounts,review
         ({'status': 'Dirty', 'calculated_at': '2026-09-12 15:00:00', 'result_is_current': False}, '重新试算'),
     ],
 )
-def test_detail_uses_one_header_calculation_entry_with_contextual_label(batch, expected_label):
+def test_detail_moves_single_calculation_entry_from_removed_status_rows_into_overview(batch, expected_label):
     result = run_js(f"""
 const v=makeView('pending');
 const batch={{name:'B',batch_no:'B',current_version:'V',primary_issue:'calculation',item_count:1,...{json.dumps(batch)}}};
@@ -403,16 +404,16 @@ v.cleanupSkuScrollControls=()=>{{}};v.cleanupMaterialGridScrollControls=()=>{{}}
 v.sourceStatusLabel=()=>'已齐备';v.erpWritebackStatusInfo=()=>({{label:'未开始',state:'neutral'}});
 v.batchStatusInfo=()=>({{label:'待试算',needsRecalculate:true}});v.renderDetailErpAction=()=>'';
 v.issueLabel=x=>x;v.transportLabel=x=>x;v.formatValue=x=>String(x??'');
-v.renderBatchDrawerOverview=()=>'';v.loadDingtalkApprovalDetail=async()=>{{}};
+v.loadDingtalkApprovalDetail=async()=>{{}};
 v.renderDetailShell();const shell=v.html["[data-area='detail-screen']"];
 v.renderOverviewDetailTab();const overview=v.html["[data-area='detail-content']"];
 console.log(JSON.stringify({{shell,overview}}));
 """)
-    assert expected_label in result['shell']
-    assert result['shell'].count('data-primary-action="recalculate"') == 1
-    header, status = result['shell'].split('<section class="ocw-detail-statusarea">', 1)
-    assert 'data-primary-action="recalculate"' not in header
-    assert 'data-primary-action="recalculate"' in status
+    assert 'ocw-detail-statusarea' not in result['shell']
+    assert 'ocw-detail-review-strip' not in result['shell']
+    assert 'data-primary-action="recalculate"' not in result['shell']
+    assert expected_label in result['overview']
+    assert result['overview'].count('data-primary-action="recalculate"') == 1
     assert 'data-action="detail-recalculate"' not in result['overview']
 
 
@@ -469,7 +470,7 @@ v.cleanupSkuScrollControls=()=>{{}};v.cleanupMaterialGridScrollControls=()=>{{}}
 v.sourceStatusLabel=()=>'已齐备';v.erpWritebackStatusInfo=()=>({{label:'未开始',state:'neutral'}});
 v.batchStatusInfo=()=>({{label:'已试算',needsRecalculate:false}});v.renderDetailErpAction=()=>'';
 v.issueLabel=x=>x;v.transportLabel=x=>x;v.formatValue=x=>String(x??'');
-v.renderDetailReviewBlockers=()=>'';v.renderDetailShell();
+v.renderDetailShell();
 console.log(JSON.stringify(v.html["[data-area='detail-screen']"]));
 """)
     assert 'data-primary-action="recalculate"' not in result
@@ -484,13 +485,13 @@ v.cleanupSkuScrollControls=()=>{};v.cleanupMaterialGridScrollControls=()=>{};
 v.sourceStatusLabel=()=>'已齐备';v.erpWritebackStatusInfo=()=>({label:'未开始',state:'neutral'});
 v.batchStatusInfo=()=>({label:'已试算',needsRecalculate:false});v.renderDetailErpAction=()=>'';
 v.issueLabel=x=>x;v.transportLabel=x=>x;v.formatValue=x=>String(x??'');
-v.renderDetailShell();console.log(JSON.stringify(v.html["[data-area='detail-screen']"]));
+console.log(JSON.stringify(v.renderDetailOverviewDashboard(batch)));
 """)
     assert result.count('data-primary-action="recalculate"') == 1
     assert '重新试算' in result
 
 
-def test_gap_rows_keep_supplement_actions_but_point_to_the_header_calculation_entry():
+def test_gap_rows_keep_supplement_actions_but_rely_on_the_overview_calculation_entry():
     html = run_js("""
 const v=makeView('pending');const batch={name:'B'};v.findBatch=()=>batch;
 const html=v.renderErpFieldGapsWithActions({items:[{fieldname:'unit_price',label:'采购单价',item_name:'I-1'}]},'B',{});
@@ -585,31 +586,23 @@ console.log(JSON.stringify({calls,errors}));
     assert result['errors'] == ['还有 2 行本次发货货值缺失或失效，请先补齐后再试算。']
 
 
-def test_processing_detail_renders_authoritative_review_blockers():
-    html = run_js("""
-const v=makeView('pending');
-console.log(JSON.stringify(v.renderDetailReviewBlockers({review_blockers:[
- {code:'MISSING_PRICE',message:'还有 1 行采购单价待补'},
- {code:'MISSING_EVIDENCE',message:'还有 2 项凭证待补'},
- {code:'STALE',message:'费用已变化，请重新试算'}
-]})));
-""")
-    assert '还有 1 行采购单价待补' in html
-    assert 'ocw-detail-review-strip' in html
-    assert 'ocw-erp-block-dialog' not in html
-    assert '<summary>更多 2</summary>' in html
-    assert '还有 2 项凭证待补' in html
+def test_removed_detail_status_helpers_do_not_leave_dead_implementations():
+    detail = (PARTS / '82-detail-page.js').read_text(encoding='utf-8')
+    css = (PARTS / '45-detail-page.css').read_text(encoding='utf-8')
+    assert 'detailStatusChip(' not in detail
+    assert 'renderDetailReviewBlockers(' not in detail
+    assert 'inferDetailIssue(' not in detail
+    assert '.ocw-detail-statusarea' not in css
+    assert '.ocw-detail-review-strip' not in css
 
 
-def test_cost_review_renders_blocker_strip_and_no_blocker_keeps_single_status_line():
-    result = run_js("""
-const v=makeView('cost');
-const withBlocker=v.renderDetailReviewBlockers({review_blockers:[{code:'STALE',message:'费用已变化，请重新试算'}]});
-const clear=v.renderDetailReviewBlockers({review_blockers:[]});
-console.log(JSON.stringify({withBlocker,clear}));
-""")
-    assert '费用已变化，请重新试算' in result['withBlocker']
-    assert result['clear'] == ''
+def test_detail_overview_and_legacy_drawer_share_one_cost_flow_projection():
+    drawer = (PARTS / '80-drawer-profit.js').read_text(encoding='utf-8')
+    overview = drawer.split('renderBatchDrawerOverview(batch, items) {', 1)[1].split('\n  buildCostFlowPresentation(batch', 1)[0]
+    erp_panel = drawer.split('renderErpFlowPanel(batch, items) {', 1)[1].split('renderBatchDrawerAllocation(', 1)[0]
+
+    assert 'const model = this.buildCostFlowPresentation(batch, items);' in overview
+    assert 'const model = this.buildCostFlowPresentation(batch, items);' in erp_panel
 
 
 def test_calculation_confirmation_is_hidden_and_blocked_outside_cost_task():

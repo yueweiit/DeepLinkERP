@@ -378,15 +378,15 @@ def test_interactive_theme_uses_deeplink_blue_without_legacy_teal() -> None:
     assert ".ocw-issue.is-ready { color: #067647; }" in redesign
 
 
-def test_detail_blocker_strip_uses_compact_single_line_summary() -> None:
+def test_detail_overview_contains_responsive_columns_and_its_own_fee_scroller() -> None:
     detail = (PARTS / "45-detail-page.css").read_text(encoding="utf-8").lower()
-    strip = detail.split(".ocw-detail-review-strip {", 1)[1].split("}", 1)[0]
-    message = detail.split(".ocw-detail-review-strip > span {", 1)[1].split("}", 1)[0]
+    dashboard = detail.split(".ocw-detail-overview-dashboard {", 1)[1].split("}", 1)[0]
+    fee_scroll = detail.split(".ocw-overview-fee-scroll {", 1)[1].split("}", 1)[0]
 
-    assert "white-space: nowrap" in strip
-    assert "min-height: 0" in strip
-    assert "overflow: hidden" in message
-    assert "text-overflow: ellipsis" in message
+    assert "grid-template-columns" in dashboard
+    assert "minmax(0, 2fr)" in dashboard
+    assert "overflow-x: auto" in fee_scroll
+    assert "@media (max-width: 1100px)" in detail
 
 
 def test_dingtalk_timeline_renders_name_as_primary_and_id_as_secondary() -> None:

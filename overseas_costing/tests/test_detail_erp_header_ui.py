@@ -34,7 +34,7 @@ function makeView(batch) {{
   view.escape=value=>String(value??'').replaceAll('&','&amp;').replaceAll('"','&quot;').replaceAll('<','&lt;');
   view.hasText=value=>String(value??'').trim().length>0;
   view.isPositive=value=>Number(value)>0;
-  view.formatMoney=value=>Number(value||0).toFixed(2);
+  view.formatMoney=value=>Number(value||0).toLocaleString('zh-CN',{{minimumFractionDigits:2,maximumFractionDigits:2}});
   view.formatValue=value=>String(value??'');
   view.formatDateTimeMinute=value=>String(value??'');
   view.businessTypeLabel=()=>'';
@@ -50,10 +50,14 @@ function makeView(batch) {{
   view.cleanupSkuScrollControls=()=>{{}};
   view.cleanupMaterialGridScrollControls=()=>{{}};
   view.html='';
+  view.contentHtml='';
   view.$root={{
     attr:key=>key==='data-screen'?'detail':'',
     find:selector=>({{
-      html:value=>{{if(selector==="[data-area='detail-screen']")view.html=value;}},
+      html:value=>{{
+        if(selector==="[data-area='detail-screen']")view.html=value;
+        if(selector==="[data-area='detail-content']")view.contentHtml=value;
+      }},
       hasClass:()=>false,
       replaceWith:value=>{{
         view.html=view.html.replace(/<span class="ocw-detail-erp-action"[\\s\\S]*?<\\/span>/,value);
@@ -235,6 +239,162 @@ console.log(JSON.stringify({header}));
     assert "[data-action='detail-dingtalk']" in event_source
     assert "this.openDingtalkOrder(this.detailState.batchName)" in event_source
     assert "[data-action='detail-repull']" not in event_source
+
+
+def test_detail_shell_removes_status_rows_but_keeps_header_actions_and_all_tabs():
+    result = run_view_js(
+        """
+const view=makeView({name:'B-1',status:'Calculated',confirm_status:'',current_version:'V-1'});
+view.detailState.tab='overview';
+view.renderDetailShell();
+console.log(JSON.stringify({html:view.html}));
+"""
+    )
+
+    html = result["html"]
+    assert "ocw-detail-statusarea" not in html
+    assert "ocw-detail-statusbar" not in html
+    assert "ocw-detail-review-strip" not in html
+    assert 'data-action="detail-dingtalk"' in html
+    assert 'data-action="detail-writeback-to-erp"' in html
+    assert "更多操作" in html
+    for tab in ("总览", "钉钉审批", "资料与费用", "SKU 明细", "凭证核对", "复核沟通", "操作记录"):
+        assert tab in html
+
+
+def test_detail_overview_renders_cost_breakdown_three_steps_and_document_checklist():
+    result = run_view_js(
+        """
+const batch={
+  name:'B-1',status:'Calculated',review_state:'ready',current_version:'V-1',item_count:6,
+  transport_mode:'SEA',business_type:'DDP',subsidiary_code:'SUPPLY',waybill_no:'BL-100',
+  summary_snapshot:{
+    calculation_schema:2,purchase_goods_value_rmb:'4270.00',total_cost_rmb:'5142.50',
+    comprehensive_cost:{
+      included_fees:[
+        {fee_key:'international_ocean_fee',expense_category:'国际海运费',amount:'872.50',currency:'RMB',amount_rmb:'872.50',amount_status:'FINAL'},
+        {fee_key:'customs_clearance_fee',expense_category:'清关费',amount:'0',currency:'MXN',amount_rmb:'0.00',amount_status:'ESTIMATED'}
+      ],
+      excluded_fees:[{fee_key:'destination_delivery',expense_category:'当地配送费',currency:'MXN',reason_code:'AMOUNT_MISSING'}],
+      ignored_fees:[{fee_key:'misc',expense_category:'其他费用',amount:'0',currency:'RMB',amount_rmb:'0.00',reason_code:'NOT_APPLICABLE'}]
+    }
+  },
+  source_status:{
+    has_oa_logistics:true,purchase_approval_sync_state:'valid',linked_purchase_count:1,
+    packing_list_count:1,parsed_packing_list_count:1,tax_certificate_count:0,parsed_tax_certificate_count:0
+  },
+  review_warnings:[{code:'EVIDENCE_MISSING',message:'费用凭证待补'}],
+  allocation_rule_snapshot:[
+    {fee_key:'international_ocean_fee',status:'Final',evidence_status:'VALID'},
+    {fee_key:'customs_clearance_fee',status:'Estimated',evidence_status:'PENDING'}
+  ]
+};
+const view=makeView(batch);view.viewState.task='cost';view.detailState.tab='overview';
+view.businessTypeLabel=()=>'海运 DDP（双清包税）';view.transportLabel=()=>'海运';
+const html=view.renderDetailOverviewDashboard(batch);
+console.log(JSON.stringify({html}));
+"""
+    )
+
+    html = result["html"]
+    for text in (
+        "采购货值",
+        "4,270.00 RMB",
+        "综合成本",
+        "5,142.50 RMB",
+        "国际海运费",
+        "清关费",
+        "当地配送费",
+        "其他费用",
+        "已计入",
+        "暂估",
+        "待补",
+        "未发生",
+        "资料补充",
+        "成本试算",
+        "推送 ERP",
+        "国际物流审批",
+        "采购审批",
+        "装箱资料",
+        "费用凭证",
+        "完税凭证",
+        "业务主体",
+    ):
+        assert text in html
+    assert 'data-primary-action="recalculate"' in html
+    assert 'data-action="confirm-calculation-result"' in html
+    for removed in ("确认状态", "回写状态", "查看资料与费用", "查看钉钉审批"):
+        assert removed not in html
+
+
+@pytest.mark.parametrize(
+    ("batch", "documents", "trial", "erp"),
+    [
+        ({"status": "Draft", "current_version": "V-1"}, "current", "pending", "pending"),
+        ({"status": "Calculated", "current_version": "V-1"}, "done", "current", "pending"),
+        (
+            {"status": "Calculated", "confirm_status": "Confirmed", "current_version": "V-1"},
+            "done",
+            "done",
+            "current",
+        ),
+        (
+            {
+                "status": "Calculated",
+                "confirm_status": "Confirmed",
+                "writeback_status": "Failed",
+                "current_version": "V-1",
+            },
+            "done",
+            "done",
+            "error",
+        ),
+        (
+            {
+                "status": "Calculated",
+                "confirm_status": "Confirmed",
+                "writeback_status": "Success",
+                "current_version": "V-1",
+            },
+            "done",
+            "done",
+            "done",
+        ),
+    ],
+)
+def test_detail_overview_maps_existing_authoritative_states_to_three_steps(batch, documents, trial, erp):
+    result = run_view_js(
+        f"""
+const view=makeView({json.dumps({'name': 'B-1', **batch})});
+const html=view.renderDetailOverviewDashboard(view.getDetailBatch());
+console.log(JSON.stringify({{html}}));
+"""
+    )
+
+    html = result["html"]
+    assert f'data-step="documents" data-state="{documents}"' in html
+    assert f'data-step="trial" data-state="{trial}"' in html
+    assert f'data-step="erp" data-state="{erp}"' in html
+
+
+@pytest.mark.parametrize(
+    ("source_status", "expected_state"),
+    [
+        ({"packing_list_count": 1, "parsed_packing_list_count": 1}, "ready"),
+        ({"packing_list_count": 1, "parsed_packing_list_count": 0}, "pending"),
+        ({"packing_list_count": 0, "parsed_packing_list_count": 0}, "missing"),
+    ],
+)
+def test_detail_overview_projects_existing_packing_status_without_new_business_rules(source_status, expected_state):
+    result = run_view_js(
+        f"""
+const view=makeView({json.dumps({'name': 'B-1', 'status': 'Draft', 'current_version': 'V-1', 'source_status': source_status})});
+const row=view.buildDocumentChecklist(view.getDetailBatch()).find(item=>item.key==='packing');
+console.log(JSON.stringify(row));
+"""
+    )
+
+    assert result["state"] == expected_state
 
 
 def test_confirm_status_never_falls_back_to_batch_status():

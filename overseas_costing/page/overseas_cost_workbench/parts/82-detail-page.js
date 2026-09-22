@@ -3,20 +3,6 @@
     return this.findBatch(this.detailState.batchName) || header;
   }
 
-  inferDetailIssue(batch = {}) {
-    if (batch.primary_issue) return batch.primary_issue;
-    const writeback = String(batch.writeback_status || "").toLowerCase();
-    const status = String(batch.status || "").toLowerCase();
-    const sourceStatus = batch.source_status || {};
-    const cost = Number((batch.summary_snapshot?.calculation_schema === 2 ? batch.summary_snapshot.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb) || 0);
-    if (!batch.subsidiary_code || ["missing", "pending", "invalid"].includes(String(sourceStatus.purchase_approval_sync_state || "").toLowerCase())) {
-      return "purchase";
-    }
-    if (["draft", "dirty", "writeback failed"].includes(status) || cost <= 0) return "calculation";
-    if (writeback.includes("fail")) return "erp_failed";
-    return "ready";
-  }
-
   async openBatchDetail(batchName = "", tab = "documents", options = {}) {
     const normalizedName = String(batchName || "").trim();
     if (!normalizedName) {
@@ -171,10 +157,6 @@
     `);
   }
 
-  detailStatusChip(label, value, tone = "neutral") {
-    return `<span class="ocw-detail-status is-${tone}"><small>${this.escape(label)}</small><strong>${this.escape(this.formatValue(value || "--"))}</strong></span>`;
-  }
-
   detailCalculationAction(batch = {}) {
     const status = String(batch.status || "").toLowerCase();
     const confirmStatus = String(batch.confirm_status || "").toLowerCase();
@@ -194,20 +176,6 @@
       || Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || summary.total_cost_rmb || 0) > 0
     );
     return { action: "recalculate", label: hasSavedResult ? "重新试算" : "开始试算" };
-  }
-
-  renderDetailReviewBlockers(batch = {}) {
-    if (!["pending", "cost"].includes(this.viewState?.task || "pending")) return "";
-    const blockers = Array.isArray(batch.review_blockers) ? batch.review_blockers : [];
-    if (!blockers.length) return "";
-    const [primary, ...remaining] = blockers;
-    return `
-      <div class="ocw-detail-review-strip" role="status">
-        <strong>待处理</strong>
-        <span>${this.escape(primary.message || primary.code || "待补信息")}</span>
-        ${remaining.length ? `<details><summary>更多 ${remaining.length}</summary><ul>${remaining.map((row) => `<li>${this.escape(row.message || row.code || "待补信息")}</li>`).join("")}</ul></details>` : ""}
-      </div>
-    `;
   }
 
   renderDetailErpAction(batch = {}) {
@@ -231,14 +199,8 @@
     this.cleanupSkuScrollControls();
     this.cleanupMaterialGridScrollControls?.();
     const batch = this.getDetailBatch();
-    const issue = this.inferDetailIssue(batch);
-    const action = this.detailCalculationAction(batch);
     const reference = batch.batch_no || batch.source_approval_no || batch.customs_no || batch.name;
     const logistics = batch.waybill_no || batch.container_no || batch.sea_bill_no || "未填写物流单号";
-    const sourceStatus = batch.source_status || {};
-    const documentStatus = this.sourceStatusLabel(sourceStatus, batch);
-    const erpInfo = this.erpWritebackStatusInfo(batch);
-    const updatedAt = batch.modified || (this.detailState.detail?.version || {}).calculated_at || batch.writeback_time || "--";
     this.$root.find("[data-area='detail-screen']").html(`
       <div class="ocw-detail-page">
         <header class="ocw-detail-header">
@@ -265,20 +227,6 @@
             </div>
           </div>
         </header>
-        <section class="ocw-detail-statusarea">
-          <div class="ocw-detail-statusbar">
-            <div class="ocw-detail-status-list">
-              ${this.detailStatusChip("当前问题", batch.calculation_stale ? "来源已更新，待重新采用" : batch.summary_snapshot?.calculation_schema === 2 && batch.summary_snapshot.is_complete && !batch.subsidiary_code ? "业务主体待补" : this.issueLabel(issue), issue === "ready" && !batch.calculation_stale ? "ok" : "warn")}
-              ${this.detailStatusChip("资料", documentStatus, documentStatus.includes("待") ? "warn" : "ok")}
-              ${this.detailStatusChip("计算", this.batchStatusInfo(batch.status, batch, Number(batch.item_count || 0)).label, String(batch.status || "").toLowerCase().includes("calculated") ? "ok" : "warn")}
-              ${this.detailStatusChip("ERP", erpInfo.label, erpInfo.state === "is-ok" ? "ok" : erpInfo.state === "is-warn" ? "warn" : "neutral")}
-              ${this.detailStatusChip("最后更新", this.formatDateTimeMinute(updatedAt) || updatedAt, "neutral")}
-              <span class="ocw-edit-lease-status" data-area="edit-lease-status">浏览模式 · 开始修改时自动申请编辑权</span>
-            </div>
-            ${action ? `<button class="ocw-primary-btn ocw-detail-trial-action" type="button" data-action="detail-primary" data-primary-action="${action.action}">${action.label}</button>` : ""}
-          </div>
-          ${this.renderDetailReviewBlockers(batch)}
-        </section>
         <nav class="ocw-detail-tabs" aria-label="批次详情分类">
           ${[
             ["overview", "总览"],
@@ -327,6 +275,100 @@
     `);
   }
 
+  renderDetailOverviewDashboard(batch = {}) {
+    const model = this.buildCostFlowPresentation(batch, []);
+    const calculationAction = this.detailCalculationAction(batch);
+    const amountText = (value, currency = "RMB") => value === null || value === undefined || value === ""
+      ? "--"
+      : `${this.formatMoney(value)} ${currency || "RMB"}`;
+    const feeRows = model.feeRows.length
+      ? model.feeRows.map((fee) => `
+          <tr>
+            <td><strong>${this.escape(fee.label)}</strong></td>
+            <td>${this.escape(amountText(fee.amount, fee.currency))}</td>
+            <td>${this.escape(amountText(fee.amountRmb, "RMB"))}</td>
+            <td><span class="ocw-overview-state is-${this.escape(fee.state)}">${this.escape(fee.stateLabel)}</span></td>
+          </tr>
+        `).join("")
+      : `<tr><td colspan="4"><div class="ocw-detail-empty">当前没有费用构成记录</div></td></tr>`;
+    const flowLabels = {
+      done: "已完成",
+      current: "当前",
+      pending: "未开始",
+      error: "失败待重试",
+    };
+    const flowSteps = [
+      { key: "documents", label: "资料补充", detail: model.documents.every((row) => ["ready", "unused"].includes(row.state)) ? "物料与费用资料已具备" : "仍有资料需处理" },
+      { key: "trial", label: "成本试算", detail: model.statusInfo.label || (model.hasCurrentTrial ? "已试算" : "待试算") },
+      { key: "erp", label: "推送 ERP", detail: model.writebackInfo.label || "未开始" },
+    ];
+    const documents = model.documents.map((document) => `
+      <li class="is-${this.escape(document.state)}">
+        <span class="ocw-overview-document-mark" aria-hidden="true"></span>
+        <div><strong>${this.escape(document.label)}</strong><small>${this.escape(document.detail)}</small></div>
+        <button type="button" data-action="switch-detail-tab" data-tab="${this.escape(document.tab)}">${document.count ? `${document.count} 项 · ` : ""}${this.escape(document.stateLabel)}</button>
+      </li>
+    `).join("");
+    const basicInfo = [
+      ["运输方式", this.transportLabel(batch.transport_mode) || "--"],
+      ["业务类型", this.businessTypeLabel(batch.business_type) || "--"],
+      ["业务主体", batch.subsidiary_code || "--"],
+      ["物料行数", `${model.itemCount} 行`],
+      ["运单/柜号", batch.waybill_no || batch.container_no || batch.sea_bill_no || "--"],
+    ];
+    const currentStep = model.flow.erp === "current" || model.flow.erp === "error"
+      ? "推送 ERP"
+      : model.flow.trial === "current"
+        ? "成本试算"
+        : "资料补充";
+    const actionButtons = [
+      calculationAction
+        ? `<button class="ocw-primary-btn" type="button" data-action="detail-primary" data-primary-action="${calculationAction.action}">${this.escape(calculationAction.label)}</button>`
+        : "",
+      model.isCostReview && !model.confirmed
+        ? `<button class="ocw-primary-btn" type="button" data-action="confirm-calculation-result"${model.canConfirm ? "" : " disabled"}>校验计算结果</button>`
+        : "",
+      model.confirmed
+        ? `<button class="ocw-outline-btn" type="button" data-action="preview-erp-payload"${model.canPreview ? "" : " disabled"}>预览 ERP 报文</button>`
+        : "",
+    ].filter(Boolean).join("");
+    return `
+      <div class="ocw-detail-overview-dashboard">
+        <section class="ocw-detail-overview-costs">
+          <div class="ocw-overview-panel-title"><div><span>成本结果</span><h2>本次成本</h2></div></div>
+          <div class="ocw-overview-total-grid">
+            <article><span>采购货值</span><strong>${this.escape(amountText(model.goodsValueRmb, "RMB"))}</strong></article>
+            <article class="is-primary"><span>综合成本</span><strong>${this.escape(amountText(model.totalCostRmb, "RMB"))}</strong></article>
+          </div>
+          <div class="ocw-overview-fee-head"><h3>费用构成</h3><strong>合计 ${this.escape(amountText(model.feeTotalRmb, "RMB"))}</strong></div>
+          <div class="ocw-overview-fee-scroll">
+            <table class="ocw-overview-fee-table">
+              <thead><tr><th>费用项目</th><th>原币金额</th><th>折合 RMB</th><th>状态</th></tr></thead>
+              <tbody>${feeRows}</tbody>
+            </table>
+          </div>
+          <dl class="ocw-overview-basic-info">
+            ${basicInfo.map(([label, value]) => `<div><dt>${this.escape(label)}</dt><dd>${this.escape(this.formatValue(value))}</dd></div>`).join("")}
+          </dl>
+          <div class="ocw-overview-current-action">
+            <div><span>当前需要</span><strong>${this.escape(currentStep)}</strong><small>${this.escape(model.invalidBusiness ? "当前审批已无效，不可确认或推送。" : model.statusInfo.suggestion || model.statusInfo.label || "按当前流程继续处理。")}</small></div>
+            <div class="ocw-overview-current-buttons">${actionButtons}</div>
+          </div>
+        </section>
+        <aside class="ocw-detail-overview-progress">
+          <div class="ocw-overview-panel-title"><div><span>业务流程</span><h2>处理进度</h2></div></div>
+          <ol class="ocw-overview-flow">
+            ${flowSteps.map((step, index) => `<li data-step="${step.key}" data-state="${model.flow[step.key]}"><span>${model.flow[step.key] === "done" ? "✓" : index + 1}</span><div><strong>${this.escape(step.label)}</strong><small>${this.escape(step.detail)}</small></div><em>${this.escape(flowLabels[model.flow[step.key]])}</em></li>`).join("")}
+          </ol>
+          <div class="ocw-overview-documents">
+            <div><h3>资料清单</h3><span>点击状态查看对应资料</span></div>
+            <ul>${documents}</ul>
+          </div>
+        </aside>
+      </div>
+    `;
+  }
+
   renderOverviewDetailTab() {
     const batch = this.getDetailBatch();
     const approval = this.detailState.dingtalkApproval;
@@ -342,8 +384,7 @@
     }
     this.$root.find("[data-area='detail-content']").html(`
       <div class="ocw-detail-overview">
-        <div class="ocw-detail-section-head"><div><span>批次概况</span><h2>成本与 ERP 流程</h2></div><div class="ocw-detail-section-actions"><button class="ocw-outline-btn" type="button" data-action="view-dingtalk-approval">查看钉钉审批</button></div></div>
-        ${this.renderBatchDrawerOverview(batch, [])}
+        ${this.renderDetailOverviewDashboard(batch)}
       </div>
     `);
   }

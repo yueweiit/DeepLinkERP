@@ -17625,24 +17625,19 @@ class OverseasCostWorkbench {
   }
 
   renderBatchDrawerOverview(batch, items) {
-    const sourceStatus = batch.source_status || {};
+    const model = this.buildCostFlowPresentation(batch, items);
+    const sourceStatus = model.sourceStatus;
     const logisticsTextSummary = sourceStatus.logistics_text_summary || {};
     const logisticsTextBrief = this.formatLogisticsTextSummary(logisticsTextSummary);
-    const summary = batch.summary_snapshot || {};
-    const itemCount = items.length || Number(batch.item_count || 0);
-    const goodsValue = items.length ? this.sumRowsNumber(items, "goods_value") : Number(batch.total_goods_value || 0);
-    const totalCost = summary.calculation_schema === 2 ? Number(summary.total_cost_rmb || 0) : items.length
-      ? this.sumRowsNumber(items, "total_cost_rmb")
-      : Number((batch.summary_snapshot?.calculation_schema === 2 ? batch.summary_snapshot.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb) || 0);
     const fields = [
       ["报关/来源单号", batch.customs_no || batch.source_approval_no || batch.batch_no || "--"],
       ["运单/柜号", batch.waybill_no || "--"],
       ["运输方式", this.transportLabel(batch.transport_mode)],
       ["业务类型", this.businessTypeLabel(batch.business_type)],
-      ["状态", this.batchStatusInfo(batch.status, batch, itemCount).label],
-      ["物料行数", itemCount],
-      ["采购货值", `${this.formatMoney(goodsValue)} RMB`],
-      ["综合成本", `${this.formatMoney(totalCost || summary.total_cost_rmb)} RMB`],
+      ["状态", model.statusInfo.label],
+      ["物料行数", model.itemCount],
+      ["采购货值", `${this.formatMoney(model.goodsValueRmb)} RMB`],
+      ["综合成本", `${this.formatMoney(model.totalCostRmb)} RMB`],
       ["采购审批", this.purchaseApprovalStatusLabel(sourceStatus)],
       ["资料情况", this.sourceStatusLabel(sourceStatus, batch)],
     ];
@@ -17665,6 +17660,142 @@ class OverseasCostWorkbench {
       </div>
       ${erpFlowHtml}
     `;
+  }
+
+  buildCostFlowPresentation(batch = {}, items = []) {
+    const summary = batch.summary_snapshot || {};
+    const sourceStatus = batch.source_status || {};
+    const itemCount = items.length || Number(batch.item_count || 0);
+    const goodsValueRmb = summary.calculation_schema === 2
+      ? Number(summary.purchase_goods_value_rmb || 0)
+      : items.length
+        ? this.sumRowsNumber(items, "goods_value")
+        : Number(batch.total_goods_value || summary.purchase_goods_value_rmb || 0);
+    const totalCostRmb = summary.calculation_schema === 2
+      ? Number(summary.total_cost_rmb || 0)
+      : items.length
+        ? this.sumRowsNumber(items, "total_cost_rmb")
+        : Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || summary.total_cost_rmb || 0);
+    const hasFeeTotals = summary.direct_fees_rmb !== undefined || summary.allocated_fees_rmb !== undefined;
+    const feeTotalRmb = summary.calculation_schema === 2 && hasFeeTotals
+      ? Number(summary.direct_fees_rmb || 0) + Number(summary.allocated_fees_rmb || 0)
+      : totalCostRmb - goodsValueRmb;
+    const statusInfo = this.batchStatusInfo(batch.status, batch, itemCount);
+    const confirmed = this.isCalculationConfirmed(batch);
+    const writebackInfo = this.erpWritebackStatusInfo(batch);
+    const writebackLower = String(batch.writeback_status || "").toLowerCase();
+    const invalidBusiness = Boolean(sourceStatus.invalid_business);
+    const hasVersion = this.hasText(batch.current_version);
+    const hasCurrentTrial = hasVersion && !statusInfo.needsRecalculate && !batch.calculation_stale
+      && (String(batch.status || "").toLowerCase().includes("calculated") || confirmed);
+    const isCostReview = this.viewState?.task === "cost";
+    const canConfirm = isCostReview && batch.review_state === "ready" && hasVersion && !statusInfo.needsRecalculate && !invalidBusiness;
+    const flow = writebackLower.includes("success")
+      ? { documents: "done", trial: "done", erp: "done" }
+      : confirmed
+        ? { documents: "done", trial: "done", erp: writebackLower.includes("fail") ? "error" : "current" }
+        : hasCurrentTrial
+          ? { documents: "done", trial: "current", erp: "pending" }
+          : { documents: "current", trial: "pending", erp: "pending" };
+    return {
+      summary,
+      sourceStatus,
+      itemCount,
+      goodsValueRmb,
+      totalCostRmb,
+      feeTotalRmb,
+      statusInfo,
+      confirmed,
+      writebackInfo,
+      invalidBusiness,
+      hasVersion,
+      hasCurrentTrial,
+      isCostReview,
+      canConfirm,
+      canPreview: confirmed && !invalidBusiness,
+      feeRows: this.buildCostBreakdownRows(batch),
+      documents: this.buildDocumentChecklist(batch),
+      flow,
+    };
+  }
+
+  buildCostBreakdownRows(batch = {}) {
+    const comprehensive = (batch.summary_snapshot || {}).comprehensive_cost || {};
+    const groups = [
+      ["included_fees", "included"],
+      ["excluded_fees", "missing"],
+      ["ignored_fees", "unused"],
+    ];
+    const seen = new Set();
+    return groups.flatMap(([key, group]) => (Array.isArray(comprehensive[key]) ? comprehensive[key] : []).map((fee) => {
+      const feeKey = String(fee.fee_key || fee.logical_fee_key || fee.rule_code || fee.expense_category || "").trim();
+      if (!feeKey || seen.has(feeKey)) return null;
+      seen.add(feeKey);
+      const amountStatus = String(fee.amount_status || fee.status || "").toUpperCase();
+      const reasonCode = String(fee.reason_code || "").toUpperCase();
+      const state = group === "included"
+        ? (amountStatus.includes("ESTIMAT") ? "estimated" : "included")
+        : group === "unused" || reasonCode.includes("NOT_APPLICABLE")
+          ? "unused"
+          : "missing";
+      return {
+        key: feeKey,
+        label: fee.expense_category || fee.fee_label || fee.label || feeKey,
+        currency: String(fee.currency || "RMB").toUpperCase(),
+        amount: fee.amount,
+        amountRmb: fee.amount_rmb,
+        state,
+        stateLabel: { included: "已计入", estimated: "暂估", missing: "待补", unused: "未发生" }[state],
+      };
+    }).filter(Boolean));
+  }
+
+  buildDocumentChecklist(batch = {}) {
+    const sourceStatus = batch.source_status || {};
+    const allocationRules = Array.isArray(batch.allocation_rule_snapshot) ? batch.allocation_rule_snapshot : [];
+    const reviewWarnings = Array.isArray(batch.review_warnings) ? batch.review_warnings : [];
+    const logisticsCount = Number(sourceStatus.has_oa_logistics ? 1 : 0);
+    const purchaseCount = Number(sourceStatus.linked_purchase_count || 0);
+    const packingCount = Number(sourceStatus.packing_list_count || 0);
+    const parsedPackingCount = Number(sourceStatus.parsed_packing_list_count || 0);
+    const taxCount = Number(sourceStatus.tax_certificate_count || 0);
+    const parsedTaxCount = Number(sourceStatus.parsed_tax_certificate_count || 0);
+    const activeRules = allocationRules.filter((rule) => Number(rule.is_active ?? 1) !== 0 && Number(rule.is_enabled ?? 1) !== 0);
+    const validEvidenceCount = activeRules.filter((rule) => String(rule.evidence_status || "").toUpperCase() === "VALID").length;
+    const pendingEvidenceCount = activeRules.filter((rule) => ["PENDING", "UNLINKED", "INVALID"].includes(String(rule.evidence_status || "").toUpperCase())).length;
+    const evidenceMissing = reviewWarnings.some((warning) => String(warning.code || "").toUpperCase() === "EVIDENCE_MISSING");
+    const purchaseState = String(sourceStatus.purchase_approval_sync_state || "").toLowerCase();
+    const hasTaxFee = this.buildCostBreakdownRows(batch).some((fee) => /import[_ -]?tax|进口税|关税/i.test(`${fee.key} ${fee.label}`) && fee.state !== "unused");
+    const parsedDocumentState = (count, parsedCount) => parsedCount ? "ready" : count ? "pending" : "missing";
+    const purchaseDocumentState = purchaseState === "valid" && purchaseCount
+      ? "ready"
+      : ["invalid", "excluded"].includes(purchaseState)
+        ? "unused"
+        : purchaseCount || purchaseState === "pending" ? "pending" : "missing";
+    const feeEvidenceState = evidenceMissing && !activeRules.length
+      ? "missing"
+      : !activeRules.length
+        ? "unused"
+        : pendingEvidenceCount || evidenceMissing
+          ? "pending"
+          : validEvidenceCount === activeRules.length ? "ready" : "missing";
+    const taxDocumentState = taxCount ? parsedDocumentState(taxCount, parsedTaxCount) : hasTaxFee ? "missing" : "unused";
+    const document = (key, label, tab, state, count, detail) => ({
+      key,
+      label,
+      tab,
+      state,
+      count,
+      detail,
+      stateLabel: { ready: "已具备", pending: "待解析或待确认", missing: "待补", unused: "不适用" }[state],
+    });
+    return [
+      document("logistics", "国际物流审批", "dingtalk", logisticsCount ? "ready" : "missing", logisticsCount, logisticsCount ? "已读取国际物流审批" : "尚未关联国际物流审批"),
+      document("purchase", "采购审批", "dingtalk", purchaseDocumentState, purchaseCount, this.purchaseApprovalStatusLabel(sourceStatus)),
+      document("packing", "装箱资料", "documents", parsedDocumentState(packingCount, parsedPackingCount), packingCount, parsedPackingCount ? `${parsedPackingCount} 份已解析` : packingCount ? `${packingCount} 份待解析` : "尚未补充装箱资料"),
+      document("fee_evidence", "费用凭证", "documents", feeEvidenceState, validEvidenceCount, evidenceMissing && !activeRules.length ? "费用凭证尚未补齐" : !activeRules.length ? "当前无需凭证的费用" : `${validEvidenceCount}/${activeRules.length} 项已确认`),
+      document("tax", "完税凭证", "vouchers", taxDocumentState, taxCount, parsedTaxCount ? `${parsedTaxCount} 份已解析` : taxCount ? `${taxCount} 份待解析` : hasTaxFee ? "尚未补充完税凭证" : "当前无完税资料要求"),
+    ];
   }
 
   renderBatchDrawerItems(batch, items) {
@@ -17935,19 +18066,17 @@ class OverseasCostWorkbench {
   }
 
   renderErpFlowPanel(batch, items) {
-    const summary = batch.summary_snapshot || {};
-    const itemCount = items.length || Number(batch.item_count || 0);
-    const totalCost = summary.calculation_schema === 2 ? Number(summary.total_cost_rmb || 0) : items.length
-      ? this.sumRowsNumber(items, "total_cost_rmb")
-      : Number((summary.calculation_schema === 2 ? summary.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || summary.total_cost_rmb) || 0);
-    const statusInfo = this.batchStatusInfo(batch.status, batch, itemCount);
-    const hasVersion = this.hasText(batch.current_version);
-    const confirmed = this.isCalculationConfirmed(batch);
-    const writebackInfo = this.erpWritebackStatusInfo(batch);
-    const invalidBusiness = Boolean((batch.source_status || {}).invalid_business);
-    const isCostReview = this.viewState?.task === "cost";
-    const canConfirm = isCostReview && batch.review_state === "ready" && hasVersion && !statusInfo.needsRecalculate && !invalidBusiness;
-    const canPreview = confirmed && !invalidBusiness;
+    const model = this.buildCostFlowPresentation(batch, items);
+    const {
+      totalCostRmb: totalCost,
+      statusInfo,
+      confirmed,
+      writebackInfo,
+      invalidBusiness,
+      isCostReview,
+      canConfirm,
+      canPreview,
+    } = model;
     const note = invalidBusiness
       ? "关联采购审批已拒绝、撤销或终止，当前批次保留用于追溯，但不会进入成本确认或 ERP 推送。"
       : confirmed
@@ -18062,20 +18191,6 @@ class OverseasCostWorkbench {
   getDetailBatch() {
     const header = this.detailState.header || {};
     return this.findBatch(this.detailState.batchName) || header;
-  }
-
-  inferDetailIssue(batch = {}) {
-    if (batch.primary_issue) return batch.primary_issue;
-    const writeback = String(batch.writeback_status || "").toLowerCase();
-    const status = String(batch.status || "").toLowerCase();
-    const sourceStatus = batch.source_status || {};
-    const cost = Number((batch.summary_snapshot?.calculation_schema === 2 ? batch.summary_snapshot.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb) || 0);
-    if (!batch.subsidiary_code || ["missing", "pending", "invalid"].includes(String(sourceStatus.purchase_approval_sync_state || "").toLowerCase())) {
-      return "purchase";
-    }
-    if (["draft", "dirty", "writeback failed"].includes(status) || cost <= 0) return "calculation";
-    if (writeback.includes("fail")) return "erp_failed";
-    return "ready";
   }
 
   async openBatchDetail(batchName = "", tab = "documents", options = {}) {
@@ -18232,10 +18347,6 @@ class OverseasCostWorkbench {
     `);
   }
 
-  detailStatusChip(label, value, tone = "neutral") {
-    return `<span class="ocw-detail-status is-${tone}"><small>${this.escape(label)}</small><strong>${this.escape(this.formatValue(value || "--"))}</strong></span>`;
-  }
-
   detailCalculationAction(batch = {}) {
     const status = String(batch.status || "").toLowerCase();
     const confirmStatus = String(batch.confirm_status || "").toLowerCase();
@@ -18255,20 +18366,6 @@ class OverseasCostWorkbench {
       || Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || summary.total_cost_rmb || 0) > 0
     );
     return { action: "recalculate", label: hasSavedResult ? "重新试算" : "开始试算" };
-  }
-
-  renderDetailReviewBlockers(batch = {}) {
-    if (!["pending", "cost"].includes(this.viewState?.task || "pending")) return "";
-    const blockers = Array.isArray(batch.review_blockers) ? batch.review_blockers : [];
-    if (!blockers.length) return "";
-    const [primary, ...remaining] = blockers;
-    return `
-      <div class="ocw-detail-review-strip" role="status">
-        <strong>待处理</strong>
-        <span>${this.escape(primary.message || primary.code || "待补信息")}</span>
-        ${remaining.length ? `<details><summary>更多 ${remaining.length}</summary><ul>${remaining.map((row) => `<li>${this.escape(row.message || row.code || "待补信息")}</li>`).join("")}</ul></details>` : ""}
-      </div>
-    `;
   }
 
   renderDetailErpAction(batch = {}) {
@@ -18292,14 +18389,8 @@ class OverseasCostWorkbench {
     this.cleanupSkuScrollControls();
     this.cleanupMaterialGridScrollControls?.();
     const batch = this.getDetailBatch();
-    const issue = this.inferDetailIssue(batch);
-    const action = this.detailCalculationAction(batch);
     const reference = batch.batch_no || batch.source_approval_no || batch.customs_no || batch.name;
     const logistics = batch.waybill_no || batch.container_no || batch.sea_bill_no || "未填写物流单号";
-    const sourceStatus = batch.source_status || {};
-    const documentStatus = this.sourceStatusLabel(sourceStatus, batch);
-    const erpInfo = this.erpWritebackStatusInfo(batch);
-    const updatedAt = batch.modified || (this.detailState.detail?.version || {}).calculated_at || batch.writeback_time || "--";
     this.$root.find("[data-area='detail-screen']").html(`
       <div class="ocw-detail-page">
         <header class="ocw-detail-header">
@@ -18326,20 +18417,6 @@ class OverseasCostWorkbench {
             </div>
           </div>
         </header>
-        <section class="ocw-detail-statusarea">
-          <div class="ocw-detail-statusbar">
-            <div class="ocw-detail-status-list">
-              ${this.detailStatusChip("当前问题", batch.calculation_stale ? "来源已更新，待重新采用" : batch.summary_snapshot?.calculation_schema === 2 && batch.summary_snapshot.is_complete && !batch.subsidiary_code ? "业务主体待补" : this.issueLabel(issue), issue === "ready" && !batch.calculation_stale ? "ok" : "warn")}
-              ${this.detailStatusChip("资料", documentStatus, documentStatus.includes("待") ? "warn" : "ok")}
-              ${this.detailStatusChip("计算", this.batchStatusInfo(batch.status, batch, Number(batch.item_count || 0)).label, String(batch.status || "").toLowerCase().includes("calculated") ? "ok" : "warn")}
-              ${this.detailStatusChip("ERP", erpInfo.label, erpInfo.state === "is-ok" ? "ok" : erpInfo.state === "is-warn" ? "warn" : "neutral")}
-              ${this.detailStatusChip("最后更新", this.formatDateTimeMinute(updatedAt) || updatedAt, "neutral")}
-              <span class="ocw-edit-lease-status" data-area="edit-lease-status">浏览模式 · 开始修改时自动申请编辑权</span>
-            </div>
-            ${action ? `<button class="ocw-primary-btn ocw-detail-trial-action" type="button" data-action="detail-primary" data-primary-action="${action.action}">${action.label}</button>` : ""}
-          </div>
-          ${this.renderDetailReviewBlockers(batch)}
-        </section>
         <nav class="ocw-detail-tabs" aria-label="批次详情分类">
           ${[
             ["overview", "总览"],
@@ -18388,6 +18465,100 @@ class OverseasCostWorkbench {
     `);
   }
 
+  renderDetailOverviewDashboard(batch = {}) {
+    const model = this.buildCostFlowPresentation(batch, []);
+    const calculationAction = this.detailCalculationAction(batch);
+    const amountText = (value, currency = "RMB") => value === null || value === undefined || value === ""
+      ? "--"
+      : `${this.formatMoney(value)} ${currency || "RMB"}`;
+    const feeRows = model.feeRows.length
+      ? model.feeRows.map((fee) => `
+          <tr>
+            <td><strong>${this.escape(fee.label)}</strong></td>
+            <td>${this.escape(amountText(fee.amount, fee.currency))}</td>
+            <td>${this.escape(amountText(fee.amountRmb, "RMB"))}</td>
+            <td><span class="ocw-overview-state is-${this.escape(fee.state)}">${this.escape(fee.stateLabel)}</span></td>
+          </tr>
+        `).join("")
+      : `<tr><td colspan="4"><div class="ocw-detail-empty">当前没有费用构成记录</div></td></tr>`;
+    const flowLabels = {
+      done: "已完成",
+      current: "当前",
+      pending: "未开始",
+      error: "失败待重试",
+    };
+    const flowSteps = [
+      { key: "documents", label: "资料补充", detail: model.documents.every((row) => ["ready", "unused"].includes(row.state)) ? "物料与费用资料已具备" : "仍有资料需处理" },
+      { key: "trial", label: "成本试算", detail: model.statusInfo.label || (model.hasCurrentTrial ? "已试算" : "待试算") },
+      { key: "erp", label: "推送 ERP", detail: model.writebackInfo.label || "未开始" },
+    ];
+    const documents = model.documents.map((document) => `
+      <li class="is-${this.escape(document.state)}">
+        <span class="ocw-overview-document-mark" aria-hidden="true"></span>
+        <div><strong>${this.escape(document.label)}</strong><small>${this.escape(document.detail)}</small></div>
+        <button type="button" data-action="switch-detail-tab" data-tab="${this.escape(document.tab)}">${document.count ? `${document.count} 项 · ` : ""}${this.escape(document.stateLabel)}</button>
+      </li>
+    `).join("");
+    const basicInfo = [
+      ["运输方式", this.transportLabel(batch.transport_mode) || "--"],
+      ["业务类型", this.businessTypeLabel(batch.business_type) || "--"],
+      ["业务主体", batch.subsidiary_code || "--"],
+      ["物料行数", `${model.itemCount} 行`],
+      ["运单/柜号", batch.waybill_no || batch.container_no || batch.sea_bill_no || "--"],
+    ];
+    const currentStep = model.flow.erp === "current" || model.flow.erp === "error"
+      ? "推送 ERP"
+      : model.flow.trial === "current"
+        ? "成本试算"
+        : "资料补充";
+    const actionButtons = [
+      calculationAction
+        ? `<button class="ocw-primary-btn" type="button" data-action="detail-primary" data-primary-action="${calculationAction.action}">${this.escape(calculationAction.label)}</button>`
+        : "",
+      model.isCostReview && !model.confirmed
+        ? `<button class="ocw-primary-btn" type="button" data-action="confirm-calculation-result"${model.canConfirm ? "" : " disabled"}>校验计算结果</button>`
+        : "",
+      model.confirmed
+        ? `<button class="ocw-outline-btn" type="button" data-action="preview-erp-payload"${model.canPreview ? "" : " disabled"}>预览 ERP 报文</button>`
+        : "",
+    ].filter(Boolean).join("");
+    return `
+      <div class="ocw-detail-overview-dashboard">
+        <section class="ocw-detail-overview-costs">
+          <div class="ocw-overview-panel-title"><div><span>成本结果</span><h2>本次成本</h2></div></div>
+          <div class="ocw-overview-total-grid">
+            <article><span>采购货值</span><strong>${this.escape(amountText(model.goodsValueRmb, "RMB"))}</strong></article>
+            <article class="is-primary"><span>综合成本</span><strong>${this.escape(amountText(model.totalCostRmb, "RMB"))}</strong></article>
+          </div>
+          <div class="ocw-overview-fee-head"><h3>费用构成</h3><strong>合计 ${this.escape(amountText(model.feeTotalRmb, "RMB"))}</strong></div>
+          <div class="ocw-overview-fee-scroll">
+            <table class="ocw-overview-fee-table">
+              <thead><tr><th>费用项目</th><th>原币金额</th><th>折合 RMB</th><th>状态</th></tr></thead>
+              <tbody>${feeRows}</tbody>
+            </table>
+          </div>
+          <dl class="ocw-overview-basic-info">
+            ${basicInfo.map(([label, value]) => `<div><dt>${this.escape(label)}</dt><dd>${this.escape(this.formatValue(value))}</dd></div>`).join("")}
+          </dl>
+          <div class="ocw-overview-current-action">
+            <div><span>当前需要</span><strong>${this.escape(currentStep)}</strong><small>${this.escape(model.invalidBusiness ? "当前审批已无效，不可确认或推送。" : model.statusInfo.suggestion || model.statusInfo.label || "按当前流程继续处理。")}</small></div>
+            <div class="ocw-overview-current-buttons">${actionButtons}</div>
+          </div>
+        </section>
+        <aside class="ocw-detail-overview-progress">
+          <div class="ocw-overview-panel-title"><div><span>业务流程</span><h2>处理进度</h2></div></div>
+          <ol class="ocw-overview-flow">
+            ${flowSteps.map((step, index) => `<li data-step="${step.key}" data-state="${model.flow[step.key]}"><span>${model.flow[step.key] === "done" ? "✓" : index + 1}</span><div><strong>${this.escape(step.label)}</strong><small>${this.escape(step.detail)}</small></div><em>${this.escape(flowLabels[model.flow[step.key]])}</em></li>`).join("")}
+          </ol>
+          <div class="ocw-overview-documents">
+            <div><h3>资料清单</h3><span>点击状态查看对应资料</span></div>
+            <ul>${documents}</ul>
+          </div>
+        </aside>
+      </div>
+    `;
+  }
+
   renderOverviewDetailTab() {
     const batch = this.getDetailBatch();
     const approval = this.detailState.dingtalkApproval;
@@ -18403,8 +18574,7 @@ class OverseasCostWorkbench {
     }
     this.$root.find("[data-area='detail-content']").html(`
       <div class="ocw-detail-overview">
-        <div class="ocw-detail-section-head"><div><span>批次概况</span><h2>成本与 ERP 流程</h2></div><div class="ocw-detail-section-actions"><button class="ocw-outline-btn" type="button" data-action="view-dingtalk-approval">查看钉钉审批</button></div></div>
-        ${this.renderBatchDrawerOverview(batch, [])}
+        ${this.renderDetailOverviewDashboard(batch)}
       </div>
     `);
   }
