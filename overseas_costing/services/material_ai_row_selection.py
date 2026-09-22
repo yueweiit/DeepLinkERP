@@ -794,6 +794,7 @@ def _field_candidates(catalog_rows):
                     if candidate['workflow_stage'] not in default_stages else
                     '未作为默认值，保留为本字段可改选候选。')
     _resolve_value_basis_defaults(result, rows_by_id)
+    _decorate_field_candidate_presentation_groups(result)
     defaults={candidate['row_id'] for candidate in result if candidate['default_selected']}
     for row_id,row in rows_by_id.items():
         if row.get('origin')!='source':
@@ -889,6 +890,37 @@ def _canonical_field_candidate(fieldname,value):
         try:return format(Decimal(str(value)).normalize(),'f')
         except (InvalidOperation,TypeError,ValueError):pass
     return str(value or '').strip().casefold()
+
+
+def _decorate_field_candidate_presentation_groups(candidates):
+    groups={}
+    for candidate in candidates:
+        key=(
+            candidate.get('item_name'),candidate.get('fieldname'),
+            candidate.get('workflow_stage'),
+            _canonical_field_candidate(
+                candidate.get('fieldname'),candidate.get('suggested_value')),
+        )
+        groups.setdefault(key,[]).append(candidate)
+    for key,equivalent in groups.items():
+        ranked=lambda candidate:(
+            not candidate.get('can_apply'),
+            int(candidate.get('workflow_rank') or 0),
+            int(candidate.get('source_priority') or 999999),
+            -float(candidate.get('confidence') or 0),
+            str(candidate.get('candidate_id') or ''),
+        )
+        defaults=[candidate for candidate in equivalent if candidate.get('default_selected')]
+        representative=min(defaults or equivalent,key=ranked)
+        candidate_ids=sorted(candidate['candidate_id'] for candidate in equivalent)
+        group_id=digest(POLICY,'field-candidate-presentation-group',*key)
+        for candidate in equivalent:
+            candidate.update(
+                presentation_group_id=group_id,
+                presentation_representative_candidate_id=representative['candidate_id'],
+            )
+            candidate.pop('presentation_equivalent_candidate_ids',None)
+        representative['presentation_equivalent_candidate_ids']=candidate_ids
 
 
 def _stage_row_material_key(row):

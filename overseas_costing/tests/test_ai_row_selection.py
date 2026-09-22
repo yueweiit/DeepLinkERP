@@ -20,6 +20,24 @@ def source(code='A1', **fields):
     return item('draft-'+code,code,_review_origin='source',**fields)
 
 
+def field_candidate_review(values, *, fieldname='gross_weight_kg', confidences=None, roles=None):
+    confidences = confidences or [.99] * len(values)
+    roles = roles or ['logistics_expense'] * len(values)
+    sources = [
+        {'source_id': f'GROUP-SOURCE-{index}', 'process_instance_id': f'GROUP-PROCESS-{index}',
+         'source_kind': 'approval_form', 'approval_role': role}
+        for index, role in enumerate(roles)
+    ]
+    proposals = [
+        {'proposal_id': f'GROUP-PROPOSAL-{index}', 'proposal_type': 'item_update',
+         'target_item_name': 'I1', 'confidence': confidences[index],
+         'source_refs': [{'source_id': source_row['source_id']}],
+         'payload': {'fields': {fieldname: value}}}
+        for index, (source_row, value) in enumerate(zip(sources, values))
+    ]
+    return catalog([item('I1', 'SKU-1', **{fieldname: None})], proposals, sources)
+
+
 def test_fill_missing_replaces_weight_placeholder_zero_and_preserves_quantity():
     rows=[item(gross_weight_kg=0,volume_m3=None)]
     c=catalog(rows,[reconcile([source(actual_shipped_qty='4',gross_weight_kg='7',volume_m3='2')])])
@@ -648,6 +666,101 @@ def test_same_source_same_value_is_one_field_candidate_not_a_false_conflict():
     assert len(candidates) == 1
     assert candidates[0]['default_selected'] is True
     assert candidates[0]['suggested_value'] == '42.05'
+
+
+@pytest.mark.parametrize(('fieldname', 'base_value', 'equivalent_value'), [
+    ('gross_weight_kg', 5, 5.0),
+    ('gross_weight_kg', 5, '5.00'),
+    ('packaging_type', ' BOX ', 'box'),
+])
+def test_equivalent_field_candidates_share_stable_presentation_metadata_without_losing_audit_rows(
+        fieldname, base_value, equivalent_value):
+    review = field_candidate_review([base_value, equivalent_value], fieldname=fieldname)
+    candidates = [row for row in review['field_candidates'] if row['fieldname'] == fieldname]
+    singleton = field_candidate_review([equivalent_value], fieldname=fieldname)['field_candidates'][0]
+
+    assert len(candidates) == 2
+    assert len({row['presentation_group_id'] for row in candidates}) == 1
+    assert candidates[0]['presentation_group_id'] == singleton['presentation_group_id']
+    candidate_ids = sorted(row['candidate_id'] for row in candidates)
+    representative = next(row for row in candidates if row['default_selected'])
+    assert representative['presentation_equivalent_candidate_ids'] == candidate_ids
+    assert all('presentation_equivalent_candidate_ids' not in row
+               for row in candidates if row is not representative)
+    assert all(row['presentation_representative_candidate_id'] == representative['candidate_id']
+               for row in candidates)
+    assert len({row['process_instance_id'] for row in candidates}) == 2
+    assert len({row['source_refs'][0]['source_id'] for row in candidates}) == 2
+    assert all(len(row['evidence_chain']) == 1 for row in candidates)
+
+
+def test_distinct_values_and_workflow_stages_remain_distinct_presentation_groups():
+    distinct_values = field_candidate_review([5, 6])['field_candidates']
+    distinct_stages = field_candidate_review(
+        [5, '5.00'], roles=['logistics_expense', 'international_logistics'],
+    )['field_candidates']
+
+    for candidates in (distinct_values, distinct_stages):
+        assert len({row['presentation_group_id'] for row in candidates}) == 2
+        assert all(row['presentation_equivalent_candidate_ids'] == [row['candidate_id']]
+                   for row in candidates)
+        assert all(row['presentation_representative_candidate_id'] == row['candidate_id']
+                   for row in candidates)
+
+
+def test_presentation_representative_prefers_safe_default_then_existing_business_ranking():
+    low_confidence = field_candidate_review([5, '5.00'], confidences=[.2, .8])['field_candidates']
+    expected = min(low_confidence, key=lambda row: (
+        not row['can_apply'], row['workflow_rank'], row['source_priority'],
+        -row['confidence'], row['candidate_id'],
+    ))
+
+    assert not any(row['default_selected'] for row in low_confidence)
+    assert all(row['presentation_representative_candidate_id'] == expected['candidate_id']
+               for row in low_confidence)
+
+    fact = {
+        'original_amount': '5', 'amount_rmb': '5', 'currency': 'RMB',
+        'quantity': '1', 'uom': '件', 'rate_to_rmb': '1', 'source_type': 'payment',
+        'material_code': 'SKU-1', 'spec_model': '',
+    }
+    sources = [
+        {'source_id': source_id, 'process_instance_id': f'PAY-{index}',
+         'source_kind': 'approval_form', 'approval_role': 'payment'}
+        for index, source_id in enumerate(('A-INVALID', 'B-LOW', 'C-DEFAULT'))
+    ]
+    proposals = [
+        {'proposal_id': source_row['source_id'], 'proposal_type': 'item_update',
+         'target_item_name': 'I1', 'confidence': confidence,
+         'source_refs': [{'source_id': source_row['source_id']}],
+         **({'_purchase_value_fact': {
+             **fact, 'source_refs': [{'source_id': source_row['source_id']}],
+         }} if has_fact else {}),
+         'payload': {'fields': {'goods_value': value}}}
+        for source_row, confidence, has_fact, value in zip(
+            sources, (1, .5, .99), (False, True, True), (5, '5.0', '5.00'))
+    ]
+    candidates = catalog([item('I1', 'SKU-1')], proposals, sources)['field_candidates']
+    by_source = {row['source_refs'][0]['source_id']: row for row in candidates}
+    representative = by_source['C-DEFAULT']
+
+    assert by_source['A-INVALID']['can_apply'] is False
+    assert by_source['B-LOW']['can_apply'] is True
+    assert by_source['B-LOW']['default_selected'] is False
+    assert representative['default_selected'] is True
+    assert all(row['presentation_representative_candidate_id'] == representative['candidate_id']
+               for row in candidates)
+
+    large_group = field_candidate_review([5] * 200)['field_candidates']
+    large_representative = next(
+        row for row in large_group
+        if row['candidate_id'] == row['presentation_representative_candidate_id']
+    )
+    assert len(large_group) == 200
+    assert len({row['presentation_group_id'] for row in large_group}) == 1
+    assert sum('presentation_equivalent_candidate_ids' in row for row in large_group) == 1
+    assert large_representative['presentation_equivalent_candidate_ids'] == sorted(
+        row['candidate_id'] for row in large_group)
 
 
 def test_plain_comment_conflict_does_not_override_attachment_in_same_process():
