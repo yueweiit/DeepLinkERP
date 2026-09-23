@@ -876,3 +876,66 @@ def test_merged_candidate_borrows_the_file_url_from_the_sibling_copy() -> None:
     assert candidate["attachment"] == "ATT-LIVE"
     assert candidate["audit_only"] is False
     assert candidate["file_url"] == "/private/files/运费账单-retired.pdf"
+
+
+def test_worklist_evidence_rows_expose_the_attachment_file_url(monkeypatch) -> None:
+    """工作清单里的已关联凭证要带上文件地址。
+
+    ``Overseas Cost Fee Evidence.attachment`` 只存链接，文件地址的真源是
+    ``Overseas Cost Attachment``；不补这一步，界面上的「预览」拿到空地址，只能变灰。
+    """
+
+    rules = build_default_fee_templates("SEA")
+    for rule in rules:
+        rule.update(amount_status="NOT_INCURRED", remark="未发生", name=rule["logical_fee_key"])
+    rules[0].update(amount_status="ACTUAL", amount="10", currency="RMB")
+    items = [{"name": "A", "stable_line_key": "A", "goods_value": "100", "quantity": "1", "purchase_uom": "件"}]
+
+    class FakeDb:
+        @staticmethod
+        def get_value(doctype, name, fieldname, **kwargs):
+            if isinstance(fieldname, list):
+                return {}
+            return {"batch": "B", "current_version": "V", "transport_mode": "SEA"}.get(fieldname)
+
+    class FakeFrappe:
+        db = FakeDb()
+
+        @staticmethod
+        def get_all(doctype, **kwargs):
+            return {
+                "Overseas Cost Item": items,
+                "Overseas Cost Fee Evidence": [
+                    {
+                        "name": "E",
+                        "fee_rule": rules[0]["name"],
+                        "attachment": "ATT-1",
+                        "evidence_role": "freight_invoice",
+                        "validation_status": "VALID",
+                    }
+                ],
+                "Overseas Cost Attachment": [{"name": "ATT-1", "file_url": "/private/files/bill.png"}],
+            }.get(doctype, [])
+
+    monkeypatch.setattr(fee_service, "frappe", FakeFrappe())
+    monkeypatch.setattr(fee_service, "_query_rules", lambda *args: rules)
+
+    worklist = fee_service.get_fee_worklist("B", "V")
+    urls = [row["file_url"] for fee in worklist["fees"] for row in (fee.get("evidence") or [])]
+
+    assert urls == ["/private/files/bill.png"]
+
+
+def test_attach_evidence_file_urls_skips_the_query_when_nothing_is_linked(monkeypatch) -> None:
+    """没有已关联凭证时不去查附件表，也不给凭证行留一个假的地址。"""
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(*_args, **_kwargs):
+            raise AssertionError("没有已关联凭证时不应查询附件表")
+
+    monkeypatch.setattr(fee_service, "frappe", FakeFrappe())
+
+    assert fee_service.attach_evidence_file_urls([]) == []
+    orphan = fee_service.attach_evidence_file_urls([{"name": "E", "attachment": ""}])
+    assert orphan[0]["file_url"] == ""

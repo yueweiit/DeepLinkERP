@@ -108,13 +108,13 @@
     this.$root.on("click", "[data-action='mf-preview-evidence']", (event) => {
       const $button = $(event.currentTarget);
       const fileUrl = $button.attr("data-file-url");
-      // 还没选附件时这个按钮就是「关联并解析凭证」的快捷入口：它的文案本身
-      // 就是那句提示，点下去直接开弹窗，而不是让人戳一个没反应的灰字。
+      // 没有可预览对象时，这个按钮只负责把话说清楚：先选附件、再预览。
+      // 提示语与按钮的悬停提示是同一句，不另起说法。
       if (!fileUrl) {
-        this.openMaterialFeeEvidenceDialog($button.attr("data-fee-key"));
+        frappe.show_alert({ message: "需在关联并解析凭证选择附件", indicator: "orange" });
         return;
       }
-      // 预览已选凭证直接复用附件预览弹窗（图片内嵌、PDF/文本 iframe、其余给下载），
+      // 预览直接复用附件预览弹窗（图片内嵌、PDF/文本 iframe、其余给下载），
       // 不再为这一处另写一套打开逻辑。
       this.openOaAttachmentFilePreviewDialog?.(fileUrl, $button.attr("data-file-name"));
     });
@@ -4703,29 +4703,31 @@
   }
 
   renderMaterialFeeEvidencePreview(feeKey) {
-    // 与「关联并解析凭证」并列的**按钮**，外观完全由 .ocw-mf-row-actions button
-    // 决定（蓝色文字按钮），不另造面板、也不自造第二套按钮样式：未勾选时文案就是
-    // 那句提示、点它开弹窗；勾选后文案换成该份附件、点它看原件。这张表本身不持有
-    // “已选凭证”，所以事实来源只能是 materialFeeState。
-    const candidate = this.materialFeeEvidencePreviewCandidate(feeKey);
-    if (!candidate) {
-      // 未勾选时按钮文案就是那句提示，但**不做成禁用灰字**：灰字在操作列里
-      // 和一串普通文字没有区别，看着就不像个按钮。保持与旁边两个按钮同款的
-      // 蓝色文字按钮，并且可点 —— 点它就是打开「关联并解析凭证」弹窗。
-      return `<button type="button" class="ocw-mf-evidence-preview" data-mf-evidence-preview="${this.escape(feeKey)}" data-action="mf-preview-evidence" data-fee-key="${this.escape(feeKey)}" title="需在关联并解析凭证选择附件">需在关联并解析凭证选择附件</button>`;
+    // 与「关联并解析凭证」并列的按钮：文案恒为「预览」，外观全部来自既有的
+    // .ocw-mf-row-actions button，不自造第二套按钮样式。
+    // 没有可预览对象时只用 class 把它调灰，**不用 disabled** —— 原生禁用的按钮
+    // 不派发点击、悬停提示也不保证出现，那样它就成了一段点不动的死文字。
+    const target = this.materialFeeEvidencePreviewTarget(feeKey);
+    const fileUrl = String(target?.file_url || "");
+    const className = `ocw-mf-evidence-preview${fileUrl ? "" : " is-muted"}`;
+    const shell = `type="button" class="${className}" data-mf-evidence-preview="${this.escape(feeKey)}" data-action="mf-preview-evidence"`;
+    if (!fileUrl) {
+      return `<button ${shell} title="需在关联并解析凭证选择附件">预览</button>`;
     }
-    const fileName = candidate.file_name || candidate.attachment || "已选附件";
-    const fileUrl = String(candidate.file_url || "");
-    // 老缓存里没有 file_url 的候选退化成不可点，而不是弹一个空预览。
-    const openAttribute = fileUrl
-      ? ` data-action="mf-preview-evidence" data-file-url="${this.escape(fileUrl)}" data-file-name="${this.escape(fileName)}" title="${this.escape(`预览已选凭证：${fileName}`)}"`
-      : " disabled";
-    return `<button type="button" class="ocw-mf-evidence-preview" data-mf-evidence-preview="${this.escape(feeKey)}"${openAttribute}>预览 ${this.escape(fileName)}</button>`;
+    const fileName = target.file_name || target.attachment || "已选附件";
+    return `<button ${shell} data-file-url="${this.escape(fileUrl)}" data-file-name="${this.escape(fileName)}" title="${this.escape(`预览 ${fileName}`)}">预览</button>`;
   }
 
-  materialFeeEvidencePreviewCandidate(feeKey) {
-    const preview = this.materialFeeState?.evidencePreview;
-    return preview && preview.feeKey === String(feeKey || "") ? preview.candidate : null;
+  materialFeeEvidencePreviewTarget(feeKey) {
+    // 可预览对象有两个来源，弹窗里刚选中的那份优先；否则退回该行最近关联的那一份
+    // （凭证行由服务端按关联时间升序返回，所以从后往前找第一份带文件地址的）。
+    // 两者都没有时返回 null，按钮保持灰色。
+    const picked = this.materialFeeState?.evidencePreview;
+    if (picked && picked.feeKey === String(feeKey || "") && picked.candidate?.file_url) {
+      return picked.candidate;
+    }
+    const linked = this.findMaterialFee(feeKey)?.evidence || [];
+    return [...linked].reverse().find((row) => String(row.file_url || "")) || null;
   }
 
   previewMaterialFeeEvidenceSelection(feeKey, candidates, attachment) {

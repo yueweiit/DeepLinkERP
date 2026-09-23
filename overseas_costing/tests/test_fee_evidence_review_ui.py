@@ -733,8 +733,9 @@ def test_evidence_picker_renders_the_server_summary_and_never_recomputes_it() ->
 def test_fee_row_previews_the_selected_voucher_next_to_the_link_action() -> None:
     """行操作列「关联并解析凭证」右侧的预览按钮。
 
-    预览和「关联并解析凭证」一样是一个按钮，不另造一块面板：未勾选时禁用并
-    自己说明缺什么，勾选后文案换成那份附件，点它复用既有附件预览弹窗。
+    文案恒为「预览」：没有可预览对象时它变灰、悬停与点击都给同一句提示；有对象时
+    变蓝、点击走既有附件预览弹窗。灰态刻意不用 ``disabled`` —— 原生禁用元素不派发
+    点击、悬停提示也不保证出现，那样它就是一段点不动的死文字。
     """
 
     source = PART.read_text(encoding="utf-8")
@@ -746,30 +747,31 @@ def test_fee_row_previews_the_selected_voucher_next_to_the_link_action() -> None
     assert 'class="ocw-mf-row-actions"' in row
 
     preview = source.split("renderMaterialFeeEvidencePreview(feeKey) {", 1)[1].split(
-        "materialFeeEvidencePreviewCandidate(feeKey) {", 1
+        "materialFeeEvidencePreviewTarget(feeKey) {", 1
     )[0]
-    empty_branch, chosen_branch = preview.split("const fileName =", 1)
+    muted_branch, ready_branch = preview.split("const fileName =", 1)
     # 就是操作列里的一个 <button>，外观交给既有的按钮样式，不再自带边框底色。
-    assert '<button type="button"' in preview
+    assert 'type="button" class="${className}"' in preview
     assert "data-mf-evidence-preview=" in preview
-    # 未选择时给提示文案，但**不能是禁用灰字** —— 灰字在操作列里和普通文字没差别，
-    # 看着就不像按钮；它要是可点的，点了直接进「关联并解析凭证」弹窗。
-    assert "需在关联并解析凭证选择附件" in empty_branch
-    assert "disabled" not in empty_branch
-    assert 'data-action="mf-preview-evidence"' in empty_branch
-    assert 'data-fee-key=' in empty_branch
-    # 选中后文案换成那份附件、点击走既有附件预览弹窗，不另写一套打开逻辑。
-    assert "预览 " in chosen_branch
-    assert 'data-action="mf-preview-evidence"' in chosen_branch
-    assert "data-file-url=" in chosen_branch
-    # 只有“候选确实没有文件地址、点了也打不开”这一种情况才退回禁用。
-    assert '? ` data-action="mf-preview-evidence"' in chosen_branch and ': " disabled"' in chosen_branch
+    # 文案恒为「预览」，不把文件名拼进按钮（长文件名会撑破操作列）。
+    assert preview.count(">预览</button>") == 2
+    # 灰态：只用 class 调色，标记上绝不能出现 disabled。
+    assert "is-muted" in muted_branch
+    assert "disabled" not in muted_branch.split("<button", 1)[1]
+    assert 'title="需在关联并解析凭证选择附件"' in muted_branch
+    # 蓝态：带上文件地址与文件名，点击才有得预览。
+    assert "is-muted" not in ready_branch
+    assert "data-file-url=" in ready_branch
+    assert "data-file-name=" in ready_branch
     assert preview.count("renderMaterialFeeEvidencePreview") == 0
 
-    handler = source.split("""data-action='mf-preview-evidence'""", 1)[1].split("});", 1)[0]
+    handler = source.split("""data-action='mf-preview-evidence'""", 1)[1].split("\n    });", 1)[0]
+    # 没地址 -> 提示先选附件；有地址 -> 复用既有附件预览弹窗，不另写打开逻辑。
+    assert "需在关联并解析凭证选择附件" in handler
+    assert "frappe.show_alert" in handler
     assert "openOaAttachmentFilePreviewDialog" in handler
-    # 未选态的可点性靠这个分支兑现：没有文件地址就开弹窗，不新增第二套弹窗。
-    assert "openMaterialFeeEvidenceDialog" in handler
+    # 灰态不再顺带开弹窗：那是「关联并解析凭证」的职责，重复开会让两个按钮行为一样。
+    assert "openMaterialFeeEvidenceDialog" not in handler
 
     dialog = source.split("openMaterialFeeEvidenceDialog(feeKey) {", 1)[1].split(
         "renderMaterialFeeEvidencePicker(candidates, linked) {", 1
@@ -779,23 +781,19 @@ def test_fee_row_previews_the_selected_voucher_next_to_the_link_action() -> None
     assert "previewMaterialFeeEvidenceSelection(feeKey, candidates," in dialog
 
     css = CSS.read_text(encoding="utf-8")
-    assert ".ocw-mf-evidence-preview" in css
-    # 长文件名靠截断收住，不再给面板式的虚线边框和底色。
-    assert "text-overflow: ellipsis" in css
-    assert ".ocw-mf-evidence-preview-empty" not in css
-    # 三个按钮共用同一套外观；预览按钮只在“没有文件地址”的禁用态才自设颜色，
-    # 否则默认态又会变成一坨看着不像按钮的灰字。
-    assert ".ocw-mf-row-actions button" in css
     preview_rules = [line for line in css.splitlines() if line.startswith(".ocw-mf-evidence-preview")]
-    assert all("color" not in line for line in preview_rules if "[disabled]" not in line)
-    assert any("[disabled]" in line and "color" in line for line in preview_rules)
+    # 灰态只靠这一个 class；裁剪、禁用样式都随固定文案一起收掉。
+    assert len(preview_rules) == 1
+    assert ".is-muted" in preview_rules[0] and "color" in preview_rules[0]
+    assert "overflow" not in preview_rules[0]
 
 
 def test_evidence_preview_follows_the_dialog_selection_per_fee_row() -> None:
     """预览按钮跟随弹窗的单选结果，且只影响自己那一行。
 
-    弹窗仍是单选，所以按钮最多带一份附件；没勾选或候选不在候选池里时回到禁用
-    提示。状态按 ``fee_key`` 归属，另一行的按钮不能被这一行的选择污染。
+    弹窗仍是单选，所以预览对象最多一份；没得预览时按钮变灰（不是禁用），
+    该行已经关联过凭证时退回最近关联的那一份，状态按 ``fee_key`` 归属，
+    另一行的按钮不能被这一行的选择污染。
     """
 
     result = _voucher_click_result(
@@ -805,30 +803,37 @@ const passive={off(){return this},on(){return this},replaceWith(html){replaced.p
 const workspace=Object.create(Harness.prototype);
 workspace.$root={on(){return this},find(){return passive}};
 workspace.detailState={batchName:'BATCH-1',versionName:'VERSION-1'};
-workspace.materialFeeState=null;
+workspace.materialFeeState={batchName:'BATCH-1',fees:{fees:[
+  {logical_fee_key:'FEE-3',evidence:[{attachment:'ATT-OLD',file_url:'/private/files/old.pdf'},{attachment:'ATT-NEW',file_url:'/private/files/new.pdf'}]},
+  {logical_fee_key:'FEE-4',evidence:[{attachment:'ATT-BARE',file_url:''}]},
+]}};
 const candidates=[
   {attachment:'A-1',file_name:'invoice.pdf',file_url:'/private/files/invoice.pdf',parse_status:'Parsed'},
   {attachment:'A-2',file_name:'bill.png',file_url:'/private/files/bill.png',parse_status:'Queued',audit_only:true,audit_only_reason:'资料已撤销或被替代，仅审计。'},
 ];
-const empty=workspace.renderMaterialFeeEvidencePreview('FEE-1');
+const untouched=workspace.renderMaterialFeeEvidencePreview('FEE-2');
 workspace.previewMaterialFeeEvidenceSelection('FEE-1',candidates,'A-2');
 const picked=replaced.join('');
 const otherRow=workspace.renderMaterialFeeEvidencePreview('FEE-2');
 workspace.previewMaterialFeeEvidenceSelection('FEE-1',candidates,'');
 const cleared=workspace.renderMaterialFeeEvidencePreview('FEE-1');
-console.log(JSON.stringify({empty,picked,otherRow,cleared}));
+const linked=workspace.renderMaterialFeeEvidencePreview('FEE-3');
+const linkedNoUrl=workspace.renderMaterialFeeEvidencePreview('FEE-4');
+console.log(JSON.stringify({untouched,picked,otherRow,cleared,linked,linkedNoUrl}));
 """
     )
 
-    # 未选之前是提示文案，并且可点（点它进「关联并解析凭证」弹窗），不是灰字。
-    assert "需在关联并解析凭证选择附件" in result["empty"]
-    assert "disabled" not in result["empty"]
-    assert result["empty"].startswith("<button")
-    # 选中 A-2 后按钮换成它，并且带上自己的附件地址供预览。
-    assert "bill.png" in result["picked"]
-    assert "invoice.pdf" not in result["picked"]
-    assert "data-file-url=\"/private/files/bill.png\"" in result["picked"]
-    assert "disabled" not in result["picked"]
-    # 另一行不受这一行的选择影响；清空后回到提示文案。
-    assert "需在关联并解析凭证选择附件" in result["otherRow"]
-    assert "需在关联并解析凭证选择附件" in result["cleared"]
+    # 还没选、也没已关联：灰色 + 提示，文案仍是「预览」。
+    assert "is-muted" in result["untouched"]
+    assert 'title="需在关联并解析凭证选择附件"' in result["untouched"]
+    assert ">预览</button>" in result["untouched"]
+    # 选中 A-2 后按钮变蓝，并带上它的附件地址供预览。
+    assert "is-muted" not in result["picked"]
+    assert 'data-file-url="/private/files/bill.png"' in result["picked"]
+    assert "is-muted" in result["otherRow"]
+    assert "is-muted" in result["cleared"]
+    # 已关联但本次没在弹窗里选：退回最近关联的那一份（new.pdf 比 old.pdf 新）。
+    assert "is-muted" not in result["linked"]
+    assert 'data-file-url="/private/files/new.pdf"' in result["linked"]
+    # 已关联却拿不到文件地址时不假装能预览，老实变灰。
+    assert "is-muted" in result["linkedNoUrl"]

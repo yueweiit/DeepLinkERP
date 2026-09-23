@@ -887,6 +887,30 @@ def deduplicate_evidence_candidates(candidates: list[dict]) -> list[dict]:
     return result
 
 
+def attach_evidence_file_urls(evidence_rows: list[dict]) -> list[dict]:
+    """给已关联凭证行补上附件的文件地址，供前端直接预览原件。
+
+    凭证行的 ``attachment`` 指向 ``Overseas Cost Attachment``，文件地址的真源在那里；
+    这里只把这一个字段搬过来，不复制任何判定结果（来源是否可用、终核状态等仍以
+    各自服务端的判定位为准）。
+    """
+    links = sorted({str(row.get("attachment") or "").strip() for row in evidence_rows or []} - {""})
+    file_urls: dict[str, str] = {}
+    if links:
+        file_urls = {
+            str(row.get("name") or ""): str(row.get("file_url") or "")
+            for row in frappe.get_all(
+                "Overseas Cost Attachment",
+                filters={"name": ["in", links]},
+                fields=["name", "file_url"],
+                limit_page_length=len(links),
+            )
+        }
+    for row in evidence_rows or []:
+        row["file_url"] = file_urls.get(str(row.get("attachment") or "").strip(), "")
+    return evidence_rows
+
+
 def _now():
     if frappe is not None:
         try:
@@ -1342,7 +1366,7 @@ def get_fee_worklist(batch_name: str, version_name: str | None = None) -> dict:
         limit_page_length=5000,
     )
     evidence_by_rule: dict[str, list[dict]] = {}
-    for row in evidence_rows:
+    for row in attach_evidence_file_urls(evidence_rows):
         evidence_by_rule.setdefault(str(row.get("fee_rule") or ""), []).append(row)
 
     fx_context = {

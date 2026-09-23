@@ -402,11 +402,11 @@
 .ocw-mf-evidence-voucher-tag { margin-left: 6px; padding: 1px 5px; border-radius: 4px; background: #f0a02a; color: #fff; font-size: 10px; font-weight: 500; vertical-align: 1px; }
 /* “仅审计”候选照常列出、不隐藏，只把原因讲清楚（审批失效／不得作为成本来源／非当前版本）。 */
 .ocw-mf-evidence-option em.ocw-mf-evidence-audit-note { color: #b42318; }
-/* 「关联并解析凭证」右侧的预览按钮：字号、颜色、边框全部沿用
-   .ocw-mf-row-actions button，三个按钮因此长得一模一样，这里只负责长文件名截断。
-   [disabled] 只服务一种情况 —— 候选确实没有文件地址，点了也打不开。 */
-.ocw-mf-evidence-preview { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ocw-mf-evidence-preview[disabled] { color: #98a2b3; cursor: default; }
+/* 「关联并解析凭证」右侧的预览按钮：文案恒为「预览」，字号、颜色、边框全部沿用
+   .ocw-mf-row-actions button，三个按钮因此长得一样。没有可预览对象时只把文字调灰，
+   刻意**不加 disabled** —— 原生禁用元素不派发点击、悬停提示也不保证出现，
+   那样它就成了一段点不动的死文字。 */
+.ocw-mf-evidence-preview.is-muted { color: #98a2b3; }
 /* 重复行（被替代／非当前版本）默认折叠：列表先呈现可用的，点开才看这些副本。 */
 .ocw-mf-evidence-audit-group { display: grid; gap: 6px; }
 .ocw-mf-evidence-audit-group > summary { cursor: pointer; padding: 5px 8px; border-radius: 6px; background: #fdf3f2; color: #b42318; font-size: 11px; }
