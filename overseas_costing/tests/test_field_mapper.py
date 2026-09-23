@@ -31,6 +31,7 @@ def test_map_oa_row_to_item() -> None:
         "重量Peso（KG）": 25750,
         "柜号/单号Número DE Logística": "HPCU5155607",
         "物流方式Camino Envío": "contenedor marítimo海运整柜",
+        "供应商Proveedor": "东莞悦为智能技术有限公司",
         "备注otro": "汇率待确认",
     }
     mapped = map_oa_row_to_item(row)
@@ -41,6 +42,7 @@ def test_map_oa_row_to_item() -> None:
     assert mapped["unit"] == "个"
     assert mapped["waybill_no"] == "HPCU5155607"
     assert mapped["transport_mode"] == "SEA"
+    assert mapped["supplier"] == "东莞悦为智能技术有限公司"
     assert mapped["source_remark"] == "汇率待确认"
 
 

@@ -327,6 +327,7 @@ def map_oa_row_to_item(row: dict) -> dict:
             "proyecto",
             "project_collection",
         ),
+        "supplier": _first_value(row, "供应商Proveedor", "供应商", "Proveedor", "supplier"),
         "quantity": _first_value(row, "数量Cantidad", "数量", "Cantidad", "Qty", "QTY", "quantity"),
         "gross_weight_kg": _first_value(
             row,

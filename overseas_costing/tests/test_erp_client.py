@@ -251,6 +251,8 @@ def test_push_standard_purchase_flow_creates_item_and_purchase_order(monkeypatch
     item_body = next(row["body"] for row in captured if row["method"] == "POST" and row["url"].endswith("/Item"))
     po_body = next(row["body"] for row in captured if row["method"] == "POST" and row["url"].endswith("/Purchase%20Order"))
     assert item_body["item_code"] == "YL000001"
+    assert item_body["stock_uom"] == "Nos"
+    assert result["response"]["items"][0]["uom_source"] == "local"
     assert item_body["custom_overseas_supplier"] == "HUAFON"
     assert item_body["custom_overseas_comprehensive_unit_price"] == 12.5
     assert po_body["company"] == "Empresas Mexico"
@@ -521,6 +523,119 @@ def test_standard_purchase_flow_uses_default_supplier_when_item_suppliers_confli
     assert result["ok"] is True
     assert po_body["supplier"] == "Default Supplier"
     assert po_body["custom_overseas_supplier_source"] == "config"
+
+
+def test_existing_erp_item_uses_remote_uom_without_overwriting_it(monkeypatch) -> None:
+    monkeypatch.setattr(
+        erp_client,
+        "get_erp_push_config",
+        lambda: {
+            "enabled": True,
+            "base_url": "https://erp.example.com/api/resource",
+            "authorization": "token abc:def",
+            "push_mode": "standard_purchase",
+            "company": "",
+            "supplier": "",
+            "cost_center": "",
+            "item_group": "Products",
+            "stock_uom": "Nos",
+            "default_currency": "CNY",
+            "schedule_date": "2026-08-20",
+            "target_doctype": "",
+            "method": "POST",
+            "timeout": 30,
+            "field_map": {},
+            "payload_field": "payload_json",
+        },
+    )
+    captured = []
+
+    class FakeResponse:
+        status = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        body = json.loads(request.data.decode("utf-8")) if request.data else None
+        captured.append({"url": request.full_url, "method": request.get_method(), "body": body})
+        if request.get_method() == "GET" and "/Purchase%20Order?" in request.full_url:
+            return FakeResponse({"data": []})
+        if request.get_method() == "GET" and "/Item/YL000001" in request.full_url:
+            return FakeResponse({"data": {"name": "YL000001", "stock_uom": "个：pieza"}})
+        if request.get_method() == "PUT" and "/Item/YL000001" in request.full_url:
+            return FakeResponse({"data": {"name": "YL000001"}})
+        if request.get_method() == "POST" and request.full_url.endswith("/Purchase%20Order"):
+            return FakeResponse({"data": {"name": "PO-0002"}})
+        raise AssertionError(f"unexpected request {request.get_method()} {request.full_url}")
+
+    monkeypatch.setattr(erp_client, "urlopen", fake_urlopen)
+
+    result = erp_client.push_overseas_cost_payload(
+        {
+            "batch_no": "BATCH-002",
+            "version_code": "V1",
+            "subsidiary_code": "Empresas Mexico",
+            "business_key": "PURCHASE:BATCH-002:Empresas Mexico:HUAFON:CNY:个",
+            "items": [
+                {
+                    "material_code": "YL000001",
+                    "material_name": "太阳眼镜",
+                    "supplier": "HUAFON",
+                    "unit": "个",
+                    "purchase_currency": "RMB",
+                    "source_quantity": 2,
+                    "original_unit_price": 8,
+                }
+            ],
+        }
+    )
+
+    item_body = next(row["body"] for row in captured if row["method"] == "PUT" and row["url"].endswith("/Item/YL000001"))
+    po_body = next(row["body"] for row in captured if row["method"] == "POST" and row["url"].endswith("/Purchase%20Order"))
+
+    assert result["ok"] is True
+    assert "stock_uom" not in item_body
+    assert result["items"][0]["action"] == "updated"
+    assert result["items"][0]["uom"] == "个：pieza"
+    assert result["items"][0]["uom_source"] == "erp"
+    assert po_body["items"][0]["uom"] == "个：pieza"
+    assert po_body["items"][0]["stock_uom"] == "个：pieza"
+
+
+def test_validate_payload_for_push_accepts_missing_default_stock_uom(monkeypatch) -> None:
+    monkeypatch.setattr(
+        erp_client,
+        "get_erp_push_config",
+        lambda: {
+            "enabled": True,
+            "base_url": "https://erp.example.com/api/resource",
+            "authorization": "token abc:def",
+            "push_mode": "standard_purchase",
+            "supplier": "HUAFON",
+            "item_group": "Products",
+            "stock_uom": "",
+            "timeout": 30,
+            "target_doctype": "",
+            "method": "POST",
+            "field_map": {},
+            "payload_field": "payload_json",
+        },
+    )
+
+    result = erp_client.validate_payload_for_push({"items": [{"material_code": "A001"}]})
+
+    assert result["ok"] is True
+    assert result["blocking_reasons"] == []
 
 
 def test_validate_payload_for_push_blocks_missing_supplier_in_standard_mode(monkeypatch) -> None:

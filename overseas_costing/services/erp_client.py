@@ -549,8 +549,8 @@ def _missing_config_reasons(config: dict, payload: dict | None = None) -> list[s
             reasons.append("缺少默认供应商配置")
         if not config.get("item_group"):
             reasons.append("缺少默认物料组配置")
-        if not config.get("stock_uom"):
-            reasons.append("缺少默认计量单位配置")
+        # 计量单位按物料从 ERP 已有档案解析（见 _ensure_item），全局默认单位只作兜底，
+        # 因此不再作为推送前置条件。
     if config.get("enabled") is False:
         reasons.append("ERP 推送设置当前未启用")
     if config.get("push_mode") == PUSH_MODE_GENERIC and config.get("method") not in {"POST", "PUT", "PATCH"}:
@@ -699,42 +699,58 @@ def _ensure_item(item: dict, payload: dict, config: dict) -> dict:
     if not item_code:
         return {"ok": False, "message": "物料编码为空，已跳过。"}
 
-    body = _build_item_body(item, payload, config)
-    exists = _resource_exists(config, "Item", item_code)
-    method = "PUT" if exists else "POST"
-    url = _build_doctype_url(config, "Item", item_code) if exists else _build_doctype_url(config, "Item")
+    # 一次读取同时判定存在性并取回 ERP 已有的计量单位：物料单位以 ERP 为准。
+    remote_item = _read_remote_document(config, "Item", item_code)
+    remote_uom = _clean((remote_item or {}).get("stock_uom"))
+    if remote_uom:
+        item["erp_stock_uom"] = remote_uom
+
+    body = _build_item_body(item, payload, config, include_stock_uom=remote_item is None)
+    method = "PUT" if remote_item is not None else "POST"
+    url = _build_doctype_url(config, "Item", item_code) if remote_item is not None else _build_doctype_url(config, "Item")
     request = _build_request(config, url=url, method=method, body=body)
     with urlopen(request, timeout=config["timeout"]) as response:
         response_body = _load_json_response(response.read().decode("utf-8", errors="ignore"))
         return {
             "ok": True,
             "item_code": item_code,
-            "action": "updated" if exists else "created",
+            "action": "updated" if remote_item is not None else "created",
+            "uom": resolve_item_uom(item, payload.get("erp_stock_uom") or config.get("stock_uom") or "Nos"),
+            "uom_source": "erp" if remote_uom else "local",
             "http_status": getattr(response, "status", 200),
             "response": response_body,
         }
 
 
-def _resource_exists(config: dict, doctype: str, docname: str) -> bool:
+def _read_remote_document(config: dict, doctype: str, docname: str) -> dict | None:
+    """读取远端单据内容；远端返回 404 时视为不存在。"""
+
     request = _build_request(config, url=_build_doctype_url(config, doctype, docname), method="GET")
     try:
-        with urlopen(request, timeout=config["timeout"]):
-            return True
+        with urlopen(request, timeout=config["timeout"]) as response:
+            response_body = _load_json_response(response.read().decode("utf-8", errors="ignore"))
     except HTTPError as exc:
         if exc.code == 404:
-            return False
+            return None
         raise
+    data = response_body.get("data") if isinstance(response_body, dict) else None
+    return data if isinstance(data, dict) else {}
 
 
-def _build_item_body(item: dict, payload: dict, config: dict) -> dict:
+def _build_item_body(
+    item: dict,
+    payload: dict,
+    config: dict,
+    *,
+    include_stock_uom: bool = True,
+) -> dict:
     formula = item.get("cost_formula") or {}
     item_code = str(item.get("material_code") or "").strip()
     item_name = str(item.get("material_name") or item.get("product_name") or item_code).strip()
-    return {
+    body = {
         "item_code": item_code,
         "item_name": item_name or item_code,
         "item_group": config.get("item_group") or "All Item Groups",
-        "stock_uom": resolve_item_uom(item, payload.get("erp_stock_uom") or config.get("stock_uom") or "Nos"),
         "is_stock_item": 1,
         "custom_overseas_batch_no": payload.get("batch_no") or payload.get("batch_name") or "",
         "custom_overseas_cost_version": payload.get("version_code") or payload.get("version_name") or "",
@@ -745,6 +761,10 @@ def _build_item_body(item: dict, payload: dict, config: dict) -> dict:
         or formula.get("comprehensive_unit_price")
         or 0,
     }
+    if include_stock_uom:
+        # 更新已有物料时不带单位，避免覆盖 ERP 上已经维护好的计量单位。
+        body["stock_uom"] = resolve_item_uom(item, payload.get("erp_stock_uom") or config.get("stock_uom") or "Nos")
+    return body
 
 
 def _build_purchase_order_body(payload: dict, config: dict) -> dict:

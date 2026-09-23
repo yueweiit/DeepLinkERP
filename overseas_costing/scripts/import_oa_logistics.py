@@ -229,6 +229,11 @@ PURCHASE_RELATE_FIELD_ALIASES = (
     "órdenes de compra",
     "ordenes de compra",
 )
+SUPPLIER_FIELD_ALIASES = (
+    "供应商Proveedor",
+    "供应商",
+    "Proveedor",
+)
 PURCHASE_APPROVAL_KEYWORDS = (
     "采购支出",
     "采购",
@@ -3427,6 +3432,7 @@ def summarize_approval(instance: dict, *, process_instance_id: str = "", include
         "transport_mode": detect_approval_transport_mode(transport_mode_raw),
         "transport_mode_raw": transport_mode_raw,
         "logistics_no": _find_field_value(fields, BATCH_NO_FIELD_ALIASES),
+        "supplier": _find_field_value(fields, SUPPLIER_FIELD_ALIASES),
         "linked_purchase_count": len(linked_purchase_approvals),
         "linked_purchase_approvals": linked_purchase_approvals,
         "oa_attachment_count": len(oa_attachments),
@@ -3741,6 +3747,7 @@ def extract_oa_goods_rows(item: dict) -> list[dict]:
     project_ownership = extract_project_candidates_from_approval(item)
     common_values = {
         "project_collection": project_ownership["candidates"][0]["name"] if len(project_ownership["candidates"]) == 1 else "",
+        "供应商Proveedor": item.get("supplier"),
         "项目proyecto": form_fields.get("项目proyecto"),
         "物料类别TIPO": form_fields.get("物料类别TIPO"),
         "物流方式Camino Envío": item.get("transport_mode_raw"),
@@ -7811,7 +7818,7 @@ def pull_latest_logistics_approvals_to_erp(
                     "items": [
                         {
                             key: row.get(key)
-                            for key in ("row_no", "material_code", "product_name", "quantity", "gross_weight_kg", "project_collection")
+                            for key in ("row_no", "material_code", "product_name", "quantity", "gross_weight_kg", "project_collection", "supplier")
                         }
                         for row in item_values[:20]
                     ],

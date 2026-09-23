@@ -509,6 +509,44 @@ def test_logistics_approval_summary_extracts_sea_trace_fields() -> None:
     assert summary["open_url"].startswith("dingtalk://")
 
 
+def test_logistics_approval_supplier_field_flows_to_item_rows() -> None:
+    instance = {
+        "processInstanceId": "PROC-SEA-SUPPLIER",
+        "businessId": "202609230001",
+        "status": "COMPLETED",
+        "formComponentValues": [
+            {"name": "物流方式Camino Envío", "value": "海运"},
+            {
+                "name": "供应商Proveedor",
+                "value": "东莞悦为智能技术有限公司",
+            },
+            {
+                "name": "货物信息Bienes",
+                "value": json.dumps(
+                    [
+                        {
+                            "rowValue": [
+                                {"label": "物料编码 Código de material", "value": "YL000097"},
+                                {"label": "物料名称（中文）Nombre del material (chino)", "value": "TPU原料"},
+                                {"label": "数量Cantidad", "value": "100"},
+                                {"label": "单位Unidad", "value": "KG"},
+                            ]
+                        }
+                    ],
+                    ensure_ascii=False,
+                ),
+            },
+        ],
+    }
+
+    summary = summarize_approval(instance)
+    items = build_oa_item_values_from_approval(summary)
+
+    assert summary["supplier"] == "东莞悦为智能技术有限公司"
+    assert len(items) == 1
+    assert items[0]["supplier"] == "东莞悦为智能技术有限公司"
+
+
 def test_extract_logistics_fee_from_approval_only_reads_explicit_amount() -> None:
     fee = extract_logistics_fee_from_approval(
         {
