@@ -161,6 +161,130 @@ def _candidate(item_name, fieldname, value, confidence=0.96, source="装箱表.x
     }
 
 
+def _project_routing(*projects):
+    return {
+        "route_revision": "ROUTES-1",
+        "options": [
+            {
+                "project_collection": project,
+                "subsidiary_code": f"COMPANY-{index}",
+                "site_code": "DEEPLINKERP",
+                "revision": index,
+                "ai_match_hint": "宠物用品" if project == "LatinGo拉丁购" else "",
+                "is_approval_candidate": True,
+            }
+            for index, project in enumerate(projects, start=1)
+        ],
+        "conflicts": [],
+    }
+
+
+def _project_item(*candidates, existing=""):
+    return {
+        **_items()[0],
+        "product_name_es": "Juguete para mascotas",
+        "category": "宠物用品",
+        "supplier": "SUPPLIER-1",
+        "project_collection": existing,
+        "extra_json": json.dumps(
+            {"project_candidates": [{"id": f"D{index}", "name": name} for index, name in enumerate(candidates, start=1)]},
+            ensure_ascii=False,
+        ),
+    }
+
+
+def _project_document():
+    return {
+        "document_id": "DOC-PROJECT",
+        "source_ref": {"source": "approval_form", "file": "国际物流审批正文"},
+        "form_fields": {"项目归属Pertenencia del proyecto": "LatinGo拉丁购, YW MOLDES MX模具"},
+    }
+
+
+def _project_proposal(project, *, proposal_id="PROJECT-1", confidence=0.96):
+    return {
+        "proposal_id": proposal_id,
+        "proposal_type": "item_update",
+        "target_item_name": "ITEM-1",
+        "confidence": confidence,
+        "payload": {"fields": {"project_collection": project}},
+        "source_refs": [
+            {"document_id": "DOC-PROJECT", "field": "项目归属Pertenencia del proyecto"}
+        ],
+    }
+
+
+def test_source_review_prompt_exposes_only_approval_candidate_routes_for_project_matching() -> None:
+    item = _project_item("LatinGo拉丁购", "YW MOLDES MX模具")
+    routing = _project_routing("LatinGo拉丁购", "AmigoMart")
+
+    messages = build_source_review_messages([item], [_project_document()], project_routing=routing)
+    prompt = json.loads(messages[1]["content"])
+    safe_item = prompt["items"][0]
+
+    assert safe_item["values"]["product_name_es"] == "Juguete para mascotas"
+    assert safe_item["values"]["category"] == "宠物用品"
+    assert safe_item["values"]["supplier"] == "SUPPLIER-1"
+    assert safe_item["project_assignment"]["allowed_projects"] == ["LatinGo拉丁购"]
+    assert safe_item["project_assignment"]["routes"][0]["ai_match_hint"] == "宠物用品"
+    assert "project_collection 只能从输入的 allowed_projects" in messages[0]["content"]
+
+
+def test_project_proposal_rejects_hallucination_and_defaults_one_high_confidence_allowed_value() -> None:
+    item = _project_item("LatinGo拉丁购", "YW MOLDES MX模具")
+    routing = _project_routing("LatinGo拉丁购", "YW MOLDES MX模具", "AmigoMart")
+
+    normalized = normalize_source_review_proposals(
+        [
+            _project_proposal("LatinGo拉丁购"),
+            _project_proposal("AmigoMart", proposal_id="PROJECT-OUTSIDE"),
+            _project_proposal("模型虚构项目", proposal_id="PROJECT-HALLUCINATED"),
+        ],
+        [item],
+        [_project_document()],
+        project_routing=routing,
+    )
+
+    assert [row["payload"]["fields"]["project_collection"] for row in normalized] == ["LatinGo拉丁购"]
+    assert normalized[0]["default_selected"] is True
+
+
+def test_project_proposal_protects_manual_value_and_keeps_ambiguous_candidates_unselected() -> None:
+    routing = _project_routing("LatinGo拉丁购", "YW MOLDES MX模具")
+    existing = normalize_source_review_proposals(
+        [_project_proposal("LatinGo拉丁购")],
+        [_project_item("LatinGo拉丁购", existing="YW MOLDES MX模具")],
+        [_project_document()],
+        project_routing=routing,
+    )
+    ambiguous = normalize_source_review_proposals(
+        [
+            _project_proposal("LatinGo拉丁购", proposal_id="PROJECT-A"),
+            _project_proposal("YW MOLDES MX模具", proposal_id="PROJECT-B"),
+        ],
+        [_project_item("LatinGo拉丁购", "YW MOLDES MX模具")],
+        [_project_document()],
+        project_routing=routing,
+    )
+
+    assert existing == []
+    assert len(ambiguous) == 2
+    assert all(row["conflict"] is True for row in ambiguous)
+    assert all(row["default_selected"] is False for row in ambiguous)
+
+
+def test_project_proposal_below_auto_adopt_threshold_is_not_preselected() -> None:
+    normalized = normalize_source_review_proposals(
+        [_project_proposal("LatinGo拉丁购", confidence=0.89)],
+        [_project_item("LatinGo拉丁购")],
+        [_project_document()],
+        project_routing=_project_routing("LatinGo拉丁购"),
+    )
+
+    assert len(normalized) == 1
+    assert normalized[0]["default_selected"] is False
+
+
 @pytest.mark.parametrize(
     ("fieldname", "value", "item", "expected"),
     [
@@ -4097,6 +4221,11 @@ def test_unified_worker_merges_approval_fee_and_deepseek_material_proposals(monk
     from overseas_costing.services import material_ai_fill_service as service
 
     repository = _LifecycleRepository(status="QUEUED")
+    review_items = _items()
+    review_items[0]["extra_json"] = json.dumps(
+        {"project_candidates": [{"id": "D1", "name": "ADURO"}]}
+    )
+    repository.get_items = lambda _batch, _version: copy.deepcopy(review_items)
     repository.sources = [
         {
             "source_kind": "approval_form",
@@ -4115,13 +4244,14 @@ def test_unified_worker_merges_approval_fee_and_deepseek_material_proposals(monk
         **original_context(batch, version),
         "transport_mode": "EXPRESS",
         "fx_rates": {"USD": "7.178751"},
+        "project_routing": _project_routing("ADURO"),
     }
     repository.run.update(
         {
             "proposal_version": 1,
             "clarification_text": "两款是一套，共四套",
             "input_fingerprint": service._source_review_fingerprint(
-                "B1", "V1", _items(), repository.sources, "两款是一套，共四套",
+                "B1", "V1", review_items, repository.sources, "两款是一套，共四套",
                 context=repository.get_context("B1", "V1"),
             ),
         }

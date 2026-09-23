@@ -20,6 +20,8 @@ def test_preflight_lists_six_companies_and_ten_routes_without_writes() -> None:
     assert plan["ok"] is True
     assert len(plan["create_companies"]) == 6
     assert len(plan["create_routes"]) == 10
+    latin = next(row for row in plan["create_routes"] if row["project_collection"] == "LatinGo拉丁购")
+    assert latin["ai_match_hint"] == "宠物用品"
 
 
 def test_preflight_repeated_run_skips_everything() -> None:
@@ -68,6 +70,12 @@ class _DB:
     def rollback(self):
         self.rollbacks += 1
 
+    def set_value(self, doctype, name, fieldname, value, update_modified=False):
+        assert doctype == "Overseas Cost Project Route"
+        route = next(row for row in self.owner.routes if row.get("name") == name)
+        route[fieldname] = value
+        self.owner.hint_writes.append((name, fieldname, value, update_modified))
+
 
 class _Doc:
     def __init__(self, fake, values):
@@ -88,7 +96,9 @@ class _Frappe:
         self.companies = list(companies)
         self.routes = []
         self.writes = []
+        self.hint_writes = []
         self.db = _DB()
+        self.db.owner = self
 
     def only_for(self, role):
         assert role == "System Manager"
@@ -124,3 +134,21 @@ def test_management_command_conflict_performs_zero_writes(monkeypatch) -> None:
     assert result["applied"] is False
     assert fake.writes == []
     assert fake.db.commits == 0
+
+
+def test_default_route_hint_is_idempotent_and_never_overwrites_admin_value(monkeypatch) -> None:
+    fake = _Frappe(_existing_core_companies())
+    fake.routes = [
+        {"name": "ROUTE-LATIN", "project_collection": "LatinGo拉丁购", "ai_match_hint": ""},
+        {"name": "ROUTE-ADMIN", "project_collection": "LatinGo拉丁购", "ai_match_hint": "管理员自定义"},
+    ]
+    monkeypatch.setattr(service, "frappe", fake)
+
+    first = service.ensure_default_route_hints()
+    second = service.ensure_default_route_hints()
+
+    assert first == {"updated": ["ROUTE-LATIN"]}
+    assert second == {"updated": []}
+    assert fake.routes[0]["ai_match_hint"] == "宠物用品"
+    assert fake.routes[1]["ai_match_hint"] == "管理员自定义"
+    assert len(fake.hint_writes) == 1

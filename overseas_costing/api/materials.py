@@ -29,8 +29,8 @@ def list_project_route_options(batch_name: str) -> dict:
 
     from overseas_costing.services.erp_sync_plan_service import list_project_route_options as list_options
 
-    require_batch_permission(batch_name, "read")
-    return list_options()
+    batch_name = require_batch_permission(batch_name, "read")
+    return list_options(batch_name)
 
 
 @frappe.whitelist()

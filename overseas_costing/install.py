@@ -107,6 +107,8 @@ def after_migrate() -> None:
     install_settlement()
     from overseas_costing.services.logistics_settlement.policy_migration import register_after_migrate
     register_after_migrate()
+    from overseas_costing.services.company_route_provision_service import ensure_default_route_hints
+    ensure_default_route_hints()
     ensure_language_defaults()
     ensure_access_role()
     ensure_erpnext_standard_fields()

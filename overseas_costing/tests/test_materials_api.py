@@ -61,6 +61,26 @@ def test_supplier_resolution_checks_read_permission_and_delegates_to_central_ser
     assert result["candidates"][0]["name"] == "SUP-1"
 
 
+def test_project_route_options_pass_resolved_batch_to_existing_service(monkeypatch) -> None:
+    api = _load_api(monkeypatch)
+    monkeypatch.setattr(
+        api,
+        "require_batch_permission",
+        lambda batch, permission: "BATCH-DOC" if (batch, permission) == ("BATCH-NO", "read") else "",
+    )
+    from overseas_costing.services import erp_sync_plan_service
+
+    calls = []
+    monkeypatch.setattr(
+        erp_sync_plan_service,
+        "list_project_route_options",
+        lambda batch_name: calls.append(batch_name) or {"ok": True, "options": []},
+    )
+
+    assert api.list_project_route_options("BATCH-NO") == {"ok": True, "options": []}
+    assert calls == ["BATCH-DOC"]
+
+
 def test_preview_checks_permission_and_rejects_paths_or_urls(monkeypatch) -> None:
     api = _load_api(monkeypatch)
     monkeypatch.setattr(api, "require_batch_permission", lambda _batch, _ptype: "BATCH-DOC")

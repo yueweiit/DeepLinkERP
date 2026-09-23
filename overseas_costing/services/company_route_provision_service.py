@@ -28,6 +28,7 @@ ALL_PROJECT_ROUTES = {
     **EXISTING_COMPANY_ROUTES,
     **{name: name for name, _abbr in MEXICO_COMPANIES},
 }
+DEFAULT_ROUTE_AI_HINTS = {"LatinGo拉丁购": "宠物用品"}
 
 
 def build_provision_plan(existing_companies: list[dict], existing_routes: list[dict]) -> dict:
@@ -86,7 +87,14 @@ def build_provision_plan(existing_companies: list[dict], existing_routes: list[d
     for project, company in ALL_PROJECT_ROUTES.items():
         targets = active_routes.get(project, set())
         if not targets:
-            create_routes.append({"project_collection": project, "subsidiary_code": company, "erp_site": ""})
+            create_routes.append(
+                {
+                    "project_collection": project,
+                    "subsidiary_code": company,
+                    "erp_site": "",
+                    "ai_match_hint": DEFAULT_ROUTE_AI_HINTS.get(project, ""),
+                }
+            )
         elif targets == {(company, "")}:
             skipped_routes.append(project)
         else:
@@ -102,6 +110,36 @@ def build_provision_plan(existing_companies: list[dict], existing_routes: list[d
     }
 
 
+def ensure_default_route_hints() -> dict:
+    """Seed missing business hints without overwriting administrator content."""
+
+    _require_frappe()
+    updated = []
+    routes = frappe.get_all(
+        "Overseas Cost Project Route",
+        filters={"enabled": 1},
+        fields=["name", "project_collection", "ai_match_hint", "enabled"],
+        limit_page_length=10000,
+    )
+    for route in routes:
+        project = _text(route.get("project_collection"))
+        hint = DEFAULT_ROUTE_AI_HINTS.get(project)
+        if (
+            hint
+            and route.get("enabled") not in (0, False, "0")
+            and not _text(route.get("ai_match_hint"))
+        ):
+            frappe.db.set_value(
+                "Overseas Cost Project Route",
+                route.get("name"),
+                "ai_match_hint",
+                hint,
+                update_modified=False,
+            )
+            updated.append(_text(route.get("name")))
+    return {"updated": updated}
+
+
 def provision_company_routes(*, dry_run: bool = True) -> dict:
     """System Manager command; preflight everything, then insert in one transaction."""
 
@@ -114,7 +152,7 @@ def provision_company_routes(*, dry_run: bool = True) -> dict:
     )
     routes = frappe.get_all(
         "Overseas Cost Project Route",
-        fields=["name", "project_collection", "subsidiary_code", "erp_site", "enabled"],
+        fields=["name", "project_collection", "subsidiary_code", "erp_site", "enabled", "ai_match_hint"],
         limit_page_length=10000,
     )
     plan = build_provision_plan(companies, routes)

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import unicodedata
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -225,21 +226,87 @@ def list_unambiguous_project_routes(routes: list[dict], *, as_of: date | None = 
     """Return active projects that resolve to exactly one Company/site target."""
 
     effective_date = as_of or date.today()
-    by_project: dict[str, set[tuple[str, str]]] = {}
+    by_project: dict[str, list[dict]] = {}
     for route in routes:
         project = _text(route.get("project_collection"))
         if project and _route_is_active(route, effective_date):
-            by_project.setdefault(project, set()).add(_route_target(route))
+            by_project.setdefault(project, []).append(route)
     options = []
     conflicts = []
-    for project, targets in sorted(by_project.items()):
+    for project, project_routes in sorted(by_project.items()):
+        targets = {_route_target(route) for route in project_routes}
         if len(targets) != 1:
             conflicts.append(project)
             continue
         company, site_code = next(iter(targets))
         if company:
-            options.append({"project_collection": project, "subsidiary_code": company, "site_code": site_code})
+            selected = max(
+                project_routes,
+                key=lambda route: (
+                    _route_revision(route),
+                    _text(route.get("ai_match_hint")),
+                ),
+            )
+            options.append(
+                {
+                    "project_collection": project,
+                    "subsidiary_code": company,
+                    "site_code": site_code,
+                    "revision": _route_revision(selected),
+                    "ai_match_hint": _text(selected.get("ai_match_hint")),
+                }
+            )
     return {"options": options, "conflicts": conflicts}
+
+
+def project_candidate_names(item: dict) -> list[str]:
+    """Read the importer-owned DingTalk project candidate structure once."""
+
+    value = item.get("extra_json")
+    if isinstance(value, dict):
+        metadata = value
+    else:
+        try:
+            metadata = json.loads(str(value or "{}"))
+        except (TypeError, ValueError):
+            metadata = {}
+    if not isinstance(metadata, dict):
+        return []
+    names = []
+    seen = set()
+    for candidate in metadata.get("project_candidates") or []:
+        name = _text(candidate.get("name") if isinstance(candidate, dict) else candidate)
+        identity = project_route_identity(name)
+        if name and identity not in seen:
+            seen.add(identity)
+            names.append(name)
+    return names
+
+
+def item_project_route_policy(item: dict, route_options: list[dict]) -> dict:
+    """Intersect DingTalk-selected projects with active unambiguous routes."""
+
+    candidates = project_candidate_names(item)
+    candidate_identities = {project_route_identity(name) for name in candidates}
+    allowed_routes = [
+        {
+            key: option.get(key)
+            for key in (
+                "project_collection",
+                "subsidiary_code",
+                "site_code",
+                "revision",
+                "ai_match_hint",
+            )
+        }
+        for option in route_options or []
+        if project_route_identity(option.get("project_collection")) in candidate_identities
+    ]
+    return {
+        "approval_candidates": candidates,
+        "allowed_projects": [route["project_collection"] for route in allowed_routes],
+        "routes": allowed_routes,
+    }
 
 
 def _route_is_active(route: dict, as_of: date) -> bool:
@@ -255,6 +322,13 @@ def _route_target(route: dict) -> tuple[str, str]:
         _text(route.get("subsidiary_code")),
         _text(route.get("site_code") or route.get("erp_site")) or DEFAULT_SITE_CODE,
     )
+
+
+def _route_revision(route: dict) -> int:
+    try:
+        return max(1, int(route.get("revision") or 1))
+    except (TypeError, ValueError):
+        return 1
 
 
 def _parse_date(value) -> date | None:

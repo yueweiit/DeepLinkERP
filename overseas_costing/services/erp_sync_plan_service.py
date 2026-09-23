@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 from overseas_costing.services import batch_service
@@ -143,12 +144,87 @@ def get_site_sync_requests(batch_name: str, version_name: str | None = None, lim
     }
 
 
-def list_project_route_options() -> dict:
+def list_project_route_options(batch_name: str = "") -> dict:
     """List unambiguous active project-to-Company routes for material editing."""
 
-    from overseas_costing.services.erp_routing_service import list_unambiguous_project_routes
+    from overseas_costing.services.erp_routing_service import (
+        list_unambiguous_project_routes,
+        project_route_identity,
+    )
 
-    return {"ok": True, **list_unambiguous_project_routes(_active_routes())}
+    result = list_unambiguous_project_routes(_active_routes())
+    candidates = _batch_project_candidate_names(batch_name) if batch_name else []
+    candidate_order = {
+        project_route_identity(name): index for index, name in enumerate(candidates)
+    }
+    options = [
+        {
+            **option,
+            "is_approval_candidate": (
+                project_route_identity(option.get("project_collection")) in candidate_order
+            ),
+        }
+        for option in result["options"]
+    ]
+    options.sort(
+        key=lambda option: (
+            0 if option["is_approval_candidate"] else 1,
+            candidate_order.get(
+                project_route_identity(option.get("project_collection")),
+                len(candidate_order),
+            ),
+            str(option.get("project_collection") or ""),
+        )
+    )
+    revision_payload = {
+        "options": options,
+        "conflicts": result["conflicts"],
+        "approval_candidates": candidates,
+    }
+    return {
+        "ok": True,
+        "options": options,
+        "conflicts": result["conflicts"],
+        "route_revision": hashlib.sha256(
+            json.dumps(
+                revision_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def _batch_project_candidate_names(batch_name: str) -> list[str]:
+    """Return first-seen DingTalk candidates from the current material version."""
+
+    from overseas_costing.services.erp_routing_service import (
+        project_candidate_names,
+        project_route_identity,
+    )
+
+    _require_frappe()
+    resolved = batch_service._resolve_batch_name(batch_name) or str(batch_name or "")
+    version = frappe.db.get_value("Overseas Cost Batch", resolved, "current_version")
+    if not resolved or not version:
+        return []
+    items = frappe.get_all(
+        "Overseas Cost Item",
+        filters={"batch": resolved, "version": version, "is_excluded": 0},
+        fields=["extra_json"],
+        order_by="row_no asc, name asc",
+        limit_page_length=10000,
+    )
+    names = []
+    seen = set()
+    for item in items:
+        for name in project_candidate_names(item):
+            identity = project_route_identity(name)
+            if identity not in seen:
+                seen.add(identity)
+                names.append(name)
+    return names
 
 
 def _prepared_items(items: list[dict]) -> list[dict]:
@@ -167,7 +243,7 @@ def _active_routes() -> list[dict]:
     return frappe.get_all(
         "Overseas Cost Project Route",
         filters={"enabled": 1},
-        fields=["project_collection", "subsidiary_code", "erp_site", "enabled", "valid_from", "valid_to", "revision"],
+        fields=["project_collection", "subsidiary_code", "erp_site", "enabled", "valid_from", "valid_to", "revision", "ai_match_hint"],
         limit_page_length=1000,
     )
 

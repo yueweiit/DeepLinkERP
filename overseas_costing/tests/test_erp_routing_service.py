@@ -3,7 +3,9 @@ from decimal import Decimal
 from overseas_costing.services.erp_routing_service import (
     build_erp_push_state,
     build_site_payload_preview,
+    list_unambiguous_project_routes,
     preview_bulk_route,
+    project_candidate_names,
     resolve_item_routes,
 )
 
@@ -33,6 +35,41 @@ def test_route_without_explicit_site_uses_shared_deeplinkerp_connection() -> Non
 
     assert result["ready"] is True
     assert result["by_item"]["P1"]["site_code"] == "DEEPLINKERP"
+
+
+def test_project_candidate_names_reuses_dingtalk_extra_json_structure() -> None:
+    item = {
+        "extra_json": '{"project_candidates":[{"id":"D1","name":"LatinGo拉丁购"},'
+        '{"department_id":"D2","name":"YW MOLDES MX模具"},'
+        '{"id":"D3","name":"LatinGo拉丁购"}]}'
+    }
+
+    assert project_candidate_names(item) == ["LatinGo拉丁购", "YW MOLDES MX模具"]
+
+
+def test_unambiguous_route_options_preserve_ai_metadata() -> None:
+    result = list_unambiguous_project_routes(
+        [
+            {
+                "project_collection": "LatinGo拉丁购",
+                "subsidiary_code": "LATIN COMPANY",
+                "erp_site": "",
+                "enabled": 1,
+                "revision": 7,
+                "ai_match_hint": "宠物用品",
+            }
+        ]
+    )
+
+    assert result["options"] == [
+        {
+            "project_collection": "LatinGo拉丁购",
+            "subsidiary_code": "LATIN COMPANY",
+            "site_code": "DEEPLINKERP",
+            "revision": 7,
+            "ai_match_hint": "宠物用品",
+        }
+    ]
 
 
 def test_historical_project_names_resolve_to_current_company_routes_without_rewriting_rows() -> None:

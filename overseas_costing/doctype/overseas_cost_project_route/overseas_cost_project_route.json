@@ -5,7 +5,7 @@
   "autoname": "hash",
   "title_field": "project_collection",
   "track_changes": 1,
-  "field_order": ["project_collection", "subsidiary_code", "erp_site", "enabled", "valid_from", "valid_to", "revision", "remark"],
+  "field_order": ["project_collection", "subsidiary_code", "erp_site", "enabled", "valid_from", "valid_to", "revision", "ai_match_hint", "remark"],
   "fields": [
     {"fieldname": "project_collection", "fieldtype": "Data", "label": "项目归属", "reqd": 1, "in_list_view": 1},
     {"fieldname": "subsidiary_code", "fieldtype": "Link", "label": "ERP公司", "options": "Company", "reqd": 1, "in_list_view": 1},
@@ -14,6 +14,7 @@
     {"fieldname": "valid_from", "fieldtype": "Date", "label": "生效日期"},
     {"fieldname": "valid_to", "fieldtype": "Date", "label": "失效日期"},
     {"fieldname": "revision", "fieldtype": "Int", "label": "路由修订号", "default": "1"},
+    {"fieldname": "ai_match_hint", "fieldtype": "Small Text", "label": "AI 匹配提示"},
     {"fieldname": "remark", "fieldtype": "Small Text", "label": "备注"}
   ],
   "permissions": [

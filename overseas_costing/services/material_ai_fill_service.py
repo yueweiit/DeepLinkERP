@@ -1167,6 +1167,7 @@ def build_source_review_messages(
     fx_rates: dict | None = None,
     fee_policy: dict | None = None,
     semantic_fact_allowlist: list[dict] | None = None,
+    project_routing: dict | None = None,
 ) -> list[dict]:
     """Build the unified review prompt while treating every source as untrusted evidence."""
 
@@ -1188,6 +1189,8 @@ def build_source_review_messages(
         "fee_update 只能补充系统给出的逻辑费用。所有数值必须引用真实 document_id 以及字段、Sheet 行或页码；"
         "图片转录可作为证据；只有文字和数值清晰可见时才可返回候选，模糊、遮挡或无法唯一匹配时不得猜测。"
         "已有值、低置信、匹配歧义或来源冲突必须 default_selected=false。"
+        "project_collection 只能从输入的 allowed_projects 中选择；列表为空时不得建议项目，"
+        "已有 project_collection 不得覆盖。ai_match_hint 仅是管理员维护的匹配提示，不是新项目名称。"
         "逐行逐字段的默认来源顺序为支付申请→国际物流→商品采购支出；优先级不是禁用规则，"
         "高优先级缺值、占位或无法解析时继续读取其他来源，所有低优先级合法候选均保留。"
         "国际物流货物明细中的货值是该行采购货值，未注明币种的专用货值列默认RMB，显式币种优先。"
@@ -1196,15 +1199,31 @@ def build_source_review_messages(
         "如果输入提供 semantic_fact_allowlist，提案必须填写 fact_ids，且只能逐字采用对应事实的"
         "allowed_actions；不得引用未知事实、越界物料或改写服务器事实数值。"
     )
-    safe_items = [
-        {
-            "item_name": row.get("name"),
-            "purchase_approval_no": row.get("source_doc_no"),
-            "material_code": row.get("material_code"),
-            "values": {field: row.get(field) for field in REVIEW_ITEM_FIELDS},
-        }
-        for row in items or []
-    ]
+    project_options = list((project_routing or {}).get("options") or [])
+    from overseas_costing.services.erp_routing_service import item_project_route_policy
+
+    safe_items = []
+    for row in items or []:
+        values = {field: row.get(field) for field in REVIEW_ITEM_FIELDS}
+        values.update(
+            {
+                "product_name_es": row.get("product_name_es"),
+                "category": row.get("category"),
+                "supplier": row.get("supplier"),
+            }
+        )
+        safe_items.append(
+            {
+                "item_name": row.get("name"),
+                "purchase_approval_no": row.get("source_doc_no"),
+                "material_code": row.get("material_code"),
+                "values": values,
+                "project_assignment": {
+                    **item_project_route_policy(row, project_options),
+                    "current_project": str(row.get("project_collection") or ""),
+                },
+            }
+        )
     compact_allowlist = (
         deepcopy(semantic_fact_allowlist)
         if semantic_fact_allowlist is not None
@@ -2165,6 +2184,7 @@ def normalize_source_review_proposals(
     transport_mode: str = "",
     trusted_system_proposal_ids: set[str] | frozenset[str] | None = None,
     trusted_approved_proposal_ids: set[str] | frozenset[str] | None = None,
+    project_routing: dict | None = None,
 ) -> list[dict]:
     """Validate model proposals against server-issued items and evidence documents."""
 
@@ -2176,6 +2196,16 @@ def normalize_source_review_proposals(
     }
     trusted_system_ids = {
         str(proposal_id) for proposal_id in trusted_system_proposal_ids or set()
+    }
+    from overseas_costing.services.erp_routing_service import (
+        item_project_route_policy,
+        project_route_identity,
+    )
+
+    project_options = list((project_routing or {}).get("options") or [])
+    project_policies = {
+        item_name: item_project_route_policy(item, project_options)
+        for item_name, item in items_by_name.items()
     }
     from .logistics_settlement.model import digest
 
@@ -2278,11 +2308,29 @@ def normalize_source_review_proposals(
             elif proposal_type == "item_update":
                 if target not in item_names:
                     continue
+                fields = _normalize_review_item_update_values(
+                    (raw.get("payload") or {}).get("fields") or {}
+                )
+                if "project_collection" in fields:
+                    current_project = str(
+                        (items_by_name.get(target) or {}).get("project_collection") or ""
+                    ).strip()
+                    allowed = {
+                        project_route_identity(project): project
+                        for project in (project_policies.get(target) or {}).get(
+                            "allowed_projects", []
+                        )
+                    }
+                    canonical_project = allowed.get(
+                        project_route_identity(fields.get("project_collection"))
+                    )
+                    if current_project or not canonical_project:
+                        fields.pop("project_collection", None)
+                    else:
+                        fields["project_collection"] = canonical_project
                 payload = {
                     "item_name": target,
-                    "fields": _normalize_review_item_update_values(
-                        (raw.get("payload") or {}).get("fields") or {}
-                    ),
+                    "fields": fields,
                 }
                 if not payload["fields"]:
                     continue
@@ -2501,6 +2549,39 @@ def normalize_source_review_proposals(
     for index in conflict_members:
         normalized[index]["conflict"] = True
         normalized[index]["default_selected"] = False
+    project_proposals: dict[str, list[dict]] = {}
+    for proposal in normalized:
+        if (
+            proposal.get("proposal_type") == "item_update"
+            and "project_collection" in (proposal.get("payload") or {}).get("fields", {})
+        ):
+            project_proposals.setdefault(
+                str(proposal.get("target_item_name") or ""), []
+            ).append(proposal)
+    for candidates in project_proposals.values():
+        for candidate in candidates:
+            candidate["default_selected"] = False
+        values = {
+            str((candidate.get("payload") or {}).get("fields", {}).get("project_collection") or "")
+            for candidate in candidates
+        }
+        eligible = [
+            candidate
+            for candidate in candidates
+            if (
+                len((candidate.get("payload") or {}).get("fields", {})) == 1
+                and not candidate.get("conflict")
+                and Decimal(str(candidate.get("confidence") or 0)) >= AUTO_ADOPT_CONFIDENCE
+            )
+        ]
+        if len(values) == 1 and eligible:
+            max(
+                eligible,
+                key=lambda candidate: (
+                    float(candidate.get("confidence") or 0),
+                    str(candidate.get("proposal_id") or ""),
+                ),
+            )["default_selected"] = True
     for proposal in normalized:
         if proposal["proposal_type"] == "fee_update" and not proposal.get("conflict_group"):
             proposal["conflict_group"] = f"fee:{proposal['payload'].get('logical_fee_key') or ''}"
@@ -2832,12 +2913,13 @@ def _source_review_context(context: dict | None) -> dict:
         "transport_mode": str(context.get("transport_mode") or ""),
         "fx_rates": deepcopy(context.get("fx_rates") or {}),
         "effective_source": deepcopy(context.get('effective_source') or {}),
+        "project_routing": deepcopy(context.get("project_routing") or {}),
         **({"clarification_revision": int(context["clarification_revision"] or 0)}
            if context.get("clarification_revision") else {}),
     }
 
 
-SOURCE_REVIEW_PROCESSING_VERSION = 'field-source-priority-11'
+SOURCE_REVIEW_PROCESSING_VERSION = 'project-route-policy-12'
 
 
 def _source_review_fingerprint(
@@ -5541,6 +5623,7 @@ def _call_source_review_ai(
     clarification_text: str = "",
     fx_rates: dict | None = None,
     fee_policy: dict | None = None,
+    project_routing: dict | None = None,
 ) -> dict:
     from overseas_costing.services import allocation_service
 
@@ -5598,6 +5681,7 @@ def _call_source_review_ai(
                 fx_rates=fx_rates,
                 fee_policy=fee_policy,
                 semantic_fact_allowlist=semantic_fact_allowlist,
+                project_routing=project_routing,
             ),
         )
         parsed = allocation_service._extract_json_object(content)
@@ -6203,6 +6287,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                         context.get("effective_source") or {},
                         REVIEW_FEE_KEYS,
                     ),
+                    project_routing=context.get("project_routing") or {},
                 ),
                 fallback={
                     "model": "",
@@ -6254,6 +6339,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 transport_mode=str(context.get("transport_mode") or ""),
                 trusted_system_proposal_ids=trusted_system_proposal_ids,
                 trusted_approved_proposal_ids=trusted_approved_proposal_ids,
+                project_routing=context.get("project_routing") or {},
             )
             candidates.extend(deepcopy(semantic_read_only_fee_records))
             # Bind policy only from deterministic server proposals, never model output.
@@ -6801,7 +6887,7 @@ class FrappeMaterialAIFillRepository:
     def _get_context(self, batch_name: str, version_name: str | None = None, *, original_sources=False) -> dict:
         if frappe is None:
             raise RuntimeError("当前未连接 Frappe。")
-        from overseas_costing.services import batch_service
+        from overseas_costing.services import batch_service, erp_sync_plan_service
 
         resolved = batch_service._resolve_batch_name(batch_name)
         if not resolved:
@@ -6830,6 +6916,7 @@ class FrappeMaterialAIFillRepository:
             "transport_mode": str(batch.get("transport_mode") or ""),
             "effective_source": ((effective_source.original_source_bundle(resolved, selected_version)
                                   if original_sources else effective_source.current_source_bundle(resolved, selected_version)) or {}).get('context') or {},
+            "project_routing": erp_sync_plan_service.list_project_route_options(resolved),
             "fx_rates": {
                 "USD": str(version.get("fx_usd_to_rmb") or ""),
                 "MXN": (
@@ -6856,7 +6943,7 @@ class FrappeMaterialAIFillRepository:
         return frappe.get_all(
             "Overseas Cost Item",
             filters={"batch": batch_name, "version": version_name, "is_excluded": 0},
-            fields=list(dict.fromkeys([*GRID_FIELDS, "extra_json", "manual_override_flag", "manual_override_reason"])),
+            fields=list(dict.fromkeys([*GRID_FIELDS, "category", "extra_json", "manual_override_flag", "manual_override_reason"])),
             order_by="row_no asc, name asc",
             limit_page_length=10000,
         )

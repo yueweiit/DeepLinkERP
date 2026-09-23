@@ -4,6 +4,7 @@ from copy import deepcopy
 import json
 
 import pytest
+from types import SimpleNamespace
 
 from overseas_costing.services import material_ai_fill_service as service
 
@@ -129,6 +130,69 @@ def test_start_fingerprints_context_read_after_batch_lock():
 
     assert repo.run["input_fingerprint"] == expected.run["input_fingerprint"]
     assert repo.run["input_fingerprint"] != before_lock.run["input_fingerprint"]
+
+
+def test_source_review_fingerprint_changes_with_project_candidates_revision_and_hint() -> None:
+    items = [{
+        "name": "I1",
+        "extra_json": json.dumps({"project_candidates": [{"id": "D1", "name": "LatinGo拉丁购"}]}, ensure_ascii=False),
+    }]
+    context = {
+        "project_routing": {
+            "route_revision": "R1",
+            "options": [{
+                "project_collection": "LatinGo拉丁购",
+                "subsidiary_code": "LATIN",
+                "site_code": "DEEPLINKERP",
+                "revision": 1,
+                "ai_match_hint": "宠物用品",
+            }],
+        }
+    }
+    baseline = service._source_review_fingerprint("B1", "V1", items, [], "", context=context)
+    changed_hint = deepcopy(context)
+    changed_hint["project_routing"]["options"][0]["ai_match_hint"] = "宠物用品、户外用品"
+    changed_revision = deepcopy(context)
+    changed_revision["project_routing"]["route_revision"] = "R2"
+    changed_candidates = deepcopy(items)
+    changed_candidates[0]["extra_json"] = json.dumps(
+        {"project_candidates": [{"id": "D2", "name": "YW MOLDES MX模具"}]}, ensure_ascii=False
+    )
+
+    assert baseline != service._source_review_fingerprint("B1", "V1", items, [], "", context=changed_hint)
+    assert baseline != service._source_review_fingerprint("B1", "V1", items, [], "", context=changed_revision)
+    assert baseline != service._source_review_fingerprint("B1", "V1", changed_candidates, [], "", context=context)
+
+
+def test_frappe_repository_context_includes_current_project_routing(monkeypatch) -> None:
+    class DB:
+        def get_value(self, doctype, name, fields=None, as_dict=False):
+            if doctype == "Overseas Cost Batch":
+                if fields == "extra_json":
+                    return "{}"
+                return {
+                    "name": "B1", "current_version": "V1", "modified": "BM1",
+                    "transport_mode": "SEA", "confirm_status": "", "writeback_status": "",
+                }
+            return {
+                "name": "V1", "batch": "B1", "status": "Active", "modified": "VM1",
+                "fx_usd_to_rmb": "7", "fx_rmb_to_mxn": "2.5",
+            }
+
+    monkeypatch.setattr(service, "frappe", SimpleNamespace(db=DB()))
+    from overseas_costing.services import batch_service, erp_sync_plan_service
+    monkeypatch.setattr(batch_service, "_resolve_batch_name", lambda name: name)
+    monkeypatch.setattr(
+        service.effective_source,
+        "current_source_bundle",
+        lambda *_args, **_kwargs: {"context": {}},
+    )
+    expected = {"ok": True, "route_revision": "ROUTES-1", "options": []}
+    monkeypatch.setattr(erp_sync_plan_service, "list_project_route_options", lambda batch: expected)
+
+    context = service.FrappeMaterialAIFillRepository().get_context("B1", "V1")
+
+    assert context["project_routing"] == expected
 
 
 @pytest.mark.parametrize("change", CHANGES)
