@@ -2311,7 +2311,12 @@ def normalize_source_review_proposals(
                 fields = _normalize_review_item_update_values(
                     (raw.get("payload") or {}).get("fields") or {}
                 )
-                if "project_collection" in fields:
+                # Deterministic source readers (for example the selected packing
+                # sheet) already carry server-bound provenance and must retain
+                # their historical project facts for cost preview. The route
+                # whitelist applies to model output, which is the only path
+                # capable of inventing a project value.
+                if "project_collection" in fields and proposal_id not in trusted_system_ids:
                     current_project = str(
                         (items_by_name.get(target) or {}).get("project_collection") or ""
                     ).strip()

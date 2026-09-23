@@ -42,10 +42,14 @@ def test_deploy_prewarms_packing_cache_before_switching_frontend_assets() -> Non
 def test_deploy_cleans_legacy_route_revision_before_migrate() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
     deploy = workflow.split("\n  deploy:\n", maxsplit=1)[1]
+    upgrade_script = (
+        WORKFLOW_PATH.parent.parent / "scripts" / "upgrade_and_migrate_erp.sh"
+    ).read_text(encoding="utf-8")
 
-    cleanup = "bench --site deeplinkerp.com execute overseas_costing.install.before_migrate"
-    assert cleanup in deploy
-    assert deploy.index("upgrade_bench.sh") < deploy.index(cleanup) < deploy.index("migrate_site.sh")
+    cleanup = 'bench --site "$site_name" execute overseas_costing.install.before_migrate'
+    assert ".github/scripts/upgrade_and_migrate_erp.sh" in deploy
+    assert cleanup in upgrade_script
+    assert upgrade_script.index("upgrade_bench.sh") < upgrade_script.index(cleanup) < upgrade_script.index("migrate_site.sh")
     assert "Inspect and normalize route revision before upgrade" in deploy
     assert ".github/scripts/prepare_route_revision_migration.sh" in deploy
     assert deploy.index("Prepare production rollback point") < deploy.index(

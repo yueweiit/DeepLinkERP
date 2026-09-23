@@ -285,6 +285,20 @@ def test_project_proposal_below_auto_adopt_threshold_is_not_preselected() -> Non
     assert normalized[0]["default_selected"] is False
 
 
+def test_trusted_source_project_fact_is_not_removed_by_model_route_whitelist() -> None:
+    proposal = _project_proposal("历史装箱项目", proposal_id="SYSTEM")
+
+    normalized = normalize_source_review_proposals(
+        [proposal],
+        [_project_item()],
+        [_project_document()],
+        trusted_system_proposal_ids={"SYSTEM"},
+        project_routing={"route_revision": "R1", "options": [], "conflicts": []},
+    )
+
+    assert normalized[0]["payload"]["fields"]["project_collection"] == "历史装箱项目"
+
+
 @pytest.mark.parametrize(
     ("fieldname", "value", "item", "expected"),
     [
