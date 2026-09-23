@@ -106,10 +106,17 @@
       this.openMaterialFeeEvidenceDialog($(event.currentTarget).attr("data-fee-key"));
     });
     this.$root.on("click", "[data-action='mf-preview-evidence']", (event) => {
+      const $button = $(event.currentTarget);
+      const fileUrl = $button.attr("data-file-url");
+      // 还没选附件时这个按钮就是「关联并解析凭证」的快捷入口：它的文案本身
+      // 就是那句提示，点下去直接开弹窗，而不是让人戳一个没反应的灰字。
+      if (!fileUrl) {
+        this.openMaterialFeeEvidenceDialog($button.attr("data-fee-key"));
+        return;
+      }
       // 预览已选凭证直接复用附件预览弹窗（图片内嵌、PDF/文本 iframe、其余给下载），
       // 不再为这一处另写一套打开逻辑。
-      const $button = $(event.currentTarget);
-      this.openOaAttachmentFilePreviewDialog?.($button.attr("data-file-url"), $button.attr("data-file-name"));
+      this.openOaAttachmentFilePreviewDialog?.(fileUrl, $button.attr("data-file-name"));
     });
     this.$root.on("change", "[data-mf-fee-status='1']", (event) => {
       this.changeMaterialFeeStatus($(event.currentTarget)).catch((error) => this.showError(error));
@@ -4696,13 +4703,16 @@
   }
 
   renderMaterialFeeEvidencePreview(feeKey) {
-    // 与「关联并解析凭证」并列的按钮，外观完全由 .ocw-mf-row-actions button 决定，
-    // 不另造一块面板：未勾选时禁用并说明缺什么，勾选后文案换成该份附件，
-    // 点它复用既有附件预览弹窗看原件。这张表本身不持有“已选凭证”，
-    // 所以事实来源只能是 materialFeeState。
+    // 与「关联并解析凭证」并列的**按钮**，外观完全由 .ocw-mf-row-actions button
+    // 决定（蓝色文字按钮），不另造面板、也不自造第二套按钮样式：未勾选时文案就是
+    // 那句提示、点它开弹窗；勾选后文案换成该份附件、点它看原件。这张表本身不持有
+    // “已选凭证”，所以事实来源只能是 materialFeeState。
     const candidate = this.materialFeeEvidencePreviewCandidate(feeKey);
     if (!candidate) {
-      return `<button type="button" class="ocw-mf-evidence-preview" data-mf-evidence-preview="${this.escape(feeKey)}" disabled>需在关联并解析凭证选择附件</button>`;
+      // 未勾选时按钮文案就是那句提示，但**不做成禁用灰字**：灰字在操作列里
+      // 和一串普通文字没有区别，看着就不像个按钮。保持与旁边两个按钮同款的
+      // 蓝色文字按钮，并且可点 —— 点它就是打开「关联并解析凭证」弹窗。
+      return `<button type="button" class="ocw-mf-evidence-preview" data-mf-evidence-preview="${this.escape(feeKey)}" data-action="mf-preview-evidence" data-fee-key="${this.escape(feeKey)}" title="需在关联并解析凭证选择附件">需在关联并解析凭证选择附件</button>`;
     }
     const fileName = candidate.file_name || candidate.attachment || "已选附件";
     const fileUrl = String(candidate.file_url || "");

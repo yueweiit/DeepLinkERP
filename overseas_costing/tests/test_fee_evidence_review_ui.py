@@ -748,18 +748,28 @@ def test_fee_row_previews_the_selected_voucher_next_to_the_link_action() -> None
     preview = source.split("renderMaterialFeeEvidencePreview(feeKey) {", 1)[1].split(
         "materialFeeEvidencePreviewCandidate(feeKey) {", 1
     )[0]
+    empty_branch, chosen_branch = preview.split("const fileName =", 1)
     # 就是操作列里的一个 <button>，外观交给既有的按钮样式，不再自带边框底色。
     assert '<button type="button"' in preview
     assert "data-mf-evidence-preview=" in preview
-    # 未选择时给提示文案并禁用，而不是留一个可点的空按钮。
-    assert "disabled" in preview
-    assert "需在关联并解析凭证选择附件" in preview
-    # 选中后点击走既有附件预览弹窗，不另写一套打开逻辑。
-    assert 'data-action="mf-preview-evidence"' in preview
+    # 未选择时给提示文案，但**不能是禁用灰字** —— 灰字在操作列里和普通文字没差别，
+    # 看着就不像按钮；它要是可点的，点了直接进「关联并解析凭证」弹窗。
+    assert "需在关联并解析凭证选择附件" in empty_branch
+    assert "disabled" not in empty_branch
+    assert 'data-action="mf-preview-evidence"' in empty_branch
+    assert 'data-fee-key=' in empty_branch
+    # 选中后文案换成那份附件、点击走既有附件预览弹窗，不另写一套打开逻辑。
+    assert "预览 " in chosen_branch
+    assert 'data-action="mf-preview-evidence"' in chosen_branch
+    assert "data-file-url=" in chosen_branch
+    # 只有“候选确实没有文件地址、点了也打不开”这一种情况才退回禁用。
+    assert '? ` data-action="mf-preview-evidence"' in chosen_branch and ': " disabled"' in chosen_branch
     assert preview.count("renderMaterialFeeEvidencePreview") == 0
 
     handler = source.split("""data-action='mf-preview-evidence'""", 1)[1].split("});", 1)[0]
     assert "openOaAttachmentFilePreviewDialog" in handler
+    # 未选态的可点性靠这个分支兑现：没有文件地址就开弹窗，不新增第二套弹窗。
+    assert "openMaterialFeeEvidenceDialog" in handler
 
     dialog = source.split("openMaterialFeeEvidenceDialog(feeKey) {", 1)[1].split(
         "renderMaterialFeeEvidencePicker(candidates, linked) {", 1
@@ -773,6 +783,12 @@ def test_fee_row_previews_the_selected_voucher_next_to_the_link_action() -> None
     # 长文件名靠截断收住，不再给面板式的虚线边框和底色。
     assert "text-overflow: ellipsis" in css
     assert ".ocw-mf-evidence-preview-empty" not in css
+    # 三个按钮共用同一套外观；预览按钮只在“没有文件地址”的禁用态才自设颜色，
+    # 否则默认态又会变成一坨看着不像按钮的灰字。
+    assert ".ocw-mf-row-actions button" in css
+    preview_rules = [line for line in css.splitlines() if line.startswith(".ocw-mf-evidence-preview")]
+    assert all("color" not in line for line in preview_rules if "[disabled]" not in line)
+    assert any("[disabled]" in line and "color" in line for line in preview_rules)
 
 
 def test_evidence_preview_follows_the_dialog_selection_per_fee_row() -> None:
@@ -804,9 +820,10 @@ console.log(JSON.stringify({empty,picked,otherRow,cleared}));
 """
     )
 
-    # 未选之前是禁用提示。
+    # 未选之前是提示文案，并且可点（点它进「关联并解析凭证」弹窗），不是灰字。
     assert "需在关联并解析凭证选择附件" in result["empty"]
-    assert "disabled" in result["empty"]
+    assert "disabled" not in result["empty"]
+    assert result["empty"].startswith("<button")
     # 选中 A-2 后按钮换成它，并且带上自己的附件地址供预览。
     assert "bill.png" in result["picked"]
     assert "invoice.pdf" not in result["picked"]
