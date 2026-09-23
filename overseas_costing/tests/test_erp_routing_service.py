@@ -212,6 +212,22 @@ def test_same_site_different_companies_never_share_one_purchase_group() -> None:
     assert {group["subsidiary_code"] for group in preview["sites"][0]["groups"]} == {"YW MOLDES MX模具", "AmigoMart"}
 
 
+def test_same_company_different_suppliers_never_share_one_purchase_group() -> None:
+    preview = build_site_payload_preview(
+        {
+            "items": [
+                {"stable_line_key": "L1", "route_status": "RESOLVED", "erp_site_code": "DEEPLINKERP", "subsidiary_code": "Company A", "supplier": "Supplier A", "purchase_currency": "CNY", "purchase_uom": "件"},
+                {"stable_line_key": "L2", "route_status": "RESOLVED", "erp_site_code": "DEEPLINKERP", "subsidiary_code": "Company A", "supplier": "Supplier B", "purchase_currency": "CNY", "purchase_uom": "件"},
+            ]
+        },
+        active_supplier_names={"Supplier A", "Supplier B"},
+    )
+
+    groups = preview["sites"][0]["groups"]
+    assert len(groups) == 2
+    assert {group["supplier"] for group in groups} == {"Supplier A", "Supplier B"}
+
+
 def test_real_material_purchase_uom_splits_purchase_groups() -> None:
     preview = build_site_payload_preview(
         {
