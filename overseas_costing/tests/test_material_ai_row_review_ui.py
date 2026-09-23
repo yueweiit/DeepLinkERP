@@ -196,7 +196,7 @@ const fill=ready();fill.row_review={...fill.row_review,policy:'ai-field-review-7
  {stage:'purchase',status:'UNAVAILABLE',rows:[],processes:[]},
 ]};delete fill.rowSelection;const selection=w.ensureMaterialAIRowSelection(fill);
 const candidates=fill.row_review.field_candidates;
-const groups=w.materialAIFieldPresentationGroups(candidates,new Map(candidates.map(candidate=>[candidate.candidate_id,candidate])));
+const groups=w.materialAIPresentationGroups(candidates,new Map(candidates.map(candidate=>[candidate.candidate_id,candidate])));
 assert.equal(groups.length,1);assert.equal(groups[0].candidates.length,3);assert.equal(groups[0].canApply,false);
 assert.equal(selection.fields.size,0);
 const html=w.renderMaterialAIReviewDialogContent();
@@ -560,6 +560,38 @@ for(const hidden of ['9367.46','费用明细','空运分项','港杂与货代费
 assert(!html.includes('data-mf-ai-fee-select="AIR"'));assert(!html.includes('data-mf-ai-fee-select="PORT"'));
 const advanced=html.slice(html.indexOf('查看依据与其他记录'));
 for(const text of ['国际空运费','9367.46','费用明细','空运分项','港杂与货代费','分项合计 10346.99，差额 0.01 RMB','其他空运报价','613.90','历史报价','待核对运费','不可采用'])assert(advanced.includes(text),text);
+""")
+
+
+def test_equivalent_fees_render_once_with_merged_sources_and_keep_raw_audit_rows():
+    run_ui(r"""
+const fill=ready();fill.source_progress=[];fill.row_review={...fill.row_review,fees:[
+ {proposal_id:'approval-fee:LOG-1:1',workflow_stage:'international_logistics',selection_role:'approved_quote',result_origin:'SYSTEM',payload:{logical_fee_key:'international_express_fee',expense_category:'国际快递费',amount:'2385.37467',currency:'RMB'},can_apply:true,default_selected:true,presentation_group_id:'FEE-GROUP',presentation_representative_candidate_id:'approval-fee:LOG-1:1',presentation_equivalent_candidate_ids:['PROP-002','approval-fee:LOG-1:1'],presentation_sources:[{label:'国际物流审批 <A>',approval_no:'APP-1',origins:['SYSTEM','AI']},{label:'备用审批',approval_no:'APP-2',origins:['AI']}]},
+ {proposal_id:'PROP-002',workflow_stage:'international_logistics',selection_role:'ambiguous',result_origin:'AI',payload:{logical_fee_key:'international_express_fee',expense_category:'国际快递费',amount:'2385.374670',currency:'RMB'},can_apply:true,default_selected:false,presentation_group_id:'FEE-GROUP',presentation_representative_candidate_id:'approval-fee:LOG-1:1'},
+],fee_stage_snapshots:[
+ {stage:'payment',status:'UNAVAILABLE',processes:[],fees:[]},
+ {stage:'international_logistics',status:'AVAILABLE',processes:[],fees:[{proposal_id:'approval-fee:LOG-1:1'},{proposal_id:'PROP-002'}]},
+ {stage:'purchase',status:'UNAVAILABLE',processes:[],fees:[]},
+]};delete fill.rowSelection;const selection=w.ensureMaterialAIRowSelection(fill);
+assert.deepEqual([...selection.fees],['approval-fee:LOG-1:1']);
+selection.fees=new Set(['PROP-002']);
+assert.deepEqual([...w.ensureMaterialAIRowSelection(fill).fees],['approval-fee:LOG-1:1']);
+const groups=w.materialAIPresentationGroups(fill.row_review.fees);
+assert.equal(groups.length,1);assert.equal(groups[0].representativeId,'approval-fee:LOG-1:1');
+const html=w.renderMaterialAIReviewDialogContent();
+const main=html.slice(html.indexOf('<h4>费用 '),html.indexOf('查看依据与其他记录'));
+assert.equal((main.match(/data-mf-ai-fee-select=/g)||[]).length,1,main);
+assert.equal((main.match(/>国际快递费</g)||[]).length,1);
+assert(main.includes('<th>来源</th>'));
+assert(main.includes('国际物流审批 &lt;A> · 系统直读 / AI识别'));
+assert(main.includes('备用审批 · AI识别'));
+assert(!main.includes('<A>'));
+assert(main.includes('已选 1 项'));
+const advanced=html.slice(html.indexOf('查看依据与其他记录'));
+for(const id of ['approval-fee:LOG-1:1','PROP-002'])assert(advanced.includes(`data-mf-ai-fee-evidence="${id}"`),id);
+w.call=async(method,args)=>{calls.push({method,args});return {ok:true,preview:{id:'P',revision:'R',can_apply:true,rows:[]}}};
+await w.previewMaterialAIRowSelection();
+assert.deepEqual(JSON.parse(calls[0].args.fee_ids_json),['approval-fee:LOG-1:1']);
 """)
 
 

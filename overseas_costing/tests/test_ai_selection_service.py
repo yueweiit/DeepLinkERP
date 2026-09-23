@@ -1170,6 +1170,53 @@ def test_public_approval_fee_id_round_trips_into_locked_preview_without_leaking_
     assert raw_process_id not in json.dumps(response, ensure_ascii=False)
 
 
+def test_existing_ready_draft_gets_fee_presentation_groups_without_reanalysis():
+    repo = Repo()
+    repo.run['candidates_json'].extend([
+        {
+            'proposal_id': 'approval-fee:LOG-1:1',
+            'proposal_type': 'fee_update',
+            'result_origin': 'SYSTEM',
+            'default_selected': True,
+            'confidence': .99,
+            'source_refs': [{'source_id': 'DOC', 'process_instance_id': 'LOG-1'}],
+            'payload': {
+                'logical_fee_key': 'international_express_fee',
+                'expense_category': '国际快递费',
+                'amount': '2385.37467',
+                'currency': 'RMB',
+                'amount_status': 'ESTIMATED',
+                'allocation_basis': 'chargeable_weight',
+                'scope_type': 'ALL_ITEMS',
+            },
+        },
+        {
+            'proposal_id': 'PROP-002',
+            'proposal_type': 'fee_update',
+            'result_origin': 'AI',
+            'confidence': .99,
+            'source_refs': [{'source_id': 'DOC', 'process_instance_id': 'LOG-1'}],
+            'payload': {
+                'logical_fee_key': 'international_express_fee',
+                'expense_category': '国际快递费',
+                'amount': '2385.374670',
+                'currency': 'rmb',
+                'amount_status': 'estimated',
+                'allocation_basis': 'CHARGEABLE_WEIGHT',
+                'scope_type': 'all_items',
+            },
+        },
+    ])
+
+    public_catalog = service.review_catalog(repo, 'B1', repo.run)
+
+    assert repo.run['status'] == 'READY'
+    assert len(public_catalog['fees']) == 2
+    assert len({fee['presentation_group_id'] for fee in public_catalog['fees']}) == 1
+    assert sum(bool(fee.get('presentation_equivalent_candidate_ids'))
+               for fee in public_catalog['fees']) == 1
+
+
 def test_ordinary_ai_selection_rejects_whole_table_replacement():
     repo = Repo()
     catalog = service.review_catalog(repo, 'B1', repo.run)

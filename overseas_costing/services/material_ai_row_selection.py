@@ -2,6 +2,7 @@
 from collections import Counter
 from copy import deepcopy
 from decimal import Decimal, InvalidOperation
+import json
 import re
 
 from . import material_ai_fee_policy
@@ -794,7 +795,25 @@ def _field_candidates(catalog_rows):
                     if candidate['workflow_stage'] not in default_stages else
                     '未作为默认值，保留为本字段可改选候选。')
     _resolve_value_basis_defaults(result, rows_by_id)
-    _decorate_field_candidate_presentation_groups(result)
+    _decorate_candidate_presentation_groups(
+        result,
+        namespace='field-candidate',
+        id_field='candidate_id',
+        equivalence_key=lambda candidate: (
+            candidate.get('item_name'),candidate.get('fieldname'),
+            candidate.get('workflow_stage'),
+            _canonical_field_candidate(
+                candidate.get('fieldname'),candidate.get('suggested_value')),
+        ),
+        rank_key=lambda candidate: (
+            not candidate.get('can_apply'),
+            not candidate.get('default_selected'),
+            int(candidate.get('workflow_rank') or 0),
+            int(candidate.get('source_priority') or 999999),
+            -float(candidate.get('confidence') or 0),
+            str(candidate.get('candidate_id') or ''),
+        ),
+    )
     defaults={candidate['row_id'] for candidate in result if candidate['default_selected']}
     for row_id,row in rows_by_id.items():
         if row.get('origin')!='source':
@@ -892,35 +911,176 @@ def _canonical_field_candidate(fieldname,value):
     return str(value or '').strip().casefold()
 
 
-def _decorate_field_candidate_presentation_groups(candidates):
-    groups={}
+def _decorate_candidate_presentation_groups(
+        candidates, *, namespace, id_field, equivalence_key, rank_key):
+    """Attach one server-owned display representative without deleting evidence."""
+
+    groups = {}
     for candidate in candidates:
-        key=(
-            candidate.get('item_name'),candidate.get('fieldname'),
-            candidate.get('workflow_stage'),
-            _canonical_field_candidate(
-                candidate.get('fieldname'),candidate.get('suggested_value')),
-        )
-        groups.setdefault(key,[]).append(candidate)
-    for key,equivalent in groups.items():
-        ranked=lambda candidate:(
-            not candidate.get('can_apply'),
-            int(candidate.get('workflow_rank') or 0),
-            int(candidate.get('source_priority') or 999999),
-            -float(candidate.get('confidence') or 0),
-            str(candidate.get('candidate_id') or ''),
-        )
-        defaults=[candidate for candidate in equivalent if candidate.get('default_selected')]
-        representative=min(defaults or equivalent,key=ranked)
-        candidate_ids=sorted(candidate['candidate_id'] for candidate in equivalent)
-        group_id=digest(POLICY,'field-candidate-presentation-group',*key)
+        groups.setdefault(equivalence_key(candidate), []).append(candidate)
+    for key, equivalent in groups.items():
+        representative = min(equivalent, key=rank_key)
+        candidate_ids = sorted(str(candidate.get(id_field) or '') for candidate in equivalent)
+        group_id = digest(POLICY, f'{namespace}-presentation-group', *key)
         for candidate in equivalent:
             candidate.update(
                 presentation_group_id=group_id,
-                presentation_representative_candidate_id=representative['candidate_id'],
+                presentation_representative_candidate_id=representative[id_field],
             )
-            candidate.pop('presentation_equivalent_candidate_ids',None)
-        representative['presentation_equivalent_candidate_ids']=candidate_ids
+            candidate.pop('presentation_equivalent_candidate_ids', None)
+        representative['presentation_equivalent_candidate_ids'] = candidate_ids
+    return groups
+
+
+def _canonical_fee_amount(value):
+    try:
+        parsed = Decimal(str(value))
+        if parsed.is_finite():
+            return '0' if parsed == 0 else format(parsed.normalize(), 'f')
+        return str(value or '').strip()
+    except (InvalidOperation, TypeError, ValueError):
+        return str(value or '').strip().casefold()
+
+
+def _canonical_fee_scope(scope_type, value):
+    if str(scope_type or 'ALL_ITEMS').strip().upper() == 'ALL_ITEMS':
+        return ()
+    parsed = value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            parsed = [part for part in value.split(',') if part.strip()]
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    elif not isinstance(parsed, (list, tuple, set)):
+        parsed = [] if parsed in (None, '') else [parsed]
+    def canonical(item):
+        if isinstance(item, dict):
+            return {
+                str(key): canonical(nested)
+                for key, nested in sorted(item.items(), key=lambda pair: str(pair[0]))
+            }
+        if isinstance(item, (list, tuple, set)):
+            nested = [canonical(value) for value in item]
+            return sorted(nested, key=lambda value: json.dumps(
+                value, ensure_ascii=False, sort_keys=True, separators=(',', ':')))
+        return str(item or '').strip().casefold()
+
+    normalized = [json.dumps(canonical(item), ensure_ascii=False, sort_keys=True,
+                             separators=(',', ':')) for item in parsed]
+    return tuple(sorted(value for value in normalized if value))
+
+
+def _fee_candidate_presentation_key(candidate):
+    payload = candidate.get('payload') or {}
+    scope_type = str(payload.get('scope_type') or 'ALL_ITEMS').strip().upper()
+    return (
+        str(payload.get('logical_fee_key') or '').strip().casefold(),
+        _canonical_fee_amount(payload.get('amount')),
+        str(payload.get('currency') or '').strip().upper(),
+        str(payload.get('amount_status') or '').strip().upper(),
+        str(payload.get('allocation_basis') or '').strip().casefold(),
+        scope_type,
+        _canonical_fee_scope(scope_type, payload.get('scope_value_json')),
+    )
+
+
+def _presentation_rank_number(value, default=999999):
+    try:
+        return int(value) if value not in (None, '') else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _fee_candidate_presentation_rank(candidate):
+    role = str(candidate.get('selection_role') or '')
+    role_rank = 0 if role in {'primary_total', 'approved_quote'} else 1
+    refs = [ref for ref in candidate.get('source_refs') or [] if isinstance(ref, dict)]
+    workflow_rank = min(
+        (_presentation_rank_number(ref.get('workflow_rank')) for ref in refs),
+        default=_presentation_rank_number(candidate.get('workflow_rank')),
+    )
+    evidence_rank = min(
+        (_presentation_rank_number(ref.get('evidence_rank')) for ref in refs),
+        default=_presentation_rank_number(
+            candidate.get('evidence_rank'),
+            _presentation_rank_number(candidate.get('source_priority')),
+        ),
+    )
+    return (
+        not candidate.get('can_apply'),
+        not candidate.get('default_selected'),
+        str(candidate.get('result_origin') or '').upper() != 'SYSTEM',
+        role_rank,
+        workflow_rank,
+        evidence_rank,
+        -float(candidate.get('confidence') or 0),
+        str(candidate.get('proposal_id') or ''),
+    )
+
+
+def _fee_presentation_sources(equivalent, sources):
+    sources_by_id = {
+        str(source.get('source_id') or ''): source
+        for source in sources or [] if str(source.get('source_id') or '')
+    }
+    grouped = {}
+    for candidate in equivalent:
+        origin = str(candidate.get('result_origin') or 'AI').strip().upper() or 'AI'
+        refs = [ref for ref in candidate.get('source_refs') or [] if isinstance(ref, dict)]
+        if not refs:
+            refs = [{}]
+        for ref in refs:
+            source = sources_by_id.get(str(ref.get('source_id') or ''), {})
+            process_id = str(
+                ref.get('process_instance_id')
+                or _process_instance_id(source)
+                or ref.get('source_id')
+                or candidate.get('proposal_id')
+                or ''
+            )
+            label = str(
+                source.get('approval_title') or source.get('process_title')
+                or source.get('process_name') or source.get('source_label')
+                or ref.get('source_label') or ref.get('file')
+                or (candidate.get('payload') or {}).get('source_label')
+                or '未标注资料'
+            )
+            approval_no = str(source.get('approval_no') or ref.get('approval_no') or '')
+            key = ('process', process_id) if process_id else ('source', label, approval_no)
+            entry = grouped.setdefault(key, {
+                'label': label,
+                'approval_no': approval_no,
+                'origins': set(),
+            })
+            entry['origins'].add(origin)
+    origin_order = {'SYSTEM': 0, 'AI': 1}
+    return [
+        {
+            'label': entry['label'],
+            'approval_no': entry['approval_no'],
+            'origins': sorted(entry['origins'], key=lambda value: (
+                origin_order.get(value, 9), value)),
+        }
+        for _key, entry in sorted(grouped.items(), key=lambda item: (
+            item[1]['label'], item[1]['approval_no'], item[0]))
+    ]
+
+
+def _decorate_fee_candidate_presentation_groups(candidates, sources):
+    groups = _decorate_candidate_presentation_groups(
+        candidates,
+        namespace='fee-candidate',
+        id_field='proposal_id',
+        equivalence_key=_fee_candidate_presentation_key,
+        rank_key=_fee_candidate_presentation_rank,
+    )
+    for equivalent in groups.values():
+        representative_id = str(equivalent[0].get('presentation_representative_candidate_id') or '')
+        representative = next(candidate for candidate in equivalent
+                              if str(candidate.get('proposal_id') or '') == representative_id)
+        representative['presentation_sources'] = _fee_presentation_sources(equivalent, sources)
 
 
 def _stage_row_material_key(row):
@@ -1607,6 +1767,7 @@ def catalog(items, proposals, fees, context, *, run_id, sources=None, fx_rates=N
         } for group in source_groups if any(
             row_id in scoped_row_ids for row_id in group.get('row_ids') or [])]
     fee_rows=[p for p in material_ai_fee_policy.decorate(proposals,fees,context) if p.get('proposal_type')=='fee_update']
+    _decorate_fee_candidate_presentation_groups(fee_rows, sources or [])
     fee_stage_snapshots=_fee_stage_snapshots(fee_rows,sources or [])
     scope_excluded_item_names = sorted(
         str(item.get('name') or '')

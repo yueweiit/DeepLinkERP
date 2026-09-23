@@ -13553,15 +13553,19 @@ class OverseasCostWorkbench {
 
   materialAIReviewFeePolicy(fill) {
     const fees = fill?.row_review?.fees || [];
-    const mainFees = fees.filter(fee => {
+    const eligibleFees = fees.filter(fee => {
       const role = String(fee.selection_role || "");
       if (["", "primary_total", "approved_quote"].includes(role)) return true;
       return role === "ambiguous" && fee.can_apply;
     });
-    const mainIds = new Set(mainFees.map(fee => String(fee.proposal_id)));
+    const mainGroups = this.materialAIPresentationGroups(eligibleFees);
+    const mainFees = mainGroups.map(group => group.representative).filter(Boolean);
     const selectableIds = new Set(mainFees.filter(fee => fee.can_apply).map(fee => String(fee.proposal_id)));
-    const otherFees = fees.filter(fee => String(fee.selection_role || "") !== "component" && !mainIds.has(String(fee.proposal_id)));
-    return { fees, mainFees, selectableIds, otherFees };
+    const representativeByCandidateId = new Map();
+    mainGroups.forEach(group => group.equivalentIds.forEach(candidateId => {
+      representativeByCandidateId.set(String(candidateId), group.representativeId);
+    }));
+    return { fees, mainFees, mainGroups, selectableIds, representativeByCandidateId };
   }
 
   materialAIFieldCandidateIndex(fieldCandidates) {
@@ -13618,13 +13622,23 @@ class OverseasCostWorkbench {
         rows: new Set(fieldCandidates.length ? [] : (fill.row_review.rows || []).filter(row => row.can_update && (row.default_update_selected ?? row.default_selected)).map(row => String(row.row_id))),
         fields: fieldDefaults,
         packingAssignments: packingDefaults,
-        fees: new Set(feePolicy.mainFees.filter(fee => fee.can_apply && fee.default_selected).map(fee => String(fee.proposal_id))),
+        fees: new Set(feePolicy.mainGroups.filter(group => group.canApply
+          && group.candidates.some(fee => fee.default_selected)).map(group => group.representativeId)),
         request: 0, loading: false, preview: null, error: "", timer: null,
       };
     } else {
       if (!(fill.rowSelection.fields instanceof Map)) fill.rowSelection.fields = new Map();
       if (!(fill.rowSelection.packingAssignments instanceof Map)) fill.rowSelection.packingAssignments = new Map();
-      fill.rowSelection.fees.forEach(id => { if (!feePolicy.selectableIds.has(String(id))) fill.rowSelection.fees.delete(id); });
+      fill.rowSelection.fees.forEach(id => {
+        const candidateId = String(id);
+        const representativeId = feePolicy.representativeByCandidateId.get(candidateId);
+        if (representativeId && feePolicy.selectableIds.has(representativeId)) {
+          if (representativeId !== candidateId) {
+            fill.rowSelection.fees.delete(candidateId);
+            fill.rowSelection.fees.add(representativeId);
+          }
+        } else fill.rowSelection.fees.delete(candidateId);
+      });
       fill.rowSelection.fields.forEach((candidateId, key) => {
         const representativeId = this.materialAIFieldRepresentativeCandidateId(fieldCandidateIndex, key, candidateId);
         if (representativeId) fill.rowSelection.fields.set(key, representativeId);
@@ -13691,7 +13705,7 @@ class OverseasCostWorkbench {
       if (option?.can_apply && selection.mode !== "add_selected") selection.packingAssignments.set(String(id), String(option.assignment_id));
       else selection.packingAssignments.delete(String(id));
     } else {
-      const items = kind === "rows" ? rows : feePolicy.fees;
+      const items = kind === "rows" ? rows : feePolicy.mainFees;
       for (const item of items) {
         const itemId = String(kind === "rows" ? item.row_id : item.proposal_id);
         const allowed = kind === "fees" ? selection.mode !== "add_selected" && feePolicy.selectableIds.has(itemId)
@@ -13873,25 +13887,32 @@ class OverseasCostWorkbench {
     return [...materialRows.values()];
   }
 
-  materialAIFieldPresentationGroups(candidates, candidatesById) {
+  materialAIPresentationGroups(candidates, candidatesById = null) {
+    const entries = Array.isArray(candidates) ? candidates : [];
+    const idOf = candidate => String(candidate?.candidate_id || candidate?.proposal_id || "");
+    const byId = candidatesById instanceof Map
+      ? candidatesById
+      : new Map(entries.map(candidate => [idOf(candidate), candidate]).filter(([candidateId]) => candidateId));
     const groups = new Map();
-    candidates.forEach(candidate => {
-      const groupId = String(candidate.presentation_group_id || "");
-      if (!groupId) return;
+    entries.forEach(candidate => {
+      const candidateId = idOf(candidate);
+      if (!candidateId) return;
+      const groupId = String(candidate.presentation_group_id || `candidate:${candidateId}`);
       if (!groups.has(groupId)) groups.set(groupId, { groupId, candidates: [] });
       groups.get(groupId).candidates.push(candidate);
     });
     return [...groups.values()].map(group => {
-      const representativeId = String(group.candidates[0]?.presentation_representative_candidate_id || "");
-      const representative = candidatesById.get(representativeId);
-      const equivalentIds = new Set([representativeId, ...group.candidates.map(candidate => String(candidate.candidate_id || "")), ...(representative?.presentation_equivalent_candidate_ids || []).map(String)]);
+      const firstId = idOf(group.candidates[0]);
+      const representativeId = String(group.candidates[0]?.presentation_representative_candidate_id || firstId);
+      const representative = byId.get(representativeId) || group.candidates[0];
+      const equivalentIds = new Set([representativeId, ...group.candidates.map(idOf), ...(representative?.presentation_equivalent_candidate_ids || []).map(String)]);
       const canApply = group.candidates.some(candidate => candidate.can_apply) && Boolean(representative?.can_apply);
       return { ...group, representativeId, representative, equivalentIds, canApply };
     });
   }
 
   renderMaterialAIFieldChoice({ candidates, candidatesById, key, material, label, selection, value, busy }) {
-    const groups = this.materialAIFieldPresentationGroups(candidates, candidatesById);
+    const groups = this.materialAIPresentationGroups(candidates, candidatesById);
     const applicableGroups = groups.filter(group => group.canApply);
     const readonlyGroups = groups.filter(group => !group.canApply);
     const selectedId = String(selection.fields.get(key) || "");
@@ -13931,7 +13952,7 @@ class OverseasCostWorkbench {
         const candidates = candidateIds.map(id => candidatesById.get(String(id))).filter(Boolean);
         const keyItem = candidates[0]?.item_name || row.item_name || "";
         const selectedId = String(selection.fields.get(`${keyItem}:${fieldname}`) || "");
-        return this.materialAIFieldPresentationGroups(candidates, candidatesById)
+        return this.materialAIPresentationGroups(candidates, candidatesById)
           .some(group => group.equivalentIds.has(selectedId));
       }).length, 0);
       const matrixRows = rows.map(row => {
@@ -13942,7 +13963,7 @@ class OverseasCostWorkbench {
           if (!candidates.length) return '<td class="is-empty">—</td>';
           const keyItem = candidates[0]?.item_name || row.item_name || "";
           const key = `${keyItem}:${fieldname}`;
-          const groups = this.materialAIFieldPresentationGroups(candidates, candidatesById);
+          const groups = this.materialAIPresentationGroups(candidates, candidatesById);
           return `<td class="${groups.length > 1 ? "is-conflict" : ""}">${this.renderMaterialAIFieldChoice({ candidates, candidatesById, key, material, label: fieldLabels[fieldname] || fieldname, selection, value, busy })}</td>`;
         }).join("");
         return `<tr data-mf-ai-material-row="${this.escape(row.materialKey)}"><th scope="row">${value(material)}</th>${fieldCells}</tr>`;
@@ -13986,7 +14007,25 @@ class OverseasCostWorkbench {
   renderMaterialAIFeeChoiceRow(fee, selection, value, disabled = false) {
     const values = fee.payload || fee;
     const readonly = selection.mode === "add_selected" || !fee.can_apply || disabled;
-    return `<tr><td><input type="checkbox" data-mf-ai-fee-select="${this.escape(fee.proposal_id)}" ${readonly ? "disabled" : ""} ${selection.fees.has(String(fee.proposal_id)) ? "checked" : ""} aria-label="选择费用 ${this.escape(values.expense_category || values.logical_fee_key || "")}"></td><td>${value(values.expense_category || values.logical_fee_key)}</td><td>${value(values.amount)} ${value(values.currency)}</td></tr>`;
+    const originLabels = { SYSTEM: "系统直读", AI: "AI识别" };
+    const presentationSources = Array.isArray(fee.presentation_sources) ? fee.presentation_sources : [];
+    const labelCounts = presentationSources.reduce((counts, source) => {
+      const label = String(source?.label || source?.approval_no || "未标注资料");
+      counts.set(label, Number(counts.get(label) || 0) + 1);
+      return counts;
+    }, new Map());
+    const sources = presentationSources.map(source => {
+      const label = source?.label || source?.approval_no || "未标注资料";
+      const approval = source?.approval_no && labelCounts.get(String(label)) > 1
+        ? `审批 ${source.approval_no}` : "";
+      const origins = (Array.isArray(source?.origins) ? source.origins : [])
+        .map(origin => originLabels[String(origin || "").toUpperCase()] || "其他识别");
+      return [this.escape(label), approval ? this.escape(approval) : "", origins.map(origin => this.escape(origin)).join(" / ")]
+        .filter(Boolean).join(" · ");
+    });
+    const fallbackSource = values.source_label || fee.source_label || "";
+    const source = sources.length ? sources.map(row => `<span>${row}</span>`).join("<br>") : value(fallbackSource);
+    return `<tr><td><input type="checkbox" data-mf-ai-fee-select="${this.escape(fee.proposal_id)}" ${readonly ? "disabled" : ""} ${selection.fees.has(String(fee.proposal_id)) ? "checked" : ""} aria-label="选择费用 ${this.escape(values.expense_category || values.logical_fee_key || "")}"></td><td>${value(values.expense_category || values.logical_fee_key)}</td><td>${value(values.amount)} ${value(values.currency)}</td><td>${source}</td></tr>`;
   }
 
   renderMaterialAIFeeStages(fill, selection, feePolicy, value) {
@@ -14010,12 +14049,12 @@ class OverseasCostWorkbench {
       const status = String(stage.status || "UNAVAILABLE").toUpperCase();
       const selectedCount = mainFees.filter(fee => selection.fees.has(String(fee.proposal_id))).length;
       const hasActionable = actionable(view);
-      const empty = '<tr><td colspan="3">无可用资料</td></tr>';
-      return `<details class="ocw-mf-ai-stage-panel is-${this.escape(status.toLowerCase())}" data-mf-ai-fee-stage="${this.escape(stage.stage)}" ${index === openIndex ? "open" : ""}><summary><strong>${this.escape(stage.stage_label)}</strong><span><b>${hasActionable ? this.escape(this.materialAIStageStatusLabel(status)) : "无可用资料"}</b>已选 ${selectedCount} 项</span></summary>${this.materialAIStageSourceActions(stage)}${this.renderMaterialAIStageWarning(stage)}<div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-fee-catalog"><thead><tr><th>选择</th><th>费用项目</th><th>金额</th></tr></thead><tbody>${mainFees.map(renderMain).join("") || empty}</tbody></table></div></details>`;
+      const empty = '<tr><td colspan="4">无可用资料</td></tr>';
+      return `<details class="ocw-mf-ai-stage-panel is-${this.escape(status.toLowerCase())}" data-mf-ai-fee-stage="${this.escape(stage.stage)}" ${index === openIndex ? "open" : ""}><summary><strong>${this.escape(stage.stage_label)}</strong><span><b>${hasActionable ? this.escape(this.materialAIStageStatusLabel(status)) : "无可用资料"}</b>已选 ${selectedCount} 项</span></summary>${this.materialAIStageSourceActions(stage)}${this.renderMaterialAIStageWarning(stage)}<div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-fee-catalog"><thead><tr><th>选择</th><th>费用项目</th><th>金额</th><th>来源</th></tr></thead><tbody>${mainFees.map(renderMain).join("") || empty}</tbody></table></div></details>`;
     }).join("");
     const assignedIds = new Set(stages.flatMap(stage => (stage.fees || []).map(fee => String(fee?.proposal_id || fee || "")).filter(Boolean)));
     const unclassified = feePolicy.mainFees.filter(fee => !assignedIds.has(String(fee.proposal_id)));
-    const unclassifiedSection = unclassified.length ? `<details class="ocw-mf-ai-unclassified" data-mf-ai-unclassified-fees="1"><summary>其他可选费用 <span>${unclassified.length} 条</span></summary><div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-fee-catalog"><thead><tr><th>选择</th><th>费用项目</th><th>金额</th></tr></thead><tbody>${unclassified.map(renderMain).join("")}</tbody></table></div></details>` : "";
+    const unclassifiedSection = unclassified.length ? `<details class="ocw-mf-ai-unclassified" data-mf-ai-unclassified-fees="1"><summary>其他可选费用 <span>${unclassified.length} 条</span></summary><div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-fee-catalog"><thead><tr><th>选择</th><th>费用项目</th><th>金额</th><th>来源</th></tr></thead><tbody>${unclassified.map(renderMain).join("")}</tbody></table></div></details>` : "";
     return `<section class="ocw-mf-ai-preview-section" data-mf-ai-fee-stages><h4>费用 <span>已选 ${selection.fees.size}</span></h4>${panels}${unclassifiedSection}</section>`;
   }
 

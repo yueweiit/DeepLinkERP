@@ -20,6 +20,41 @@ def source(code='A1', **fields):
     return item('draft-'+code,code,_review_origin='source',**fields)
 
 
+def fee_candidate(proposal_id, *, amount='100', source_id='LOG-FORM', process_id='LOG-1',
+                  result_origin='AI', default_selected=False, selection_role='ambiguous',
+                  **payload_overrides):
+    payload = {
+        'logical_fee_key': 'international_express_fee',
+        'expense_category': '国际快递费',
+        'amount': amount,
+        'currency': 'RMB',
+        'amount_status': 'ESTIMATED',
+        'allocation_basis': 'chargeable_weight',
+        'scope_type': 'ALL_ITEMS',
+        'scope_value_json': '[]',
+        **payload_overrides,
+    }
+    return {
+        'proposal_id': proposal_id,
+        'proposal_type': 'fee_update',
+        'confidence': .99,
+        'workflow_stage': 'international_logistics',
+        'workflow_rank': 1,
+        'result_origin': result_origin,
+        'default_selected': default_selected,
+        'selection_role': selection_role,
+        'source_refs': [{
+            'source_id': source_id,
+            'process_instance_id': process_id,
+            'workflow_stage': 'international_logistics',
+            'workflow_rank': 1,
+            'evidence_kind': 'approval_form',
+            'evidence_rank': 1,
+        }],
+        'payload': payload,
+    }
+
+
 def field_candidate_review(values, *, fieldname='gross_weight_kg', confidences=None, roles=None):
     confidences = confidences or [.99] * len(values)
     roles = roles or ['logistics_expense'] * len(values)
@@ -1660,6 +1695,127 @@ def test_fee_stage_snapshots_group_safe_summaries_and_include_purchase():
     assert [fee['proposal_id'] for fee in purchase['fees']] == ['PUR']
     assert all('source_refs' not in fee and 'payload' not in fee
                for stage in review['fee_stage_snapshots'] for fee in stage['fees'])
+
+
+def test_equivalent_fee_candidates_share_one_presentation_group_and_keep_raw_audit_records():
+    sources = [
+        {'source_id': 'LOG-FORM', 'process_instance_id': 'LOG-1',
+         'source_kind': 'approval_form', 'approval_role': 'international_logistics',
+         'approval_title': '国际物流审批', 'approval_no': 'APP-001'},
+        {'source_id': 'LOG-AI', 'process_instance_id': 'LOG-1',
+         'source_kind': 'approval_form', 'approval_role': 'international_logistics',
+         'approval_title': '国际物流审批', 'approval_no': 'APP-001'},
+    ]
+    proposals = [
+        fee_candidate('approval-fee:LOG-1:1', source_id='LOG-FORM',
+                      result_origin='SYSTEM', default_selected=True),
+        fee_candidate('PROP-002', source_id='LOG-AI', result_origin='AI'),
+    ]
+
+    review = catalog([], proposals, sources)
+    raw_fees = review['fees']
+    representative = next(fee for fee in raw_fees
+                          if fee.get('presentation_equivalent_candidate_ids'))
+
+    assert len(raw_fees) == 2
+    assert len({fee['presentation_group_id'] for fee in raw_fees}) == 1
+    assert representative['proposal_id'] == 'approval-fee:LOG-1:1'
+    assert representative['presentation_equivalent_candidate_ids'] == [
+        'PROP-002', 'approval-fee:LOG-1:1',
+    ]
+    assert representative['presentation_sources'] == [{
+        'label': '国际物流审批',
+        'approval_no': 'APP-001',
+        'origins': ['SYSTEM', 'AI'],
+    }]
+
+    projected = service.project([], review, [], [representative['proposal_id']], 'fill_missing')
+    assert [fee['proposal_id'] for fee in projected['fees']] == [representative['proposal_id']]
+    with pytest.raises(ValueError, match='只选择一份'):
+        service.project([], review, [], [fee['proposal_id'] for fee in raw_fees], 'fill_missing')
+
+
+def test_equivalent_fee_candidates_from_different_approvals_merge_and_keep_both_sources():
+    sources = [
+        {'source_id': 'LOG-1-FORM', 'process_instance_id': 'LOG-1',
+         'source_kind': 'approval_form', 'approval_role': 'international_logistics',
+         'approval_title': '国际物流审批 A', 'approval_no': 'APP-A'},
+        {'source_id': 'LOG-2-FORM', 'process_instance_id': 'LOG-2',
+         'source_kind': 'approval_form', 'approval_role': 'international_logistics',
+         'approval_title': '国际物流审批 B', 'approval_no': 'APP-B'},
+    ]
+    proposals = [
+        fee_candidate('FEE-A', source_id='LOG-1-FORM', process_id='LOG-1',
+                      result_origin='SYSTEM', default_selected=True),
+        fee_candidate('FEE-B', source_id='LOG-2-FORM', process_id='LOG-2'),
+    ]
+
+    review = catalog([], proposals, sources)
+    representative = next(fee for fee in review['fees']
+                          if fee.get('presentation_equivalent_candidate_ids'))
+
+    assert len({fee['presentation_group_id'] for fee in review['fees']}) == 1
+    assert representative['presentation_sources'] == [
+        {'label': '国际物流审批 A', 'approval_no': 'APP-A', 'origins': ['SYSTEM']},
+        {'label': '国际物流审批 B', 'approval_no': 'APP-B', 'origins': ['AI']},
+    ]
+
+
+def test_fee_presentation_scope_normalizes_item_order_and_nested_metadata():
+    proposals = [
+        fee_candidate('FEE-A', scope_type='ITEMS',
+                      scope_value_json='{"item_keys":["ITEM-2","ITEM-1"],"tags":["B","A"]}'),
+        fee_candidate('FEE-B', scope_type='items',
+                      scope_value_json='{"tags":["A","B"],"item_keys":["ITEM-1","ITEM-2"]}'),
+    ]
+
+    review = catalog([], proposals, [])
+
+    assert len({fee['presentation_group_id'] for fee in review['fees']}) == 1
+
+
+@pytest.mark.parametrize(('payload_overrides', 'label'), [
+    ({'logical_fee_key': 'express_surcharge'}, '费用键'),
+    ({'currency': 'MXN'}, '币种'),
+    ({'amount_status': 'ACTUAL'}, '金额状态'),
+    ({'allocation_basis': 'goods_value'}, '分摊依据'),
+    ({'scope_type': 'ITEMS', 'scope_value_json': '["ITEM-2", "ITEM-1"]'}, '作用范围'),
+])
+def test_fee_presentation_groups_keep_distinct_business_effects(payload_overrides, label):
+    proposals = [
+        fee_candidate('BASE', result_origin='SYSTEM', default_selected=True),
+        fee_candidate('VARIANT', **payload_overrides),
+    ]
+
+    review = catalog([], proposals, [])
+
+    assert len({fee['presentation_group_id'] for fee in review['fees']}) == 2, label
+
+
+def test_fee_presentation_representative_priority_is_stable():
+    proposals = [
+        fee_candidate('AI-DEFAULT', amount='101', result_origin='AI', default_selected=True),
+        fee_candidate('SYSTEM-NONDEFAULT', amount='101', result_origin='SYSTEM'),
+        fee_candidate('AI-PLAIN', amount='102', result_origin='AI'),
+        fee_candidate('SYSTEM-PLAIN', amount='102', result_origin='SYSTEM'),
+        fee_candidate('AI-AMBIGUOUS', amount='103', result_origin='AI',
+                      selection_role='ambiguous'),
+        fee_candidate('AI-APPROVED', amount='103', result_origin='AI',
+                      selection_role='approved_quote'),
+    ]
+
+    review = catalog([], proposals, [])
+    representatives = {
+        str(fee['payload']['amount']): fee['proposal_id']
+        for fee in review['fees']
+        if fee.get('presentation_equivalent_candidate_ids')
+    }
+
+    assert representatives == {
+        '101': 'AI-DEFAULT',
+        '102': 'SYSTEM-PLAIN',
+        '103': 'AI-APPROVED',
+    }
 
 
 def test_more_complete_unsafe_candidate_is_not_promoted():
