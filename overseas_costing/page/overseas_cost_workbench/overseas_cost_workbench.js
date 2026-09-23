@@ -12257,27 +12257,15 @@ class OverseasCostWorkbench {
     return `${invalid}${renderGroup("本审批候选", candidates)}${renderGroup("其他可选项目", others)}${options.length ? "" : `<p class="ocw-mf-reference-empty">没有匹配的有效项目</p>`}`;
   }
 
-  referenceSelectionRequiresReason(items, fieldname, target) {
-    const next = String(target || "").trim();
-    return (items || []).some((item) => {
-      const current = String(item?.[fieldname] || "").trim();
-      return Boolean(current && current !== next);
-    });
-  }
-
   renderReferenceChangePreview(items, fieldname, target, label) {
     const rows = (items || []).map((row) => `<tr><td>${this.escape(row.material_code || row.stable_line_key || row.name)}</td><td>${this.escape(row[fieldname] || "未设置")}</td><td>${this.escape(target || "未选择")}</td></tr>`).join("");
     return `<div class="ocw-mf-reference-preview"><strong>${this.escape(label)}</strong><span>只修改明确勾选的 ${items.length} 行，不会扩展到装箱组。</span><table><thead><tr><th>物料</th><th>原值</th><th>新值</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
-  async applyMaterialReferenceSelection(items, fieldname, value, reason = "", options = {}) {
+  async applyMaterialReferenceSelection(items, fieldname, value, options = {}) {
     const target = String(value || "").trim();
     const allowedValues = options.allowedValues instanceof Set ? options.allowedValues : new Set(options.allowedValues || []);
     if (!target || !allowedValues.has(target)) throw new Error("请从有效列表中选择，不能录入列表外的值。");
-    const trimmedReason = String(reason || "").trim();
-    if (this.referenceSelectionRequiresReason(items, fieldname, target) && !trimmedReason) {
-      throw new Error("修改已有值时必须填写修改原因。");
-    }
     const state = this.ensureMaterialFeeState();
     if (options.aiDraft && fieldname === "project_collection") {
       (items || []).forEach((item) => {
@@ -12295,14 +12283,14 @@ class OverseasCostWorkbench {
         }
         this.updateMaterialAIDraftValue(item.name, fieldname, target, item[fieldname] || "");
         const draft = state.aiFill?.manualUpdates?.[`${item.name}:${fieldname}`];
-        if (draft) draft.reason = trimmedReason;
+        if (draft) delete draft.reason;
       });
       this.renderMaterialFeeWorkspacePreservingPosition();
       return { ok:true, draft:true, changed_count:items.length };
     }
     if (!(await this.ensureEditSession())) return { ok:false, cancelled:true };
     const fallbackRemark = fieldname === "project_collection" ? "设置 ERP 项目归属" : "设置 ERP 供应商";
-    const auditRemark = trimmedReason || fallbackRemark;
+    const auditRemark = String(options.auditRemark || fallbackRemark).trim() || fallbackRemark;
     const updates = (items || []).map((item) => ({
       item_name:item.name, fieldname, value:target, remark:auditRemark,
     }));
@@ -12325,8 +12313,8 @@ class OverseasCostWorkbench {
     return result;
   }
 
-  async applyProjectCollectionSelection(items, value, reason = "", options = {}) {
-    return this.applyMaterialReferenceSelection(items, "project_collection", value, reason, options);
+  async applyProjectCollectionSelection(items, value, options = {}) {
+    return this.applyMaterialReferenceSelection(items, "project_collection", value, options);
   }
 
   async openProjectCollectionForItem(itemName, suggestedValue = "") {
@@ -12359,15 +12347,13 @@ class OverseasCostWorkbench {
       title:source === "bulk" ? `批量设置项目归属（${items.length} 行）` : `选择项目归属`,
       fields:[
         {fieldtype:"HTML", fieldname:"picker", options:`<div class="ocw-mf-reference-picker-dialog"><label class="ocw-mf-reference-search"><span>搜索项目或 ERP 公司</span><input type="search" data-mf-project-search autocomplete="off"></label><div data-mf-project-options>${this.renderProjectPickerOptions(model)}</div></div>`},
-        {fieldtype:"Small Text", fieldname:"reason", label:"修改原因", description:"填补空值无需原因；覆盖已有值时必填。"},
         {fieldtype:"HTML", fieldname:"preview", options:this.renderReferenceChangePreview(items, "project_collection", initial, "项目归属变更预览")},
       ],
       primary_action_label:source === "bulk" ? "确认批量设置" : "保存",
-      primary_action:async (values) => {
+      primary_action:async () => {
         const target = String(model.selectedValue || "");
-        const reason = String(values.reason || "").trim();
         const aiDraft = Boolean(this.isMaterialAIReadyStatus(state.aiFill?.status) && state.aiFill?.draftVisible);
-        await this.applyProjectCollectionSelection(items, target, reason, {
+        await this.applyProjectCollectionSelection(items, target, {
           aiDraft,
           allowedValues:valid,
         });
@@ -12386,7 +12372,7 @@ class OverseasCostWorkbench {
     return dialog;
   }
 
-  async loadSupplierOptions(rawValue = "") {
+  async loadSupplierResolution(rawValue = "") {
     const state = this.ensureMaterialFeeState();
     const batchName = String(this.detailState?.batchName || "");
     const query = String(rawValue || "").trim();
@@ -12403,20 +12389,47 @@ class OverseasCostWorkbench {
       if (!candidate?.name || options.some((row) => row.name === candidate.name)) return;
       options.push({ ...candidate, name:String(candidate.name) });
     });
-    state.supplierOptionsCache.set(key, options);
-    return options;
+    const model = {
+      query,
+      status:String(result?.status || (query ? "UNRESOLVED" : "EMPTY")),
+      options,
+      canCreate:Boolean(query && !["EXACT", "AMBIGUOUS"].includes(String(result?.status || ""))),
+      highConfidence:options.find((row) => row.high_confidence) || null,
+    };
+    state.supplierOptionsCache.set(key, model);
+    return model;
   }
 
-  renderSupplierPickerOptions(options = [], search = "", selectedValue = "") {
-    const needle = String(search || "").trim().toLocaleLowerCase();
-    const filtered = (options || []).filter((row) => !needle || [row.name, row.supplier_name]
-      .some((value) => String(value || "").toLocaleLowerCase().includes(needle)));
-    if (!filtered.length) return `<p class="ocw-mf-reference-empty">请输入 ERP 供应商名称搜索；只能选择返回的规范供应商。</p>`;
-    return `<section class="ocw-mf-reference-group"><h6>ERP 供应商</h6>${filtered.map((row) => `<label class="ocw-mf-reference-option ${String(row.name) === String(selectedValue) ? "is-selected" : ""}"><input type="radio" name="ocw-supplier" value="${this.escape(row.name)}" ${String(row.name) === String(selectedValue) ? "checked" : ""}><span><strong>${this.escape(row.name)}</strong><small>${this.escape(row.supplier_name || row.name)}${row.score ? ` · ${Math.round(Number(row.score) * 100)}%` : ""}</small></span>${row.high_confidence ? `<em>高置信候选</em>` : ""}</label>`).join("")}</section>`;
+  renderSupplierPickerOptions(model = {}, selection = {}) {
+    const options = model.options || [];
+    const selectedKind = String(selection.kind || "");
+    const selectedValue = String(selection.value || "");
+    const existing = options.length ? `<section class="ocw-mf-reference-group"><h6>ERP 供应商</h6>${options.map((row) => `<label class="ocw-mf-reference-option ${selectedKind === "existing" && String(row.name) === selectedValue ? "is-selected" : ""}"><input type="radio" name="ocw-supplier" data-mf-supplier-kind="existing" data-mf-supplier-value="${this.escape(row.name)}" ${selectedKind === "existing" && String(row.name) === selectedValue ? "checked" : ""}><span><strong>${this.escape(row.name)}</strong><small>${this.escape(row.supplier_name || row.name)}${row.score ? ` · ${Math.round(Number(row.score) * 100)}%` : ""}</small></span>${row.high_confidence ? `<em>高置信候选</em>` : ""}</label>`).join("")}</section>` : "";
+    const warning = model.highConfidence ? `<small>存在高置信近似供应商 ${this.escape(model.highConfidence.name)}；创建前需确认“这是不同供应商”。</small>` : `<small>仅创建基础 Supplier，详细档案可稍后维护。</small>`;
+    const create = model.canCreate ? `<section class="ocw-mf-reference-group"><h6>没有完全同名结果</h6><label class="ocw-mf-reference-option is-create ${selectedKind === "create" ? "is-selected" : ""}"><input type="radio" name="ocw-supplier" data-mf-supplier-kind="create" data-mf-supplier-value="${this.escape(model.query)}" ${selectedKind === "create" ? "checked" : ""}><span><strong>新建供应商：${this.escape(model.query)}</strong>${warning}</span></label></section>` : "";
+    return existing || create ? `${existing}${create}` : `<p class="ocw-mf-reference-empty">请输入供应商名称，搜索已有供应商或快速新建。</p>`;
   }
 
-  async applySupplierSelection(items, value, reason = "", options = {}) {
-    return this.applyMaterialReferenceSelection(items, "supplier", value, reason, options);
+  async applySupplierSelection(items, value, options = {}) {
+    return this.applyMaterialReferenceSelection(items, "supplier", value, options);
+  }
+
+  async createSupplierAndApply(items, supplierName, confirmSimilar = false) {
+    const name = String(supplierName || "").trim();
+    const result = await this.call("overseas_costing.api.materials.create_supplier_from_workbench", {
+      batch_name:String(this.detailState?.batchName || ""),
+      supplier_name:name,
+      confirm_similar:confirmSimilar ? 1 : 0,
+    }, false, { type:"POST" });
+    if (!result?.ok) return result || { ok:false, message:"供应商创建失败。" };
+    const supplier = String(result.supplier || "").trim();
+    if (!supplier) throw new Error("ERP 未返回规范供应商 ID。");
+    this.ensureMaterialFeeState().supplierOptionsCache.clear();
+    await this.applySupplierSelection(items, supplier, {
+      allowedValues:new Set([supplier]),
+      auditRemark:result.created ? "新建 ERP 供应商并设置物料" : "设置 ERP 供应商",
+    });
+    return result;
   }
 
   async openSupplierForItem(itemName, suggestedValue = "") {
@@ -12437,20 +12450,37 @@ class OverseasCostWorkbench {
   async openSupplierPicker({ items = [], source = "cell", suggestedValue = "" } = {}) {
     const sharedCurrent = [...new Set(items.map((row) => String(row.supplier || "").trim()).filter(Boolean))];
     let query = String(suggestedValue || (sharedCurrent.length === 1 ? sharedCurrent[0] : ""));
-    let options = await this.loadSupplierOptions(query);
-    let selectedValue = options.some((row) => row.name === query) ? query : "";
+    let model = await this.loadSupplierResolution(query);
+    let selection = model.options.some((row) => row.name === query)
+      ? { kind:"existing", value:query }
+      : { kind:"", value:"" };
     let requestRevision = 0;
     const dialog = new frappe.ui.Dialog({
       title:source === "bulk" ? `批量设置供应商（${items.length} 行）` : "选择 ERP 供应商",
       fields:[
-        {fieldtype:"HTML", fieldname:"picker", options:`<div class="ocw-mf-reference-picker-dialog"><label class="ocw-mf-reference-search"><span>搜索供应商</span><input type="search" data-mf-supplier-search autocomplete="off" value="${this.escape(query)}"></label><div data-mf-supplier-options>${this.renderSupplierPickerOptions(options, "", selectedValue)}</div></div>`},
-        {fieldtype:"Small Text", fieldname:"reason", label:"修改原因", description:"填补空值无需原因；更换已有规范供应商时必填。"},
-        {fieldtype:"HTML", fieldname:"preview", options:this.renderReferenceChangePreview(items, "supplier", selectedValue, "供应商变更预览")},
+        {fieldtype:"HTML", fieldname:"picker", options:`<div class="ocw-mf-reference-picker-dialog"><label class="ocw-mf-reference-search"><span>搜索或输入供应商</span><input type="search" data-mf-supplier-search autocomplete="off" value="${this.escape(query)}"></label><div data-mf-supplier-options>${this.renderSupplierPickerOptions(model, selection)}</div></div>`},
+        {fieldtype:"HTML", fieldname:"preview", options:this.renderReferenceChangePreview(items, "supplier", selection.value, "供应商变更预览")},
       ],
       primary_action_label:source === "bulk" ? "确认批量设置" : "保存",
-      primary_action:async (values) => {
-        const allowedValues = new Set(options.map((row) => row.name));
-        await this.applySupplierSelection(items, selectedValue, String(values.reason || "").trim(), { allowedValues });
+      primary_action:async () => {
+        if (!selection.kind || !selection.value) throw new Error("请选择已有供应商，或选择新建当前输入名称。");
+        if (selection.kind === "existing") {
+          const allowedValues = new Set(model.options.map((row) => row.name));
+          await this.applySupplierSelection(items, selection.value, { allowedValues });
+        } else {
+          let result = await this.createSupplierAndApply(items, selection.value, false);
+          if (result?.code === "SIMILAR_SUPPLIER_CONFIRMATION_REQUIRED") {
+            const candidates = (result.candidates || []).map((row) => row.name).filter(Boolean).join("、");
+            const confirmed = await new Promise((resolve) => frappe.confirm(
+              `发现近似供应商${candidates ? `：${this.escape(candidates)}` : ""}。确认“这是不同供应商”，并新建 ${this.escape(selection.value)}？`,
+              () => resolve(true),
+              () => resolve(false)
+            ));
+            if (!confirmed) return;
+            result = await this.createSupplierAndApply(items, selection.value, true);
+          }
+          if (!result?.ok) throw new Error(result?.message || "供应商创建失败。");
+        }
         dialog.hide();
         frappe.show_alert({message:`已更新 ${items.length} 行供应商`, indicator:"green"});
       },
@@ -12458,19 +12488,28 @@ class OverseasCostWorkbench {
     dialog.show();
     const $picker = dialog.fields_dict.picker.$wrapper;
     const render = () => {
-      $picker.find("[data-mf-supplier-options]").html(this.renderSupplierPickerOptions(options, "", selectedValue));
-      dialog.fields_dict.preview.$wrapper.html(this.renderReferenceChangePreview(items, "supplier", selectedValue, "供应商变更预览"));
+      $picker.find("[data-mf-supplier-options]").html(this.renderSupplierPickerOptions(model, selection));
+      dialog.fields_dict.preview.$wrapper.html(this.renderReferenceChangePreview(items, "supplier", selection.value, "供应商变更预览"));
+      dialog.get_primary_btn?.().text(selection.kind === "create" ? "新建并使用" : (source === "bulk" ? "确认批量设置" : "保存"));
     };
     $picker.on("input", "[data-mf-supplier-search]", async (event) => {
       query = String($(event.currentTarget).val() || "").trim();
       const currentRevision = ++requestRevision;
-      const next = await this.loadSupplierOptions(query);
+      const next = await this.loadSupplierResolution(query);
       if (currentRevision !== requestRevision) return;
-      options = next;
-      if (!options.some((row) => row.name === selectedValue)) selectedValue = "";
+      model = next;
+      if (selection.kind === "existing" && !model.options.some((row) => row.name === selection.value)) selection = { kind:"", value:"" };
+      if (selection.kind === "create") selection = { kind:"", value:"" };
       render();
     });
-    $picker.on("change", "input[name='ocw-supplier']", (event) => { selectedValue = String($(event.currentTarget).val() || ""); render(); });
+    $picker.on("change", "input[name='ocw-supplier']", (event) => {
+      const $input = $(event.currentTarget);
+      selection = {
+        kind:String($input.attr("data-mf-supplier-kind") || ""),
+        value:String($input.attr("data-mf-supplier-value") || ""),
+      };
+      render();
+    });
     return dialog;
   }
 
@@ -13986,7 +14025,7 @@ class OverseasCostWorkbench {
     const catalog = fill.row_review;
     const preview = selection.previewKey === this.materialAIRowSelectionKey(fill) ? selection.preview : null;
     const value = input => this.escape(input === null || input === undefined || input === "" ? "—" : input);
-    const columns = [["material_code", "物料编码"], ["product_name", "物料名称"], ["quantity", "采购数量"], ["actual_shipped_qty", "实发数量"], ["shipped_uom", "单位"], ["unit_price", "采购单价"], ["purchase_currency", "币种"], ["shipment_value_rmb", "本次发货货值 RMB"], ["package_count", "箱数"], ["net_weight_kg", "净重 kg"], ["gross_weight_kg", "毛重 kg"], ["volume_m3", "体积 m³"], ["project_collection", "项目归属"]];
+    const columns = [["material_code", "物料编码"], ["product_name", "物料名称"], ["quantity", "采购数量"], ["actual_shipped_qty", "实发数量"], ["shipped_uom", "单位"], ["unit_price", "采购单价"], ["purchase_currency", "币种"], ["shipment_value_rmb", "本次发货货值 RMB"], ["package_count", "箱数"], ["net_weight_kg", "净重 kg"], ["gross_weight_kg", "毛重 kg"], ["volume_m3", "体积 m³"], ["supplier", "供应商"], ["project_collection", "项目归属"]];
     const displayCell = (row, field) => {
       if (field === "unit_price" && row.adopted_price?.value != null) {
         const price = Number(row.adopted_price.value);

@@ -61,6 +61,41 @@ def test_supplier_resolution_checks_read_permission_and_delegates_to_central_ser
     assert result["candidates"][0]["name"] == "SUP-1"
 
 
+def test_supplier_creation_requires_batch_write_and_returns_expected_business_error(monkeypatch) -> None:
+    api = _load_api(monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        api,
+        "require_batch_permission",
+        lambda batch, ptype: calls.append((batch, ptype)) or "BATCH-DOC",
+    )
+
+    class _ExpectedError(api.supplier_resolution_service.SupplierCreationError):
+        pass
+
+    monkeypatch.setattr(
+        api.supplier_resolution_service,
+        "create_supplier",
+        lambda name, confirm_similar=False: (_ for _ in ()).throw(
+            _ExpectedError(
+                "SIMILAR_SUPPLIER_CONFIRMATION_REQUIRED",
+                "存在近似供应商。",
+                candidates=[{"name": "SUP-1", "score": 0.94}],
+            )
+        ),
+    )
+
+    result = api.create_supplier_from_workbench("BATCH-NO", "Alpha Tradng", 0)
+
+    assert calls == [("BATCH-NO", "write")]
+    assert result == {
+        "ok": False,
+        "code": "SIMILAR_SUPPLIER_CONFIRMATION_REQUIRED",
+        "message": "存在近似供应商。",
+        "candidates": [{"name": "SUP-1", "score": 0.94}],
+    }
+
+
 def test_project_route_options_pass_resolved_batch_to_existing_service(monkeypatch) -> None:
     api = _load_api(monkeypatch)
     monkeypatch.setattr(

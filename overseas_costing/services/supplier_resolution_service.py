@@ -1,7 +1,7 @@
-"""ERP 供应商的唯一解析入口。
+"""ERP 供应商解析和受控创建的唯一入口。
 
 只有启用中的 Supplier 精确匹配才会返回可写入的规范名称；模糊结果
-始终只是人工选择候选，不会自动创建或写入 ERP Supplier。
+始终只是人工选择候选。Supplier 仅能由用户在工作台明确确认后创建。
 """
 
 from __future__ import annotations
@@ -21,6 +21,17 @@ MIN_CANDIDATE_SCORE = 0.72
 HIGH_CONFIDENCE_SCORE = 0.90
 HIGH_CONFIDENCE_MARGIN = 0.08
 MAX_CANDIDATES = 5
+MAX_SUPPLIER_NAME_LENGTH = 140
+PLACEHOLDER_NAMES = {"-", "—", "－"}
+
+
+class SupplierCreationError(ValueError):
+    """可安全返回到工作台的供应商创建业务错误。"""
+
+    def __init__(self, code: str, message: str, *, candidates: list[dict] | None = None):
+        super().__init__(message)
+        self.code = str(code or "SUPPLIER_CREATION_FAILED")
+        self.candidates = list(candidates or [])
 
 
 def _value(record: Any, fieldname: str, default: Any = "") -> Any:
@@ -36,11 +47,12 @@ def normalize_supplier_text(value: Any) -> str:
     return "".join(character for character in text if character.isalnum())
 
 
-def _active_supplier_rows(suppliers: Iterable[Any]) -> list[dict]:
+def _supplier_rows(suppliers: Iterable[Any], *, include_disabled: bool = False) -> list[dict]:
     rows: list[dict] = []
     seen: set[str] = set()
     for supplier in suppliers or []:
-        if bool(int(_value(supplier, "disabled", 0) or 0)):
+        disabled = bool(int(_value(supplier, "disabled", 0) or 0))
+        if disabled and not include_disabled:
             continue
         name = str(_value(supplier, "name") or "").strip()
         if not name or name in seen:
@@ -50,9 +62,14 @@ def _active_supplier_rows(suppliers: Iterable[Any]) -> list[dict]:
             {
                 "name": name,
                 "supplier_name": str(_value(supplier, "supplier_name") or "").strip(),
+                "disabled": int(disabled),
             }
         )
     return rows
+
+
+def _active_supplier_rows(suppliers: Iterable[Any]) -> list[dict]:
+    return _supplier_rows(suppliers)
 
 
 def load_active_suppliers() -> list[dict]:
@@ -71,6 +88,22 @@ def load_active_suppliers() -> list[dict]:
     )
 
 
+def load_suppliers() -> list[dict]:
+    """读取启用和停用 Supplier，用于创建前的完整查重。"""
+
+    if frappe is None:
+        return []
+    return _supplier_rows(
+        frappe.get_all(
+            "Supplier",
+            fields=["name", "supplier_name", "disabled"],
+            order_by="supplier_name asc, name asc",
+            limit_page_length=0,
+        ),
+        include_disabled=True,
+    )
+
+
 def _similarity(query: str, candidate: str) -> float:
     if not query or not candidate:
         return 0.0
@@ -80,6 +113,20 @@ def _similarity(query: str, candidate: str) -> float:
         partial_score = MIN_CANDIDATE_SCORE + (1 - MIN_CANDIDATE_SCORE) * shorter / longer
         return max(sequence_score, partial_score)
     return sequence_score
+
+
+def _exact_supplier_rows(raw_value: Any, suppliers: Iterable[Any]) -> list[dict]:
+    normalized_raw = normalize_supplier_text(raw_value)
+    if not normalized_raw:
+        return []
+    return [
+        supplier
+        for supplier in _supplier_rows(suppliers, include_disabled=True)
+        if normalized_raw in {
+            normalize_supplier_text(supplier["name"]),
+            normalize_supplier_text(supplier["supplier_name"]),
+        }
+    ]
 
 
 def resolve_supplier_reference(raw_value: Any, *, suppliers: Iterable[Any] | None = None) -> dict:
@@ -97,19 +144,7 @@ def resolve_supplier_reference(raw_value: Any, *, suppliers: Iterable[Any] | Non
 
     rows = _active_supplier_rows(load_active_suppliers() if suppliers is None else suppliers)
     normalized_raw = normalize_supplier_text(raw)
-    exact_matches_by_name = {
-        supplier["name"]: supplier
-        for supplier in rows
-        if normalized_raw and normalize_supplier_text(supplier["name"]) == normalized_raw
-    }
-    exact_matches_by_name.update({
-        supplier["name"]: supplier
-        for supplier in rows
-        if normalized_raw
-        and supplier["supplier_name"]
-        and normalize_supplier_text(supplier["supplier_name"]) == normalized_raw
-    })
-    exact_matches = list(exact_matches_by_name.values())
+    exact_matches = _exact_supplier_rows(raw, rows)
     if len(exact_matches) == 1:
         return {
             "raw_value": raw,
@@ -162,6 +197,116 @@ def resolve_supplier_reference(raw_value: Any, *, suppliers: Iterable[Any] | Non
         result["status"] = "SUGGESTED"
         result["candidates"] = candidates
     return result
+
+
+def _default_supplier_group() -> str:
+    if frappe is None:
+        return ""
+    configured = ""
+    try:
+        field = frappe.get_meta("Supplier").get_field("supplier_group")
+        configured = str(getattr(field, "default", "") or "").strip()
+    except Exception:
+        configured = ""
+    if configured and frappe.db.exists("Supplier Group", configured):
+        return configured
+    root_group = "All Supplier Groups"
+    return root_group if frappe.db.exists("Supplier Group", root_group) else ""
+
+
+def _existing_supplier_result(row: dict) -> dict:
+    return {
+        "ok": True,
+        "created": False,
+        "supplier": row["name"],
+        "supplier_name": row.get("supplier_name") or row["name"],
+        "supplier_group": "",
+    }
+
+
+def _validate_new_supplier_name(value: Any) -> str:
+    supplier_name = str(value or "").strip()
+    if (
+        not supplier_name
+        or supplier_name in PLACEHOLDER_NAMES
+        or not normalize_supplier_text(supplier_name)
+        or len(supplier_name) > MAX_SUPPLIER_NAME_LENGTH
+    ):
+        raise SupplierCreationError(
+            "INVALID_SUPPLIER_NAME",
+            f"供应商名称不能为空、不能使用占位符，且不能超过 {MAX_SUPPLIER_NAME_LENGTH} 个字符。",
+        )
+    return supplier_name
+
+
+def _check_exact_supplier(supplier_name: str, suppliers: Iterable[Any]) -> dict | None:
+    exact = _exact_supplier_rows(supplier_name, suppliers)
+    if len(exact) > 1:
+        raise SupplierCreationError("AMBIGUOUS_SUPPLIER", "同一名称对应多个 ERP Supplier，请先处理主数据冲突。")
+    if not exact:
+        return None
+    if exact[0].get("disabled"):
+        raise SupplierCreationError("DISABLED_SUPPLIER_EXISTS", "同名 ERP Supplier 已停用，请管理员启用或处理旧记录。")
+    return _existing_supplier_result(exact[0])
+
+
+def create_supplier(
+    supplier_name: Any,
+    *,
+    confirm_similar: bool = False,
+    suppliers: Iterable[Any] | None = None,
+    supplier_loader=None,
+    supplier_group: str | None = None,
+    document_factory=None,
+) -> dict:
+    """在完整查重后创建最小 Supplier；重复请求返回既有规范 Supplier。"""
+
+    normalized_name = _validate_new_supplier_name(supplier_name)
+    loader = supplier_loader or load_suppliers
+    supplier_rows = list(suppliers) if suppliers is not None else list(loader())
+    existing = _check_exact_supplier(normalized_name, supplier_rows)
+    if existing:
+        return existing
+
+    resolution = resolve_supplier_reference(normalized_name, suppliers=supplier_rows)
+    high_confidence = [candidate for candidate in resolution["candidates"] if candidate.get("high_confidence")]
+    if high_confidence and not confirm_similar:
+        raise SupplierCreationError(
+            "SIMILAR_SUPPLIER_CONFIRMATION_REQUIRED",
+            "存在高置信近似供应商，请确认这是不同供应商后再创建。",
+            candidates=high_confidence,
+        )
+
+    group = _default_supplier_group() if supplier_group is None else str(supplier_group or "").strip()
+    if not group:
+        raise SupplierCreationError("SUPPLIER_GROUP_REQUIRED", "未配置默认供应商组，无法快速创建 Supplier。")
+    if frappe is None and document_factory is None:
+        raise RuntimeError("当前未连接 Frappe。")
+    factory = document_factory or frappe.get_doc
+    document = factory({
+        "doctype": "Supplier",
+        "supplier_name": normalized_name,
+        "supplier_group": group,
+        "supplier_type": "Company",
+        "disabled": 0,
+    })
+    try:
+        document.insert(ignore_permissions=True)
+    except Exception:
+        # 两个请求并发通过预检时，唯一性约束可能只允许其中一个写入。
+        # 重新读取并复用胜出的记录；没有同名记录则保留原始异常。
+        refreshed = list(loader())
+        concurrent = _check_exact_supplier(normalized_name, refreshed)
+        if concurrent:
+            return concurrent
+        raise
+    return {
+        "ok": True,
+        "created": True,
+        "supplier": str(document.name or "").strip(),
+        "supplier_name": str(getattr(document, "supplier_name", "") or normalized_name).strip(),
+        "supplier_group": str(getattr(document, "supplier_group", "") or group).strip(),
+    }
 
 
 def validate_canonical_supplier(value: Any, *, suppliers: Iterable[Any] | None = None) -> str:

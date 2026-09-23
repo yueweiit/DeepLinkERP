@@ -1,6 +1,9 @@
 """供应商解析必须在服务端收口：精确匹配才可自动写入，模糊结果只供人工选择。"""
 
 import json
+from types import SimpleNamespace
+
+import pytest
 
 
 def _service():
@@ -140,3 +143,150 @@ def test_supplier_provenance_distinguishes_new_template_from_legacy_default() ->
     assert "历史兼容默认供应商" in legacy["warning"]
     assert resolved["requires_explicit_supplier"] is False
     assert resolved["legacy_default_allowed"] is False
+
+
+@pytest.mark.parametrize("supplier_name", ["", "   ", "-", "—", "－", "x" * 141])
+def test_create_supplier_rejects_blank_placeholder_and_overlong_names(supplier_name: str) -> None:
+    service = _service()
+
+    with pytest.raises(service.SupplierCreationError) as captured:
+        service.create_supplier(supplier_name, suppliers=[], supplier_group="All Supplier Groups")
+
+    assert captured.value.code == "INVALID_SUPPLIER_NAME"
+
+
+def test_create_supplier_reuses_one_active_exact_match_without_inserting() -> None:
+    service = _service()
+    calls = []
+
+    result = service.create_supplier(
+        " Alpha Trading ",
+        suppliers=[{"name": "SUP-001", "supplier_name": "Alpha Trading", "disabled": 0}],
+        supplier_group="All Supplier Groups",
+        document_factory=lambda payload: calls.append(payload),
+    )
+
+    assert result == {
+        "ok": True,
+        "created": False,
+        "supplier": "SUP-001",
+        "supplier_name": "Alpha Trading",
+        "supplier_group": "",
+    }
+    assert calls == []
+
+
+def test_create_supplier_blocks_disabled_and_ambiguous_exact_matches() -> None:
+    service = _service()
+
+    with pytest.raises(service.SupplierCreationError) as disabled:
+        service.create_supplier(
+            "Dormant Supplier",
+            suppliers=[{"name": "SUP-OFF", "supplier_name": "Dormant Supplier", "disabled": 1}],
+            supplier_group="All Supplier Groups",
+        )
+    assert disabled.value.code == "DISABLED_SUPPLIER_EXISTS"
+
+    with pytest.raises(service.SupplierCreationError) as ambiguous:
+        service.create_supplier(
+            "ACME",
+            suppliers=[
+                {"name": "SUP-ACME-CN", "supplier_name": "ACME", "disabled": 0},
+                {"name": "SUP-ACME-MX", "supplier_name": "Acme", "disabled": 0},
+            ],
+            supplier_group="All Supplier Groups",
+        )
+    assert ambiguous.value.code == "AMBIGUOUS_SUPPLIER"
+
+
+def test_create_supplier_requires_confirmation_for_high_confidence_then_uses_safe_fields() -> None:
+    service = _service()
+    suppliers = [{"name": "SUP-ALPHA", "supplier_name": "Alpha Trading Mexico", "disabled": 0}]
+
+    with pytest.raises(service.SupplierCreationError) as confirmation:
+        service.create_supplier(
+            "Alpha Tradng Mexico",
+            suppliers=suppliers,
+            supplier_group="All Supplier Groups",
+        )
+    assert confirmation.value.code == "SIMILAR_SUPPLIER_CONFIRMATION_REQUIRED"
+    assert confirmation.value.candidates[0]["name"] == "SUP-ALPHA"
+
+    created_payload = {}
+
+    class _SupplierDoc:
+        name = "SUP-NEW"
+        supplier_name = "Alpha Tradng Mexico"
+        supplier_group = "All Supplier Groups"
+
+        def insert(self, *, ignore_permissions=False):
+            created_payload["ignore_permissions"] = ignore_permissions
+
+    def factory(payload):
+        created_payload.update(payload)
+        return _SupplierDoc()
+
+    result = service.create_supplier(
+        "  Alpha Tradng Mexico  ",
+        confirm_similar=True,
+        suppliers=suppliers,
+        supplier_group="All Supplier Groups",
+        document_factory=factory,
+    )
+
+    assert result["created"] is True
+    assert result["supplier"] == "SUP-NEW"
+    assert created_payload == {
+        "doctype": "Supplier",
+        "supplier_name": "Alpha Tradng Mexico",
+        "supplier_group": "All Supplier Groups",
+        "supplier_type": "Company",
+        "disabled": 0,
+        "ignore_permissions": True,
+    }
+
+
+def test_create_supplier_requires_default_group_and_recovers_concurrent_insert() -> None:
+    service = _service()
+
+    with pytest.raises(service.SupplierCreationError) as missing_group:
+        service.create_supplier("New Supplier", suppliers=[], supplier_group="")
+    assert missing_group.value.code == "SUPPLIER_GROUP_REQUIRED"
+
+    supplier_snapshots = iter([
+        [],
+        [{"name": "SUP-RACE", "supplier_name": "Race Supplier", "disabled": 0}],
+    ])
+
+    class _RacingDoc:
+        def insert(self, *, ignore_permissions=False):
+            raise RuntimeError("duplicate entry")
+
+    result = service.create_supplier(
+        "Race Supplier",
+        supplier_loader=lambda: next(supplier_snapshots),
+        supplier_group="All Supplier Groups",
+        document_factory=lambda _payload: _RacingDoc(),
+    )
+
+    assert result["created"] is False
+    assert result["supplier"] == "SUP-RACE"
+
+
+def test_default_supplier_group_prefers_configured_value_then_root(monkeypatch) -> None:
+    service = _service()
+    available = {"Preferred Suppliers", "All Supplier Groups"}
+    fake_frappe = SimpleNamespace(
+        get_meta=lambda _doctype: SimpleNamespace(
+            get_field=lambda _fieldname: SimpleNamespace(default="Preferred Suppliers")
+        ),
+        db=SimpleNamespace(exists=lambda _doctype, name: name in available),
+    )
+    monkeypatch.setattr(service, "frappe", fake_frappe)
+
+    assert service._default_supplier_group() == "Preferred Suppliers"
+
+    fake_frappe.get_meta = lambda _doctype: SimpleNamespace(
+        get_field=lambda _fieldname: SimpleNamespace(default="Missing Group")
+    )
+    assert service._default_supplier_group() == "All Supplier Groups"

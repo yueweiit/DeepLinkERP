@@ -41,6 +41,23 @@ def resolve_supplier_options(batch_name: str, raw_value: str = "") -> dict:
     return supplier_resolution_service.resolve_supplier_reference(raw_value)
 
 
+@frappe.whitelist(methods=["POST"])
+def create_supplier_from_workbench(batch_name: str, supplier_name: str, confirm_similar=False) -> dict:
+    """创建基础 Supplier；物料写入仍由既有批量更新入口负责。"""
+
+    require_batch_permission(batch_name, "write")
+    confirmed = confirm_similar in (True, 1, "1", "true", "True")
+    try:
+        return supplier_resolution_service.create_supplier(supplier_name, confirm_similar=confirmed)
+    except supplier_resolution_service.SupplierCreationError as error:
+        return {
+            "ok": False,
+            "code": error.code,
+            "message": str(error),
+            "candidates": error.candidates,
+        }
+
+
 def _choices_payload(value) -> dict:
     if isinstance(value, dict):
         payload = value
