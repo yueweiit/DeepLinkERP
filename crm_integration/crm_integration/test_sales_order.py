@@ -7,14 +7,16 @@ from frappe.tests import UnitTestCase
 from crm_integration.crm_integration.sales_order import (
 	CRM_STATUS_CONFIRMED_DEPOSIT_PUSH_PRODUCTION,
 	CRM_STATUS_IN_PRODUCTION,
+	CRM_STATUS_PRODUCTION_PROGRESS_REPORTED,
 	PENDING_PRODUCTION,
 	build_mes_sales_order_payload,
-	confirm_deposit_and_push_to_mes_job,
 	confirm_deposit_and_push_to_mes,
+	confirm_deposit_and_push_to_mes_job,
 	enqueue_confirm_deposit_and_push_to_mes,
 	get_mes_integration_services,
 	make_crm_trace_id,
 	prevent_duplicate_crm_order_no,
+	push_sales_order_status_payload_to_crm,
 	reconcile_final_payment,
 	reject_sales_order,
 	run_confirm_deposit_sync,
@@ -50,6 +52,46 @@ class TestMESSalesOrderPayload(UnitTestCase):
 				payload = build_mes_sales_order_payload(order)
 				self.assertEqual(len(payload["data"]["items"]), 1)
 				self.assertNotIn("custom_version", payload["data"]["items"][0])
+
+	def test_production_progress_payload_includes_erp_delivery_note_number(self):
+		sales_order = frappe._dict(
+			name="SO-001",
+			custom_crm_order_no="CRM-001",
+			custom_process_status="Pending Final Payment",
+		)
+		response = MagicMock(status_code=200, headers={"content-type": "application/json"})
+		response.json.return_value = {"code": 200}
+
+		with (
+			patch("crm_integration.crm_integration.sales_order.create_crm_log"),
+			patch("crm_integration.crm_integration.sales_order.update_crm_log"),
+			patch(
+				"crm_integration.crm_integration.sales_order.get_crm_status_api_url",
+				return_value="https://crm.example/status",
+			),
+			patch(
+				"crm_integration.crm_integration.sales_order.get_crm_status_api_key",
+				return_value="test-key",
+			),
+			patch(
+				"crm_integration.crm_integration.sales_order.get_crm_status_api_verify_ssl",
+				return_value=True,
+			),
+			patch(
+				"crm_integration.crm_integration.sales_order.requests.post",
+				return_value=response,
+			) as post,
+		):
+			push_sales_order_status_payload_to_crm(
+				sales_order=sales_order,
+				external_status=CRM_STATUS_PRODUCTION_PROGRESS_REPORTED,
+				delivery_note_name="MAT-DN-2026-00001",
+				production_batch_no="BATCH-001",
+			)
+
+		payload = post.call_args.kwargs["json"]
+		self.assertEqual(payload["deliveryNoteName"], "MAT-DN-2026-00001")
+		self.assertEqual(payload["delivery_note"], "MAT-DN-2026-00001")
 
 
 class TestSalesOrderPermissions(UnitTestCase):

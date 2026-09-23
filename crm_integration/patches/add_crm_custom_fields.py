@@ -70,6 +70,21 @@ def create_crm_custom_fields():
 					"allow_on_submit": 1,
 				},
 			],
+			"Delivery Note": [
+				{
+					"fieldname": "custom_crm_shipment_no",
+					"fieldtype": "Data",
+					"label": "CRM Shipment No",
+					"length": 140,
+					"insert_after": "customer",
+					"read_only": 1,
+					"in_list_view": 1,
+					"in_standard_filter": 1,
+					"unique": 1,
+					"allow_on_submit": 1,
+					"no_copy": 1,
+				},
+			],
 			"Sales Order Item": [
 				{
 					"fieldname": "custom_product",
@@ -91,11 +106,27 @@ def create_crm_custom_fields():
 					"insert_after": "custom_specifications",
 				},
 			],
+			"Delivery Note Item": [
+				{
+					"fieldname": "custom_version",
+					"fieldtype": "Data",
+					"label": "Version",
+					"length": 64,
+					"insert_after": "description",
+					"read_only": 1,
+				},
+			],
 		},
 		update=True,
 	)
 
 
 def clear_crm_custom_field_cache():
-	for doctype in ("Item", "Sales Order", "Sales Order Item"):
+	for doctype in (
+		"Item",
+		"Sales Order",
+		"Sales Order Item",
+		"Delivery Note",
+		"Delivery Note Item",
+	):
 		frappe.clear_cache(doctype=doctype)

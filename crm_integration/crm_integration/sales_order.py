@@ -359,6 +359,10 @@ def push_sales_order_status_payload_to_crm(
 		payload["triggerEvent"] = trigger_event
 		payload["trigger_event"] = trigger_event
 
+	if delivery_note_name:
+		payload["deliveryNoteName"] = delivery_note_name
+		payload["delivery_note"] = delivery_note_name
+
 	crm_log = create_crm_log(
 		direction="Outbound",
 		event=get_crm_status_event(external_status),

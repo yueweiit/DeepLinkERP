@@ -5,15 +5,21 @@ from frappe import _
 from frappe.utils import flt
 
 from crm_integration.crm_integration.auth import validate_crm_api_user
+from crm_integration.crm_integration.delivery_note import create_and_submit_delivery_note_from_crm
 from crm_integration.crm_integration.integration_log import create_crm_log, update_crm_log
-from crm_integration.crm_integration.sales_order import PENDING_DEPOSIT_CONFIRMATION
-from crm_integration.crm_integration.sales_order import PENDING_CONFIRMATION, PENDING_PRODUCTION
+from crm_integration.crm_integration.sales_order import (
+	PENDING_CONFIRMATION,
+	PENDING_DEPOSIT_CONFIRMATION,
+	PENDING_PRODUCTION,
+)
 from crm_integration.crm_integration.sales_order_identity import (
 	crm_sales_order_creation_lock,
 	get_sales_order_names_by_crm_order_no,
 )
-from crm_integration.crm_integration.settings import is_crm_integration_enabled, throw_crm_integration_disabled
-
+from crm_integration.crm_integration.settings import (
+	is_crm_integration_enabled,
+	throw_crm_integration_disabled,
+)
 
 SALES_ORDER_UPDATE_ALLOWED_FIELDS = {
 	"custom_crm_order_no",
@@ -329,6 +335,38 @@ def get_request_url():
 		return None
 
 	return getattr(frappe.request, "url", None)
+
+
+@frappe.whitelist(methods=["POST"])
+def create_and_submit_delivery_note(shipment=None):
+	"""Create or submit the ERP Delivery Note for one CRM shipment."""
+	validate_crm_api_user()
+	payload = get_shipment_request_payload(shipment)
+	return create_and_submit_delivery_note_from_crm(payload)
+
+
+def get_shipment_request_payload(shipment=None):
+	if isinstance(shipment, str):
+		return frappe.parse_json(shipment)
+
+	if isinstance(shipment, dict):
+		return shipment
+
+	if frappe.request and frappe.request.is_json:
+		request_json = frappe.request.get_json(silent=True) or {}
+		wrapped_payload = request_json.get("shipment")
+		if isinstance(wrapped_payload, str):
+			return frappe.parse_json(wrapped_payload)
+		if isinstance(wrapped_payload, dict):
+			return wrapped_payload
+		return request_json
+
+	wrapped_payload = frappe.form_dict.get("shipment")
+	if isinstance(wrapped_payload, str):
+		return frappe.parse_json(wrapped_payload)
+	if isinstance(wrapped_payload, dict):
+		return wrapped_payload
+	return dict(frappe.form_dict)
 
 
 # ---------------------------------------------------------------------------
