@@ -67,80 +67,8 @@ def create_draft_delivery_note_from_mes(data=None):
     if not isinstance(payload, dict):
         frappe.throw(_("缺少请求数据或数据格式不正确"))
 
-    ensure_crm_integration_available()
-
-    sales_order_name = payload.get("sales_order")
-    request_key = get_mes_delivery_request_key(payload)
-    company = frappe.db.get_value("Sales Order", sales_order_name, "company") if sales_order_name else None
-    if not is_mes_integration_enabled(company):
-        throw_mes_integration_disabled(company)
-
     validate_mes_api_user()
-    validate_mes_delivery_note_permissions()
-
-    mes_log = create_mes_log(
-        direction="Inbound",
-        event="MES Delivery Note Draft Create",
-        status="Pending",
-        reference_doctype="Sales Order",
-        reference_name=payload.get("sales_order"),
-        source="MES",
-        request_url=get_request_url(),
-        request_payload=payload,
-    )
-
-    reused = False
-    try:
-        with lock_mes_delivery_note_request(company, sales_order_name, request_key):
-            lock_sales_order_for_mes_delivery_note(sales_order_name)
-            delivery_note = get_existing_mes_delivery_note(
-                company,
-                request_key,
-                payload,
-            )
-            if delivery_note:
-                reused = True
-            else:
-                delivery_note = create_draft_delivery_note(
-                    payload,
-                    request_key=request_key,
-                )
-    except Exception:
-        update_mes_log(
-            mes_log,
-            status="Failed",
-            error_message=frappe.get_traceback(),
-        )
-        raise
-
-    response = {
-        "status": "success",
-        "message": _("已复用原销售出库草稿，未创建新单据。")
-        if reused
-        else _("销售出库草稿已创建"),
-        "delivery_note": delivery_note.name,
-        "sales_order": payload.get("sales_order"),
-        "request_id": request_key,
-        "idempotent_reuse": reused,
-        "sales_order_status": frappe.db.get_value(
-            "Sales Order", payload.get("sales_order"), "custom_process_status"
-        ),
-        "delivery_note_url": frappe.utils.get_url_to_form("Delivery Note", delivery_note.name),
-        "timestamp": now(),
-    }
-
-    update_mes_log(
-        mes_log,
-        status="Success",
-        reference_doctype="Delivery Note",
-        reference_name=delivery_note.name,
-        response_payload=response,
-    )
-
-    if not reused:
-        enqueue_crm_production_progress_event(payload, delivery_note)
-
-    return response
+    frappe.throw(_("MES 销售出库草稿接口已停用，请由 CRM 发货接口创建并提交销售出库。"))
 
 
 def enqueue_crm_production_progress_event(payload, delivery_note):

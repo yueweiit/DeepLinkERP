@@ -4,16 +4,34 @@ import frappe
 from frappe.tests import UnitTestCase
 
 from mes_integration.mes_integration.delivery_note import (
+	create_draft_delivery_note_from_mes,
 	enqueue_delivery_note_status_callback,
 	get_existing_mes_delivery_note,
-	get_mes_delivery_note_item_warehouse,
 	get_mes_delivery_note_identity_mismatches,
+	get_mes_delivery_note_item_warehouse,
 	get_mes_delivery_request_key,
 	push_delivery_note_status_to_mes_job,
 )
 
 
 class TestMESDeliveryNote(UnitTestCase):
+	def test_mes_delivery_note_creation_endpoint_is_disabled(self):
+		with (
+			patch("mes_integration.mes_integration.delivery_note.validate_mes_api_user") as validate_user,
+			patch("mes_integration.mes_integration.delivery_note.create_mes_log") as create_log,
+			patch(
+				"mes_integration.mes_integration.delivery_note.create_draft_delivery_note"
+			) as create_delivery_note,
+			self.assertRaisesRegex(frappe.ValidationError, "接口已停用"),
+		):
+			create_draft_delivery_note_from_mes(
+				{"sales_order": "SO-001", "items": [{"item_code": "ITEM-001", "qty": 1}]}
+			)
+
+		validate_user.assert_called_once_with()
+		create_log.assert_not_called()
+		create_delivery_note.assert_not_called()
+
 	def test_delivery_warehouse_prefers_company_config_before_stock_guess(self):
 		with (
 			patch(
