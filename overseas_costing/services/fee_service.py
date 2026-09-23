@@ -330,6 +330,66 @@ def is_voucher_file_name(file_name: object) -> bool:
     return VOUCHER_FILE_NAME_MARKER in str(file_name or "")
 
 
+#: ``Overseas Cost Attachment`` 是全批次共用的资料表，``attachment_type`` 有 8 种。
+#: 但“关联并解析凭证”只应把**费用凭证**放进采购、费用申请、国际物流三个流程分组；
+#: 装箱单、完税凭证、报关单、Excel 主表属于同一批次的其他资料，收进单独的
+#: “批次其他资料”分组，避免混进流程分组造成误选。
+MATERIAL_ATTACHMENT_TYPES = frozenset({
+    "Excel Main Table",
+    "Packing List",
+    "Tax Certificate",
+    "Customs Declaration",
+})
+ATTACHMENT_CATEGORY_LABELS = {
+    "voucher": "费用凭证",
+    "material": "批次其他资料",
+}
+
+
+def attachment_category(attachment_type: object) -> str:
+    """Classify one attachment row as a fee voucher or a batch material.
+
+    只把**已确认**的四类批次资料判为 ``material``；未识别的类型（含 ``Other``
+    与空值）一律留在 ``voucher``，这样人工上传的凭证不会因为类型没填而被藏起来。
+
+    判定只依赖 ``attachment_type`` 这一列，**不读审批归属、不读版本**。因为
+    采购支出单挂在国际物流审批下可以顺着关联链拿到，而月结付款并不一定关联
+    国际物流、需要另行匹配，按归属过滤会把后者整片误杀。
+    """
+
+    value = str(attachment_type or "").strip()
+    return "material" if value in MATERIAL_ATTACHMENT_TYPES else "voucher"
+
+
+def _candidate_audit_only(
+    parsed: dict,
+    descriptor: dict | None,
+    attachment: dict,
+    version_name: str | None,
+) -> tuple[bool, str]:
+    """Reuse the cost-source eligibility flags the import chain already maintains.
+
+    ``approval_excluded`` / ``cost_source_allowed`` 由钉钉归档链路写进
+    ``parse_result_json``，``import_service`` 与 ``effective_logistics_source``
+    都已在用它们判定“不得作为成本来源”。这里只**标注**、不隐藏：候选仍留在
+    列表里供审计与人工确认，前端据此提示它仅审计。
+
+    刻意**不含** ``import_service`` 里“OA 且无版本”那一款：月结付款这类不在
+    国际物流关联链里的资料本来就可能没有版本，照搬会把它们误判。
+    """
+
+    if descriptor and descriptor.get("audit_only"):
+        return True, "资料已撤销或被替代，仅审计。"
+    if parsed.get("approval_excluded"):
+        return True, "审批已失效，不参与核算。"
+    if parsed.get("cost_source_allowed") is False:
+        return True, "来源已被判定不得作为成本来源，仅审计。"
+    version = str(attachment.get("version") or "").strip()
+    if version and version_name and version != str(version_name).strip():
+        return True, "不属于当前版本，仅审计。"
+    return False, ""
+
+
 def build_evidence_candidates(
     attachments: list[dict],
     *,
@@ -381,13 +441,16 @@ def build_evidence_candidates(
             }
         workflow_stage = classify_workflow_stage(evidence_source)
         file_name = str(attachment.get("file_name") or "")
+        attachment_type = str(attachment.get("attachment_type") or "")
+        category = attachment_category(attachment_type)
+        audit_only, audit_reason = _candidate_audit_only(parsed, descriptor, attachment, version_name)
         result.append(
             {
                 "attachment": str(attachment.get("name") or ""),
                 "file_name": file_name,
                 "file_url": str(attachment.get("file_url") or ""),
                 "source_type": str(attachment.get("source_type") or ""),
-                "attachment_type": str(attachment.get("attachment_type") or ""),
+                "attachment_type": attachment_type,
                 "parse_status": str(attachment.get("parse_status") or "Draft"),
                 "classification": classification,
                 "version": attachment.get("version"),
@@ -399,7 +462,11 @@ def build_evidence_candidates(
                 "evidence_kind": classify_evidence_kind(evidence_source),
                 # 文件名含“凭证”的资料在弹窗里高亮，用户第一眼就能找到目标件。
                 "is_voucher_name": is_voucher_file_name(file_name),
-                "audit_only": bool(descriptor and descriptor.get("audit_only")),
+                # 凭证类走三个流程分组，资料类收进“批次其他资料”，两边都保留金额候选。
+                "attachment_category": category,
+                "attachment_category_label": ATTACHMENT_CATEGORY_LABELS[category],
+                "audit_only": audit_only,
+                "audit_only_reason": audit_reason,
                 "amount_candidates": [] if descriptor else _extract_amount_candidates({**parsed, **mapped}),
                 "summary": _evidence_candidate_summary(
                     parsed=parsed,
@@ -458,7 +525,10 @@ def _evidence_candidate_summary(
 
     for key, label in (
         ("expense_type", "费用类别"),
-        ("occurred_at", "发生日期"),
+        # ``occurred_at`` 在全仓的语义是**来源／审批时间**（``approval.finish_time``、
+        # ``comment.create_time``、``source_updated_at``），不是单据自身的开票日期。
+        # 早先误标成“发生日期”，会让用户把别的时段的时间当成凭证日期。
+        ("occurred_at", "来源时间"),
         ("invoice_no", "单据号"),
         ("source_doc_no", "单据号"),
     ):

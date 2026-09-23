@@ -556,7 +556,12 @@ def test_evidence_picker_groups_the_three_pullable_processes() -> None:
 
 
 def test_evidence_picker_keeps_scope_warning_instead_of_hiding_candidates() -> None:
-    """不在当前采购支出范围的候选只做提示，不再被隐藏或整体降级。"""
+    """越界候选只做提示，不再被隐藏或整体降级。
+
+    ``audit_only`` 同样只允许用来渲染原因文案，绝不允许用来过滤候选：
+    失效审批、被判定不得作为成本来源、非当前版本的资料仍然要留在列表里，
+    由用户看到原因后自行判断。
+    """
 
     source = PART.read_text(encoding="utf-8")
     picker = source.split("renderMaterialFeeEvidencePicker(candidates, linked)", 1)[1].split(
@@ -566,7 +571,73 @@ def test_evidence_picker_keeps_scope_warning_instead_of_hiding_candidates() -> N
     assert "in_current_source" in picker
     assert "stage_selectable" in picker
     assert "不在当前采购支出范围" in picker
-    assert "audit_only" not in picker
+    # 仅审计的候选照常列出，只加一句原因说明。
+    assert "candidate.audit_only" in picker
+    assert "audit_only_reason" in picker
+    assert "ocw-mf-evidence-audit-note" in picker
+    # 不存在任何依据 audit_only 的过滤／隐藏。
+    assert ".filter((candidate) => candidate.audit_only" not in picker
+    assert "if (!candidate.audit_only)" not in picker
+
+
+def test_evidence_picker_separates_batch_materials_from_fee_vouchers() -> None:
+    """装箱单／完税凭证／报关单等批次资料不得混进三个流程分组。
+
+    批次附件表是全批次共用的资料表，分类结果必须来自服务端的
+    ``attachment_category``；前端只读，不自己按附件类型或文件名猜测。
+    """
+
+    source = PART.read_text(encoding="utf-8")
+    groups = source.split("evidenceSourceGroups(candidates)", 1)[1].split(
+        "async linkSelectedMaterialFeeEvidence", 1
+    )[0]
+
+    # 分类真源在服务端：前端只读 attachment_category。
+    assert "attachment_category" in groups
+    assert "material" in groups
+    # 分类标签同样取服务端字段，前端不硬编码业务文案。
+    assert "attachment_category_label" in groups
+    # 兜底组只在确有候选时才出现，且排在三个流程分组之后。
+    assert "material.rows.length ? [...visible, material] : visible" in groups
+    # 三流程分组的恒定展示规则不受影响。
+    assert 'const alwaysVisible = ["payment", "international_logistics", "purchase"]' in groups
+    assert "alwaysVisible.includes(group.stage)" in groups
+
+    picker = source.split("renderMaterialFeeEvidencePicker(candidates, linked)", 1)[1].split(
+        "evidenceSourceGroups(candidates)", 1
+    )[0]
+    # 兜底组用独立底色区分层级。
+    assert "is-material" in picker
+
+
+def test_evidence_picker_keeps_the_upload_fallback_outside_the_scroll_area() -> None:
+    """上传兜底入口不能被卷进滚动区，否则窄弹窗里用户找不到它。"""
+
+    source = PART.read_text(encoding="utf-8")
+    # 带 “ {” 才能切到方法定义本身：不带会把调用它的弹窗函数也带进来。
+    picker = source.split("renderMaterialFeeEvidencePicker(candidates, linked) {", 1)[1].split(
+        "evidenceSourceGroups(candidates)", 1
+    )[0]
+
+    # 分组列表单独包裹，闭合后紧跟上传按钮 —— 按钮落在滚动区之外。
+    assert "ocw-mf-evidence-groups" in picker
+    assert '</div><button class="ocw-outline-btn" type="button" data-action="mf-upload-evidence">' in picker
+    assert picker.index("ocw-mf-evidence-groups") < picker.index("mf-upload-evidence")
+
+    css = CSS.read_text(encoding="utf-8")
+    # 只有分组列表滚动。
+    assert ".ocw-mf-evidence-groups" in css
+    assert "max-height: min(60vh, 600px)" in css
+
+
+def test_evidence_dialog_is_wide_enough_for_the_four_groups() -> None:
+    """弹窗必须显式给宽度：Frappe 的 .modal-dialog 自带固定宽度，只写 max-width 撑不开。"""
+
+    css = CSS.read_text(encoding="utf-8")
+    dialog_rule = css.split(".ocw-mf-dialog .modal-dialog {", 1)[1].split("}", 1)[0]
+
+    assert "width: min(1100px, calc(100vw - 40px))" in dialog_rule
+    assert "max-width: min(1100px, calc(100vw - 40px))" in dialog_rule
 
 
 def test_evidence_picker_always_renders_the_three_process_group_titles() -> None:

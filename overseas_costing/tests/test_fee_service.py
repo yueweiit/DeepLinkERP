@@ -585,3 +585,135 @@ def test_voucher_marker_is_the_single_shared_token() -> None:
     assert fee_service.VOUCHER_FILE_NAME_MARKER == "凭证"
     assert fee_service.is_voucher_file_name("XX凭证YY") is True
     assert fee_service.is_voucher_file_name("voucher.pdf") is False
+
+
+@pytest.mark.parametrize(
+    "attachment_type,expected",
+    [
+        ("Commercial Invoice", "voucher"),
+        ("Logistics Bill", "voucher"),
+        ("Purchase Order", "voucher"),
+        ("Excel Main Table", "material"),
+        ("Packing List", "material"),
+        ("Tax Certificate", "material"),
+        ("Customs Declaration", "material"),
+    ],
+)
+def test_attachment_category_separates_batch_materials_from_fee_vouchers(attachment_type, expected) -> None:
+    """批次附件表是共用的资料表，仅四类批次资料算“批次其他资料”。"""
+
+    assert fee_service.attachment_category(attachment_type) == expected
+
+
+@pytest.mark.parametrize("attachment_type", ["Other", "", None, "attachment_document"])
+def test_attachment_category_keeps_unrecognized_types_as_fee_vouchers(attachment_type) -> None:
+    """未识别类型一律按凭证类处理，人工上传的凭证不会因为类型没填被藏起来。"""
+
+    assert fee_service.attachment_category(attachment_type) == "voucher"
+
+
+def test_evidence_candidates_expose_the_attachment_category() -> None:
+    """候选要带上服务端分类与标签，前端据此分组、不私造判定。"""
+
+    attachments = [
+        {
+            "name": "ATT-MATERIAL",
+            "file_name": "装箱单2026.9.5.xlsx",
+            "attachment_type": "Packing List",
+            "source_type": "OA",
+            "parse_status": "Queued",
+            "parse_result_json": "{}",
+            "mapped_result_json": "{}",
+        }
+    ]
+
+    candidate = build_evidence_candidates(attachments)[0]
+
+    assert candidate["attachment_category"] == "material"
+    assert candidate["attachment_category_label"] == fee_service.ATTACHMENT_CATEGORY_LABELS["material"]
+    assert "批次其他资料" == candidate["attachment_category_label"]
+
+
+@pytest.mark.parametrize(
+    "parse_result,version,version_name,expected_reason",
+    [
+        (
+            {"settlement_document": {"audit_only": True}},
+            "V1",
+            "V1",
+            "资料已撤销或被替代，仅审计。",
+        ),
+        ({"approval_excluded": True}, "V1", "V1", "审批已失效，不参与核算。"),
+        ({"cost_source_allowed": False}, "V1", "V1", "来源已被判定不得作为成本来源，仅审计。"),
+        ({}, "V0", "V1", "不属于当前版本，仅审计。"),
+    ],
+)
+def test_evidence_candidates_mark_audit_only_sources_with_a_reason(
+    parse_result, version, version_name, expected_reason
+) -> None:
+    """失效／越界／非当前版本的候选只加注原因，仍然留在列表里供人工确认。"""
+
+    attachments = [
+        {
+            "name": "ATT-AUDIT",
+            "file_name": "商业发票.pdf",
+            "attachment_type": "Commercial Invoice",
+            "source_type": "OA",
+            "version": version,
+            "parse_status": "Parsed",
+            "parse_result_json": json.dumps(parse_result, ensure_ascii=False),
+            "mapped_result_json": "{}",
+        }
+    ]
+
+    candidate = build_evidence_candidates(attachments, version_name=version_name)[0]
+
+    assert candidate["audit_only"] is True
+    assert candidate["audit_only_reason"] == expected_reason
+
+
+def test_evidence_candidates_without_source_flags_are_not_audit_only() -> None:
+    """回归护栏：没有任何失效标记的候选不得被误标为仅审计。"""
+
+    attachments = [
+        {
+            "name": "ATT-OK",
+            "file_name": "运费账单9月.pdf",
+            "attachment_type": "Logistics Bill",
+            "source_type": "OA",
+            "version": "V1",
+            "parse_status": "Parsed",
+            "parse_result_json": "{}",
+            "mapped_result_json": "{}",
+        }
+    ]
+
+    candidate = build_evidence_candidates(attachments, version_name="V1")[0]
+
+    assert candidate["audit_only"] is False
+    assert candidate["audit_only_reason"] == ""
+
+
+def test_versionless_attachments_are_not_judged_as_audit_only() -> None:
+    """无版本的附件不判仅审计。
+
+    月结付款这类不在国际物流关联链里的资料本来就可能没有版本，
+    照搬 import_service 里“OA 且无版本即 audit_only”的判据会把它们误判。
+    """
+
+    attachments = [
+        {
+            "name": "ATT-NO-VERSION",
+            "file_name": "月结运费付款申请.pdf",
+            "attachment_type": "Commercial Invoice",
+            "source_type": "OA",
+            "version": None,
+            "parse_status": "Queued",
+            "parse_result_json": "{}",
+            "mapped_result_json": "{}",
+        }
+    ]
+
+    candidate = build_evidence_candidates(attachments, version_name="V1")[0]
+
+    assert candidate["audit_only"] is False

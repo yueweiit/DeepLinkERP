@@ -7745,10 +7745,15 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
 .ocw-mf-excluded { display: flex; flex-wrap: wrap; gap: 7px; padding: 12px 15px; background: #fffaf0; color: #7a4b00; }
 .ocw-mf-excluded span { padding: 2px 7px; border-radius: 5px; background: #fff; border: 1px solid #f6d59b; font-size: 11px; }
 
-.ocw-mf-dialog .modal-dialog { max-width: min(1100px, calc(100vw - 40px)); }
+/* Frappe 的 .modal-dialog 自带固定宽度，只写 max-width 撑不开，必须显式给 width。
+   凭证选择器一屏要放下四个分组，窄弹窗会把候选挤成一条，用户只能滚动挑。 */
+.ocw-mf-dialog .modal-dialog { width: min(1100px, calc(100vw - 40px)); max-width: min(1100px, calc(100vw - 40px)); }
 .ocw-mf-import-dialog .modal-dialog { max-width: min(1320px, calc(100vw - 34px)); }
 .ocw-mf-dialog-note { margin-bottom: 12px; padding: 10px 12px; border-radius: 7px; background: #eef7ff; color: #344054; line-height: 1.55; }
-.ocw-mf-scope-picker, .ocw-mf-evidence-picker { display: grid; gap: 7px; max-height: 310px; overflow: auto; padding: 8px; border: 1px solid var(--mf-border); border-radius: 8px; }
+.ocw-mf-scope-picker { display: grid; gap: 7px; max-height: 310px; overflow: auto; padding: 8px; border: 1px solid var(--mf-border); border-radius: 8px; }
+/* 凭证选择器本身不滚动，只有分组列表滚动，上传按钮因此始终可见。 */
+.ocw-mf-evidence-picker { display: grid; gap: 10px; }
+.ocw-mf-evidence-groups { display: grid; gap: 7px; max-height: min(60vh, 600px); overflow: auto; padding: 8px; border: 1px solid var(--mf-border); border-radius: 8px; }
 .ocw-mf-scope-picker > strong { position: sticky; top: -8px; z-index: 1; padding: 7px; background: #fff; }
 .ocw-mf-scope-picker label, .ocw-mf-evidence-option { display: flex; align-items: flex-start; gap: 8px; margin: 0; padding: 7px; border-radius: 6px; background: #f8fafc; font-weight: 400; }
 .ocw-mf-evidence-option span { display: grid; gap: 2px; }
@@ -7767,6 +7772,11 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
 .ocw-mf-evidence-option.is-voucher { background: #fff8e7; box-shadow: inset 3px 0 0 #f0a02a; }
 .ocw-mf-evidence-option.is-voucher > span > strong { color: #8a5700; }
 .ocw-mf-evidence-voucher-tag { margin-left: 6px; padding: 1px 5px; border-radius: 4px; background: #f0a02a; color: #fff; font-size: 10px; font-weight: 500; vertical-align: 1px; }
+/* 装箱单、完税凭证、报关单等批次资料收在兜底组里，用中性底色区别于三个流程分组。 */
+.ocw-mf-evidence-source-group.is-material > header { background: #eef1f5; }
+.ocw-mf-evidence-source-group.is-material > header strong { color: #667085; }
+/* “仅审计”候选照常列出、不隐藏，只把原因讲清楚（审批失效／不得作为成本来源／非当前版本）。 */
+.ocw-mf-evidence-option em.ocw-mf-evidence-audit-note { color: #b42318; }
 .ocw-mf-import-summary { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 .ocw-mf-import-summary span { padding: 7px 10px; border-radius: 6px; background: #f2f4f7; }
 .ocw-mf-import-table { max-height: 58vh; border: 1px solid var(--mf-border); }
