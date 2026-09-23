@@ -23,6 +23,38 @@ def test_exact_match_uses_normalized_name_or_supplier_name_and_skips_disabled() 
     assert result["candidates"] == []
 
 
+def test_supplier_document_name_exact_match_wins_over_an_earlier_supplier_name_alias() -> None:
+    service = _service()
+    suppliers = [
+        {"name": "SUP-WRONG", "supplier_name": "Acme", "disabled": 0},
+        {"name": "ACME", "supplier_name": "Acme Manufacturing", "disabled": 0},
+    ]
+
+    result = service.resolve_supplier_reference("ACME", suppliers=suppliers)
+
+    assert result["status"] == "EXACT"
+    assert result["canonical_supplier"] == "ACME"
+
+
+def test_duplicate_supplier_name_is_ambiguous_and_never_auto_canonicalized() -> None:
+    service = _service()
+    suppliers = [
+        {"name": "SUP-ACME-CN", "supplier_name": "Acme", "disabled": 0},
+        {"name": "SUP-ACME-MX", "supplier_name": "ACME", "disabled": 0},
+    ]
+
+    result = service.resolve_supplier_reference("acme", suppliers=suppliers)
+
+    assert result["status"] == "AMBIGUOUS"
+    assert result["canonical_supplier"] == ""
+    assert [candidate["name"] for candidate in result["candidates"]] == [
+        "SUP-ACME-CN",
+        "SUP-ACME-MX",
+    ]
+    assert all(candidate["score"] == 1 for candidate in result["candidates"])
+    assert all(candidate["high_confidence"] is False for candidate in result["candidates"])
+
+
 def test_fuzzy_match_returns_at_most_five_candidates_but_never_canonicalizes() -> None:
     service = _service()
     suppliers = [

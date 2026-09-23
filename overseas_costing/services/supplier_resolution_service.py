@@ -97,15 +97,47 @@ def resolve_supplier_reference(raw_value: Any, *, suppliers: Iterable[Any] | Non
 
     rows = _active_supplier_rows(load_active_suppliers() if suppliers is None else suppliers)
     normalized_raw = normalize_supplier_text(raw)
-    for supplier in rows:
-        aliases = (supplier["name"], supplier["supplier_name"])
-        if normalized_raw and any(normalize_supplier_text(alias) == normalized_raw for alias in aliases if alias):
-            return {
-                "raw_value": raw,
-                "status": "EXACT",
-                "canonical_supplier": supplier["name"],
-                "candidates": [],
-            }
+    name_matches = [
+        supplier for supplier in rows
+        if normalized_raw and normalize_supplier_text(supplier["name"]) == normalized_raw
+    ]
+    if len(name_matches) == 1:
+        return {
+            "raw_value": raw,
+            "status": "EXACT",
+            "canonical_supplier": name_matches[0]["name"],
+            "candidates": [],
+        }
+
+    supplier_name_matches = [
+        supplier for supplier in rows
+        if normalized_raw
+        and supplier["supplier_name"]
+        and normalize_supplier_text(supplier["supplier_name"]) == normalized_raw
+    ]
+    exact_matches = name_matches or supplier_name_matches
+    if len(exact_matches) == 1:
+        return {
+            "raw_value": raw,
+            "status": "EXACT",
+            "canonical_supplier": exact_matches[0]["name"],
+            "candidates": [],
+        }
+    if len(exact_matches) > 1:
+        return {
+            "raw_value": raw,
+            "status": "AMBIGUOUS",
+            "canonical_supplier": "",
+            "candidates": [
+                {
+                    "name": supplier["name"],
+                    "supplier_name": supplier["supplier_name"],
+                    "score": 1.0,
+                    "high_confidence": False,
+                }
+                for supplier in sorted(exact_matches, key=lambda item: item["name"])
+            ][:MAX_CANDIDATES],
+        }
 
     scored: list[dict] = []
     for supplier in rows:
