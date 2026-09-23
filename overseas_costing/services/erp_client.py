@@ -49,7 +49,7 @@ def check_erp_connection() -> dict:
     """
 
     config = get_erp_push_config()
-    missing = _missing_config_reasons(config)
+    missing = _connection_config_reasons(config)
     if missing:
         return {
             "ok": False,
@@ -536,25 +536,32 @@ def get_erp_push_config() -> dict:
 
 
 def _missing_config_reasons(config: dict, payload: dict | None = None) -> list[str]:
-    reasons = []
-    payload = payload or {}
-    if not config.get("base_url"):
-        reasons.append("缺少 DeepLinkERP 接口地址配置")
-    if not config.get("authorization"):
-        reasons.append("缺少 DeepLinkERP 鉴权配置")
-    if config.get("push_mode") == PUSH_MODE_GENERIC and not config.get("target_doctype"):
-        reasons.append("缺少 DeepLinkERP 目标 DocType 配置")
+    reasons = _connection_config_reasons(config)
     if config.get("push_mode") == PUSH_MODE_STANDARD:
-        if not config.get("supplier") and not _payload_has_supplier(payload):
+        if not config.get("supplier") and not _payload_has_supplier(payload or {}):
             reasons.append("缺少默认供应商配置")
         if not config.get("item_group"):
             reasons.append("缺少默认物料组配置")
         # 计量单位按物料从 ERP 已有档案解析（见 _ensure_item），全局默认单位只作兜底，
         # 因此不再作为推送前置条件。
+    return reasons
+
+
+def _connection_config_reasons(config: dict) -> list[str]:
+    """连接与元数据检查共用的前提：地址、鉴权、通用模式目标 DocType、启用状态。
+
+    供应商、物料组、计量单位只在真正推送时才需要（且供应商优先取报文里的值），
+    不应让「测试连接」误报推送配置缺失。
+    """
+
+    reasons = _metadata_config_errors(config)
+    if config.get("push_mode") == PUSH_MODE_GENERIC:
+        if not config.get("target_doctype"):
+            reasons.append("缺少 DeepLinkERP 目标 DocType 配置")
+        if config.get("method") not in {"POST", "PUT", "PATCH"}:
+            reasons.append("DeepLinkERP HTTP 方法只支持 POST/PUT/PATCH")
     if config.get("enabled") is False:
         reasons.append("ERP 推送设置当前未启用")
-    if config.get("push_mode") == PUSH_MODE_GENERIC and config.get("method") not in {"POST", "PUT", "PATCH"}:
-        reasons.append("DeepLinkERP HTTP 方法只支持 POST/PUT/PATCH")
     return reasons
 
 

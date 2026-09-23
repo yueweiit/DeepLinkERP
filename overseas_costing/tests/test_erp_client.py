@@ -161,6 +161,53 @@ def test_check_erp_connection_uses_get_without_writing(monkeypatch) -> None:
     }
 
 
+def test_check_erp_connection_ignores_push_only_gaps(monkeypatch) -> None:
+    monkeypatch.setattr(
+        erp_client,
+        "get_erp_push_config",
+        lambda: {
+            "enabled": True,
+            "base_url": "https://erp.example.com/api/resource",
+            "authorization": "token abc:def",
+            "push_mode": "standard_purchase",
+            "supplier": "",
+            "item_group": "",
+            "stock_uom": "",
+            "timeout": 30,
+            "target_doctype": "",
+            "method": "POST",
+            "field_map": {},
+            "payload_field": "payload_json",
+        },
+    )
+    requested = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        @staticmethod
+        def read():
+            return json.dumps({"data": []}).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        requested.append(request.full_url)
+        return FakeResponse()
+
+    monkeypatch.setattr(erp_client, "urlopen", fake_urlopen)
+
+    result = erp_client.check_erp_connection()
+
+    assert result["ok"] is True
+    assert result["config_ready"] is True
+    assert len(requested) == 2
+
+
 def test_push_standard_purchase_flow_creates_item_and_purchase_order(monkeypatch) -> None:
     monkeypatch.setattr(
         erp_client,
