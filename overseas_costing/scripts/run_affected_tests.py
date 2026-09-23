@@ -29,7 +29,14 @@ def select_tests(root, changed):
     frontend=False
     for path in changed:
         if path.endswith(('.md','.png','.jpg')):continue
-        if path in {'.github/workflows/deploy-overseas-costing.yml','overseas_costing/scripts/run_affected_tests.py'}:
+        # .github 下只有工作流本身牵动测试选择；部署脚本、探针脚本都只在 runner
+        # 或服务器上执行，改动它们不该影响 Python 测试。漏掉这条会落进末尾的 else，
+        # 被当成“未映射的运行时改动”而触发全量测试 —— 全量里既有的红会把 CI 判失败，
+        # 后续的 Deploy 步骤随之整体跳过。
+        if path.startswith('.github/'):
+            if path=='.github/workflows/deploy-overseas-costing.yml':selected.update(p for p in tests if p.endswith('/test_affected_tests.py'))
+            continue
+        if path=='overseas_costing/scripts/run_affected_tests.py':
             selected.update(p for p in tests if p.endswith('/test_affected_tests.py'));continue
         if 'overseas_cost_workbench/' in path:
             frontend=True;continue
