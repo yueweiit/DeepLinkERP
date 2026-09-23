@@ -506,9 +506,31 @@ def _merge_same_file_candidates(candidates: list[dict]) -> list[dict]:
         if current is None:
             merged[key] = candidate
             order.append(key)
-        elif _candidate_preference(candidate) > _candidate_preference(current):
-            merged[key] = candidate
+            continue
+        winner, loser = (
+            (candidate, current)
+            if _candidate_preference(candidate) > _candidate_preference(current)
+            else (current, candidate)
+        )
+        merged[key] = _adopt_missing_file_url(winner, loser)
     return [merged[key] for key in order]
+
+
+def _adopt_missing_file_url(winner: dict, loser: dict) -> dict:
+    """保留的副本缺文件地址时，从同组的其它副本借一个。
+
+    线上重复登记的实况是：“能进核算”的那条 ``file_url`` 为空，被标仅审计的
+    副本反而有地址。只按口径留一条的话，界面上留下的候选既打不开也解析不了，
+    所以同一版本、同一文件名的副本之间把文件地址补齐 —— 它们本来就是同一个
+    物理文件。只借 ``file_url`` 这一个字段，不搬运任何判定结果。
+    """
+
+    if str(winner.get("file_url") or "").strip():
+        return winner
+    file_url = str(loser.get("file_url") or "").strip()
+    if not file_url:
+        return winner
+    return {**winner, "file_url": file_url}
 
 
 def _evidence_candidate_summary(

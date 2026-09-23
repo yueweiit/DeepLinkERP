@@ -851,3 +851,28 @@ def test_merging_duplicates_prefers_the_copy_that_can_enter_costing() -> None:
     assert len(candidates) == 1
     assert candidates[0]["attachment"] == "ATT-LIVE"
     assert candidates[0]["audit_only"] is False
+
+
+def test_merged_candidate_borrows_the_file_url_from_the_sibling_copy() -> None:
+    """留下的副本缺文件地址时，从同版本同文件的其它副本借一个。
+
+    线上实况：能进核算的那条 ``file_url`` 为空，被标仅审计的副本反而有地址。
+    不借的话，界面上留下的候选既打不开也解析不了。
+    """
+
+    attachments = [
+        _attachment_row("ATT-LIVE", "运费账单.pdf", version="V1"),
+        _attachment_row(
+            "ATT-RETIRED",
+            "运费账单.pdf",
+            version="V1",
+            file_url="/private/files/运费账单-retired.pdf",
+            parse_result={"settlement_document": {"audit_only": True}},
+        ),
+    ]
+
+    candidate = build_evidence_candidates(attachments, version_name="V1")[0]
+
+    assert candidate["attachment"] == "ATT-LIVE"
+    assert candidate["audit_only"] is False
+    assert candidate["file_url"] == "/private/files/运费账单-retired.pdf"
