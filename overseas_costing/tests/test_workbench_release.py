@@ -248,3 +248,108 @@ def test_page_show_resumes_release_monitor_after_page_hide_cleanup() -> None:
     assert "workbench.resumeWorkbenchReleaseMonitor()" in bootstrap
     assert "this.stopWorkbenchReleaseMonitor()" in shell
     assert 'window.removeEventListener("focus", this._releaseFocusHandler)' in data
+
+
+_STORAGE_STUB = (
+    "global.window.localStorage={_d:%s,"
+    "getItem(k){return this._d[k]===undefined?null:this._d[k]},"
+    "setItem(k,v){this._d[k]=String(v)},"
+    "removeItem(k){delete this._d[k]}};"
+)
+
+
+def test_reopened_page_self_heals_when_browser_cached_the_previous_script() -> None:
+    """重新打开页面时，若浏览器用的是上一次部署缓存的脚本，要能自己纠正过来。
+
+    页面重新打开时 ``pageview.with_page`` 直接命中 localStorage 里的脚本缓存，
+    根本不再问服务端，那份旧脚本因此永远以为自己是最新版 —— 光靠内存里的
+    基线版本号发现不了。持久锚点与当前发布标识不一致时，必须先失效 Page 缓存
+    再重载，否则刷新拿回来的还是同一份旧脚本。
+    """
+
+    result = _request_result(
+        _STORAGE_STUB
+        % "{ocw_workbench_release:'release-1','_page:overseas-cost-workbench':'cached-old-script'}"
+        + """
+workspace.requestJson=async()=>({message:{ok:true,release_id:'release-2'}});
+const state=await workspace.checkWorkbenchRelease();
+const store=global.window.localStorage;
+console.log(JSON.stringify({
+  state,
+  reloads:global.reloads,
+  anchor:store.getItem('ocw_workbench_release'),
+  cachedPage:store.getItem('_page:overseas-cost-workbench'),
+}));
+"""
+    )
+    assert result == {
+        "state": {"changed": True, "releaseId": "release-2", "reloading": True},
+        "reloads": 1,
+        "anchor": "release-2",
+        "cachedPage": None,
+    }
+
+
+def test_changed_release_drops_the_cached_page_script_before_asking_to_refresh() -> None:
+    """发布标识变化时，除了提示刷新，还要失效浏览器里的脚本缓存。
+
+    “立即刷新”走的是 ``window.location.reload``，而 Frappe 刷新时优先读
+    ``_page:<name>``。不清掉它，用户按了刷新看到的仍然是旧页面。
+    """
+
+    result = _request_result(
+        _STORAGE_STUB
+        % "{ocw_workbench_release:'release-2','_page:overseas-cost-workbench':'cached-old-script'}"
+        + """
+let dialogs=0;
+workspace.showWorkbenchReleaseDialog=()=>{dialogs+=1};
+workspace.requestJson=async()=>({message:{ok:true,release_id:'release-2'}});
+const state=await workspace.checkWorkbenchRelease();
+const store=global.window.localStorage;
+console.log(JSON.stringify({
+  state,
+  dialogs,
+  blocked:workspace.releaseBlocked,
+  cachedPage:store.getItem('_page:overseas-cost-workbench'),
+  reloads:global.reloads,
+}));
+"""
+    )
+    # 基线是 harness 预设的 release-1，所以服务端返回 release-2 属于换版。
+    assert result == {
+        "state": {"changed": True, "releaseId": "release-2"},
+        "dialogs": 1,
+        "blocked": True,
+        "cachedPage": None,
+        "reloads": 0,
+    }
+
+
+def test_release_anchor_matches_current_release_leaves_the_page_untouched() -> None:
+    """锚点与当前发布标识一致时不得有任何副作用。
+
+    这段校验每次页面显示、每次窗口获得焦点都会跑；误判成换版就会把正在用的
+    页面反复重载。
+    """
+
+    result = _request_result(
+        _STORAGE_STUB
+        % "{ocw_workbench_release:'release-1','_page:overseas-cost-workbench':'current-script'}"
+        + """
+workspace.requestJson=async()=>({message:{ok:true,release_id:'release-1'}});
+const state=await workspace.checkWorkbenchRelease();
+const store=global.window.localStorage;
+console.log(JSON.stringify({
+  state,
+  reloads:global.reloads,
+  blocked:!!workspace.releaseBlocked,
+  cachedPage:store.getItem('_page:overseas-cost-workbench'),
+}));
+"""
+    )
+    assert result == {
+        "state": {"changed": False, "releaseId": "release-1"},
+        "reloads": 0,
+        "blocked": False,
+        "cachedPage": "current-script",
+    }

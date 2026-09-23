@@ -124,6 +124,9 @@
         const result = payload.message || payload || {};
         const releaseId = String(result.release_id || "").trim();
         if (!releaseId) throw new Error("发布标识为空");
+        if (this.adoptWorkbenchRelease(releaseId)) {
+          return { changed: true, releaseId, reloading: true };
+        }
         if (!this.initialReleaseId) {
           this.initialReleaseId = releaseId;
           return { changed: false, releaseId };
@@ -131,6 +134,7 @@
         if (releaseId !== this.initialReleaseId) {
           this.releaseBlocked = true;
           this.releaseUpdating = false;
+          this.dropCachedWorkbenchPage();
           this.showWorkbenchReleaseDialog("updated");
           return { changed: true, releaseId };
         }
@@ -161,6 +165,68 @@
         this._releaseDeploymentFailureRequested = false;
       }
     }
+  }
+
+  // Frappe 会把整段页面脚本缓存在 localStorage（`pageview.with_page` 里的
+  // `_page:<name>`），刷新时优先命中它而不是回服务端取。部署换了版本却不失效
+  // 这个键，刷新就还是跑旧脚本 —— 也就是“明明更新了，页面却没变化”的来源。
+  cachedWorkbenchPageKey() {
+    const pageName = String(window.page_name || "").trim() || "overseas-cost-workbench";
+    return `_page:${pageName}`;
+  }
+
+  workbenchReleaseAnchorKey() {
+    return "ocw_workbench_release";
+  }
+
+  readStoredWorkbenchRelease() {
+    try {
+      const value = window.localStorage?.getItem?.(this.workbenchReleaseAnchorKey());
+      return value ? String(value).trim() : "";
+    } catch (error) {
+      return "";
+    }
+  }
+
+  storeWorkbenchRelease(releaseId) {
+    try {
+      window.localStorage?.setItem?.(this.workbenchReleaseAnchorKey(), String(releaseId || ""));
+    } catch (error) {
+      // 存储不可用时忽略：只少了一层“重新打开页面自愈”，不影响本次校验。
+    }
+  }
+
+  dropCachedWorkbenchPage() {
+    try {
+      window.localStorage?.removeItem?.(this.cachedWorkbenchPageKey());
+    } catch (error) {
+      // 同上：存储不可用时本来也命中不到这份缓存。
+    }
+  }
+
+  reloadWorkbenchPage() {
+    try {
+      window.location?.reload?.();
+    } catch (error) {
+      // 受限环境下无法重载：保持页面可用，等下一次校验再试。
+    }
+  }
+
+  /**
+   * 确认当前这份脚本属于哪个发布标识。
+   *
+   * 页面重新打开时 `pageview.with_page` 会直接命中 localStorage 里的脚本缓存，
+   * 根本不再问服务端，于是那份脚本永远认为自己是最新版。持久锚点就是为了识破
+   * 这一点：锚点与当前发布标识不一致，说明跑的是上一次部署的脚本 —— 先失效
+   * Page 缓存再重载，下一次拿到的才是新脚本。重载前先写锚点，避免来回重载。
+   */
+  adoptWorkbenchRelease(releaseId) {
+    const stored = this.readStoredWorkbenchRelease();
+    this.storeWorkbenchRelease(releaseId);
+    if (!stored || stored === releaseId) return false;
+    this.dropCachedWorkbenchPage();
+    this.reloadWorkbenchPage();
+    return true;
   }
 
   isWorkbenchReleaseMonitorCurrent(generation) {
