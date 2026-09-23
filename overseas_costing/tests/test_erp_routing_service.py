@@ -245,6 +245,100 @@ def test_real_material_purchase_uom_splits_purchase_groups() -> None:
     assert {group["erp_stock_uom"] for group in preview["sites"][0]["groups"]} == {"kg", "件"}
 
 
+def test_new_template_missing_supplier_blocks_only_that_material_group() -> None:
+    preview = build_site_payload_preview(
+        {
+            "items": [
+                {
+                    "stable_line_key": "VALID",
+                    "route_status": "RESOLVED",
+                    "erp_site_code": "DEEPLINKERP",
+                    "subsidiary_code": "Company A",
+                    "supplier": "Supplier A",
+                    "purchase_currency": "CNY",
+                    "purchase_uom": "件",
+                    "total_cost_rmb": "10",
+                    "extra_json": '{"supplier_field_present":true,"supplier_match_status":"EXACT"}',
+                },
+                {
+                    "stable_line_key": "MISSING",
+                    "route_status": "RESOLVED",
+                    "erp_site_code": "DEEPLINKERP",
+                    "subsidiary_code": "Company A",
+                    "supplier": "",
+                    "purchase_currency": "CNY",
+                    "purchase_uom": "件",
+                    "total_cost_rmb": "20",
+                    "extra_json": '{"supplier_field_present":true,"supplier_raw_value":"未匹配供应商","supplier_match_status":"UNMATCHED"}',
+                },
+            ]
+        },
+        active_supplier_names={"Supplier A"},
+    )
+
+    assert preview["ready"] is False
+    assert preview["blocking"] == [
+        {
+            "code": "ITEM_SUPPLIER_REQUIRED",
+            "stable_line_key": "MISSING",
+            "raw_value": "未匹配供应商",
+            "match_status": "UNMATCHED",
+            "message": "物料行 MISSING：供应商尚未匹配并确认。",
+        }
+    ]
+    assert [row["stable_line_key"] for row in preview["sites"][0]["groups"][0]["items"]] == ["VALID"]
+
+
+def test_new_template_inactive_supplier_is_not_sent_to_erp() -> None:
+    preview = build_site_payload_preview(
+        {
+            "items": [
+                {
+                    "stable_line_key": "INACTIVE",
+                    "route_status": "RESOLVED",
+                    "erp_site_code": "DEEPLINKERP",
+                    "subsidiary_code": "Company A",
+                    "supplier": "Disabled Supplier",
+                    "purchase_currency": "CNY",
+                    "purchase_uom": "件",
+                    "extra_json": '{"supplier_field_present":true,"supplier_match_status":"EXACT"}',
+                }
+            ]
+        },
+        active_supplier_names={"Supplier A"},
+    )
+
+    assert preview["sites"] == []
+    assert preview["blocking"][0]["code"] == "ITEM_SUPPLIER_INACTIVE"
+
+
+def test_legacy_item_without_supplier_column_keeps_default_supplier_fallback_warning() -> None:
+    preview = build_site_payload_preview(
+        {
+            "items": [
+                {
+                    "stable_line_key": "LEGACY",
+                    "route_status": "RESOLVED",
+                    "erp_site_code": "DEEPLINKERP",
+                    "subsidiary_code": "Company A",
+                    "supplier": "",
+                    "purchase_currency": "CNY",
+                    "purchase_uom": "件",
+                    "extra_json": "{}",
+                }
+            ]
+        },
+        active_supplier_names={"Supplier A"},
+    )
+
+    group = preview["sites"][0]["groups"][0]
+    assert preview["ready"] is True
+    assert group["supplier"] == ""
+    assert group["warnings"] == [
+        {"code": "LEGACY_DEFAULT_SUPPLIER", "message": "历史兼容默认供应商"}
+    ]
+
+
 def test_first_push_blocks_entire_batch_if_one_item_has_no_route() -> None:
     result = build_erp_push_state(
         {

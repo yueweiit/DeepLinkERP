@@ -45,9 +45,6 @@ def build_sync_request_specs(
 ) -> dict:
     """从分站点预览生成待保存的同步请求草稿。"""
 
-    if not preview.get("ready", True):
-        return {"ready": False, "blocking": list(preview.get("blocking") or []), "requests": []}
-
     requests = []
     for site in preview.get("sites") or []:
         for group in site.get("groups") or []:
@@ -85,6 +82,7 @@ def build_sync_request_specs(
                 "supplier": _text(group.get("supplier")),
                 "purchase_currency": _text(group.get("purchase_currency")),
                 "erp_stock_uom": _text(group.get("erp_stock_uom")),
+                "warnings": list(group.get("warnings") or []),
                 "total_cost_rmb": _text(group.get("total_cost_rmb")),
                 "allocated_fee_rmb": _text(group.get("allocated_fee_rmb")),
                 "items": group.get("items") or [],
@@ -103,7 +101,13 @@ def build_sync_request_specs(
                 }
             )
 
-    return {"ready": True, "blocking": [], "requests": requests}
+    blocking = list(preview.get("blocking") or [])
+    return {
+        "ready": bool(requests),
+        "complete": not blocking,
+        "blocking": blocking,
+        "requests": requests,
+    }
 
 
 def build_site_sync_plan(
@@ -113,6 +117,7 @@ def build_site_sync_plan(
     items: list[dict],
     routes: list[dict],
     site_configs: list[dict],
+    active_supplier_names: set[str] | None = None,
     client_intent_id: str = "",
 ) -> dict:
     """按物料项目归属生成分站点同步草稿，只计算预览，不保存也不推送。"""
@@ -138,7 +143,11 @@ def build_site_sync_plan(
         "fee_total_rmb": _sum_decimal_text(row.get("allocated_fee_rmb") for row in routed_items),
         "items": routed_items,
     }
-    push_state = build_erp_push_state(result, site_configs)
+    push_state = build_erp_push_state(
+        result,
+        site_configs,
+        active_supplier_names=active_supplier_names,
+    )
     cost_result_hash = payload_hash(
         {
             "batch": _text(batch.get("name") or batch.get("batch_no")),
@@ -156,9 +165,13 @@ def build_site_sync_plan(
         client_intent_id=client_intent_id,
     )
     blocking = list(push_state["blocking"])
+    preview_blocking = list(push_state["preview"].get("blocking") or [])
+    global_blocking = [row for row in blocking if row not in preview_blocking]
+    executable = bool(specs.get("requests")) and not global_blocking
     return {
         "ok": not blocking,
-        "ready": not blocking,
+        "ready": executable,
+        "complete": not blocking,
         "blocking": blocking,
         "route_result": route_result,
         "push_state": push_state,

@@ -56,6 +56,7 @@ def preview_site_sync_plan(batch_name: str, version_name: str | None = None, cli
         items=_prepared_items(context["items"]),
         routes=_active_routes(),
         site_configs=_enabled_sites(),
+        active_supplier_names=_active_supplier_names(),
         client_intent_id=client_intent_id,
     )
     return {
@@ -256,6 +257,19 @@ def _enabled_sites() -> list[dict]:
         fields=["site_code", "enabled", "subsidiary_code", "capability_status", "cost_update_mode"],
         limit_page_length=1000,
     )
+
+
+def _active_supplier_names() -> set[str]:
+    """Load active canonical Supplier names once for the complete ERP preview."""
+
+    _require_frappe()
+    rows = frappe.get_all(
+        "Supplier",
+        filters={"disabled": 0},
+        fields=["name"],
+        limit_page_length=10000,
+    )
+    return {str(row.get("name") or "").strip() for row in rows if row.get("name")}
 
 
 def _insert_plan_audit_log(plan: dict, saved: dict) -> None:

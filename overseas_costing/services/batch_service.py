@@ -2204,6 +2204,7 @@ ERP_PAYLOAD_ITEM_FIELDS = list(
             "material_code",
             "product_name",
             "supplier",
+            "extra_json",
             "quantity",
             "actual_shipped_qty",
             "actual_shipped_qty_mode", "actual_shipped_qty_source_revision",

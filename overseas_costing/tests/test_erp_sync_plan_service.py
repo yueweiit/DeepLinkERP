@@ -21,6 +21,42 @@ def test_preview_site_sync_plan_blocks_before_reading_routes_when_batch_is_not_c
     assert result["blocking"] == [{"code": "WRITEBACK_READINESS_REQUIRED", "message": "当前批次还没有确认。"}]
 
 
+def test_preview_loads_active_suppliers_once_for_group_validation(monkeypatch) -> None:
+    monkeypatch.setattr(
+        plans.batch_service,
+        "check_writeback_ready",
+        lambda *args, **kwargs: {"ready": True, "batch_name": "B1", "version_name": "V1"},
+    )
+    monkeypatch.setattr(plans.batch_service, "_build_review_remediation_gate", lambda *args, **kwargs: {"erp_blocked": False})
+    monkeypatch.setattr(
+        plans.batch_service,
+        "_load_erp_push_context",
+        lambda *args: {
+            "ok": True,
+            "batch": {"name": "B1", "confirm_status": "CONFIRMED"},
+            "version": {"name": "V1"},
+            "items": [],
+            "batch_doc_name": "B1",
+            "version_name": "V1",
+        },
+    )
+    monkeypatch.setattr(plans, "_active_routes", lambda: [])
+    monkeypatch.setattr(plans, "_enabled_sites", lambda: [])
+    calls = []
+    monkeypatch.setattr(plans, "_active_supplier_names", lambda: calls.append(True) or {"Supplier A"})
+    captured = {}
+    monkeypatch.setattr(
+        plans,
+        "build_site_sync_plan",
+        lambda **kwargs: captured.update(kwargs) or {"ready": False, "blocking": []},
+    )
+
+    plans.preview_site_sync_plan("B1", "V1")
+
+    assert calls == [True]
+    assert captured["active_supplier_names"] == {"Supplier A"}
+
+
 def test_save_site_sync_plan_only_saves_server_recomputed_ready_plan(monkeypatch) -> None:
     monkeypatch.setattr(
         plans,

@@ -84,7 +84,11 @@ def resolve_item_routes(
     }
 
 
-def build_site_payload_preview(result: dict) -> dict:
+def build_site_payload_preview(
+    result: dict,
+    *,
+    active_supplier_names: set[str] | None = None,
+) -> dict:
     """按 ERP 站点和目标单据约束生成只读报文预览。
 
     每行的分摊金额是唯一费用来源；本函数不重新分摊，也不把批次总额复制到站点。
@@ -99,6 +103,16 @@ def build_site_payload_preview(result: dict) -> dict:
         subsidiary_code = _text(item.get("subsidiary_code"))
         if status not in {"RESOLVED", "OVERRIDDEN"} or not site_code or not subsidiary_code:
             blocking.append({"code": "ITEM_ROUTE_REQUIRED", "stable_line_key": item_key})
+            continue
+
+        supplier_state = _supplier_push_state(item, active_supplier_names)
+        if supplier_state["blocking"]:
+            blocking.append(
+                {
+                    **supplier_state["blocking"],
+                    "stable_line_key": item_key,
+                }
+            )
             continue
 
         group_key = (
@@ -116,11 +130,14 @@ def build_site_payload_preview(result: dict) -> dict:
                 "supplier": group_key[2],
                 "purchase_currency": group_key[3],
                 "erp_stock_uom": group_key[4],
+                "warnings": [],
                 "items": [],
                 "total_cost_rmb": Decimal("0"),
                 "allocated_fee_rmb": Decimal("0"),
             },
         )
+        if supplier_state["warning"] and supplier_state["warning"] not in group["warnings"]:
+            group["warnings"].append(supplier_state["warning"])
         group["items"].append(item)
         group["total_cost_rmb"] += _decimal(item.get("total_cost_rmb"))
         group["allocated_fee_rmb"] += _decimal(item.get("allocated_fee_rmb"))
@@ -148,10 +165,15 @@ def build_site_payload_preview(result: dict) -> dict:
     }
 
 
-def build_erp_push_state(result: dict, site_configs: list[dict] | None = None) -> dict:
+def build_erp_push_state(
+    result: dict,
+    site_configs: list[dict] | None = None,
+    *,
+    active_supplier_names: set[str] | None = None,
+) -> dict:
     """计算分站点 ERP 推送门槛，不执行网络请求。"""
 
-    preview = build_site_payload_preview(result)
+    preview = build_site_payload_preview(result, active_supplier_names=active_supplier_names)
     blocking = list(preview["blocking"])
     status = _text(result.get("status") or result.get("confirm_status")).upper()
     if status != "CONFIRMED":
@@ -166,7 +188,10 @@ def build_erp_push_state(result: dict, site_configs: list[dict] | None = None) -
 
     source_total = _decimal(preview["source_total_cost_rmb"])
     preview_total = _decimal(preview["preview_total_cost_rmb"])
-    if source_total and source_total != preview_total:
+    # Row-scoped blockers deliberately remove those rows from the executable
+    # preview, so a lower preview total is expected. A mismatch without such a
+    # blocker still indicates data loss and remains a global stop condition.
+    if source_total and source_total != preview_total and not preview["blocking"]:
         blocking.append({"code": "SITE_TOTAL_MISMATCH", "source": _decimal_text(source_total), "preview": _decimal_text(preview_total)})
 
     return {"ready": not blocking, "blocking": blocking, "preview": preview}
@@ -361,6 +386,42 @@ def _decimal_text(value) -> str:
     return format(_decimal(value).normalize(), "f")
 
 
+def _supplier_push_state(item: dict, active_supplier_names: set[str] | None) -> dict:
+    """Apply new-template supplier rules while retaining the documented legacy fallback."""
+
+    from overseas_costing.services.supplier_resolution_service import supplier_provenance_state
+
+    state = supplier_provenance_state(item)
+    item_key = _text(item.get("stable_line_key") or item.get("name") or item.get("row_no"))
+    if state["requires_explicit_supplier"]:
+        return {
+            "warning": None,
+            "blocking": {
+                "code": "ITEM_SUPPLIER_REQUIRED",
+                "raw_value": state["raw_value"],
+                "match_status": state["match_status"],
+                "message": f"物料行 {item_key}：供应商尚未匹配并确认。",
+            },
+        }
+    if (
+        state["supplier"]
+        and active_supplier_names is not None
+        and state["supplier"] not in active_supplier_names
+    ):
+        return {
+            "warning": None,
+            "blocking": {
+                "code": "ITEM_SUPPLIER_INACTIVE",
+                "supplier": state["supplier"],
+                "message": f"物料行 {item_key}：供应商已失效或不在 ERP 有效供应商列表。",
+            },
+        }
+    warning = None
+    if state["legacy_default_allowed"]:
+        warning = {"code": "LEGACY_DEFAULT_SUPPLIER", "message": state["warning"]}
+    return {"warning": warning, "blocking": None}
+
+
 def _serialise_group(group: dict) -> dict:
     return {
         "site_code": group["site_code"],
@@ -368,6 +429,7 @@ def _serialise_group(group: dict) -> dict:
         "supplier": group["supplier"],
         "purchase_currency": group["purchase_currency"],
         "erp_stock_uom": group["erp_stock_uom"],
+        "warnings": list(group.get("warnings") or []),
         "item_count": len(group["items"]),
         "items": group["items"],
         "total_cost_rmb": _decimal_text(group["total_cost_rmb"]),

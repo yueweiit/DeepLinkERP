@@ -59,6 +59,59 @@ def test_company_is_part_of_request_identity_on_one_shared_site() -> None:
     assert {row["payload"]["subsidiary_code"] for row in requests} == {"COMPANY-A", "COMPANY-B"}
 
 
+def test_safe_groups_still_create_requests_when_other_material_groups_are_blocked() -> None:
+    preview = {
+        "ready": False,
+        "blocking": [{"code": "ITEM_SUPPLIER_REQUIRED", "stable_line_key": "L2"}],
+        "sites": [{
+            "site_code": "DEEPLINKERP",
+            "groups": [
+                {
+                    "subsidiary_code": "COMPANY-A",
+                    "supplier": "SUP",
+                    "purchase_currency": "CNY",
+                    "erp_stock_uom": "件",
+                    "total_cost_rmb": "10",
+                    "allocated_fee_rmb": "2",
+                    "warnings": [],
+                    "items": [{"stable_line_key": "L1"}],
+                }
+            ],
+        }],
+    }
+
+    specs = build_sync_request_specs(batch="B1", cost_result_hash="H1", preview=preview)
+
+    assert specs["ready"] is True
+    assert specs["complete"] is False
+    assert specs["blocking"] == preview["blocking"]
+    assert [row["payload"]["items"][0]["stable_line_key"] for row in specs["requests"]] == ["L1"]
+
+
+def test_legacy_default_supplier_warning_is_carried_into_request_payload() -> None:
+    preview = {
+        "ready": True,
+        "blocking": [],
+        "sites": [{
+            "site_code": "DEEPLINKERP",
+            "groups": [{
+                "subsidiary_code": "COMPANY-A",
+                "supplier": "",
+                "purchase_currency": "CNY",
+                "erp_stock_uom": "件",
+                "total_cost_rmb": "10",
+                "allocated_fee_rmb": "2",
+                "warnings": [{"code": "LEGACY_DEFAULT_SUPPLIER", "message": "历史兼容默认供应商"}],
+                "items": [{"stable_line_key": "L1"}],
+            }],
+        }],
+    }
+
+    request = build_sync_request_specs(batch="B1", cost_result_hash="H1", preview=preview)["requests"][0]
+
+    assert request["payload"]["warnings"] == preview["sites"][0]["groups"][0]["warnings"]
+
+
 def test_old_cost_result_is_stale() -> None:
     assert is_stale_cost_result("H2", "H1") is True
     assert is_stale_cost_result("H1", "H1") is False
@@ -89,6 +142,57 @@ def test_site_sync_plan_routes_mixed_container_without_duplicate_fee() -> None:
     assert len(result["request_specs"]["requests"]) == 2
     assert result["push_state"]["preview"]["preview_total_cost_rmb"] == "120"
     assert result["push_state"]["preview"]["preview_allocated_fee_rmb"] == "30"
+
+
+def test_site_sync_plan_keeps_valid_supplier_group_executable_when_another_row_is_blocked() -> None:
+    common = {
+        "project_collection": "项目A",
+        "purchase_currency": "CNY",
+        "purchase_uom": "件",
+        "extra_json": '{"supplier_field_present":true}',
+    }
+    result = build_site_sync_plan(
+        batch={"name": "B1", "confirm_status": "CONFIRMED"},
+        version={"name": "V1"},
+        items=[
+            {**common, "name": "I1", "supplier": "Supplier A", "total_cost_rmb": "10"},
+            {**common, "name": "I2", "supplier": "", "total_cost_rmb": "20"},
+        ],
+        routes=[{"project_collection": "项目A", "subsidiary_code": "COMPANY-A", "enabled": 1}],
+        site_configs=[],
+        active_supplier_names={"Supplier A"},
+    )
+
+    assert result["ok"] is False
+    assert result["ready"] is True
+    assert result["complete"] is False
+    assert result["blocking"][0]["code"] == "ITEM_SUPPLIER_REQUIRED"
+    assert [row["payload"]["items"][0]["name"] for row in result["request_specs"]["requests"]] == ["I1"]
+
+
+def test_global_confirmation_gate_still_blocks_all_generated_groups() -> None:
+    result = build_site_sync_plan(
+        batch={"name": "B1", "confirm_status": "DRAFT"},
+        version={"name": "V1"},
+        items=[
+            {
+                "name": "I1",
+                "project_collection": "项目A",
+                "supplier": "Supplier A",
+                "purchase_currency": "CNY",
+                "purchase_uom": "件",
+                "total_cost_rmb": "10",
+                "extra_json": '{"supplier_field_present":true}',
+            }
+        ],
+        routes=[{"project_collection": "项目A", "subsidiary_code": "COMPANY-A", "enabled": 1}],
+        site_configs=[],
+        active_supplier_names={"Supplier A"},
+    )
+
+    assert result["request_specs"]["requests"]
+    assert result["ready"] is False
+    assert any(row["code"] == "CALCULATION_CONFIRMATION_REQUIRED" for row in result["blocking"])
 
 
 def test_material_change_with_same_totals_changes_cost_result_identity() -> None:
