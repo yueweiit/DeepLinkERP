@@ -20,7 +20,10 @@ from overseas_costing.services import (
     version_service,
 )
 from overseas_costing.services.material_value_semantics import is_effectively_missing
-from overseas_costing.services.supplier_resolution_service import resolve_supplier_reference
+from overseas_costing.services.supplier_resolution_service import (
+    load_active_suppliers,
+    validate_canonical_supplier,
+)
 
 
 # --- First usable implementation for the Excel -> recalculate MVP. ---
@@ -336,7 +339,7 @@ def _coerce_check(value) -> int:
     return 1 if text in {"1", "true", "yes", "y", "on", "是"} else 0
 
 
-def _coerce_edit_value(fieldname: str, value):
+def _coerce_edit_value(fieldname: str, value, *, supplier_catalog=None):
     if fieldname in SHIPMENT_VALUE_EDIT_FIELDS:
         if value is None or (isinstance(value, str) and not value.strip()):
             return ""
@@ -361,13 +364,7 @@ def _coerce_edit_value(fieldname: str, value):
             raise ValueError(f"字段 {fieldname} 的值 {text} 不在允许范围内。")
         return text
     if fieldname == "supplier":
-        text = str(value or "").strip()
-        if not text:
-            return ""
-        resolution = resolve_supplier_reference(text)
-        if resolution.get("status") != "EXACT" or not resolution.get("canonical_supplier"):
-            raise ValueError("供应商必须从启用中的 ERP 供应商列表选择。")
-        return str(resolution["canonical_supplier"])
+        return validate_canonical_supplier(value, suppliers=supplier_catalog)
     if isinstance(value, (dict, list)):
         return _json_dumps(value)
     return "" if value is None else str(value).strip()
@@ -1385,6 +1382,7 @@ def update_item_field(
     expected_modified: str | None = None,
     _skip_edit_check: bool = False,
     _skip_commit: bool = False,
+    _supplier_catalog=None,
 ) -> dict:
     is_shipment_value = fieldname in SHIPMENT_VALUE_EDIT_FIELDS
     edit_remark = _normalize_edit_remark(remark, manual_override_reason)
@@ -1402,7 +1400,7 @@ def update_item_field(
         }
 
     try:
-        coerced_value = _coerce_edit_value(fieldname, value)
+        coerced_value = _coerce_edit_value(fieldname, value, supplier_catalog=_supplier_catalog)
         if fieldname == "extra_json" and _frappe is None:
             assert_server_metadata_unchanged(None, coerced_value)
     except ValueError as exc:
@@ -1725,6 +1723,11 @@ def batch_update_items(
         edit_token=edit_token,
         expected_modified=expected_modified,
     )
+    supplier_catalog = (
+        load_active_suppliers()
+        if any((update.get("fieldname") or update.get("field_name")) == "supplier" for update in loaded_updates)
+        else None
+    )
 
     changed_count = 0
     skipped_count = 0
@@ -1770,6 +1773,7 @@ def batch_update_items(
             remark=edit_remark,
             _skip_edit_check=True,
             _skip_commit=True,
+            _supplier_catalog=supplier_catalog,
         )
         results.append(result)
         if not result.get("ok"):

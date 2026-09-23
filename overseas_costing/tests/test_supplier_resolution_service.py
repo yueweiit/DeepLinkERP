@@ -23,7 +23,7 @@ def test_exact_match_uses_normalized_name_or_supplier_name_and_skips_disabled() 
     assert result["candidates"] == []
 
 
-def test_supplier_document_name_exact_match_wins_over_an_earlier_supplier_name_alias() -> None:
+def test_cross_field_exact_matches_are_ambiguous_for_raw_supplier_text() -> None:
     service = _service()
     suppliers = [
         {"name": "SUP-WRONG", "supplier_name": "Acme", "disabled": 0},
@@ -32,8 +32,26 @@ def test_supplier_document_name_exact_match_wins_over_an_earlier_supplier_name_a
 
     result = service.resolve_supplier_reference("ACME", suppliers=suppliers)
 
-    assert result["status"] == "EXACT"
-    assert result["canonical_supplier"] == "ACME"
+    assert result["status"] == "AMBIGUOUS"
+    assert result["canonical_supplier"] == ""
+    assert {candidate["name"] for candidate in result["candidates"]} == {"ACME", "SUP-WRONG"}
+
+
+def test_canonical_supplier_validation_uses_only_active_supplier_document_name() -> None:
+    service = _service()
+    suppliers = [
+        {"name": "SUP-WRONG", "supplier_name": "ACME", "disabled": 0},
+        {"name": "ACME", "supplier_name": "Acme Manufacturing", "disabled": 0},
+        {"name": "DISABLED", "supplier_name": "Disabled Supplier", "disabled": 1},
+    ]
+
+    assert service.validate_canonical_supplier("ACME", suppliers=suppliers) == "ACME"
+    try:
+        service.validate_canonical_supplier("Disabled Supplier", suppliers=suppliers)
+    except ValueError as error:
+        assert "ERP 供应商列表" in str(error)
+    else:
+        raise AssertionError("停用 Supplier 不得通过规范 ID 校验")
 
 
 def test_duplicate_supplier_name_is_ambiguous_and_never_auto_canonicalized() -> None:

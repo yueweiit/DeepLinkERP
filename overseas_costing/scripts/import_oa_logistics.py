@@ -45,7 +45,10 @@ if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
 from overseas_costing.integrations.dingtalk_approval_source import ApprovalSourceConfig, PostgresApprovalSource
-from overseas_costing.services.supplier_resolution_service import resolve_supplier_reference
+from overseas_costing.services.supplier_resolution_service import (
+    load_active_suppliers,
+    resolve_supplier_reference,
+)
 from overseas_costing.utils.dingtalk import build_dingtalk_order_payload, extract_dingtalk_instance_id
 from overseas_costing.utils.field_mapper import (
     map_oa_row_to_item,
@@ -4111,6 +4114,7 @@ def build_oa_item_values_from_approval(item: dict) -> list[dict]:
     project_ownership = extract_project_candidates_from_approval(item)
     form_fields = item.get("form_fields") or {}
     total_gross_weight = _to_number_or_none(_find_field_value(form_fields, LOGISTICS_WEIGHT_FIELD_ALIASES))
+    active_suppliers = load_active_suppliers()
     values: list[dict] = []
     for index, row in enumerate(rows, start=1):
         mapped = map_oa_row_to_item(row)
@@ -4118,7 +4122,7 @@ def build_oa_item_values_from_approval(item: dict) -> list[dict]:
             _field_matches_alias(column, ("供应商Proveedor", "供应商", "Proveedor"))
             for column in (row.get("_oa_goods_columns") or [])
         )
-        supplier_resolution = resolve_supplier_reference(mapped.get("supplier"))
+        supplier_resolution = resolve_supplier_reference(mapped.get("supplier"), suppliers=active_suppliers)
         mapped["supplier"] = (
             supplier_resolution.get("canonical_supplier")
             if supplier_resolution.get("status") == "EXACT"

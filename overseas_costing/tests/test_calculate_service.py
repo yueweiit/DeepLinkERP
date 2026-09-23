@@ -500,13 +500,10 @@ def test_supplier_fill_is_editable_but_changing_existing_supplier_requires_reaso
     service, _db = _install_item_edit_frappe(monkeypatch, items)
     monkeypatch.setattr(
         service,
-        "resolve_supplier_reference",
-        lambda raw: {
-            "raw_value": raw,
-            "status": "EXACT" if raw in {"SUPPLIER-A", "SUPPLIER-B"} else "UNRESOLVED",
-            "canonical_supplier": raw if raw in {"SUPPLIER-A", "SUPPLIER-B"} else "",
-            "candidates": [],
-        },
+        "validate_canonical_supplier",
+        lambda raw, suppliers=None: raw
+        if raw in {"SUPPLIER-A", "SUPPLIER-B"}
+        else (_ for _ in ()).throw(ValueError("供应商必须从启用中的 ERP 供应商列表选择。")),
     )
 
     filled = service.update_item_field(
@@ -535,19 +532,49 @@ def test_supplier_edit_rejects_text_that_is_not_an_active_erp_supplier(monkeypat
 
     monkeypatch.setattr(
         service,
-        "resolve_supplier_reference",
-        lambda raw: {
-            "raw_value": raw,
-            "status": "SUGGESTED",
-            "canonical_supplier": "",
-            "candidates": [{"name": "SUPPLIER-A", "score": 0.92}],
-        },
+        "validate_canonical_supplier",
+        lambda _raw, suppliers=None: (_ for _ in ()).throw(
+            ValueError("供应商必须从启用中的 ERP 供应商列表选择。")
+        ),
     )
 
     result = service.update_item_field("ITEM-1", "supplier", "Supplier A typo")
 
     assert result["ok"] is False
     assert "ERP 供应商列表" in result["message"]
+
+
+def test_batch_supplier_updates_load_active_supplier_catalog_once(monkeypatch) -> None:
+    items = {"I1": {"supplier": ""}, "I2": {"supplier": ""}}
+    service, _db = _install_item_edit_frappe(monkeypatch, items)
+    from overseas_costing.services import edit_session_service
+
+    monkeypatch.setattr(edit_session_service, "assert_batch_write", lambda *_args, **_kwargs: None)
+    load_calls = []
+    monkeypatch.setattr(
+        service,
+        "load_active_suppliers",
+        lambda: load_calls.append("load") or [
+            {"name": "SUPPLIER-A", "supplier_name": "Supplier A", "disabled": 0},
+            {"name": "SUPPLIER-B", "supplier_name": "Supplier B", "disabled": 0},
+        ],
+    )
+
+    result = service.batch_update_items(
+        "B1",
+        json.dumps([
+            {"item_name": "I1", "fieldname": "supplier", "value": "SUPPLIER-A"},
+            {"item_name": "I2", "fieldname": "supplier", "value": "SUPPLIER-B"},
+        ]),
+        version_name="V1",
+        edit_token="TOKEN",
+        expected_modified="OLD",
+    )
+
+    assert result["ok"] is True
+    assert load_calls == ["load"]
+    assert items["I1"].supplier == "SUPPLIER-A"
+    assert items["I2"].supplier == "SUPPLIER-B"
 
 
 def test_net_weight_is_an_editable_numeric_material_field() -> None:

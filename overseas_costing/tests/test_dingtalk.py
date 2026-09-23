@@ -513,7 +513,7 @@ def test_logistics_approval_reads_supplier_per_goods_row_and_ignores_top_level_f
     monkeypatch.setattr(
         import_oa_logistics,
         "resolve_supplier_reference",
-        lambda raw: {
+        lambda raw, suppliers=None: {
             "raw_value": str(raw or "").strip(),
             "status": "EXACT" if raw else "EMPTY",
             "canonical_supplier": str(raw or "").strip(),
@@ -586,7 +586,7 @@ def test_logistics_approval_keeps_unmatched_supplier_only_in_metadata(monkeypatc
     monkeypatch.setattr(
         import_oa_logistics,
         "resolve_supplier_reference",
-        lambda raw: {
+        lambda raw, suppliers=None: {
             "raw_value": str(raw or "").strip(),
             "status": "SUGGESTED",
             "canonical_supplier": "",
@@ -618,6 +618,49 @@ def test_logistics_approval_keeps_unmatched_supplier_only_in_metadata(monkeypatc
     assert metadata["supplier_match_status"] == "SUGGESTED"
     assert metadata["supplier_candidates"][0]["name"] == "SUP-ALPHA"
     assert metadata["dingtalk_goods_row_no"] == "TableField_9"
+
+
+def test_build_oa_items_loads_active_supplier_catalog_once_per_approval(monkeypatch) -> None:
+    supplier_catalog = [
+        {"name": "SUP-A", "supplier_name": "Supplier A", "disabled": 0},
+        {"name": "SUP-B", "supplier_name": "Supplier B", "disabled": 0},
+    ]
+    load_calls = []
+    resolution_catalogs = []
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "load_active_suppliers",
+        lambda: load_calls.append("load") or supplier_catalog,
+    )
+    real_resolver = import_oa_logistics.resolve_supplier_reference
+
+    def tracked_resolver(raw, *, suppliers=None):
+        resolution_catalogs.append(suppliers)
+        return real_resolver(raw, suppliers=suppliers)
+
+    monkeypatch.setattr(import_oa_logistics, "resolve_supplier_reference", tracked_resolver)
+    approval = {
+        "form_fields": {
+            "货物信息Bienes": [
+                {"rowValue": [
+                    {"label": "物料编码 Código de material", "value": "M-1"},
+                    {"label": "物料名称（中文）Nombre del material (chino)", "value": "A"},
+                    {"label": "供应商Proveedor", "value": "Supplier A"},
+                ]},
+                {"rowValue": [
+                    {"label": "物料编码 Código de material", "value": "M-2"},
+                    {"label": "物料名称（中文）Nombre del material (chino)", "value": "B"},
+                    {"label": "供应商Proveedor", "value": "Supplier B"},
+                ]},
+            ],
+        },
+    }
+
+    items = build_oa_item_values_from_approval(approval)
+
+    assert load_calls == ["load"]
+    assert resolution_catalogs == [supplier_catalog, supplier_catalog]
+    assert [item["supplier"] for item in items] == ["SUP-A", "SUP-B"]
 
 
 def test_extract_logistics_fee_from_approval_only_reads_explicit_amount() -> None:

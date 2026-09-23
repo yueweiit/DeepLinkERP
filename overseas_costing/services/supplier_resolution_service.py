@@ -97,25 +97,19 @@ def resolve_supplier_reference(raw_value: Any, *, suppliers: Iterable[Any] | Non
 
     rows = _active_supplier_rows(load_active_suppliers() if suppliers is None else suppliers)
     normalized_raw = normalize_supplier_text(raw)
-    name_matches = [
-        supplier for supplier in rows
+    exact_matches_by_name = {
+        supplier["name"]: supplier
+        for supplier in rows
         if normalized_raw and normalize_supplier_text(supplier["name"]) == normalized_raw
-    ]
-    if len(name_matches) == 1:
-        return {
-            "raw_value": raw,
-            "status": "EXACT",
-            "canonical_supplier": name_matches[0]["name"],
-            "candidates": [],
-        }
-
-    supplier_name_matches = [
-        supplier for supplier in rows
+    }
+    exact_matches_by_name.update({
+        supplier["name"]: supplier
+        for supplier in rows
         if normalized_raw
         and supplier["supplier_name"]
         and normalize_supplier_text(supplier["supplier_name"]) == normalized_raw
-    ]
-    exact_matches = name_matches or supplier_name_matches
+    })
+    exact_matches = list(exact_matches_by_name.values())
     if len(exact_matches) == 1:
         return {
             "raw_value": raw,
@@ -168,6 +162,24 @@ def resolve_supplier_reference(raw_value: Any, *, suppliers: Iterable[Any] | Non
         result["status"] = "SUGGESTED"
         result["candidates"] = candidates
     return result
+
+
+def validate_canonical_supplier(value: Any, *, suppliers: Iterable[Any] | None = None) -> str:
+    """校验人工选中的规范 Supplier ID，不使用 supplier_name 别名解析。"""
+
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    normalized_value = normalize_supplier_text(text)
+    rows = _active_supplier_rows(load_active_suppliers() if suppliers is None else suppliers)
+    matches = [
+        supplier["name"]
+        for supplier in rows
+        if normalize_supplier_text(supplier["name"]) == normalized_value
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    raise ValueError("供应商必须从启用中的 ERP 供应商列表选择。")
 
 
 def _metadata(value: Any) -> dict:
