@@ -72,6 +72,62 @@ def test_unambiguous_route_options_preserve_ai_metadata() -> None:
     ]
 
 
+def test_unambiguous_route_options_merge_aliases_and_use_highest_revision_display() -> None:
+    result = list_unambiguous_project_routes(
+        [
+            {
+                "project_collection": "YUEWEI MX核心制造",
+                "subsidiary_code": "MX COMPANY",
+                "enabled": 1,
+                "revision": 2,
+                "ai_match_hint": "旧提示",
+            },
+            {
+                "project_collection": "YW Fabricación MX 核心制造",
+                "subsidiary_code": "MX COMPANY",
+                "enabled": 1,
+                "revision": 5,
+                "ai_match_hint": "新提示",
+            },
+        ]
+    )
+
+    assert result == {
+        "options": [
+            {
+                "project_collection": "YW Fabricación MX 核心制造",
+                "subsidiary_code": "MX COMPANY",
+                "site_code": "DEEPLINKERP",
+                "revision": 5,
+                "ai_match_hint": "新提示",
+            }
+        ],
+        "conflicts": [],
+    }
+
+
+def test_unambiguous_route_options_report_conflict_across_aliases() -> None:
+    result = list_unambiguous_project_routes(
+        [
+            {
+                "project_collection": "YUEWEI MX核心制造",
+                "subsidiary_code": "LEGACY COMPANY",
+                "enabled": 1,
+                "revision": 2,
+            },
+            {
+                "project_collection": "YW Fabricación MX 核心制造",
+                "subsidiary_code": "CURRENT COMPANY",
+                "enabled": 1,
+                "revision": 5,
+            },
+        ]
+    )
+
+    assert result["options"] == []
+    assert result["conflicts"] == ["YW Fabricación MX 核心制造"]
+
+
 def test_historical_project_names_resolve_to_current_company_routes_without_rewriting_rows() -> None:
     result = resolve_item_routes(
         [

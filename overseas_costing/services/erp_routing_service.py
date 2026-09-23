@@ -230,23 +230,26 @@ def list_unambiguous_project_routes(routes: list[dict], *, as_of: date | None = 
     for route in routes:
         project = _text(route.get("project_collection"))
         if project and _route_is_active(route, effective_date):
-            by_project.setdefault(project, []).append(route)
+            by_project.setdefault(project_route_identity(project), []).append(route)
     options = []
     conflicts = []
-    for project, project_routes in sorted(by_project.items()):
+    for _identity, project_routes in sorted(by_project.items()):
+        selected = min(
+            project_routes,
+            key=lambda route: (
+                -_route_revision(route),
+                _text(route.get("project_collection")).casefold(),
+                _text(route.get("project_collection")),
+                _text(route.get("ai_match_hint")),
+            ),
+        )
+        project = _text(selected.get("project_collection"))
         targets = {_route_target(route) for route in project_routes}
         if len(targets) != 1:
             conflicts.append(project)
             continue
         company, site_code = next(iter(targets))
         if company:
-            selected = max(
-                project_routes,
-                key=lambda route: (
-                    _route_revision(route),
-                    _text(route.get("ai_match_hint")),
-                ),
-            )
             options.append(
                 {
                     "project_collection": project,
