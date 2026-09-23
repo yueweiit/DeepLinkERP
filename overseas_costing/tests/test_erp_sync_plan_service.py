@@ -226,3 +226,47 @@ def test_insert_plan_audit_log_records_created_reused_and_sites(monkeypatch) -> 
     assert '"created_count": 1' in captured["new_value"]
     assert '"reused_count": 1' in captured["new_value"]
     assert '"sites": ["DEEPLINKERP", "MEXICO"]' in captured["new_value"]
+
+
+def test_partial_group_execution_never_marks_the_whole_batch_success(monkeypatch) -> None:
+    monkeypatch.setattr(plans, "frappe", None)
+    monkeypatch.setattr(
+        plans,
+        "save_site_sync_plan",
+        lambda *args, **kwargs: {
+            "saved": True,
+            "ready": True,
+            "complete": False,
+            "blocking": [{"code": "ITEM_SUPPLIER_REQUIRED", "stable_line_key": "L2"}],
+            "ledger": {"requests": [{"name": "REQ-1"}]},
+        },
+    )
+    from overseas_costing.services import erp_sync_ledger_service
+
+    monkeypatch.setattr(
+        erp_sync_ledger_service,
+        "execute_saved_sync_requests",
+        lambda _requests: {
+            "ok": True,
+            "success_count": 1,
+            "failed_count": 0,
+            "uncertain_count": 0,
+            "skipped_count": 0,
+        },
+    )
+    recorded = {}
+    monkeypatch.setattr(
+        plans,
+        "_record_execution_summary",
+        lambda plan, execution, **kwargs: recorded.update(kwargs),
+    )
+
+    result = plans.execute_site_sync_plan("B1", "V1")
+
+    assert result["ok"] is False
+    assert result["pushed"] is False
+    assert result["queued"] is True
+    assert result["retryable"] is True
+    assert result["writeback_status"] == "Failed"
+    assert "1 个物料组未推送" in result["message"]
+    assert recorded["status"] == "Failed"

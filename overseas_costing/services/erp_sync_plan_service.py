@@ -117,16 +117,22 @@ def execute_site_sync_plan(batch_name: str, version_name: str | None = None, cli
     if not saved_plan.get("saved"):
         return {**saved_plan, "pushed": False, "queued": False}
     execution = execute_saved_sync_requests((saved_plan.get("ledger") or {}).get("requests") or [])
-    _record_execution_summary(saved_plan, execution)
+    complete = saved_plan.get("complete", True) is not False
+    successful = bool(execution.get("ok")) and complete
+    status = "Success" if successful else "Failed"
+    message = _execution_message(execution)
+    if not complete:
+        message += f"；另有 {len(saved_plan.get('blocking') or [])} 个物料组未推送，请修正后重试。"
+    _record_execution_summary(saved_plan, execution, status=status, message=message)
     return {
         **saved_plan,
         "execution": execution,
-        "ok": bool(execution.get("ok")),
-        "pushed": bool(execution.get("success_count")) and not execution.get("failed_count") and not execution.get("uncertain_count"),
-        "queued": bool(execution.get("failed_count") or execution.get("uncertain_count")),
-        "retryable": bool(execution.get("failed_count")),
-        "writeback_status": "Success" if execution.get("ok") else "Failed",
-        "message": _execution_message(execution),
+        "ok": successful,
+        "pushed": bool(execution.get("success_count")) and successful,
+        "queued": bool(execution.get("failed_count") or execution.get("uncertain_count") or not complete),
+        "retryable": bool(execution.get("failed_count") or not complete),
+        "writeback_status": status,
+        "message": message,
     }
 
 
@@ -300,9 +306,15 @@ def _insert_plan_audit_log(plan: dict, saved: dict) -> None:
     )
 
 
-def _record_execution_summary(plan: dict, execution: dict) -> None:
-    status = "Success" if execution.get("ok") else "Failed"
-    message = _execution_message(execution)
+def _record_execution_summary(
+    plan: dict,
+    execution: dict,
+    *,
+    status: str | None = None,
+    message: str | None = None,
+) -> None:
+    status = status or ("Success" if execution.get("ok") else "Failed")
+    message = message or _execution_message(execution)
     values = {
         "writeback_status": status,
         "writeback_time": frappe.utils.now_datetime(),
