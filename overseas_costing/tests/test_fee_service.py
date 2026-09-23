@@ -767,3 +767,87 @@ def test_versionless_attachments_are_not_judged_as_audit_only() -> None:
     candidate = build_evidence_candidates(attachments, version_name="V1")[0]
 
     assert candidate["audit_only"] is False
+
+
+def _attachment_row(name, file_name, *, version, file_url="", parse_result=None, attachment_type="Logistics Bill", parse_status="Parsed"):
+    return {
+        "name": name,
+        "file_name": file_name,
+        "file_url": file_url,
+        "attachment_type": attachment_type,
+        "source_type": "OA",
+        "version": version,
+        "parse_status": parse_status,
+        "parse_result_json": json.dumps(parse_result or {}, ensure_ascii=False),
+        "mapped_result_json": "{}",
+    }
+
+
+def test_same_file_registered_twice_in_one_version_merges_into_one_candidate() -> None:
+    """同一版本里同一份文件的重复登记归并为一条候选。
+
+    线上实况：OA 同步把同一份报价单在同一版本下重复登记成多条，其中一条带
+    ``file_url`` 可用于解析，其余 ``file_url`` 为空。界面上表现为同一份文件
+    出现两次、类型和状态还不一样，用户无从选择，所以候选池只摆一条出来。
+    """
+
+    attachments = [
+        _attachment_row(
+            "ATT-FULL",
+            "sisa报价3420元-立方.png",
+            version="V1",
+            file_url="/private/files/sisa报价3420元-立方2345f0.png",
+        ),
+        _attachment_row(
+            "ATT-SHELL",
+            "sisa报价3420元-立方.png",
+            version="V1",
+            attachment_type="Other",
+            parse_status="Draft",
+        ),
+    ]
+
+    candidates = build_evidence_candidates(attachments, version_name="V1")
+
+    assert len(candidates) == 1
+    # 留下的是能打开、能解析的那一份，而不是空壳。
+    assert candidates[0]["attachment"] == "ATT-FULL"
+    assert candidates[0]["file_url"] == "/private/files/sisa报价3420元-立方2345f0.png"
+
+
+def test_same_file_across_versions_keeps_one_candidate_per_version() -> None:
+    """跨版本的同名副本各自保留。
+
+    “哪些副本不属于当前版本”本身就是要讲给用户的审计信息，归并不能连它一起吃掉。
+    """
+
+    attachments = [
+        _attachment_row("ATT-V1", "报价单.png", version="V1"),
+        _attachment_row("ATT-V0", "报价单.png", version="V0"),
+    ]
+
+    candidates = build_evidence_candidates(attachments, version_name="V1")
+
+    assert [row["attachment"] for row in candidates] == ["ATT-V1", "ATT-V0"]
+    assert [row["audit_only"] for row in candidates] == [False, True]
+
+
+def test_merging_duplicates_prefers_the_copy_that_can_enter_costing() -> None:
+    """重复副本里优先留下能进核算的那一份，而不是已失效的副本。"""
+
+    attachments = [
+        _attachment_row(
+            "ATT-RETIRED",
+            "运费账单.pdf",
+            version="V1",
+            file_url="/private/files/运费账单-retired.pdf",
+            parse_result={"settlement_document": {"audit_only": True}},
+        ),
+        _attachment_row("ATT-LIVE", "运费账单.pdf", version="V1"),
+    ]
+
+    candidates = build_evidence_candidates(attachments, version_name="V1")
+
+    assert len(candidates) == 1
+    assert candidates[0]["attachment"] == "ATT-LIVE"
+    assert candidates[0]["audit_only"] is False

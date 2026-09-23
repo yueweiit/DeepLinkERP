@@ -450,7 +450,65 @@ def build_evidence_candidates(
                 ),
             }
         )
-    return result
+    return _merge_same_file_candidates(result)
+
+
+# 解析进度排序：解析完成的副本优先于还在排队的，排队优先于未开始的草稿。
+_PARSE_STATUS_RANK = {"parsed": 3, "queued": 2, "draft": 1}
+
+
+def _candidate_preference(candidate: dict) -> tuple:
+    """同版本重复副本里挑一条保留时的取舍顺序。
+
+    先要“这份能拿去核算”（非仅审计），再要“这份能打开、能解析”（有 file_url），
+    然后是解析进度更靠前的，最后才看摘要完整度。
+    """
+
+    return (
+        0 if candidate.get("audit_only") else 1,
+        1 if str(candidate.get("file_url") or "").strip() else 0,
+        _PARSE_STATUS_RANK.get(str(candidate.get("parse_status") or "").strip().lower(), 0),
+        len(candidate.get("summary") or {}),
+    )
+
+
+def _merge_same_file_candidates(candidates: list[dict]) -> list[dict]:
+    """同一版本内的同一份文件只留一条候选。
+
+    OA 同步链路会把同一份文件（同一 ``file_url``／``file_id``）重复登记，
+    同一批次同一版本下因此可能并存多条同名副本：一条带 ``file_url`` 可用于解析，
+    其余是 ``file_url`` 为空的空壳。它们指向同一个物理文件，界面上表现为
+    “同一份报价单出现两次、状态还不一样”，用户无从选择。
+
+    归并只发生在**同一版本内**：跨版本的副本各自保留，因为“不属于当前版本”
+    正是要讲给用户的审计信息。
+
+    与 ``deduplicate_evidence_candidates`` 分工不同：那个处理的是**已入库凭证行**
+    （按附件＋角色＋修订号规范成三元组），这里处理的是**候选池**，要保留候选的
+    全部字段供选择界面使用，两者不是同一层面的去重，不能互相替代。
+
+    身份取文件名而不是 ``file_url``：线上重复登记的实况正是一条带 ``file_url``、
+    其余为空，用 ``file_url`` 做键反而会把它们判成不同文件。文件名缺失时才退到
+    ``file_url``。
+
+    这里不改写任何原始附件行，只是让候选池不再把同一个文件重复摆出来。
+    """
+
+    merged: dict[tuple, dict] = {}
+    order: list[tuple] = []
+    for index, candidate in enumerate(candidates or []):
+        file_key = str(candidate.get("file_name") or "").strip().lower() or str(
+            candidate.get("file_url") or ""
+        ).strip()
+        # 既没有文件名也没有 file_url 时无从判断是否同一个文件，原样保留。
+        key = (str(candidate.get("version") or ""), file_key) if file_key else ("", f"__row_{index}")
+        current = merged.get(key)
+        if current is None:
+            merged[key] = candidate
+            order.append(key)
+        elif _candidate_preference(candidate) > _candidate_preference(current):
+            merged[key] = candidate
+    return [merged[key] for key in order]
 
 
 def _evidence_candidate_summary(
@@ -526,8 +584,8 @@ def _evidence_candidate_summary(
             if len(summary) >= 8:
                 break
 
-    parse_status = str(attachment.get("parse_status") or "").strip()
-    summary["解析状态"] = parse_status or "Draft"
+    # 解析状态不在这里再给一遍：候选顶层本来就有 ``parse_status`` 字段，选项的
+    # 元信息行已经在展示它，摘要只补用户在选择时看不到的信息。
     # 键值对上限用于保护前端渲染，摘要只是辅助信息，不承载业务真相。
     return dict(list(summary.items())[:8])
 

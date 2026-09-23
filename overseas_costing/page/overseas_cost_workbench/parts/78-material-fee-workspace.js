@@ -105,6 +105,12 @@
     this.$root.on("click", "[data-action='mf-link-evidence']", (event) => {
       this.openMaterialFeeEvidenceDialog($(event.currentTarget).attr("data-fee-key"));
     });
+    this.$root.on("click", "[data-action='mf-preview-evidence']", (event) => {
+      // 预览已选凭证直接复用附件预览弹窗（图片内嵌、PDF/文本 iframe、其余给下载），
+      // 不再为这一处另写一套打开逻辑。
+      const $button = $(event.currentTarget);
+      this.openOaAttachmentFilePreviewDialog?.($button.attr("data-file-url"), $button.attr("data-file-name"));
+    });
     this.$root.on("change", "[data-mf-fee-status='1']", (event) => {
       this.changeMaterialFeeStatus($(event.currentTarget)).catch((error) => this.showError(error));
     });
@@ -4619,9 +4625,7 @@
     return `<div class="ocw-mf-evidence-picker"><div class="ocw-mf-dialog-note">可先选凭证，系统再提取金额、币种、费用类别及 SKU／税种关系。采购、费用申请、国际物流三个渠道抓到的资料都按审批归属落到对应分组。所有结果都要在审核草稿中确认。</div><div class="ocw-mf-evidence-groups">${cards || emptyState}</div><button class="ocw-outline-btn" type="button" data-action="mf-upload-evidence">上传新凭证并解析</button></div>`;
   }
 
-  materialFeeEvidenceItemHtml(candidate, linked) {
-    // 弹窗选项与行内预览面板共用这一份字段渲染：两处都只展示服务端已经给出的
-    // ``summary``／``audit_only_reason`` 等字段，不各自另算一套口径。
+  materialFeeEvidenceOptionHtml(candidate, linked) {
     const scopeNote = candidate.in_current_source === false && candidate.stage_selectable
       ? `<em>不在当前采购支出范围，解析后需人工确认</em>` : "";
     // 服务端标注“仅审计”的候选仍然照常列出、不隐藏，只把原因显示出来：
@@ -4631,6 +4635,8 @@
     // 摘要优先展示：把服务端已解析出的字段放在文件名下方，用户不必打开
     // 凭证就能判断该选哪一份。摘要只做展示，不参与任何业务判定。
     const summary = this.materialFeeEvidenceSummaryHtml(candidate);
+    // 文件名含“凭证”的资料高亮，用户上传时常靠命名表达“这就是凭证件”。
+    const voucherClass = candidate.is_voucher_name ? " is-voucher" : "";
     const voucherTag = candidate.is_voucher_name
       ? `<span class="ocw-mf-evidence-voucher-tag">凭证</span>` : "";
     // 附件类型是服务端按文件名推断的既有列，直接展示，用户不必打开文件
@@ -4639,13 +4645,7 @@
       .filter((value) => String(value ?? "").trim())
       .map((value) => this.escape(String(value)))
       .join(" · ");
-    return `<strong>${this.escape(candidate.file_name || candidate.attachment || "--")}${voucherTag}</strong>${summary}<small>${meta}${linked.has(candidate.attachment) ? " · 已关联，可重新解析" : ""}</small>${auditNote}${scopeNote}`;
-  }
-
-  materialFeeEvidenceOptionHtml(candidate, linked) {
-    // 文件名含“凭证”的资料高亮，用户上传时常靠命名表达“这就是凭证件”。
-    const voucherClass = candidate.is_voucher_name ? " is-voucher" : "";
-    return `<label class="ocw-mf-evidence-option${voucherClass}"><input type="radio" name="mf-evidence-attachment" data-mf-evidence-attachment="${this.escape(candidate.attachment || "")}"/><span>${this.materialFeeEvidenceItemHtml(candidate, linked)}</span></label>`;
+    return `<label class="ocw-mf-evidence-option${voucherClass}"><input type="radio" name="mf-evidence-attachment" data-mf-evidence-attachment="${this.escape(candidate.attachment || "")}"/><span><strong>${this.escape(candidate.file_name || candidate.attachment || "--")}${voucherTag}</strong>${summary}<small>${meta}${linked.has(candidate.attachment) ? " · 已关联，可重新解析" : ""}</small>${auditNote}${scopeNote}</span></label>`;
   }
 
   materialFeeEvidenceSummaryHtml(candidate) {
@@ -4696,26 +4696,36 @@
   }
 
   renderMaterialFeeEvidencePreview(feeKey) {
-    // 面板挂在操作列「关联并解析凭证」右侧，只读展示；未勾选时给出提示文案，
-    // 而这张表本身不具备任何“已选凭证”的状态，所以事实存在 materialFeeState。
-    return `<div class="ocw-mf-evidence-preview" data-mf-evidence-preview="${this.escape(feeKey)}">${this.materialFeeEvidencePreviewBody(feeKey)}</div>`;
+    // 与「关联并解析凭证」并列的按钮，外观完全由 .ocw-mf-row-actions button 决定，
+    // 不另造一块面板：未勾选时禁用并说明缺什么，勾选后文案换成该份附件，
+    // 点它复用既有附件预览弹窗看原件。这张表本身不持有“已选凭证”，
+    // 所以事实来源只能是 materialFeeState。
+    const candidate = this.materialFeeEvidencePreviewCandidate(feeKey);
+    if (!candidate) {
+      return `<button type="button" class="ocw-mf-evidence-preview" data-mf-evidence-preview="${this.escape(feeKey)}" disabled>需在关联并解析凭证选择附件</button>`;
+    }
+    const fileName = candidate.file_name || candidate.attachment || "已选附件";
+    const fileUrl = String(candidate.file_url || "");
+    // 老缓存里没有 file_url 的候选退化成不可点，而不是弹一个空预览。
+    const openAttribute = fileUrl
+      ? ` data-action="mf-preview-evidence" data-file-url="${this.escape(fileUrl)}" data-file-name="${this.escape(fileName)}" title="${this.escape(`预览已选凭证：${fileName}`)}"`
+      : " disabled";
+    return `<button type="button" class="ocw-mf-evidence-preview" data-mf-evidence-preview="${this.escape(feeKey)}"${openAttribute}>预览 ${this.escape(fileName)}</button>`;
   }
 
-  materialFeeEvidencePreviewBody(feeKey) {
+  materialFeeEvidencePreviewCandidate(feeKey) {
     const preview = this.materialFeeState?.evidencePreview;
-    const candidate = preview && preview.feeKey === String(feeKey || "") ? preview.candidate : null;
-    if (!candidate) return `<span class="ocw-mf-evidence-preview-empty">需在关联并解析凭证选择附件</span>`;
-    const linked = new Set((this.findMaterialFee(feeKey)?.evidence || []).map((row) => row.attachment));
-    return this.materialFeeEvidenceItemHtml(candidate, linked);
+    return preview && preview.feeKey === String(feeKey || "") ? preview.candidate : null;
   }
 
   previewMaterialFeeEvidenceSelection(feeKey, candidates, attachment) {
     const candidate = (candidates || []).find((row) => String(row.attachment || "") === attachment) || null;
     this.ensureMaterialFeeState().evidencePreview = candidate ? { feeKey: String(feeKey || ""), candidate } : null;
-    // 只替换面板这一块，不整表重渲染：重渲染会打断正在打开的弹窗所在行的交互。
+    // 只替换这一个按钮，不整表重渲染：重渲染会打断正在打开的弹窗所在行的交互。
     if (!this.$root?.find) return;
-    const $panel = this.$root.find(`[data-mf-evidence-preview="${this.escape(feeKey)}"]`);
-    if ($panel?.html) $panel.html(this.materialFeeEvidencePreviewBody(feeKey));
+    this.$root
+      .find(`[data-mf-evidence-preview="${this.escape(feeKey)}"]`)
+      .replaceWith(this.renderMaterialFeeEvidencePreview(feeKey));
   }
 
   async linkSelectedMaterialFeeEvidence(dialog, fee) {
