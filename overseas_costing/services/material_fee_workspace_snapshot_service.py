@@ -10,7 +10,12 @@ import uuid
 from overseas_costing.services.logistics_settlement.model import digest, dumps
 
 
-SCHEMA_VERSION = 1
+#: 快照投影口径的版本。**候选列表的字段与分组由应用代码决定，代码换了旧快照就不再可信。**
+#: 读侧只认 ``schema_version == SCHEMA_VERSION`` 的缓存，所以每次改动投影形状都必须 +1。
+#: 1 → 2：候选新增 ``workflow_stage`` / ``attachment_category`` / ``audit_only_reason``。
+#: 只靠这个常量并不安全 —— 改投影却忘了 +1，线上就会继续吃旧快照。所以指纹里另外并进了
+#: 发布号（见 ``projection_revision``），部署后由前端的新鲜度检查自动触发重建。
+SCHEMA_VERSION = 2
 RUN_LEASE = timedelta(minutes=5)
 DEFAULT_PAGE = 1
 DEFAULT_PAGE_LENGTH = 200
@@ -358,6 +363,26 @@ def _settlement_revision(batch_name: str, version_name: str) -> dict:
         return {"unavailable": True}
 
 
+def projection_revision() -> str:
+    """当前应用代码的发布号，用来让旧快照失效。
+
+    ``build_input_fingerprint`` 记录的全是**数据**修订，没有任何一项会随代码变化。
+    于是投影逻辑改了、数据没动时，指纹不变，快照被判定为“新鲜”而长期沿用，
+    用户看到的就是按旧代码排布的分组与字段 —— 2026-09-23 线上正是如此：
+    浏览器拿到的候选没有 ``workflow_stage``，全部落进“其他资料”。
+
+    发布号由部署流程写进站点配置，这里只读。本地没有它时返回空串，
+    此时退回到 ``SCHEMA_VERSION`` 兜底，不会误判。
+    """
+
+    try:
+        import frappe
+
+        return str(frappe.conf.get("overseas_costing_release_id") or "")
+    except Exception:  # noqa: BLE001 - 指纹计算不该因为读不到配置而中断
+        return ""
+
+
 def build_input_fingerprint(batch_name: str, version_name: str) -> str:
     """Cheap local revision fingerprint; never reads DingTalk or attachment bytes."""
 
@@ -388,6 +413,8 @@ def build_input_fingerprint(batch_name: str, version_name: str) -> str:
         dict(version),
         revisions,
         _settlement_revision(batch_name, version_name),
+        # 投影口径也是输入：同一批数据在不同代码下会呈现不同分组与字段。
+        projection_revision(),
     )
 
 
@@ -415,6 +442,18 @@ def _public(state: dict, *, served_from_cache: bool) -> dict:
     }
 
 
+def _data_schema_version(state: dict) -> int:
+    """快照里**那份数据**自己的口径版本。
+
+    ``schema_version`` 描述的是 ``data`` 由哪一版投影产出，不是"现在写到第几版"。
+    写运行中／失败态时保留上一份数据的版本号，读侧的版本校验才能继续把它判为过期；
+    若一律写当前版本，旧口径的数据会被冒充成新口径，失效机制就被绕过了。
+    没有历史数据时用当前版本占位。
+    """
+
+    return int((state or {}).get("schema_version") or SCHEMA_VERSION)
+
+
 def _begin_refresh_once(store, state_id: str, context: dict, now: str, token: str) -> tuple[str, dict] | None:
     with store.atomic():
         # The permanent lock row also serializes the first insert for a new snapshot key.
@@ -432,7 +471,7 @@ def _begin_refresh_once(store, state_id: str, context: dict, now: str, token: st
         running = {
             **{key: value for key, value in previous.items() if key not in {"id", "updated_at"}},
             **context,
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": _data_schema_version(previous),
             "run_status": "running",
             "run_token": token,
             "started_at": now,
@@ -519,7 +558,11 @@ def refresh_snapshot(
         failed = {
             **{key: value for key, value in previous.items() if key not in {"id", "updated_at"}},
             **context,
-            "schema_version": SCHEMA_VERSION,
+            # 失败时保留下来的仍是**上一次成功那份数据**，它由当时的项目口径产出。
+            # 这里若直接写 SCHEMA_VERSION，会把一份旧口径的数据冒充成新口径，
+            # 读侧的版本校验随即放行 —— 失效机制等于被绕过。保留它自己的版本号，
+            # 让它继续被判为过期，下次访问再试重建。
+            "schema_version": _data_schema_version(previous),
             "status": "stale" if previous.get("data") else "error",
             "run_status": "idle",
             "run_token": token,

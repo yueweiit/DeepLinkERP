@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import json
 import sqlite3
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -389,3 +390,101 @@ def test_workspace_snapshot_stays_available_when_packing_group_is_blocked(monkey
         "reason_code": "PACKING_GROUP_RECONFIRMATION_REQUIRED",
         "message": "装箱组成员已变化，请重新确认分组后再试算。",
     }]
+
+
+def _rewrite_cached_schema(store, service, batch: str, version: str, schema_version: int) -> None:
+    """把已缓存快照的项目口径版本改写成指定值，用来模拟旧代码写下的快照。"""
+
+    from overseas_costing.services.logistics_settlement.model import dumps
+
+    state_id = service._state_id(batch, version, 1, service.DEFAULT_PAGE_LENGTH)
+    stored = store.get("state", state_id)
+    store.put(
+        "state",
+        {
+            "id": state_id,
+            "updated_at": "2026-09-23T01:00:00+00:00",
+            "data": dumps({**stored, "schema_version": schema_version}),
+        },
+    )
+    store.commit()
+
+
+def test_snapshot_written_by_an_older_projection_is_rebuilt_not_served() -> None:
+    """改过投影口径后旧快照必须重建。
+
+    2026-09-23 线上就是吃到了这一口：候选列表的字段与分组早已换代，快照却还在按
+    旧口径回放（没有 workflow_stage，于是全部落进“其他资料”），页面看起来像是新功能
+    没生效。读侧只认当前口径版本的缓存。
+    """
+
+    from overseas_costing.services import material_fee_workspace_snapshot_service as service
+
+    store = _store()
+    calls: list[str] = []
+    service.get_snapshot(
+        "B1", "V1", store=store, fingerprint_loader=lambda *_: "fingerprint-1",
+        snapshot_builder=_builder(calls), now="2026-09-23T01:00:00+00:00",
+    )
+    _rewrite_cached_schema(store, service, "B1", "V1", service.SCHEMA_VERSION - 1)
+
+    rebuilt = service.get_snapshot(
+        "B1", "V1", store=store, fingerprint_loader=lambda *_: "fingerprint-1",
+        snapshot_builder=_builder(calls, total="999.00"), now="2026-09-23T01:01:00+00:00",
+    )
+
+    assert calls == ["B1:V1:1:200", "B1:V1:1:200"]
+    assert rebuilt["cache"]["served_from_cache"] is False
+    assert rebuilt["cache"]["schema_version"] == service.SCHEMA_VERSION
+    assert rebuilt["data"]["preview"]["summary"]["total_cost_rmb"] == "999.00"
+
+
+def test_failed_rebuild_keeps_the_surviving_payload_marked_as_old() -> None:
+    """重建失败时不能把上一份旧口径数据改标成新口径。
+
+    标成新口径，读侧的版本校验就会放行它，之后即便代码已经是对的，页面也永远
+    拿到那份旧数据 —— 失效机制被绕过去了。
+    """
+
+    from overseas_costing.services import material_fee_workspace_snapshot_service as service
+
+    store = _store()
+    service.get_snapshot(
+        "B1", "V1", store=store, fingerprint_loader=lambda *_: "fingerprint-1",
+        snapshot_builder=_builder([]), now="2026-09-23T01:00:00+00:00",
+    )
+    previous_version = service.SCHEMA_VERSION - 1
+    _rewrite_cached_schema(store, service, "B1", "V1", previous_version)
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("builder down")
+
+    stale = service.refresh_snapshot(
+        "B1", "V1", store=store, fingerprint_loader=lambda *_: "fingerprint-1",
+        snapshot_builder=boom, now="2026-09-23T01:02:00+00:00",
+    )
+
+    assert stale["cache"]["served_from_cache"] is True
+    assert stale["cache"]["status"] == "stale"
+    assert stale["cache"]["schema_version"] == previous_version
+    assert stale["data"]["preview"]["summary"]["total_cost_rmb"] == "100.00"
+
+
+def test_projection_revision_follows_the_deploy_marker(monkeypatch) -> None:
+    """指纹必须带上发布号。
+
+    指纹里原先只有数据修订，投影改了、数据没动时它不变，快照就会被一直沿用。
+    发布号随部署变化，正好补上这一维；站点上没有它时退回空串，不误判。
+    """
+
+    from overseas_costing.services import material_fee_workspace_snapshot_service as service
+
+    fake = SimpleNamespace(conf={"overseas_costing_release_id": "rev-a"})
+    monkeypatch.setitem(sys.modules, "frappe", fake)
+    assert service.projection_revision() == "rev-a"
+
+    fake.conf["overseas_costing_release_id"] = "rev-b"
+    assert service.projection_revision() == "rev-b"
+
+    fake.conf.pop("overseas_costing_release_id")
+    assert service.projection_revision() == ""
