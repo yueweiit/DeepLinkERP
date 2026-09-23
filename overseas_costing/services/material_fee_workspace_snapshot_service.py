@@ -12,7 +12,7 @@ from overseas_costing.services.logistics_settlement.model import digest, dumps
 
 #: 快照投影口径的版本。**候选列表的字段与分组由应用代码决定，代码换了旧快照就不再可信。**
 #: 读侧只认 ``schema_version == SCHEMA_VERSION`` 的缓存，所以每次改动投影形状都必须 +1。
-#: 1 → 2：候选新增 ``workflow_stage`` / ``attachment_category`` / ``audit_only_reason``。
+#: 1 → 2：候选新增 ``workflow_stage`` / ``audit_only_reason`` 等分组与标注字段。
 #: 只靠这个常量并不安全 —— 改投影却忘了 +1，线上就会继续吃旧快照。所以指纹里另外并进了
 #: 发布号（见 ``projection_revision``），部署后由前端的新鲜度检查自动触发重建。
 SCHEMA_VERSION = 2

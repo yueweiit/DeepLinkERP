@@ -4590,38 +4590,49 @@
     const rows = Array.isArray(candidates) ? candidates : [];
     const groups = this.evidenceSourceGroups(rows);
     const cards = groups.map((group) => {
-      const records = group.rows.map((candidate) => {
-        const scopeNote = candidate.in_current_source === false && candidate.stage_selectable
-          ? `<em>不在当前采购支出范围，解析后需人工确认</em>` : "";
-        // 服务端标注“仅审计”的候选仍然照常列出、不隐藏，只把原因显示出来：
-        // 审批已失效、来源被判定不得作为成本来源，或不属于当前版本。
-        const auditNote = candidate.audit_only
-          ? `<em class="ocw-mf-evidence-audit-note">${this.escape(candidate.audit_only_reason || "仅审计，不参与核算。")}</em>` : "";
-        // 摘要优先展示：把服务端已解析出的字段放在文件名下方，用户不必打开
-        // 凭证就能判断该选哪一份。摘要只做展示，不参与任何业务判定。
-        const summary = this.materialFeeEvidenceSummaryHtml(candidate);
-        // 文件名含“凭证”的资料高亮，用户上传时常靠命名表达“这就是凭证件”。
-        const voucherClass = candidate.is_voucher_name ? " is-voucher" : "";
-        const voucherTag = candidate.is_voucher_name
-          ? `<span class="ocw-mf-evidence-voucher-tag">凭证</span>` : "";
-        // 附件类型是服务端按文件名推断的既有列，直接展示，用户不必打开文件
-        // 就知道这是发票、账单还是装箱单。
-        const meta = [candidate.attachment_type, candidate.source_type || "附件", candidate.parse_status || "Draft"]
-          .filter((value) => String(value ?? "").trim())
-          .map((value) => this.escape(String(value)))
-          .join(" · ");
-        return `<label class="ocw-mf-evidence-option${voucherClass}"><input type="radio" name="mf-evidence-attachment" data-mf-evidence-attachment="${this.escape(candidate.attachment || "")}"/><span><strong>${this.escape(candidate.file_name || candidate.attachment || "--")}${voucherTag}</strong>${summary}<small>${meta}${linked.has(candidate.attachment) ? " · 已关联，可重新解析" : ""}</small>${auditNote}${scopeNote}</span></label>`;
-      }).join("");
-      const body = records
+      // 同一份文件在反复同步里会留下多条副本，被服务端标成“仅审计”的都是被替代、
+      // 或不属于当前版本的行。它们默认收进折叠区：列表先呈现可用的，重复行要点开才看；
+      // 但一条都不丢，展开后仍用同一套选项渲染、仍可选中解析。
+      const available = group.rows.filter((candidate) => !candidate.audit_only);
+      const auditOnly = group.rows.filter((candidate) => candidate.audit_only);
+      // 该组一条可用资料都没有时折叠区默认展开：否则整组看起来是空的，
+      // 用户会以为这条渠道什么也没抓到。
+      const openAttribute = available.length ? "" : " open";
+      const body = available.map((candidate) => this.materialFeeEvidenceOptionHtml(candidate, linked)).join("")
         || `<div class="ocw-mf-evidence-source-empty">该流程暂无可关联资料，可上传新凭证。</div>`;
-      // 兜底收纳组用不同底色，避免和三个流程分组看起来是同一层级。
-      const groupClass = group.stage === "material" ? " is-material" : "";
-      return `<section class="ocw-mf-evidence-source-group${groupClass}"><header><strong>${this.escape(group.label)}</strong><b>${group.rows.length} 份</b></header>${body}</section>`;
+      const collapsed = auditOnly.length
+        ? `<details class="ocw-mf-evidence-audit-group"${openAttribute}><summary>仅审计 ${auditOnly.length} 份</summary>${auditOnly.map((candidate) => this.materialFeeEvidenceOptionHtml(candidate, linked)).join("")}</details>`
+        : "";
+      // 分组计数只算可用份数：折叠区自己带着“仅审计 N 份”，两个数字不重不漏。
+      return `<section class="ocw-mf-evidence-source-group"><header><strong>${this.escape(group.label)}</strong><b>${available.length} 份</b></header>${body}${collapsed}</section>`;
     }).join("");
     // 只有分组列表滚动，上传按钮和说明留在滚动区之外：早先按钮被卷进滚动容器，
     // 弹窗一窄就看不见，用户找不到“没有就上传”的兜底入口。
     const emptyState = `<div class="ocw-detail-empty"><strong>暂无可关联资料</strong><span>可先上传新凭证。</span></div>`;
-    return `<div class="ocw-mf-evidence-picker"><div class="ocw-mf-dialog-note">可先选凭证，系统再提取金额、币种、费用类别及 SKU／税种关系。采购、费用申请、国际物流三流程的费用凭证都可关联；装箱单、完税凭证、报关单、Excel 主表属于批次其他资料，不放进流程分组。所有结果都要在审核草稿中确认。</div><div class="ocw-mf-evidence-groups">${cards || emptyState}</div><button class="ocw-outline-btn" type="button" data-action="mf-upload-evidence">上传新凭证并解析</button></div>`;
+    return `<div class="ocw-mf-evidence-picker"><div class="ocw-mf-dialog-note">可先选凭证，系统再提取金额、币种、费用类别及 SKU／税种关系。采购、费用申请、国际物流三个渠道抓到的资料都按审批归属落到对应分组。所有结果都要在审核草稿中确认。</div><div class="ocw-mf-evidence-groups">${cards || emptyState}</div><button class="ocw-outline-btn" type="button" data-action="mf-upload-evidence">上传新凭证并解析</button></div>`;
+  }
+
+  materialFeeEvidenceOptionHtml(candidate, linked) {
+    const scopeNote = candidate.in_current_source === false && candidate.stage_selectable
+      ? `<em>不在当前采购支出范围，解析后需人工确认</em>` : "";
+    // 服务端标注“仅审计”的候选仍然照常列出、不隐藏，只把原因显示出来：
+    // 审批已失效、来源被判定不得作为成本来源，或不属于当前版本。
+    const auditNote = candidate.audit_only
+      ? `<em class="ocw-mf-evidence-audit-note">${this.escape(candidate.audit_only_reason || "仅审计，不参与核算。")}</em>` : "";
+    // 摘要优先展示：把服务端已解析出的字段放在文件名下方，用户不必打开
+    // 凭证就能判断该选哪一份。摘要只做展示，不参与任何业务判定。
+    const summary = this.materialFeeEvidenceSummaryHtml(candidate);
+    // 文件名含“凭证”的资料高亮，用户上传时常靠命名表达“这就是凭证件”。
+    const voucherClass = candidate.is_voucher_name ? " is-voucher" : "";
+    const voucherTag = candidate.is_voucher_name
+      ? `<span class="ocw-mf-evidence-voucher-tag">凭证</span>` : "";
+    // 附件类型是服务端按文件名推断的既有列，直接展示，用户不必打开文件
+    // 就知道这是发票、账单还是装箱单。
+    const meta = [candidate.attachment_type, candidate.source_type || "附件", candidate.parse_status || "Draft"]
+      .filter((value) => String(value ?? "").trim())
+      .map((value) => this.escape(String(value)))
+      .join(" · ");
+    return `<label class="ocw-mf-evidence-option${voucherClass}"><input type="radio" name="mf-evidence-attachment" data-mf-evidence-attachment="${this.escape(candidate.attachment || "")}"/><span><strong>${this.escape(candidate.file_name || candidate.attachment || "--")}${voucherTag}</strong>${summary}<small>${meta}${linked.has(candidate.attachment) ? " · 已关联，可重新解析" : ""}</small>${auditNote}${scopeNote}</span></label>`;
   }
 
   materialFeeEvidenceSummaryHtml(candidate) {
@@ -4642,9 +4653,9 @@
     // 资料时给出空态提示，而不是整组消失。否则用户无法判断“这条流程没有资料”
     // 还是“这条流程没被支持”。“其他资料”仅在确有归属不明的候选时才出现。
     //
-    // 批次附件表是全批次共用的资料表，装箱单、完税凭证、报关单、Excel 主表本来
-    // 就不是费用凭证。它们混进流程分组会让用户误选，所以按服务端给出的
-    // attachment_category 单独收进“批次其他资料”。分类由服务端判定，前端只读。
+    // 分组只认服务端给出的 workflow_stage。批次附件表虽然是全批次共用的资料表，
+    // 但装箱单、报关单这类资料同样挂在某个审批下被采集：落回它所属的渠道，
+    // 用户才看得清“这条渠道到底抓到了什么”。前端不再另立资料分组。
     const order = ["payment", "international_logistics", "purchase", "other"];
     const labels = {
       payment: "费用申请",
@@ -4656,14 +4667,7 @@
     const grouped = new Map(
       order.map((stage) => [stage, { stage, label: labels[stage], rows: [] }])
     );
-    const material = { stage: "material", label: "批次其他资料", rows: [] };
     (Array.isArray(candidates) ? candidates : []).forEach((candidate) => {
-      if (String(candidate.attachment_category || "") === "material") {
-        // 服务端返回的分类标签是文案真源，优先采用。
-        if (candidate.attachment_category_label) material.label = candidate.attachment_category_label;
-        material.rows.push(candidate);
-        return;
-      }
       const stage = order.includes(String(candidate.workflow_stage || ""))
         ? String(candidate.workflow_stage)
         : "other";
@@ -4672,11 +4676,10 @@
       if (candidate.workflow_label) group.label = candidate.workflow_label;
       group.rows.push(candidate);
     });
-    const visible = order
+    // “其他资料”只在确有归属不明的候选时出现：它是兜底收纳，不应多出一个恒为空的组。
+    return order
       .map((stage) => grouped.get(stage))
       .filter((group) => group.rows.length || alwaysVisible.includes(group.stage));
-    // “批次其他资料”只在确有候选时出现：它是兜底收纳，不应多出一个恒为空的组。
-    return material.rows.length ? [...visible, material] : visible;
   }
 
   async linkSelectedMaterialFeeEvidence(dialog, fee) {

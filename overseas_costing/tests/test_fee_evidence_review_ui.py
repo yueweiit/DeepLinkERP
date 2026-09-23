@@ -558,9 +558,9 @@ def test_evidence_picker_groups_the_three_pullable_processes() -> None:
 def test_evidence_picker_keeps_scope_warning_instead_of_hiding_candidates() -> None:
     """越界候选只做提示，不再被隐藏或整体降级。
 
-    ``audit_only`` 同样只允许用来渲染原因文案，绝不允许用来过滤候选：
+    ``audit_only`` 只允许用来决定“收进折叠区还是直接平铺”，绝不允许用来丢弃候选：
     失效审批、被判定不得作为成本来源、非当前版本的资料仍然要留在列表里，
-    由用户看到原因后自行判断。
+    展开后照常可以选中解析，由用户看到原因后自行判断。
     """
 
     source = PART.read_text(encoding="utf-8")
@@ -575,16 +575,44 @@ def test_evidence_picker_keeps_scope_warning_instead_of_hiding_candidates() -> N
     assert "candidate.audit_only" in picker
     assert "audit_only_reason" in picker
     assert "ocw-mf-evidence-audit-note" in picker
-    # 不存在任何依据 audit_only 的过滤／隐藏。
-    assert ".filter((candidate) => candidate.audit_only" not in picker
+    # “折叠”用的是渲染分支，不是过滤：候选对象被原样交给同一个选项渲染函数。
+    assert "candidate.audit_only)" in picker
+    assert "auditOnly.map((candidate) => this.materialFeeEvidenceOptionHtml(candidate, linked))" in picker
+    # 前端不得把审计候选从列表里删掉，也不得为它们另走一套降级模板。
     assert "if (!candidate.audit_only)" not in picker
 
 
-def test_evidence_picker_separates_batch_materials_from_fee_vouchers() -> None:
-    """装箱单／完税凭证／报关单等批次资料不得混进三个流程分组。
+def test_evidence_picker_collapses_repeated_audit_only_rows() -> None:
+    """被替代／非当前版本的重复行默认折叠，但不丢。
 
-    批次附件表是全批次共用的资料表，分类结果必须来自服务端的
-    ``attachment_category``；前端只读，不自己按附件类型或文件名猜测。
+    同一份文件在反复同步里会留下多条副本。全部平铺时列表里九成是重复行，
+    真正可用的那份反而找不到；收进折叠区后先看到可用的，重复行点开才看。
+    该组一条可用资料都没有时折叠区默认展开，避免整组看起来是空的。
+    """
+
+    source = PART.read_text(encoding="utf-8")
+    picker = source.split("renderMaterialFeeEvidencePicker(candidates, linked) {", 1)[1].split(
+        "evidenceSourceGroups(candidates)", 1
+    )[0]
+
+    assert 'const available = group.rows.filter((candidate) => !candidate.audit_only);' in picker
+    assert 'const auditOnly = group.rows.filter((candidate) => candidate.audit_only);' in picker
+    assert 'const openAttribute = available.length ? "" : " open";' in picker
+    assert '<details class="ocw-mf-evidence-audit-group"${openAttribute}>' in picker
+    assert "<summary>仅审计 ${auditOnly.length} 份</summary>" in picker
+    # 分组计数只算可用份数，折叠区自带审计份数，两个数字不重不漏。
+    assert "<b>${available.length} 份</b>" in picker
+
+    css = CSS.read_text(encoding="utf-8")
+    assert ".ocw-mf-evidence-audit-group > summary" in css
+
+
+def test_evidence_picker_groups_batch_materials_into_their_own_channel() -> None:
+    """装箱单等批次资料落回它所属的渠道分组，不再另立资料分组。
+
+    批次附件表是全批次共用的资料表，但装箱单同样是挂在某个审批下被采集的。
+    另立“批次其他资料”会让三个渠道分组看不到自己抓到的资料，用户只能看到
+    一个大杂烩。分组只认服务端给出的 ``workflow_stage``。
     """
 
     source = PART.read_text(encoding="utf-8")
@@ -592,22 +620,17 @@ def test_evidence_picker_separates_batch_materials_from_fee_vouchers() -> None:
         "async linkSelectedMaterialFeeEvidence", 1
     )[0]
 
-    # 分类真源在服务端：前端只读 attachment_category。
-    assert "attachment_category" in groups
-    assert "material" in groups
-    # 分类标签同样取服务端字段，前端不硬编码业务文案。
-    assert "attachment_category_label" in groups
-    # 兜底组只在确有候选时才出现，且排在三个流程分组之后。
-    assert "material.rows.length ? [...visible, material] : visible" in groups
+    # 分组真源只有 workflow_stage，前端不按附件类型或文件名另作分类。
+    assert "workflow_stage" in groups
+    assert "attachment_category" not in groups
+    assert '"material"' not in groups
     # 三流程分组的恒定展示规则不受影响。
     assert 'const alwaysVisible = ["payment", "international_logistics", "purchase"]' in groups
     assert "alwaysVisible.includes(group.stage)" in groups
 
-    picker = source.split("renderMaterialFeeEvidencePicker(candidates, linked)", 1)[1].split(
-        "evidenceSourceGroups(candidates)", 1
-    )[0]
-    # 兜底组用独立底色区分层级。
-    assert "is-material" in picker
+    # 兜底组的独立底色随分类一起撤掉，样式表里不留死规则。
+    css = CSS.read_text(encoding="utf-8")
+    assert ".is-material" not in css
 
 
 def test_evidence_picker_keeps_the_upload_fallback_outside_the_scroll_area() -> None:
@@ -630,7 +653,7 @@ def test_evidence_picker_keeps_the_upload_fallback_outside_the_scroll_area() -> 
     assert "max-height: min(60vh, 600px)" in css
 
 
-def test_evidence_dialog_is_wide_enough_for_the_four_groups() -> None:
+def test_evidence_dialog_is_wide_enough_for_the_group_cards() -> None:
     """弹窗必须显式给宽度：Frappe 的 .modal-dialog 自带固定宽度，只写 max-width 撑不开。"""
 
     css = CSS.read_text(encoding="utf-8")

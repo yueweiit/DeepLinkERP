@@ -330,37 +330,6 @@ def is_voucher_file_name(file_name: object) -> bool:
     return VOUCHER_FILE_NAME_MARKER in str(file_name or "")
 
 
-#: ``Overseas Cost Attachment`` 是全批次共用的资料表，``attachment_type`` 有 8 种。
-#: 但“关联并解析凭证”只应把**费用凭证**放进采购、费用申请、国际物流三个流程分组；
-#: 装箱单、完税凭证、报关单、Excel 主表属于同一批次的其他资料，收进单独的
-#: “批次其他资料”分组，避免混进流程分组造成误选。
-MATERIAL_ATTACHMENT_TYPES = frozenset({
-    "Excel Main Table",
-    "Packing List",
-    "Tax Certificate",
-    "Customs Declaration",
-})
-ATTACHMENT_CATEGORY_LABELS = {
-    "voucher": "费用凭证",
-    "material": "批次其他资料",
-}
-
-
-def attachment_category(attachment_type: object) -> str:
-    """Classify one attachment row as a fee voucher or a batch material.
-
-    只把**已确认**的四类批次资料判为 ``material``；未识别的类型（含 ``Other``
-    与空值）一律留在 ``voucher``，这样人工上传的凭证不会因为类型没填而被藏起来。
-
-    判定只依赖 ``attachment_type`` 这一列，**不读审批归属、不读版本**。因为
-    采购支出单挂在国际物流审批下可以顺着关联链拿到，而月结付款并不一定关联
-    国际物流、需要另行匹配，按归属过滤会把后者整片误杀。
-    """
-
-    value = str(attachment_type or "").strip()
-    return "material" if value in MATERIAL_ATTACHMENT_TYPES else "voucher"
-
-
 def _candidate_audit_only(
     parsed: dict,
     descriptor: dict | None,
@@ -450,7 +419,6 @@ def build_evidence_candidates(
         workflow_stage = classify_workflow_stage(evidence_source)
         file_name = str(attachment.get("file_name") or "")
         attachment_type = str(attachment.get("attachment_type") or "")
-        category = attachment_category(attachment_type)
         audit_only, audit_reason = _candidate_audit_only(parsed, descriptor, attachment, version_name)
         result.append(
             {
@@ -470,9 +438,6 @@ def build_evidence_candidates(
                 "evidence_kind": classify_evidence_kind(evidence_source),
                 # 文件名含“凭证”的资料在弹窗里高亮，用户第一眼就能找到目标件。
                 "is_voucher_name": is_voucher_file_name(file_name),
-                # 凭证类走三个流程分组，资料类收进“批次其他资料”，两边都保留金额候选。
-                "attachment_category": category,
-                "attachment_category_label": ATTACHMENT_CATEGORY_LABELS[category],
                 "audit_only": audit_only,
                 "audit_only_reason": audit_reason,
                 "amount_candidates": [] if descriptor else _extract_amount_candidates({**parsed, **mapped}),

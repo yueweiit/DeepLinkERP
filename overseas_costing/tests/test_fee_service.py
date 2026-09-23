@@ -657,37 +657,17 @@ def test_voucher_marker_is_the_single_shared_token() -> None:
     assert fee_service.is_voucher_file_name("voucher.pdf") is False
 
 
-@pytest.mark.parametrize(
-    "attachment_type,expected",
-    [
-        ("Commercial Invoice", "voucher"),
-        ("Logistics Bill", "voucher"),
-        ("Purchase Order", "voucher"),
-        ("Excel Main Table", "material"),
-        ("Packing List", "material"),
-        ("Tax Certificate", "material"),
-        ("Customs Declaration", "material"),
-    ],
-)
-def test_attachment_category_separates_batch_materials_from_fee_vouchers(attachment_type, expected) -> None:
-    """批次附件表是共用的资料表，仅四类批次资料算“批次其他资料”。"""
+def test_evidence_candidates_carry_no_material_category() -> None:
+    """候选不带资料分类，分组只按审批归属。
 
-    assert fee_service.attachment_category(attachment_type) == expected
-
-
-@pytest.mark.parametrize("attachment_type", ["Other", "", None, "attachment_document"])
-def test_attachment_category_keeps_unrecognized_types_as_fee_vouchers(attachment_type) -> None:
-    """未识别类型一律按凭证类处理，人工上传的凭证不会因为类型没填被藏起来。"""
-
-    assert fee_service.attachment_category(attachment_type) == "voucher"
-
-
-def test_evidence_candidates_expose_the_attachment_category() -> None:
-    """候选要带上服务端分类与标签，前端据此分组、不私造判定。"""
+    曾经用 ``attachment_type`` 把装箱单一类判成“批次其他资料”并单独成组，结果三个
+    渠道分组看不见自己抓到的资料。分类已撤掉，这里锁住它不被顺手加回来：
+    要看清“这条渠道抓到了什么”，就得让资料落回它所属的渠道。
+    """
 
     attachments = [
         {
-            "name": "ATT-MATERIAL",
+            "name": "ATT-PACKING",
             "file_name": "装箱单2026.9.5.xlsx",
             "attachment_type": "Packing List",
             "source_type": "OA",
@@ -699,9 +679,9 @@ def test_evidence_candidates_expose_the_attachment_category() -> None:
 
     candidate = build_evidence_candidates(attachments)[0]
 
-    assert candidate["attachment_category"] == "material"
-    assert candidate["attachment_category_label"] == fee_service.ATTACHMENT_CATEGORY_LABELS["material"]
-    assert "批次其他资料" == candidate["attachment_category_label"]
+    assert "attachment_category" not in candidate
+    assert "attachment_category_label" not in candidate
+    assert not hasattr(fee_service, "attachment_category")
 
 
 @pytest.mark.parametrize(

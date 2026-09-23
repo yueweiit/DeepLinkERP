@@ -400,11 +400,11 @@
 .ocw-mf-evidence-option.is-voucher { background: #fff8e7; box-shadow: inset 3px 0 0 #f0a02a; }
 .ocw-mf-evidence-option.is-voucher > span > strong { color: #8a5700; }
 .ocw-mf-evidence-voucher-tag { margin-left: 6px; padding: 1px 5px; border-radius: 4px; background: #f0a02a; color: #fff; font-size: 10px; font-weight: 500; vertical-align: 1px; }
-/* 装箱单、完税凭证、报关单等批次资料收在兜底组里，用中性底色区别于三个流程分组。 */
-.ocw-mf-evidence-source-group.is-material > header { background: #eef1f5; }
-.ocw-mf-evidence-source-group.is-material > header strong { color: #667085; }
 /* “仅审计”候选照常列出、不隐藏，只把原因讲清楚（审批失效／不得作为成本来源／非当前版本）。 */
 .ocw-mf-evidence-option em.ocw-mf-evidence-audit-note { color: #b42318; }
+/* 重复行（被替代／非当前版本）默认折叠：列表先呈现可用的，点开才看这些副本。 */
+.ocw-mf-evidence-audit-group { display: grid; gap: 6px; }
+.ocw-mf-evidence-audit-group > summary { cursor: pointer; padding: 5px 8px; border-radius: 6px; background: #fdf3f2; color: #b42318; font-size: 11px; }
 .ocw-mf-import-summary { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 .ocw-mf-import-summary span { padding: 7px 10px; border-radius: 6px; background: #f2f4f7; }
 .ocw-mf-import-table { max-height: 58vh; border: 1px solid var(--mf-border); }
