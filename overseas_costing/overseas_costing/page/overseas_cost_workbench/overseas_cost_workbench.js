@@ -10878,6 +10878,7 @@ class OverseasCostWorkbench {
         feeEvidenceReviewActiveRequestKey: "",
         costTrialAI: null,
         costTrialDialog: null,
+        evidencePreview: null,
       };
     }
     if (!Number.isFinite(this.materialFeeState.requestId)) this.materialFeeState.requestId = 0;
@@ -10899,6 +10900,7 @@ class OverseasCostWorkbench {
     if (!this.materialFeeState.aiClarificationStatus) this.materialFeeState.aiClarificationStatus = "saved";
     if (!Number.isFinite(this.materialFeeState.inputRevision)) this.materialFeeState.inputRevision = 0;
     if (this.materialFeeState.focusedFeeInput === undefined) this.materialFeeState.focusedFeeInput = null;
+    if (this.materialFeeState.evidencePreview === undefined) this.materialFeeState.evidencePreview = null;
     return this.materialFeeState;
   }
 
@@ -11783,7 +11785,7 @@ class OverseasCostWorkbench {
           <small id="${this.escape(errorId)}" class="ocw-mf-fee-inline-error-text ${inlineError ? "is-visible" : ""}" data-mf-fee-error="1">${this.escape(inlineError)}</small>
         </td>
         <td><span class="ocw-mf-badge is-${evidenceInfo.tone}">${this.escape(evidenceInfo.label)}</span><small>${evidenceAttachmentCount ? `${evidenceAttachmentCount} 份已关联` : "可上传或关联已有资料"}</small></td>
-        <td><div class="ocw-mf-row-actions"><button type="button" data-action="mf-edit-fee" data-fee-key="${this.escape(fee.logical_fee_key || "")}">更多设置</button><button type="button" data-action="mf-link-evidence" data-fee-key="${this.escape(fee.logical_fee_key || "")}">关联并解析凭证</button>${this.renderReviewFeedbackButton?.({ target_tab: "documents", target_field: feeKey }) || ""}</div>
+        <td><div class="ocw-mf-row-actions"><button type="button" data-action="mf-edit-fee" data-fee-key="${this.escape(fee.logical_fee_key || "")}">更多设置</button><button type="button" data-action="mf-link-evidence" data-fee-key="${this.escape(fee.logical_fee_key || "")}">关联并解析凭证</button>${this.renderReviewFeedbackButton?.({ target_tab: "documents", target_field: feeKey }) || ""}${this.renderMaterialFeeEvidencePreview(feeKey)}</div>
           <details class="ocw-mf-row-details"><summary>范围与凭证详情</summary><div><span>适用：${this.escape(scopeLabel)}</span>${finalRows.length ? `<span>最终账单：${this.escape(finalRows.join("；"))}</span>` : ""}${settlementRows.length ? `<span>已付款净额：${this.escape(settlementRows.join("；"))}（不与账单重复计费）</span>` : ""}${evidence.length ? evidence.map((row) => `<span>${this.escape(row.evidence_role || "凭证")} · ${this.escape(row.evidence_type || "待分类")} · ${this.escape(row.currency || "")} ${this.escape(row.original_amount ?? "待补金额")}${row.related_evidence ? ` · 原付款 ${this.escape(row.related_evidence)}` : ""} · 终核状态：${this.escape(this.materialFeeEvidenceFinalLabel(row.validation_status))} <button type="button" data-action="mf-evidence-status" data-evidence-name="${this.escape(row.name || "")}" data-status="VALID">确认有效</button><button type="button" data-action="mf-evidence-status" data-evidence-name="${this.escape(row.name || "")}" data-status="INVALID">标记无效</button></span>`).join("") : "<span>暂无关联凭证</span>"}</div></details>
         </td>
       </tr>
@@ -15431,6 +15433,11 @@ class OverseasCostWorkbench {
     dialog.$wrapper.on("click", "[data-action='mf-upload-evidence']", () => {
       this.uploadMaterialFeeEvidence(dialog, fee);
     });
+    // 预览面板长在操作列上（弹窗外面），所以勾选要把结果同步出去：面板只消费
+    // “当前勾的是哪一份”这个事实，候选数据本身仍然来自服务端候选池。
+    dialog.$wrapper.on("change", "[data-mf-evidence-attachment]", (event) => {
+      this.previewMaterialFeeEvidenceSelection(feeKey, candidates, String($(event.target).attr("data-mf-evidence-attachment") || ""));
+    });
   }
 
   renderMaterialFeeEvidencePicker(candidates, linked) {
@@ -15459,7 +15466,9 @@ class OverseasCostWorkbench {
     return `<div class="ocw-mf-evidence-picker"><div class="ocw-mf-dialog-note">可先选凭证，系统再提取金额、币种、费用类别及 SKU／税种关系。采购、费用申请、国际物流三个渠道抓到的资料都按审批归属落到对应分组。所有结果都要在审核草稿中确认。</div><div class="ocw-mf-evidence-groups">${cards || emptyState}</div><button class="ocw-outline-btn" type="button" data-action="mf-upload-evidence">上传新凭证并解析</button></div>`;
   }
 
-  materialFeeEvidenceOptionHtml(candidate, linked) {
+  materialFeeEvidenceItemHtml(candidate, linked) {
+    // 弹窗选项与行内预览面板共用这一份字段渲染：两处都只展示服务端已经给出的
+    // ``summary``／``audit_only_reason`` 等字段，不各自另算一套口径。
     const scopeNote = candidate.in_current_source === false && candidate.stage_selectable
       ? `<em>不在当前采购支出范围，解析后需人工确认</em>` : "";
     // 服务端标注“仅审计”的候选仍然照常列出、不隐藏，只把原因显示出来：
@@ -15469,8 +15478,6 @@ class OverseasCostWorkbench {
     // 摘要优先展示：把服务端已解析出的字段放在文件名下方，用户不必打开
     // 凭证就能判断该选哪一份。摘要只做展示，不参与任何业务判定。
     const summary = this.materialFeeEvidenceSummaryHtml(candidate);
-    // 文件名含“凭证”的资料高亮，用户上传时常靠命名表达“这就是凭证件”。
-    const voucherClass = candidate.is_voucher_name ? " is-voucher" : "";
     const voucherTag = candidate.is_voucher_name
       ? `<span class="ocw-mf-evidence-voucher-tag">凭证</span>` : "";
     // 附件类型是服务端按文件名推断的既有列，直接展示，用户不必打开文件
@@ -15479,7 +15486,13 @@ class OverseasCostWorkbench {
       .filter((value) => String(value ?? "").trim())
       .map((value) => this.escape(String(value)))
       .join(" · ");
-    return `<label class="ocw-mf-evidence-option${voucherClass}"><input type="radio" name="mf-evidence-attachment" data-mf-evidence-attachment="${this.escape(candidate.attachment || "")}"/><span><strong>${this.escape(candidate.file_name || candidate.attachment || "--")}${voucherTag}</strong>${summary}<small>${meta}${linked.has(candidate.attachment) ? " · 已关联，可重新解析" : ""}</small>${auditNote}${scopeNote}</span></label>`;
+    return `<strong>${this.escape(candidate.file_name || candidate.attachment || "--")}${voucherTag}</strong>${summary}<small>${meta}${linked.has(candidate.attachment) ? " · 已关联，可重新解析" : ""}</small>${auditNote}${scopeNote}`;
+  }
+
+  materialFeeEvidenceOptionHtml(candidate, linked) {
+    // 文件名含“凭证”的资料高亮，用户上传时常靠命名表达“这就是凭证件”。
+    const voucherClass = candidate.is_voucher_name ? " is-voucher" : "";
+    return `<label class="ocw-mf-evidence-option${voucherClass}"><input type="radio" name="mf-evidence-attachment" data-mf-evidence-attachment="${this.escape(candidate.attachment || "")}"/><span>${this.materialFeeEvidenceItemHtml(candidate, linked)}</span></label>`;
   }
 
   materialFeeEvidenceSummaryHtml(candidate) {
@@ -15527,6 +15540,29 @@ class OverseasCostWorkbench {
     return order
       .map((stage) => grouped.get(stage))
       .filter((group) => group.rows.length || alwaysVisible.includes(group.stage));
+  }
+
+  renderMaterialFeeEvidencePreview(feeKey) {
+    // 面板挂在操作列「关联并解析凭证」右侧，只读展示；未勾选时给出提示文案，
+    // 而这张表本身不具备任何“已选凭证”的状态，所以事实存在 materialFeeState。
+    return `<div class="ocw-mf-evidence-preview" data-mf-evidence-preview="${this.escape(feeKey)}">${this.materialFeeEvidencePreviewBody(feeKey)}</div>`;
+  }
+
+  materialFeeEvidencePreviewBody(feeKey) {
+    const preview = this.materialFeeState?.evidencePreview;
+    const candidate = preview && preview.feeKey === String(feeKey || "") ? preview.candidate : null;
+    if (!candidate) return `<span class="ocw-mf-evidence-preview-empty">需在关联并解析凭证选择附件</span>`;
+    const linked = new Set((this.findMaterialFee(feeKey)?.evidence || []).map((row) => row.attachment));
+    return this.materialFeeEvidenceItemHtml(candidate, linked);
+  }
+
+  previewMaterialFeeEvidenceSelection(feeKey, candidates, attachment) {
+    const candidate = (candidates || []).find((row) => String(row.attachment || "") === attachment) || null;
+    this.ensureMaterialFeeState().evidencePreview = candidate ? { feeKey: String(feeKey || ""), candidate } : null;
+    // 只替换面板这一块，不整表重渲染：重渲染会打断正在打开的弹窗所在行的交互。
+    if (!this.$root?.find) return;
+    const $panel = this.$root.find(`[data-mf-evidence-preview="${this.escape(feeKey)}"]`);
+    if ($panel?.html) $panel.html(this.materialFeeEvidencePreviewBody(feeKey));
   }
 
   async linkSelectedMaterialFeeEvidence(dialog, fee) {

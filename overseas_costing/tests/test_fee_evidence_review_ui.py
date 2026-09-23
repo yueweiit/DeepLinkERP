@@ -728,3 +728,79 @@ def test_evidence_picker_renders_the_server_summary_and_never_recomputes_it() ->
 
     css = CSS.read_text(encoding="utf-8")
     assert ".ocw-mf-evidence-summary" in css
+
+
+def test_fee_row_previews_the_selected_voucher_next_to_the_link_action() -> None:
+    """行操作列「关联并解析凭证」右侧常驻预览面板。
+
+    面板长在操作列上而不是弹窗里：未勾选时它要自己说明缺什么，勾选后展示的字段
+    必须与弹窗选项同源（同走 ``materialFeeEvidenceItemHtml``），否则同一份附件
+    会在弹窗和面板长出两套口径。
+    """
+
+    source = PART.read_text(encoding="utf-8")
+    row = source.split("renderMaterialFeeRow(fee) {", 1)[1].split("materialFeeFreightEditorCurrent", 1)[0]
+
+    # 面板落在操作列内、排在「关联并解析凭证」之后，也就是按钮右侧。
+    assert row.index('data-action="mf-link-evidence"') < row.index("renderMaterialFeeEvidencePreview(feeKey)")
+    # 与按钮共用同一个 flex 容器，位置由布局决定，不需要额外定位或新容器。
+    assert 'class="ocw-mf-row-actions"' in row
+
+    panel = source.split("renderMaterialFeeEvidencePreview(feeKey) {", 1)[1].split(
+        "materialFeeEvidencePreviewBody(feeKey) {", 1
+    )[0]
+    assert "data-mf-evidence-preview=" in panel
+
+    preview = source.split("materialFeeEvidencePreviewBody(feeKey) {", 1)[1].split(
+        "previewMaterialFeeEvidenceSelection", 1
+    )[0]
+    # 未选择时给提示文案，而不是留一个空面板。
+    assert "需在关联并解析凭证选择附件" in preview
+    # 选中后复用弹窗那套字段渲染，不另写一份摘要逻辑。
+    assert "materialFeeEvidenceItemHtml(candidate, linked)" in preview
+    assert "materialFeeEvidenceSummaryHtml" not in preview
+
+    dialog = source.split("openMaterialFeeEvidenceDialog(feeKey) {", 1)[1].split(
+        "renderMaterialFeeEvidencePicker(candidates, linked) {", 1
+    )[0]
+    # 勾选发生在弹窗内，靠 change 委托同步出去；只更新面板那一块，不整表重渲染。
+    assert 'dialog.$wrapper.on("change", "[data-mf-evidence-attachment]"' in dialog
+    assert "previewMaterialFeeEvidenceSelection(feeKey, candidates," in dialog
+
+    css = CSS.read_text(encoding="utf-8")
+    assert ".ocw-mf-evidence-preview" in css
+    assert ".ocw-mf-evidence-preview-empty" in css
+
+
+def test_evidence_preview_follows_the_dialog_selection_per_fee_row() -> None:
+    """面板跟随弹窗的单选结果，且只影响自己那一行。
+
+    弹窗仍是单选，所以面板最多展示一份；没勾选或候选不在候选池里时回到提示文案。
+    面板状态按 ``fee_key`` 归属，另一行的面板不能被这一行的选择污染。
+    """
+
+    result = _voucher_click_result(
+        r"""
+const workspace=Object.create(Harness.prototype);
+workspace.$root={on(){return this},find(){return {html(){return this}}}};
+workspace.detailState={batchName:'BATCH-1',versionName:'VERSION-1'};
+workspace.materialFeeState=null;
+const candidates=[
+  {attachment:'A-1',file_name:'invoice.pdf',attachment_type:'Commercial Invoice',source_type:'OA',parse_status:'Parsed'},
+  {attachment:'A-2',file_name:'bill.png',attachment_type:'Logistics Bill',source_type:'OA',parse_status:'Queued',audit_only:true,audit_only_reason:'资料已撤销或被替代，仅审计。'},
+];
+workspace.previewMaterialFeeEvidenceSelection('FEE-1',candidates,'A-2');
+const picked=workspace.materialFeeEvidencePreviewBody('FEE-1');
+const otherRow=workspace.materialFeeEvidencePreviewBody('FEE-2');
+workspace.previewMaterialFeeEvidenceSelection('FEE-1',candidates,'');
+const cleared=workspace.materialFeeEvidencePreviewBody('FEE-1');
+console.log(JSON.stringify({picked,otherRow,cleared}));
+"""
+    )
+
+    assert "bill.png" in result["picked"]
+    assert "invoice.pdf" not in result["picked"]
+    # 仅审计原因照旧显示在面板上，用户看到的是同一句话。
+    assert "资料已撤销或被替代，仅审计。" in result["picked"]
+    assert "需在关联并解析凭证选择附件" in result["otherRow"]
+    assert "需在关联并解析凭证选择附件" in result["cleared"]

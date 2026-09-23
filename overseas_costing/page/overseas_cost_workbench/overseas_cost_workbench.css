@@ -7774,6 +7774,14 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
 .ocw-mf-evidence-voucher-tag { margin-left: 6px; padding: 1px 5px; border-radius: 4px; background: #f0a02a; color: #fff; font-size: 10px; font-weight: 500; vertical-align: 1px; }
 /* “仅审计”候选照常列出、不隐藏，只把原因讲清楚（审批失效／不得作为成本来源／非当前版本）。 */
 .ocw-mf-evidence-option em.ocw-mf-evidence-audit-note { color: #b42318; }
+/* 「关联并解析凭证」右侧的预览面板：未勾选时给提示文案，勾选后展示这份附件的服务端字段。
+   面板与操作按钮同属 .ocw-mf-row-actions 这个 flex 容器，因此自然落在按钮右侧。 */
+.ocw-mf-evidence-preview { flex: 1 1 200px; display: grid; gap: 2px; max-width: 260px; padding: 7px; border: 1px dashed #dfe4ec; border-radius: 6px; background: #fbfcfe; font-size: 11px; }
+.ocw-mf-evidence-preview-empty { color: #98a2b3; }
+.ocw-mf-evidence-preview > strong { color: #344054; font-weight: 500; word-break: break-all; }
+.ocw-mf-evidence-preview > small { color: var(--mf-muted); }
+.ocw-mf-evidence-preview > em { color: #a15c00; font-size: 11px; font-style: normal; }
+.ocw-mf-evidence-preview > em.ocw-mf-evidence-audit-note { color: #b42318; }
 /* 重复行（被替代／非当前版本）默认折叠：列表先呈现可用的，点开才看这些副本。 */
 .ocw-mf-evidence-audit-group { display: grid; gap: 6px; }
 .ocw-mf-evidence-audit-group > summary { cursor: pointer; padding: 5px 8px; border-radius: 6px; background: #fdf3f2; color: #b42318; font-size: 11px; }
