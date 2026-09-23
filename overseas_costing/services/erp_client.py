@@ -25,6 +25,8 @@ DEFAULT_TIMEOUT = 20
 SETTINGS_DOCTYPE = "Overseas Cost ERP Settings"
 PUSH_MODE_STANDARD = "standard_purchase"
 PUSH_MODE_GENERIC = "generic_resource"
+# ERPNext 只认带鉴权方案的 Authorization 头；裸 key:secret 会被当作匿名请求返回 403。
+AUTHORIZATION_SCHEMES = ("token ", "basic ", "bearer ")
 
 
 class AmbiguousRemoteBusinessKey(RuntimeError):
@@ -569,8 +571,11 @@ def _metadata_config_errors(config: dict) -> list[str]:
     reasons = []
     if not config.get("base_url"):
         reasons.append("缺少 DeepLinkERP 接口地址配置")
-    if not config.get("authorization"):
+    authorization = _clean(config.get("authorization"))
+    if not authorization:
         reasons.append("缺少 DeepLinkERP 鉴权配置")
+    elif not authorization.lower().startswith(AUTHORIZATION_SCHEMES):
+        reasons.append("鉴权配置格式应为 token <api_key>:<api_secret>")
     return reasons
 
 

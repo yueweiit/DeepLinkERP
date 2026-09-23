@@ -20,6 +20,18 @@ def test_read_erpnext_doctype_metadata_rejects_incomplete_config_without_leaking
     assert "缺少 DeepLinkERP 鉴权配置" in result["errors"]["config"]
 
 
+def test_metadata_config_rejects_authorization_without_scheme() -> None:
+    """裸 key:secret 会被 ERPNext 当作匿名请求返回 403，必须提前拦下。"""
+
+    result = erp_client.read_erpnext_doctype_metadata(
+        {"base_url": "https://erp.example.com/api/resource", "authorization": "abc:def"},
+        ["Purchase Order"],
+    )
+
+    assert result["ok"] is False
+    assert "鉴权配置格式应为 token <api_key>:<api_secret>" in result["errors"]["config"]
+
+
 def test_read_erpnext_doctype_metadata_reads_each_doctype_with_get(monkeypatch) -> None:
     captured = []
 
