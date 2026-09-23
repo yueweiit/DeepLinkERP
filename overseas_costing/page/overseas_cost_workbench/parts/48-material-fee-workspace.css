@@ -263,6 +263,9 @@
   .ocw-mf-material-toolrow { flex-direction: column; align-items: stretch; }
   .ocw-mf-material-toolgroup,
   .ocw-mf-material-toolgroup.is-data { justify-content: flex-start; width: 100%; margin-left: 0; }
+  .ocw-mf-reference-option { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .ocw-mf-reference-option input { position: absolute; opacity: 0; pointer-events: none; }
+  .ocw-mf-reference-option em { justify-self: start; }
 }
 
 .ocw-mf-selection-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid #e3eaf3; border-bottom: 1px solid #d8e2ef; background: #f7fbff; }
@@ -331,6 +334,36 @@
 .ocw-mf-cell.is-ai-draft :is(input, select) { color: #076fbe; font-weight: 600; }
 .ocw-mf-cell.is-protected-purchase { padding-right: 46px; background: #f8fafc; }
 .ocw-mf-purchase-correct { position: absolute; right: 5px; top: 8px; border: 0; padding: 2px 4px; background: transparent; color: var(--mf-blue); font-size: 10px; cursor: pointer; }
+.ocw-mf-reference-cell { position: relative; padding-right: 46px !important; }
+.ocw-mf-reference-cell > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ocw-mf-reference-picker { position: absolute; top: 7px; right: 5px; border: 0; padding: 2px 4px; background: transparent; color: var(--mf-blue); font: inherit; font-size: 10px; cursor: pointer; }
+.ocw-mf-reference-picker:disabled { color: #98a2b3; cursor: not-allowed; }
+.ocw-mf-reference-picker-dialog { display: grid; gap: 10px; }
+.ocw-mf-reference-search { display: grid; gap: 5px; color: #475467; font-size: 12px; font-weight: 600; }
+.ocw-mf-reference-search input { width: 100%; min-height: 36px; border: 1px solid #cfd9e6; border-radius: 7px; padding: 7px 10px; background: #fff; color: #172033; font: inherit; outline: 0; }
+.ocw-mf-reference-search input:focus { border-color: var(--mf-blue); box-shadow: 0 0 0 2px rgba(11, 140, 240, 0.14); }
+[data-mf-project-options],
+[data-mf-supplier-options] { display: grid; gap: 10px; max-height: 360px; overflow-y: auto; padding-right: 3px; }
+.ocw-mf-reference-group { display: grid; gap: 6px; }
+.ocw-mf-reference-group h6 { margin: 0; color: #667085; font-size: 11px; font-weight: 700; }
+.ocw-mf-reference-option { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 9px; margin: 0; padding: 9px 10px; border: 1px solid #dce6f2; border-radius: 8px; background: #fff; cursor: pointer; }
+.ocw-mf-reference-option:hover,
+.ocw-mf-reference-option.is-selected { border-color: #86c5f5; background: #f4faff; }
+.ocw-mf-reference-option input { margin: 0; accent-color: var(--mf-blue); }
+.ocw-mf-reference-option span { min-width: 0; }
+.ocw-mf-reference-option strong,
+.ocw-mf-reference-option small { display: block; overflow-wrap: anywhere; }
+.ocw-mf-reference-option small { margin-top: 2px; color: #667085; font-weight: 400; }
+.ocw-mf-reference-option em { padding: 2px 7px; border-radius: 999px; background: var(--mf-blue-soft); color: #076fbe; font-size: 10px; font-style: normal; white-space: nowrap; }
+.ocw-mf-reference-invalid { display: grid; gap: 3px; margin: 0; padding: 8px 10px; border: 1px solid #f6c8c3; border-radius: 7px; background: #fff5f3; color: #b42318; }
+.ocw-mf-reference-invalid span,
+.ocw-mf-reference-empty { color: #667085; font-size: 11px; }
+.ocw-mf-reference-empty { margin: 0; padding: 14px; border: 1px dashed #cfd9e6; border-radius: 8px; text-align: center; }
+.ocw-mf-reference-preview { display: grid; gap: 6px; margin-top: 6px; color: #475467; font-size: 11px; }
+.ocw-mf-reference-preview table { width: 100%; border-collapse: collapse; }
+.ocw-mf-reference-preview th,
+.ocw-mf-reference-preview td { padding: 6px; border: 1px solid #e5ebf2; text-align: left; vertical-align: top; }
+.ocw-mf-reference-preview th { background: #f7f9fc; color: #667085; }
 .ocw-mf-grid-table tr.is-ai-replacement td { background: #f3f9ff; }
 .ocw-mf-grid-table tr.is-ai-replacement td:first-child { box-shadow: inset 3px 0 0 #2496ed; }
 .ocw-mf-cell.is-ai-replacement small { display: block; color: #1478bd; font-size: 10px; white-space: nowrap; }

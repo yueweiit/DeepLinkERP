@@ -160,3 +160,169 @@ def test_conflicting_real_merges_require_source_correction_not_unavailable_check
       confirmation_groups:[{group_id:'hidden',row_numbers:[2,3,4],source_correction_required:true}]},{})}));
     ''')
     assert '修正原表' in result['issue'] and '2、3、4' in result['issue']
+
+
+def test_project_and_supplier_cells_use_list_pickers_in_the_main_grid():
+    result = _fee_workspace_result(r'''
+    const w=new Harness();w.escape=value=>String(value??'');w.formatValue=value=>String(value??'--');
+    w.detailState={batchName:'B-1',versionName:'V-1',tab:'documents'};
+    const state=w.ensureMaterialFeeState();state.materials={items:[]};
+    const columns=w.materialFeeGridColumns();
+    const project=w.renderMaterialFeeGridCell({name:'I-1',project_collection:'',requirements:{}},columns.find(row=>row.field==='project_collection'),new Set(),1);
+    const invalid=w.renderMaterialFeeGridCell({name:'I-2',project_collection:'YW ODM',requirements:{}},columns.find(row=>row.field==='project_collection'),new Set(),1);
+    const supplier=w.renderMaterialFeeGridCell({name:'I-3',supplier:'SUP-001',requirements:{}},columns.find(row=>row.field==='supplier'),new Set(),1);
+    console.log(JSON.stringify({fields:columns.map(row=>row.field),project,invalid,supplier}));
+    ''')
+    assert "supplier" in result["fields"]
+    assert result["fields"].index("supplier") < result["fields"].index("project_collection")
+    assert 'data-action="mf-open-project-picker"' in result["project"]
+    assert '选择项目归属' in result["project"]
+    assert '修正' in result["invalid"] and 'YW ODM' in result["invalid"]
+    assert 'data-action="mf-open-supplier-picker"' in result["supplier"]
+    assert 'data-mf-cell-input' not in result["project"] + result["invalid"] + result["supplier"]
+
+
+def test_project_picker_groups_candidates_filters_and_keeps_invalid_current_read_only():
+    result = _fee_workspace_result(r'''
+    const w=Object.create(Harness.prototype);w.escape=value=>String(value??'');
+    const optionsResult={ok:true,route_revision:'R-1',conflicts:[],options:[
+      {project_collection:'LatinGo拉丁购',subsidiary_code:'拉丁购国际电子商务（东莞）有限公司',is_approval_candidate:true},
+      {project_collection:'YW MOLDES MX模具',subsidiary_code:'YW MOLDES MX模具',is_approval_candidate:false}
+    ]};
+    const model=w.buildProjectPickerModel([{name:'I-1',project_collection:'YW ODM'}],optionsResult,'');
+    const all=w.renderProjectPickerOptions(model);
+    const filtered=w.renderProjectPickerOptions({...model,search:'moldes'});
+    console.log(JSON.stringify({model,all,filtered}));
+    ''')
+    assert result["model"]["invalidCurrent"] == ["YW ODM"]
+    assert '当前值：YW ODM' in result["all"]
+    assert '无有效 ERP 路由' in result["all"]
+    assert '本审批候选' in result["all"] and '其他可选项目' in result["all"]
+    assert '拉丁购国际电子商务' in result["all"]
+    assert 'value="YW ODM"' not in result["all"]
+    assert 'YW MOLDES MX模具' in result["filtered"]
+    assert 'LatinGo拉丁购' not in result["filtered"]
+
+
+def test_project_route_options_are_cached_per_batch_and_refresh_on_revision_or_save():
+    result = _fee_workspace_result(r'''
+    const w=Object.create(Harness.prototype);w.detailState={batchName:'B-1'};w.ensureMaterialFeeState();
+    let calls=0;w.call=async()=>({ok:true,route_revision:`R-${++calls}`,options:[{project_collection:`P-${calls}`,subsidiary_code:'C'}]});
+    const first=await w.loadProjectRouteOptions();
+    const cached=await w.loadProjectRouteOptions();
+    const revised=await w.loadProjectRouteOptions({expectedRevision:'different'});
+    w.invalidateProjectRouteOptions();
+    const afterSave=await w.loadProjectRouteOptions();
+    console.log(JSON.stringify({calls,first:first.route_revision,cached:cached.route_revision,revised:revised.route_revision,afterSave:afterSave.route_revision}));
+    ''')
+    assert result == {"calls": 3, "first": "R-1", "cached": "R-1", "revised": "R-2", "afterSave": "R-3"}
+
+
+def test_project_selection_reason_rules_exact_rows_and_ai_draft_is_non_mutating():
+    result = _fee_workspace_result(r'''
+    const w=Object.create(Harness.prototype);w.detailState={batchName:'B-1',versionName:'V-1',editToken:'T',expectedModified:'M'};
+    const state=w.ensureMaterialFeeState();state.materials={items:[]};
+    w.isMaterialAIReadyStatus=status=>status==='READY';w.renderMaterialFeeWorkspacePreservingPosition=()=>{};
+    const blank={name:'A',stable_line_key:'L-A',material_code:'A',project_collection:''};
+    const existing={name:'B',stable_line_key:'L-B',material_code:'B',project_collection:'YW ODM'};
+    const reasonRules=[w.referenceSelectionRequiresReason([blank],'project_collection','LatinGo拉丁购'),w.referenceSelectionRequiresReason([existing],'project_collection','LatinGo拉丁购')];
+    state.aiFill={status:'READY',draftVisible:true,review_mode:true,updates:{},manualUpdates:{},proposals:[],selections:new Set()};
+    let writes=0;w.call=async()=>{writes++;return {ok:true}};
+    await w.applyProjectCollectionSelection([existing],'LatinGo拉丁购','调整归属',{aiDraft:true,allowedValues:new Set(['LatinGo拉丁购'])});
+    const draft={...state.aiFill.manualUpdates['B:project_collection']};
+    state.aiFill=null;w.ensureEditSession=async()=>true;w.updateMaterialFeeExpectedModified=()=>{};w.loadMaterialFeeWorkspace=async()=>true;w.loadProjectRouteOptions=async()=>({ok:true});
+    let payload=null;w.call=async(endpoint,args)=>{writes++;payload={endpoint,args};return {ok:true,changed_count:2}};
+    await w.applyProjectCollectionSelection([blank,existing],'LatinGo拉丁购','批量校正',{allowedValues:new Set(['LatinGo拉丁购'])});
+    console.log(JSON.stringify({reasonRules,writes,draft,updates:JSON.parse(payload.args.updates)}));
+    ''')
+    assert result["reasonRules"] == [False, True]
+    assert result["draft"] == {
+        "item_name": "B",
+        "fieldname": "project_collection",
+        "value": "LatinGo拉丁购",
+        "reason": "调整归属",
+    }
+    assert result["writes"] == 1
+    assert [row["item_name"] for row in result["updates"]] == ["A", "B"]
+    assert all(row["remark"] == "批量校正" for row in result["updates"])
+
+
+def test_project_single_bulk_and_correction_entries_share_one_picker():
+    result = _fee_workspace_result(r'''
+    const w=Object.create(Harness.prototype);w.detailState={batchName:'B'};const state=w.ensureMaterialFeeState();
+    state.materials={packing_group_editable:true,packing_groups:[],items:[
+      {name:'A',stable_line_key:'L-A',project_collection:''},{name:'B',stable_line_key:'L-B',project_collection:'YW ODM'}
+    ]};state.packingGroupSelections=new Set(['L-A']);
+    const calls=[];w.openProjectCollectionPicker=async request=>{calls.push({source:request.source,names:request.items.map(row=>row.name),suggestedValue:request.suggestedValue||''})};
+    await w.openProjectCollectionForItem('A');await w.openProjectCollectionForItem('B');await w.openProjectCollectionDialog();
+    state.aiFill={status:'READY',draftVisible:true,updates:{'A:project_collection':{value:'LatinGo拉丁购'}},manualUpdates:{}};
+    await w.openProjectCollectionForItem('A');
+    console.log(JSON.stringify({calls}));
+    ''')
+    assert result["calls"] == [
+        {"source": "cell", "names": ["A"], "suggestedValue": ""},
+        {"source": "cell", "names": ["B"], "suggestedValue": ""},
+        {"source": "bulk", "names": ["A"], "suggestedValue": ""},
+        {"source": "cell", "names": ["A"], "suggestedValue": "LatinGo拉丁购"},
+    ]
+
+
+def test_supplier_picker_uses_only_resolved_names_and_bulk_targets_exact_rows():
+    result = _fee_workspace_result(r'''
+    const w=Object.create(Harness.prototype);w.escape=value=>String(value??'');w.detailState={batchName:'B-1',versionName:'V',editToken:'T',expectedModified:'M'};
+    const state=w.ensureMaterialFeeState();state.materials={items:[]};
+    let queries=[];w.call=async(endpoint,args)=>{queries.push({endpoint,args});return {raw_value:args.raw_value,status:'SUGGESTED',canonical_supplier:'',candidates:[
+      {name:'SUP-001',supplier_name:'Alpha Trading',score:0.94,high_confidence:true},
+      {name:'SUP-002',supplier_name:'Alpha Tools',score:0.78,high_confidence:false}
+    ]}};
+    const options=await w.loadSupplierOptions('Alpha Tradng');const html=w.renderSupplierPickerOptions(options,'alpha');
+    const rows=[{name:'A',stable_line_key:'L-A',material_code:'A',supplier:''},{name:'C',stable_line_key:'L-C',material_code:'C',supplier:'SUP-OLD'}];
+    const reasonRules=[w.referenceSelectionRequiresReason([rows[0]],'supplier','SUP-001'),w.referenceSelectionRequiresReason([rows[1]],'supplier','SUP-001')];
+    w.ensureEditSession=async()=>true;w.updateMaterialFeeExpectedModified=()=>{};w.loadMaterialFeeWorkspace=async()=>true;
+    let saved=null;w.call=async(endpoint,args)=>{saved={endpoint,args};return {ok:true,changed_count:2}};
+    await w.applySupplierSelection(rows,'SUP-001','批量修正',{allowedValues:new Set(options.map(row=>row.name))});
+    console.log(JSON.stringify({queries,options,html,reasonRules,updates:JSON.parse(saved.args.updates)}));
+    ''')
+    assert [row["name"] for row in result["options"]] == ["SUP-001", "SUP-002"]
+    assert '高置信候选' in result["html"] and 'Alpha Trading' in result["html"]
+    assert 'value="Alpha Tradng"' not in result["html"]
+    assert result["reasonRules"] == [False, True]
+    assert [row["item_name"] for row in result["updates"]] == ["A", "C"]
+    assert all(row["fieldname"] == "supplier" for row in result["updates"])
+
+
+def test_supplier_exact_match_becomes_a_selectable_canonical_option():
+    result = _fee_workspace_result(r'''
+    const w=Object.create(Harness.prototype);w.detailState={batchName:'B-1'};w.ensureMaterialFeeState();
+    w.call=async()=>({raw_value:'Alpha Trading',status:'EXACT',canonical_supplier:'SUP-001',candidates:[]});
+    const options=await w.loadSupplierOptions('Alpha Trading');
+    console.log(JSON.stringify({options}));
+    ''')
+    assert result["options"] == [{
+        "name": "SUP-001",
+        "supplier_name": "SUP-001",
+        "score": 1,
+        "exact": True,
+    }]
+
+
+def test_material_toolbar_exposes_supplier_bulk_action():
+    result = _fee_workspace_result(r'''
+    const w=Object.create(Harness.prototype);w.escape=value=>String(value??'');w.detailState={batchName:'B'};
+    const state=w.ensureMaterialFeeState();state.materials={packing_group_editable:true,packing_groups:[],items:[{name:'A',stable_line_key:'L-A'}]};state.packingGroupSelections=new Set(['L-A']);
+    console.log(JSON.stringify({html:w.renderMaterialSelectionToolbar(),actions:w.materialSelectionContext().actions}));
+    ''')
+    assert 'data-action="mf-set-supplier"' in result["html"]
+    assert '批量设置供应商' in result["html"]
+    assert result["actions"]["supplier"]["enabled"] is True
+
+
+def test_reference_picker_layout_is_compact_scrollable_and_responsive():
+    css = (PARTS / "48-material-fee-workspace.css").read_text(encoding="utf-8")
+    assert ".ocw-mf-reference-picker-dialog" in css
+    assert ".ocw-mf-reference-group" in css
+    assert "max-height:" in css and "overflow-y: auto" in css
+    assert ".ocw-mf-reference-option" in css
+    responsive = css.split("@media (max-width: 700px)", 1)[1]
+    assert ".ocw-mf-reference-option" in responsive
+    assert "grid-template-columns: minmax(0, 1fr)" in responsive

@@ -32,6 +32,9 @@
         costTrialAI: null,
         costTrialDialog: null,
         evidencePreview: null,
+        projectRouteOptionsCache: null,
+        projectRouteOptionsPromise: null,
+        supplierOptionsCache: new Map(),
       };
     }
     if (!Number.isFinite(this.materialFeeState.requestId)) this.materialFeeState.requestId = 0;
@@ -45,6 +48,8 @@
     this.materialFeeState.materialSaveErrors = this.materialFeeState.materialSaveErrors || {};
     this.materialFeeState.materialDrafts = this.materialFeeState.materialDrafts || {};
     this.materialFeeState.packingGroupSelections = this.materialFeeState.packingGroupSelections || new Set();
+    this.materialFeeState.supplierOptionsCache = this.materialFeeState.supplierOptionsCache instanceof Map
+      ? this.materialFeeState.supplierOptionsCache : new Map();
     this.materialFeeState.aiFill = this.materialFeeState.aiFill || null;
     this.materialFeeState.aiPendingReady = this.materialFeeState.aiPendingReady || null;
     if (this.materialFeeState.aiClarification === undefined) this.materialFeeState.aiClarification = "";
@@ -60,6 +65,7 @@
   bindMaterialFeeWorkspaceEvents() {
     this.$root.on("click", "[data-action='mf-reload']", () => {
       this.clearMaterialSelection(false);
+      this.invalidateProjectRouteOptions();
       this.loadMaterialFeeWorkspace({ forceRefresh: true });
     });
     this.$root.on("click", "[data-action='mf-jump-status']", (event) => {
@@ -170,6 +176,17 @@
     });
     this.$root.on("click", "[data-action='mf-set-project']", () => {
       this.openProjectCollectionDialog().catch((error) => this.showError(error));
+    });
+    this.$root.on("click", "[data-action='mf-set-supplier']", () => {
+      this.openSupplierDialog().catch((error) => this.showError(error));
+    });
+    this.$root.on("click", "[data-action='mf-open-project-picker']", (event) => {
+      const itemName = $(event.currentTarget).attr("data-item-name");
+      this.openProjectCollectionForItem(itemName).catch((error) => this.showError(error));
+    });
+    this.$root.on("click", "[data-action='mf-open-supplier-picker']", (event) => {
+      const itemName = $(event.currentTarget).attr("data-item-name");
+      this.openSupplierForItem(itemName).catch((error) => this.showError(error));
     });
     this.$root.on("click", "[data-action='mf-clear-selection']", () => {
       this.clearMaterialSelection();
@@ -1098,6 +1115,7 @@
       { field: "gross_weight_kg", label: "毛重 kg", numeric: true, width: 130 },
       { field: "volume_m3", label: "体积 m³", numeric: true, width: 130 },
       { field: "chargeable_weight_kg", label: "计费重 kg", numeric: true, width: 140 },
+      { field: "supplier", label: "供应商", width: 220 },
       { field: "project_collection", label: "项目归属", width: 180 },
     ];
     if (state.showAuxiliary) {
@@ -1108,7 +1126,6 @@
         { field: "purchase_uom", label: "采购单位", purchaseField: true, width: 120 },
         { field: "unit_price_uom", label: "计价单位", purchaseField: true, width: 120 },
         { field: "purchase_currency", label: "采购币种", purchaseField: true, options: this.materialFeeCurrencyOptions(), width: 130 },
-        { field: "supplier", label: "供应商", readonly: true, width: 220 },
         { field: "source_file_name", label: "来源文件", readonly: true, width: 240 }
       );
     }
@@ -1235,6 +1252,7 @@
           : lockedPageKeys.length ? "当前选择包含不可操作的 AI 替换草稿行"
           : incompleteGroupIds.length ? "删除组员前请先解除合并" : "请先选择物料"},
         project:{enabled:projectEnabled, reason:projectEnabled ? "" : !editable ? readonlyReason : "请先选择有效物料行"},
+        supplier:{enabled:projectEnabled, reason:projectEnabled ? "" : !editable ? readonlyReason : "请先选择有效物料行"},
         clear:{enabled:selectedCount > 0, reason:selectedCount ? "" : "当前没有选中物料"},
       },
     };
@@ -1251,66 +1269,296 @@
       ${button("编辑装箱组", "mf-edit-selected-packing-group", context.actions.edit)}
       ${button("解除合并", "mf-remove-selected-packing-groups", context.actions.unmerge)}
       ${button("批量设置项目归属", "mf-set-project", context.actions.project)}
+      ${button("批量设置供应商", "mf-set-supplier", context.actions.supplier)}
       ${button("删除所选", "mf-exclude-selected", context.actions.remove, "ocw-outline-btn is-danger")}
       ${button("清除选择", "mf-clear-selection", context.actions.clear)}
     </div>`;
+  }
+
+  invalidateProjectRouteOptions() {
+    const state = this.ensureMaterialFeeState();
+    state.projectRouteOptionsCache = null;
+    state.projectRouteOptionsPromise = null;
+  }
+
+  projectRouteRevisionHint() {
+    const state = this.ensureMaterialFeeState();
+    return String(
+      state.materials?.route_revision
+      || state.aiFill?.route_revision
+      || state.aiFill?.project_routing?.route_revision
+      || ""
+    );
+  }
+
+  async loadProjectRouteOptions({ force = false, expectedRevision = "" } = {}) {
+    const state = this.ensureMaterialFeeState();
+    const batchName = String(this.detailState?.batchName || "");
+    const cached = state.projectRouteOptionsCache;
+    const revisionChanged = Boolean(expectedRevision && cached?.route_revision !== expectedRevision);
+    if (!force && !revisionChanged && cached?.batch_name === batchName) return cached.result;
+    if (!force && !revisionChanged && state.projectRouteOptionsPromise) return state.projectRouteOptionsPromise;
+    const request = this.call("overseas_costing.api.materials.list_project_route_options", {
+      batch_name:batchName,
+    }, false).then((result) => {
+      if (!result?.ok) throw new Error(result?.message || "项目路由加载失败。");
+      if (this.materialFeeState === state && String(this.detailState?.batchName || "") === batchName) {
+        state.projectRouteOptionsCache = { batch_name:batchName, route_revision:String(result.route_revision || ""), result };
+      }
+      return result;
+    }).finally(() => {
+      if (state.projectRouteOptionsPromise === request) state.projectRouteOptionsPromise = null;
+    });
+    state.projectRouteOptionsPromise = request;
+    return request;
+  }
+
+  buildProjectPickerModel(items, optionsResult, search = "", selectedValue = "") {
+    const options = Array.isArray(optionsResult?.options) ? optionsResult.options : [];
+    const validProjects = new Set(options.map((row) => String(row.project_collection || "").trim()).filter(Boolean));
+    const invalidCurrent = [...new Set((items || []).map((row) => String(row.project_collection || "").trim())
+      .filter((value) => value && !validProjects.has(value)))];
+    return {
+      options,
+      conflicts: optionsResult?.conflicts || [],
+      routeRevision: String(optionsResult?.route_revision || ""),
+      invalidCurrent,
+      selectedValue:String(selectedValue || ""),
+      search:String(search || ""),
+    };
+  }
+
+  renderProjectPickerOptions(model = {}) {
+    const needle = String(model.search || "").trim().toLocaleLowerCase();
+    const options = (model.options || []).filter((row) => !needle || [
+      row.project_collection, row.subsidiary_code, row.erp_site,
+    ].some((value) => String(value || "").toLocaleLowerCase().includes(needle)));
+    const renderGroup = (label, rows) => rows.length ? `<section class="ocw-mf-reference-group"><h6>${label}</h6>${rows.map((row) => {
+      const project = String(row.project_collection || "");
+      const selected = project === String(model.selectedValue || "");
+      return `<label class="ocw-mf-reference-option ${selected ? "is-selected" : ""}"><input type="radio" name="ocw-project-route" value="${this.escape(project)}" ${selected ? "checked" : ""}><span><strong>${this.escape(project)}</strong><small>ERP 公司：${this.escape(row.subsidiary_code || "未配置")}</small></span>${row.is_approval_candidate ? `<em>本审批候选</em>` : ""}</label>`;
+    }).join("")}</section>` : "";
+    const invalid = (model.invalidCurrent || []).map((value) => `<p class="ocw-mf-reference-invalid">当前值：${this.escape(value)}<span>无有效 ERP 路由，请改选下方有效项目。</span></p>`).join("");
+    const candidates = options.filter((row) => row.is_approval_candidate);
+    const others = options.filter((row) => !row.is_approval_candidate);
+    return `${invalid}${renderGroup("本审批候选", candidates)}${renderGroup("其他可选项目", others)}${options.length ? "" : `<p class="ocw-mf-reference-empty">没有匹配的有效项目</p>`}`;
+  }
+
+  referenceSelectionRequiresReason(items, fieldname, target) {
+    const next = String(target || "").trim();
+    return (items || []).some((item) => {
+      const current = String(item?.[fieldname] || "").trim();
+      return Boolean(current && current !== next);
+    });
+  }
+
+  renderReferenceChangePreview(items, fieldname, target, label) {
+    const rows = (items || []).map((row) => `<tr><td>${this.escape(row.material_code || row.stable_line_key || row.name)}</td><td>${this.escape(row[fieldname] || "未设置")}</td><td>${this.escape(target || "未选择")}</td></tr>`).join("");
+    return `<div class="ocw-mf-reference-preview"><strong>${this.escape(label)}</strong><span>只修改明确勾选的 ${items.length} 行，不会扩展到装箱组。</span><table><thead><tr><th>物料</th><th>原值</th><th>新值</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+
+  async applyMaterialReferenceSelection(items, fieldname, value, reason = "", options = {}) {
+    const target = String(value || "").trim();
+    const allowedValues = options.allowedValues instanceof Set ? options.allowedValues : new Set(options.allowedValues || []);
+    if (!target || !allowedValues.has(target)) throw new Error("请从有效列表中选择，不能录入列表外的值。");
+    const trimmedReason = String(reason || "").trim();
+    if (this.referenceSelectionRequiresReason(items, fieldname, target) && !trimmedReason) {
+      throw new Error("修改已有值时必须填写修改原因。");
+    }
+    const state = this.ensureMaterialFeeState();
+    if (options.aiDraft && fieldname === "project_collection") {
+      (items || []).forEach((item) => {
+        const meta = item.__aiReplacement;
+        if (meta) {
+          const proposal = (state.aiFill?.proposals || []).find((row) => String(row.proposal_id || "") === String(meta.proposalId || ""));
+          if (!proposal) return;
+          state.aiFill.edits = state.aiFill.edits || {};
+          if (!state.aiFill.edits[meta.proposalId]) state.aiFill.edits[meta.proposalId] = JSON.parse(JSON.stringify(proposal.payload?.fields || {}));
+          const edit = state.aiFill.edits[meta.proposalId];
+          edit.replacement_rows = edit.replacement_rows || JSON.parse(JSON.stringify(proposal.payload?.replacement_rows || []));
+          if (edit.replacement_rows[meta.rowIndex]) edit.replacement_rows[meta.rowIndex].project_collection = target;
+          state.aiFill.selections?.add?.(String(meta.proposalId));
+          return;
+        }
+        this.updateMaterialAIDraftValue(item.name, fieldname, target, item[fieldname] || "");
+        const draft = state.aiFill?.manualUpdates?.[`${item.name}:${fieldname}`];
+        if (draft) draft.reason = trimmedReason;
+      });
+      this.renderMaterialFeeWorkspacePreservingPosition();
+      return { ok:true, draft:true, changed_count:items.length };
+    }
+    if (!(await this.ensureEditSession())) return { ok:false, cancelled:true };
+    const fallbackRemark = fieldname === "project_collection" ? "设置 ERP 项目归属" : "设置 ERP 供应商";
+    const auditRemark = trimmedReason || fallbackRemark;
+    const updates = (items || []).map((item) => ({
+      item_name:item.name, fieldname, value:target, remark:auditRemark,
+    }));
+    const result = await this.call("overseas_costing.api.calculate.batch_update_items", {
+      batch_name:this.detailState.batchName,
+      version_name:this.detailState.versionName,
+      updates:JSON.stringify(updates),
+      remark:auditRemark,
+      edit_token:this.detailState.editToken,
+      expected_modified:this.detailState.expectedModified,
+    }, false);
+    if (!result?.ok) throw new Error(result?.message || `${fieldname === "project_collection" ? "项目归属" : "供应商"}未保存。`);
+    this.updateMaterialFeeExpectedModified(result);
+    state.packingGroupSelections?.clear?.();
+    if (fieldname === "project_collection") {
+      this.invalidateProjectRouteOptions();
+      await this.loadProjectRouteOptions({ force:true });
+    }
+    await this.loadMaterialFeeWorkspace({ quiet:true });
+    return result;
+  }
+
+  async applyProjectCollectionSelection(items, value, reason = "", options = {}) {
+    return this.applyMaterialReferenceSelection(items, "project_collection", value, reason, options);
+  }
+
+  async openProjectCollectionForItem(itemName, suggestedValue = "") {
+    const item = this.findMaterialFeeItem(itemName);
+    if (!item) throw new Error("物料行已变化，请刷新后重试。");
+    const state = this.ensureMaterialFeeState();
+    const draftValue = state.aiFill?.manualUpdates?.[`${itemName}:project_collection`]?.value
+      ?? state.aiFill?.updates?.[`${itemName}:project_collection`]?.value;
+    return this.openProjectCollectionPicker({ items:[item], source:"cell", suggestedValue:suggestedValue || draftValue || "" });
   }
 
   async openProjectCollectionDialog() {
     const state = this.ensureMaterialFeeState();
     const context = this.materialSelectionContext();
     if (!context.actions.project.enabled) throw new Error(context.actions.project.reason);
-    const selected = (state.materials?.items || []).filter((row) =>
-      context.selectedKeys.has(String(row.stable_line_key || "")));
-    if (selected.length !== context.selectedCount || selected.some((row) => !row.name)) {
-      throw new Error("选中物料已变化，请刷新后重试。");
-    }
-    const optionsResult = await this.call("overseas_costing.api.materials.list_project_route_options", {
-      batch_name:this.detailState.batchName,
-    }, false);
-    if (!optionsResult?.ok) throw new Error(optionsResult?.message || "项目路由加载失败。");
-    const options = optionsResult.options || [];
-    if (!options.length) throw new Error("当前没有可用的项目路由。");
-    const validProjects = new Set(options.map((row) => row.project_collection));
-    const invalidCurrent = [...new Set(selected.map((row) => String(row.project_collection || "").trim())
-      .filter((project) => project && !validProjects.has(project)))];
-    const routeWarning = [...new Set([...(optionsResult.conflicts || []), ...invalidCurrent])];
+    const selected = (state.materials?.items || []).filter((row) => context.selectedKeys.has(String(row.stable_line_key || "")));
+    if (selected.length !== context.selectedCount || selected.some((row) => !row.name)) throw new Error("选中物料已变化，请刷新后重试。");
+    return this.openProjectCollectionPicker({ items:selected, source:"bulk" });
+  }
+
+  async openProjectCollectionPicker({ items = [], source = "cell", suggestedValue = "" } = {}) {
+    const state = this.ensureMaterialFeeState();
+    const optionsResult = await this.loadProjectRouteOptions({ expectedRevision:this.projectRouteRevisionHint() });
+    if (!(optionsResult.options || []).length) throw new Error("当前没有可用的项目路由。");
+    const valid = new Set(optionsResult.options.map((row) => String(row.project_collection || "")));
+    const sharedCurrent = [...new Set(items.map((row) => String(row.project_collection || "").trim()).filter(Boolean))];
+    const initial = valid.has(String(suggestedValue || "")) ? String(suggestedValue) : sharedCurrent.length === 1 && valid.has(sharedCurrent[0]) ? sharedCurrent[0] : "";
+    let model = this.buildProjectPickerModel(items, optionsResult, "", initial);
     const dialog = new frappe.ui.Dialog({
-      title:`批量设置项目归属（${selected.length} 行）`,
+      title:source === "bulk" ? `批量设置项目归属（${items.length} 行）` : `选择项目归属`,
       fields:[
-        {fieldtype:"Select", fieldname:"project_collection", label:"项目归属", reqd:1,
-          options:options.map((row) => row.project_collection),
-          description:"只修改当前明确勾选的物料行。"},
-        {fieldtype:"HTML", fieldname:"preview", options:`<div class="ocw-mf-project-preview">${routeWarning.length
-          ? `<p class="text-danger">以下归属当前无有效唯一路由：${routeWarning.map((value) => this.escape(value)).join("、")}</p>` : ""}</div>`},
+        {fieldtype:"HTML", fieldname:"picker", options:`<div class="ocw-mf-reference-picker-dialog"><label class="ocw-mf-reference-search"><span>搜索项目或 ERP 公司</span><input type="search" data-mf-project-search autocomplete="off"></label><div data-mf-project-options>${this.renderProjectPickerOptions(model)}</div></div>`},
+        {fieldtype:"Small Text", fieldname:"reason", label:"修改原因", description:"填补空值无需原因；覆盖已有值时必填。"},
+        {fieldtype:"HTML", fieldname:"preview", options:this.renderReferenceChangePreview(items, "project_collection", initial, "项目归属变更预览")},
       ],
-      primary_action_label:"预览并保存",
+      primary_action_label:source === "bulk" ? "确认批量设置" : "保存",
       primary_action:async (values) => {
-        const target = String(values.project_collection || "").trim();
-        if (!target) return;
-        const company = options.find((row) => row.project_collection === target)?.subsidiary_code || "";
-        const previewRows = selected.map((row) =>
-          `${this.escape(row.material_code || row.stable_line_key)}：${this.escape(row.project_collection || "未设置")} → ${this.escape(target)}`);
-        dialog.fields_dict.preview.$wrapper.html(`<p><strong>ERP 公司：</strong>${this.escape(company)}</p><p>${previewRows.join("<br>")}</p>`);
-        frappe.confirm(`确认只修改这 ${selected.length} 行的项目归属？`, async () => {
-          if (!(await this.ensureEditSession())) return;
-          const updates = selected.map((row) => ({item_name:row.name, fieldname:"project_collection", value:target,
-            remark:"批量设置 ERP 项目归属"}));
-          const result = await this.call("overseas_costing.api.calculate.batch_update_items", {
-            batch_name:this.detailState.batchName, version_name:this.detailState.versionName,
-            updates:JSON.stringify(updates), remark:"批量设置 ERP 项目归属",
-            edit_token:this.detailState.editToken, expected_modified:this.detailState.expectedModified,
-          }, false);
-          if (!result?.ok) throw new Error(result?.message || "项目归属未保存。");
-          this.updateMaterialFeeExpectedModified(result);
-          state.packingGroupSelections.clear();
-          dialog.hide();
-          await this.loadMaterialFeeWorkspace({quiet:true});
-          frappe.show_alert({message:`已更新 ${Number(result.changed_count || 0)} 行项目归属`, indicator:"green"});
+        const target = String(model.selectedValue || "");
+        const reason = String(values.reason || "").trim();
+        const aiDraft = Boolean(this.isMaterialAIReadyStatus(state.aiFill?.status) && state.aiFill?.draftVisible);
+        await this.applyProjectCollectionSelection(items, target, reason, {
+          aiDraft,
+          allowedValues:valid,
         });
+        dialog.hide();
+        frappe.show_alert({message:aiDraft ? "项目归属已更新到 AI 草稿" : `已更新 ${items.length} 行项目归属`, indicator:"green"});
       },
     });
     dialog.show();
+    const $picker = dialog.fields_dict.picker.$wrapper;
+    const render = () => {
+      $picker.find("[data-mf-project-options]").html(this.renderProjectPickerOptions(model));
+      dialog.fields_dict.preview.$wrapper.html(this.renderReferenceChangePreview(items, "project_collection", model.selectedValue, "项目归属变更预览"));
+    };
+    $picker.on("input", "[data-mf-project-search]", (event) => { model = { ...model, search:String($(event.currentTarget).val() || "") }; render(); });
+    $picker.on("change", "input[name='ocw-project-route']", (event) => { model = { ...model, selectedValue:String($(event.currentTarget).val() || "") }; render(); });
+    return dialog;
+  }
+
+  async loadSupplierOptions(rawValue = "") {
+    const state = this.ensureMaterialFeeState();
+    const batchName = String(this.detailState?.batchName || "");
+    const query = String(rawValue || "").trim();
+    const key = `${batchName}:${query.toLocaleLowerCase()}`;
+    if (state.supplierOptionsCache.has(key)) return state.supplierOptionsCache.get(key);
+    const result = await this.call("overseas_costing.api.materials.resolve_supplier_options", {
+      batch_name:batchName, raw_value:query,
+    }, false, { type:"GET" });
+    const options = [];
+    if (result?.canonical_supplier) options.push({
+      name:String(result.canonical_supplier), supplier_name:String(result.canonical_supplier), score:1, exact:true,
+    });
+    (result?.candidates || []).forEach((candidate) => {
+      if (!candidate?.name || options.some((row) => row.name === candidate.name)) return;
+      options.push({ ...candidate, name:String(candidate.name) });
+    });
+    state.supplierOptionsCache.set(key, options);
+    return options;
+  }
+
+  renderSupplierPickerOptions(options = [], search = "", selectedValue = "") {
+    const needle = String(search || "").trim().toLocaleLowerCase();
+    const filtered = (options || []).filter((row) => !needle || [row.name, row.supplier_name]
+      .some((value) => String(value || "").toLocaleLowerCase().includes(needle)));
+    if (!filtered.length) return `<p class="ocw-mf-reference-empty">请输入 ERP 供应商名称搜索；只能选择返回的规范供应商。</p>`;
+    return `<section class="ocw-mf-reference-group"><h6>ERP 供应商</h6>${filtered.map((row) => `<label class="ocw-mf-reference-option ${String(row.name) === String(selectedValue) ? "is-selected" : ""}"><input type="radio" name="ocw-supplier" value="${this.escape(row.name)}" ${String(row.name) === String(selectedValue) ? "checked" : ""}><span><strong>${this.escape(row.name)}</strong><small>${this.escape(row.supplier_name || row.name)}${row.score ? ` · ${Math.round(Number(row.score) * 100)}%` : ""}</small></span>${row.high_confidence ? `<em>高置信候选</em>` : ""}</label>`).join("")}</section>`;
+  }
+
+  async applySupplierSelection(items, value, reason = "", options = {}) {
+    return this.applyMaterialReferenceSelection(items, "supplier", value, reason, options);
+  }
+
+  async openSupplierForItem(itemName, suggestedValue = "") {
+    const item = this.findMaterialFeeItem(itemName);
+    if (!item) throw new Error("物料行已变化，请刷新后重试。");
+    return this.openSupplierPicker({ items:[item], source:"cell", suggestedValue });
+  }
+
+  async openSupplierDialog() {
+    const state = this.ensureMaterialFeeState();
+    const context = this.materialSelectionContext();
+    if (!context.actions.supplier.enabled) throw new Error(context.actions.supplier.reason);
+    const selected = (state.materials?.items || []).filter((row) => context.selectedKeys.has(String(row.stable_line_key || "")));
+    if (selected.length !== context.selectedCount || selected.some((row) => !row.name)) throw new Error("选中物料已变化，请刷新后重试。");
+    return this.openSupplierPicker({ items:selected, source:"bulk" });
+  }
+
+  async openSupplierPicker({ items = [], source = "cell", suggestedValue = "" } = {}) {
+    const sharedCurrent = [...new Set(items.map((row) => String(row.supplier || "").trim()).filter(Boolean))];
+    let query = String(suggestedValue || (sharedCurrent.length === 1 ? sharedCurrent[0] : ""));
+    let options = await this.loadSupplierOptions(query);
+    let selectedValue = options.some((row) => row.name === query) ? query : "";
+    let requestRevision = 0;
+    const dialog = new frappe.ui.Dialog({
+      title:source === "bulk" ? `批量设置供应商（${items.length} 行）` : "选择 ERP 供应商",
+      fields:[
+        {fieldtype:"HTML", fieldname:"picker", options:`<div class="ocw-mf-reference-picker-dialog"><label class="ocw-mf-reference-search"><span>搜索供应商</span><input type="search" data-mf-supplier-search autocomplete="off" value="${this.escape(query)}"></label><div data-mf-supplier-options>${this.renderSupplierPickerOptions(options, "", selectedValue)}</div></div>`},
+        {fieldtype:"Small Text", fieldname:"reason", label:"修改原因", description:"填补空值无需原因；更换已有规范供应商时必填。"},
+        {fieldtype:"HTML", fieldname:"preview", options:this.renderReferenceChangePreview(items, "supplier", selectedValue, "供应商变更预览")},
+      ],
+      primary_action_label:source === "bulk" ? "确认批量设置" : "保存",
+      primary_action:async (values) => {
+        const allowedValues = new Set(options.map((row) => row.name));
+        await this.applySupplierSelection(items, selectedValue, String(values.reason || "").trim(), { allowedValues });
+        dialog.hide();
+        frappe.show_alert({message:`已更新 ${items.length} 行供应商`, indicator:"green"});
+      },
+    });
+    dialog.show();
+    const $picker = dialog.fields_dict.picker.$wrapper;
+    const render = () => {
+      $picker.find("[data-mf-supplier-options]").html(this.renderSupplierPickerOptions(options, "", selectedValue));
+      dialog.fields_dict.preview.$wrapper.html(this.renderReferenceChangePreview(items, "supplier", selectedValue, "供应商变更预览"));
+    };
+    $picker.on("input", "[data-mf-supplier-search]", async (event) => {
+      query = String($(event.currentTarget).val() || "").trim();
+      const currentRevision = ++requestRevision;
+      const next = await this.loadSupplierOptions(query);
+      if (currentRevision !== requestRevision) return;
+      options = next;
+      if (!options.some((row) => row.name === selectedValue)) selectedValue = "";
+      render();
+    });
+    $picker.on("change", "input[name='ocw-supplier']", (event) => { selectedValue = String($(event.currentTarget).val() || ""); render(); });
+    return dialog;
   }
 
   async openMaterialPackingGroupDialog(action = "create", groupId = "") {
@@ -1529,6 +1777,9 @@
     if (!editable.has(fieldname)) {
       return `<td class="ocw-mf-cell is-readonly is-ai-replacement" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}" title="AI 临时明细，确认后替换原模糊物料行"><span>${this.escape(this.formatValue(value || "--"))}</span></td>`;
     }
+    if (fieldname === "project_collection") {
+      return this.renderMaterialReferencePickerCell(item, column, value, columnIndex, "is-ai-draft is-ai-replacement");
+    }
     return `<td class="ocw-mf-cell is-ai-draft is-ai-replacement" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}"><input data-mf-ai-edit="1" data-proposal-id="${this.escape(meta.proposalId || "")}" data-row-index="${Number(meta.rowIndex || 0)}" data-fieldname="${this.escape(fieldname)}" value="${this.escape(value ?? "")}" ${column.numeric ? 'inputmode="decimal"' : ""} aria-label="AI 临时明细 ${this.escape(column.label)}" /><small>AI 临时明细 · 可修改</small></td>`;
   }
 
@@ -1631,6 +1882,9 @@
     const valuationMeta = column.field === "shipment_value_rmb" ? this.renderShipmentValuationMeta(item.shipment_valuation, item.name) : "";
     const classes = ["ocw-mf-cell", isMissing ? "is-missing" : "", isDefault ? "is-default" : "", column.readonly ? "is-readonly" : "", requiresCorrection ? "is-protected-purchase" : "", draft?.error ? "is-save-error" : "", aiUpdate || manualUpdate ? "is-ai-draft" : "", aiCell && !aiUpdate ? "has-ai-candidate" : "", valuationStatus ? "is-shipment-valuation" : "", valuationStatus ? `is-valuation-${valuationStatus}` : ""].filter(Boolean).join(" ");
     const reason = draft?.error || (column.field === "shipment_value_rmb" ? item.shipment_valuation?.error_detail : "") || (item.requirements?.field_reasons?.[column.field] || []).map((row) => row.message || row.code).join("；");
+    if (["project_collection", "supplier"].includes(column.field)) {
+      return this.renderMaterialReferencePickerCell(item, column, value, columnIndex, classes);
+    }
     if (column.readonly) {
       const fullValue = this.formatValue(value ?? "--");
       return `<td class="${classes}" data-item-name="${this.escape(item.name || "")}" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}" title="${this.escape(column.field === "product_name" || column.field === "source_doc_no" ? fullValue : reason)}"><span>${this.escape(fullValue)}</span>${column.field === "source_doc_no" ? this.renderApprovalLinkMarker(item.approval_link) : ""}${column.field === "product_name" ? (this.renderReviewFeedbackButton?.({ target_tab: "documents", target_field: column.field, target_item: item.name }, "反馈此行") || "") : ""}</td>`;
@@ -1643,6 +1897,16 @@
       : `<input data-mf-cell-input="1" data-item-name="${this.escape(item.name || "")}" data-fieldname="${this.escape(column.field)}" data-original-value="${this.escape(originalValue ?? "")}" value="${this.escape(value ?? "")}" ${column.numeric ? 'inputmode="decimal"' : ""} aria-label="${this.escape(column.label)}" />`;
     const retry = draft?.error ? `<button type="button" class="ocw-mf-cell-retry" data-action="mf-retry-cell">重试</button>` : "";
     return `<td class="${classes}" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}" title="${this.escape(reason)}">${editor}${valuationMeta}${retry}${aiUpdate ? `<small>AI 草稿${aiUpdate.user_edited ? " · 已修改" : ""}</small>` : manualUpdate ? `<small>人工草稿</small>` : isDefault && column.field === "actual_shipped_qty" ? `<small>默认=采购数</small>` : ""}${this.renderMaterialAICandidates(item.name, column.field, aiCell, Boolean(aiUpdate))}</td>`;
+  }
+
+  renderMaterialReferencePickerCell(item, column, value, columnIndex, extraClasses = "") {
+    const fieldname = String(column.field || "");
+    const project = fieldname === "project_collection";
+    const action = project ? "mf-open-project-picker" : "mf-open-supplier-picker";
+    const label = project ? "项目归属" : "供应商";
+    const display = String(value ?? "").trim();
+    const disabled = this.detailState?.readOnly ? "disabled" : "";
+    return `<td class="ocw-mf-cell ocw-mf-reference-cell ${extraClasses}" data-mf-column-index="${columnIndex}" data-mf-grid-field="${this.escape(fieldname)}"><span>${this.escape(display || "未设置")}</span><button type="button" class="ocw-mf-reference-picker" data-action="${action}" data-item-name="${this.escape(item.name || "")}" ${disabled}>${display ? "修正" : `选择${label}`}</button></td>`;
   }
 
   shipmentValuationStatus(valuation = {}) {
@@ -3693,7 +3957,9 @@
   }
 
   findMaterialFeeItem(itemName) {
-    return (this.ensureMaterialFeeState().materials?.items || []).find((row) => String(row.name) === String(itemName));
+    const items = this.ensureMaterialFeeState().materials?.items || [];
+    return items.find((row) => String(row.name) === String(itemName))
+      || this.materialReplacementRows(items).find((row) => String(row.name) === String(itemName));
   }
 
   updateMaterialFeeExpectedModified(result) {
@@ -3793,6 +4059,8 @@
   }
 
   openMaterialPurchaseCorrectionDialog(itemName, fieldname, suggestedValue = undefined) {
+    if (fieldname === "project_collection") return this.openProjectCollectionForItem(itemName, suggestedValue);
+    if (fieldname === "supplier") return this.openSupplierForItem(itemName, suggestedValue);
     const item = this.findMaterialFeeItem(itemName);
     if (!item) {
       frappe.show_alert({ message: "物料行已变化，请刷新后重试", indicator: "red" });
