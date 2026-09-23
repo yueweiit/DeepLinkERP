@@ -8,7 +8,12 @@ import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import getdate
 
-from china_finance.services.closing import run_closing_checks, submit_closing_run
+from china_finance.services.closing import (
+	preview_reverse_closing,
+	reverse_closing,
+	run_closing_checks,
+	submit_closing_run,
+)
 from china_finance.services.financial_statement import snapshot_statement
 from china_finance.services.statutory_reporting import generate_statutory_report_package
 
@@ -131,6 +136,64 @@ class TestClosingReportSnapshots(IntegrationTestCase):
 		self.assertTrue(all(json.loads(row.data_json)["comparison_status"] == "Missing Template" for row in snapshots))
 		self.assertEqual(getdate(frappe.db.get_value("Company", self.company, "accounts_frozen_till_date")), getdate("2026-01-31"))
 		self.assertTrue(enqueue.call_args.kwargs["enqueue_after_commit"])
+
+	def test_reverse_closing_includes_later_periods_and_cancels_latest_first(self):
+		frappe.db.set_value(
+			"China Closing Run",
+			self.run.name,
+			{"docstatus": 1, "status": "Closed", "previous_frozen_date": "2025-12-31"},
+		)
+		later_pcv = self.insert(
+			"Period Closing Voucher",
+			"February closing",
+			company=self.company,
+			period_start_date="2026-02-01",
+			period_end_date="2026-02-28",
+			docstatus=1,
+		)
+		later_run = self.insert(
+			"China Closing Run",
+			"February run",
+			company=self.company,
+			closing_type="Monthly",
+			from_date="2026-02-01",
+			to_date="2026-02-28",
+			period_closing_voucher=later_pcv,
+			status="Closed",
+			docstatus=1,
+		)
+		frappe.db.set_value("Company", self.company, "accounts_frozen_till_date", "2026-02-28")
+
+		preview = preview_reverse_closing(self.run.name)
+		self.assertEqual([row.name for row in preview["runs"]], [later_run, self.run.name])
+
+		cancelled = []
+
+		def cancel(voucher):
+			cancelled.append(voucher.name)
+			frappe.db.set_value("Period Closing Voucher", voucher.name, "docstatus", 2)
+
+		with patch(
+			"china_finance.overrides.period_closing_voucher.ChinaFinancePeriodClosingVoucher.cancel",
+			autospec=True,
+			side_effect=cancel,
+		):
+			result = reverse_closing(self.run.name, "补录一月凭证")
+
+		self.assertEqual(cancelled, [later_pcv, self.pcv])
+		self.assertEqual([row.name for row in result["reopened_runs"]], [later_run, self.run.name])
+		self.assertEqual(
+			frappe.get_all(
+				"China Closing Run",
+				filters={"name": ["in", [self.run.name, later_run]]},
+				pluck="status",
+			),
+			["Reopened", "Reopened"],
+		)
+		self.assertEqual(
+			getdate(frappe.db.get_value("Company", self.company, "accounts_frozen_till_date")),
+			getdate("2025-12-31"),
+		)
 
 	def test_year_end_still_rejects_missing_comparison(self):
 		self.run.closing_type = "Year End"

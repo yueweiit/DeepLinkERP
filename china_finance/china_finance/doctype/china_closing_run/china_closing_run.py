@@ -41,7 +41,7 @@ class ChinaClosingRun(Document):
 				or getdate(period_end_date) != getdate(self.to_date)
 				or docstatus == 2
 			):
-				frappe.throw(_("损益结转凭证必须与期末智能结转的公司和起止日期一致，且不能是已取消状态"))
+				frappe.throw(_("损益结转凭证必须与月末结账单的公司和起止日期一致，且不能是已取消状态"))
 
 	def _remove_empty_check_rows(self):
 		"""Discard UI-created blank rows before Frappe validates child mandatory fields."""
@@ -57,7 +57,7 @@ class ChinaClosingRun(Document):
 		lock_company(self.company)
 		if frappe.db.count("Journal Entry", {"company": self.company, "docstatus": 0,
 			"posting_date": ["between", [self.from_date, self.to_date]]}):
-			frappe.throw(_("本期还有未记账凭证，请先完成统一记账"))
+			frappe.throw(_("本期还有未记账凭证，请先完成月末记账"))
 		if self.get("preparation_state") and frappe.db.get_value(
 			"Period Closing Voucher", self.period_closing_voucher, "gle_processing_status"
 		) != "Completed":
@@ -65,7 +65,7 @@ class ChinaClosingRun(Document):
 		if self.period_closing_voucher and frappe.db.get_value(
 			"Period Closing Voucher", self.period_closing_voucher, "docstatus"
 		) != 1:
-			frappe.throw(_("请先提交损益结转凭证，再提交期末智能结转"))
+			frappe.throw(_("请先完成损益结转，再确认月末结账"))
 		checks = run_closing_checks(
 			self.company, self.from_date, self.to_date, self.period_closing_voucher, self.closing_type
 		)

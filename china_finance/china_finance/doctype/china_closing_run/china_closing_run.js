@@ -49,7 +49,7 @@ async function save_latest_closing_run(frm) {
 
 	await frm.save();
 	if (frm.is_dirty()) {
-		throw new Error(__("期末智能结转保存失败，请刷新页面后重试"));
+		throw new Error(__("月末结账单保存失败，请刷新页面后重试"));
 	}
 }
 
@@ -90,6 +90,104 @@ function show_closing_action_error(title, error) {
 	});
 }
 
+function open_period_vouchers(frm) {
+	frappe.route_options = {
+		company: frm.doc.company,
+		from_date: frm.doc.from_date,
+		to_date: frm.doc.to_date,
+		period_preset: "",
+		voucher_status: "全部有效凭证",
+	};
+	frappe.set_route("query-report", "China Voucher Ledger");
+}
+
+async function create_reclosing_run(frm) {
+	const existing = await frappe.db.get_value(
+		"China Closing Run",
+		{
+			company: frm.doc.company,
+			closing_type: frm.doc.closing_type,
+			from_date: frm.doc.from_date,
+			to_date: frm.doc.to_date,
+			docstatus: 0,
+		},
+		"name"
+	);
+	if (existing.message?.name) {
+		frappe.set_route("Form", "China Closing Run", existing.message.name);
+		return;
+	}
+	frappe.new_doc("China Closing Run", {
+		company: frm.doc.company,
+		closing_type: frm.doc.closing_type,
+		from_date: frm.doc.from_date,
+		to_date: frm.doc.to_date,
+	});
+}
+
+async function reverse_closing(frm) {
+	if (frm.__china_closing_action_running) return;
+	frm.__china_closing_action_running = true;
+	try {
+		const preview_response = await frappe.call({
+			method: "china_finance.services.closing.preview_reverse_closing",
+			args: { name: frm.doc.name },
+		});
+		const preview = preview_response.message || {};
+		const periods = (preview.runs || [])
+			.map((run) => `${frappe.datetime.str_to_user(run.from_date)} - ${frappe.datetime.str_to_user(run.to_date)}`)
+			.join("<br>");
+		const vouchers = (preview.period_closing_vouchers || [])
+			.filter((voucher) => voucher.docstatus === 1)
+			.map((voucher) => frappe.utils.escape_html(voucher.name))
+			.join("、");
+		frappe.prompt(
+			[
+				{
+					fieldtype: "HTML",
+					options: `<p>${__("系统将一次完成以下操作：")}</p>
+						<ul><li>${__("反结账期间：")}<br>${periods}</li>
+						<li>${__("自动撤销损益结转凭证：{0}", [vouchers || __("无")])}</li>
+						<li>${__("账务截止日期恢复至：{0}", [preview.previous_frozen_date ? frappe.datetime.str_to_user(preview.previous_frozen_date) : __("未设置")])}</li></ul>`,
+				},
+				{ fieldname: "reason", fieldtype: "Small Text", label: __("反结账原因"), reqd: 1 },
+			],
+			async (values) => {
+				frappe.dom.freeze(__("正在反结账并撤销损益结转..."));
+				try {
+					const response = await frappe.call({
+						method: "china_finance.services.closing.reverse_closing",
+						args: { name: frm.doc.name, reason: values.reason },
+						type: "POST",
+					});
+					const result = response.message || {};
+					const runs = (result.reopened_runs || []).map((run) => run.name).join("、");
+					const cancelled = (result.cancelled_period_closing_vouchers || []).join("、");
+					const pending = (result.pending_period_closing_vouchers || []).join("、");
+					const messages = [
+						__("已反结账：{0}", [runs]),
+						__("已撤销损益结转：{0}", [cancelled || __("无")]),
+						__("现在可以修改本期凭证；修改完成后新建同期间的月末结账单。"),
+					];
+					if (pending) messages.splice(2, 0, __("以下凭证的总账撤销仍在后台处理：{0}", [pending]));
+					frappe.msgprint({ message: messages.join("<br>"), indicator: pending ? "orange" : "green" });
+					await frm.reload_doc();
+				} catch (error) {
+					show_closing_action_error("反结账失败", error);
+				} finally {
+					frappe.dom.unfreeze();
+				}
+			},
+			__("反结账"),
+			__("确认反结账")
+		);
+	} catch (error) {
+		show_closing_action_error("反结账检查失败", error);
+	} finally {
+		frm.__china_closing_action_running = false;
+	}
+}
+
 async function generate_period_closing_voucher(frm) {
 	if (frm.__china_closing_action_running) return;
 
@@ -115,7 +213,7 @@ async function generate_period_closing_voucher(frm) {
 		}
 		frappe.msgprint({
 			message: result.message + (frm.is_new()
-				? __("；当前期末智能结转尚未保存，请保存后再提交结转")
+				? __("；当前月末结账单尚未保存，请保存后再完成损益结转")
 				: ""),
 			primary_action: {
 				label: __("打开损益结转凭证"),
@@ -134,7 +232,7 @@ async function run_closing_checks(frm) {
 	if (frm.__china_closing_action_running) return;
 	if (!frm.doc.period_closing_voucher) {
 		frappe.msgprint({
-			message: __("请先填写并选择 ERPNext 损益结转凭证"),
+			message: __("请先生成或选择损益结转凭证"),
 			indicator: "orange",
 		});
 		return;
@@ -212,7 +310,7 @@ frappe.ui.form.on("China Closing Run", {
 		lock_check_grid(frm);
 		if (frm.doc.company && frm.doc.from_date && frm.doc.to_date && frm.doc.docstatus === 0) {
 			if (!frm.is_new()) {
-				frm.page.set_primary_action(__("提交并完成结账"), () => {
+				frm.page.set_primary_action(__("确认结账"), () => {
 					frappe.confirm(
 						__("确认提交并完成期末结账 {0}？", [frm.doc.name]),
 						() => submit_and_complete_closing(frm)
@@ -220,9 +318,9 @@ frappe.ui.form.on("China Closing Run", {
 				}, "check");
 			}
 			frm.add_custom_button(__(frm.doc.closing_type === "Monthly"
-				? "生成本月损益结转草稿"
-				: "生成年度损益结转草稿"), () => generate_period_closing_voucher(frm), __("结账"));
-			frm.add_custom_button(__("生成必需对账单"), () => frappe.call({
+				? "生成损益结转凭证"
+				: "生成年度损益结转凭证"), () => generate_period_closing_voucher(frm), __("月末结账"));
+			frm.add_custom_button(__("生成本期对账单"), () => frappe.call({
 				method: "china_finance.services.reconciliation_control.generate_required_statements",
 				args: { company: frm.doc.company, from_date: frm.doc.from_date, to_date: frm.doc.to_date },
 				freeze: true,
@@ -230,42 +328,22 @@ frappe.ui.form.on("China Closing Run", {
 					const result = response.message || {};
 					frappe.msgprint(__("处理 {0} 项，创建 {1} 张，已存在 {2} 张，失败 {3} 项", [result.processed || 0, result.created || 0, result.existing || 0, result.failed || 0]));
 				},
-			}), __("对账"));
-			frm.add_custom_button(__("运行结账检查"), () => run_closing_checks(frm), __("对账"));
+			}), __("月末检查"));
+			frm.add_custom_button(__("结账检查"), () => run_closing_checks(frm), __("月末检查"));
 		}
 		if (frm.doc.docstatus === 1 && frm.doc.status === "Closed") {
-			frm.set_intro(frm.doc.archive_package ? __("已结账，归档包已生成") : __("已结账，归档包尚未就绪，可刷新或重试归档"), "green");
-			if (!frm.doc.archive_package) frm.add_custom_button(__("重试归档"), async () => {
+			frm.set_intro(frm.doc.archive_package ? __("已结账，结账档案已生成") : __("已结账，结账档案尚未就绪，可刷新或重新生成"), "green");
+			if (!frm.doc.archive_package) frm.add_custom_button(__("重新生成结账档案"), async () => {
 				const response = await frappe.call({method: "china_finance.services.month_end.retry_archive", args: {name: frm.doc.name}, type: "POST"});
-				frappe.msgprint(response.message?.message || __("归档包已就绪"));
+				frappe.msgprint(response.message?.message || __("结账档案已生成"));
 				frm.reload_doc();
 			});
-			frm.add_custom_button(__("重新开账（含后续期间）"), () => {
-				frappe.prompt(
-					[{ fieldname: "reason", fieldtype: "Small Text", label: __("重新开账原因"), reqd: 1 }],
-					(values) => frappe.call({
-						method: "china_finance.services.closing.reopen_closing",
-						args: { name: frm.doc.name, reason: values.reason },
-						freeze: true,
-						callback: (response) => {
-							const result = response.message || {};
-							const runs = (result.reopened_runs || []).map((run) => run.name).join(", ");
-							const vouchers = (result.period_closing_vouchers || []).join(", ");
-							frappe.msgprint({
-								message: [
-									__("已按倒序重新开账：{0}", [runs]),
-									__("当前账务冻结日期已恢复至：{0}", [result.previous_frozen_date || __("无")]),
-									__("请按倒序取消以下损益结转凭证：{0}", [vouchers || __("无")]),
-									__("修改完成后，请按期间正序重新结转并提交结账。"),
-								].join("<br>"),
-								indicator: "green",
-							});
-							frm.reload_doc();
-						},
-					}),
-					__("重新开账（含后续期间）")
-				);
-			});
+			frm.page.set_primary_action(__("反结账"), () => reverse_closing(frm));
+		}
+		if (frm.doc.docstatus === 1 && frm.doc.status === "Reopened") {
+			frm.set_intro(__("已反结账，可以修改本期凭证；修改完成后重新结账。"), "orange");
+			frm.page.set_primary_action(__("查看本期凭证"), () => open_period_vouchers(frm));
+			frm.add_custom_button(__("重新结账"), () => create_reclosing_run(frm));
 		}
 	},
 });

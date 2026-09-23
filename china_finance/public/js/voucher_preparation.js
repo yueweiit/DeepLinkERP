@@ -26,7 +26,7 @@ frappe.provide("china_finance.preparation");
 			{fieldtype: "HTML", options: `<p>${esc(doc.company)} · ${esc(result.currency)} · ${__("保存后需要重新核对。银行收支必须与原回单一致。")}</p>`},
 			{fieldname: "posting_date", fieldtype: "Date", label: __("凭证日期"), default: doc.posting_date, reqd: 1},
 			{fieldname: "user_remark", fieldtype: "Small Text", label: __("凭证摘要"), default: doc.user_remark},
-			{fieldname: "accounts", fieldtype: "Table", label: __("会计分录"), in_place_edit: true, fields,
+			{fieldname: "accounts", fieldtype: "Table", label: __("会计分录"), in_place_edit: false, fields,
 				data: doc.accounts.map(row => ({...row, source_row: row.name}))},
 			{fieldtype: "HTML", options: `${result.receipts.map(r => `<a href="${esc(r.source_file)}#page=${r.page_number}" target="_blank" rel="noopener">原回单：第 ${r.page_number} 页第 ${r.position} 张</a>`).join(" · ")}${result.cash.error ? `<p class="text-warning">${esc(result.cash.error)}</p>` : ""}`},
 			{fieldname: "cash_flow_rows", fieldtype: "Table", label: __("现金流项目（按本位币核对）"), hidden: !result.cash.rows.length, cannot_add_rows: true, cannot_delete_rows: true, in_place_edit: true,
@@ -94,7 +94,7 @@ frappe.provide("china_finance.preparation");
 			report.refresh();
 		});
 		report.page.add_inner_button(__("未记账试算"), () => china_finance.preparation.trial(report.get_filter_value("company"), report.get_filter_value("from_date"), report.get_filter_value("to_date")));
-		report.page.add_inner_button(__("月末处理"), () => frappe.new_doc("China Closing Run", {company: report.get_filter_value("company"), from_date: report.get_filter_value("from_date"), to_date: report.get_filter_value("to_date")}));
+		report.page.add_inner_button(__("月末结账"), () => frappe.new_doc("China Closing Run", {company: report.get_filter_value("company"), from_date: report.get_filter_value("from_date"), to_date: report.get_filter_value("to_date")}));
 		report.page.add_inner_button(__("新增草稿"), () => frappe.new_doc("Journal Entry", {company: report.get_filter_value("company")}));
 	};
 })();

@@ -131,6 +131,44 @@ function batch_post_selected_journal_entries(listview) {
 	dialog.show();
 }
 
+function delete_selected_journal_entry_drafts(listview) {
+	const selected = listview.get_checked_items();
+	if (!selected.length) {
+		frappe.msgprint(__("请先勾选需要删除的凭证草稿"));
+		return;
+	}
+
+	const submitted = selected.filter((doc) => Number(doc.docstatus) !== 0);
+	const names = selected.map((doc) => doc.name);
+	const message = submitted.length
+		? __("已选择 {0} 张凭证，其中 {1} 张不是草稿。系统只会删除未记账草稿，其余记录会显示失败原因。", [selected.length, submitted.length])
+		: __("确认删除选中的 {0} 张未记账凭证草稿？回单、银行交易和 PDF 原件会保留，可重新生成。", [selected.length]);
+
+	frappe.confirm(message, () => {
+		frappe.call({
+			method: "china_finance.services.bank_receipt_import.delete_draft_vouchers",
+			args: {names: JSON.stringify(names)},
+			freeze: true,
+			freeze_message: __("正在删除凭证草稿，请稍候…"),
+		}).then((response) => {
+			const result = response.message || {};
+			const failed = result.failed || [];
+			const details = failed.length
+				? `<br><br><b>${__("未删除记录")}</b><br>${failed
+					.map((row) => `${frappe.utils.escape_html(row.name)}：${frappe.utils.escape_html(row.error || "删除失败")}`)
+					.join("<br>")}`
+				: "";
+			frappe.msgprint({
+				title: failed.length ? __("凭证草稿删除完成（部分失败）") : __("凭证草稿已删除"),
+				indicator: failed.length ? "orange" : "green",
+				message: `${__("已删除 {0} 张草稿。", [result.deleted_count || 0])}${details}`,
+			});
+			listview.clear_checked_items();
+			listview.refresh();
+		});
+	});
+}
+
 configure_china_voucher_number_list("Journal Entry", [
 	"custom_china_voucher_number", "title", "status_field", "company", "total_debit", "name",
 ], "title");
@@ -141,5 +179,8 @@ configure_china_voucher_number_list("Payment Entry", [
 frappe.listview_settings["Journal Entry"].onload = function (listview) {
 	listview.page.add_action_item(__("批量审核并记账"), () => {
 		batch_post_selected_journal_entries(listview);
+	});
+	listview.page.add_action_item(__("删除所选未记账草稿"), () => {
+		delete_selected_journal_entry_drafts(listview);
 	});
 };

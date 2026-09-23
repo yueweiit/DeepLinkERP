@@ -1,10 +1,10 @@
 China Finance,中国财务
 China Accounting Voucher,中国会计凭证
 China Accounting Voucher Entry,中国会计凭证分录
-Period Closing Voucher,期末结账
+Period Closing Voucher,损益结转凭证
 China Voucher Sync Issue,凭证快照同步异常
-China Closing Check,中国结账检查
-China Closing Run,期末智能结转
+China Closing Check,结账检查
+China Closing Run,月末结账
 China Electronic Document,电子会计档案
 China Finance Settings,中国财务设置
 China Financial Statement Mapping,财务报表科目映射
@@ -129,7 +129,7 @@ Cancellation,取消
 Monthly,月结
 Year End,年结
 Closed,已结账
-Reopened,已重新开账
+Reopened,已反结账
 China Statement Mapping,科目映射控制台
 Statement Type,报表类型
 Account Search,搜索科目

@@ -17,7 +17,7 @@ from china_finance.services.bank_receipt_parser import (
 	money,
 	parse_cmb_receipts,
 )
-from china_finance.services.bank_receipt_social import SOCIAL_ITEMS, social_suggestion
+from china_finance.services.bank_receipt_social import SOCIAL_ITEMS, social_period, social_suggestion
 
 IMPORT = "China Bank Receipt Import"
 RECEIPT = "China Bank Receipt"
@@ -163,6 +163,24 @@ def validate_receipt_context(row, bank, company):
 		frappe.throw("回单币种与银行账户不一致")
 
 
+def receipt_summary(data):
+	"""Build a concise accounting summary from structured receipt fields."""
+	summary = str(data.get("summary") or "").strip()
+	counterparty = str(data.get("counterparty") or "").strip()
+	if summary in {"报销", "报销款"} and counterparty:
+		return f"{summary}-{counterparty}"
+
+	tax_details = data.get("tax_details") or []
+	if tax_details and all(str(detail.get("item") or "").strip() == "个人所得税" for detail in tax_details):
+		try:
+			period = social_period(tax_details, data.get("posting_date"))
+		except (TypeError, ValueError):
+			period = None
+		if period:
+			return f"支付{period['label']}个人所得税"
+	return summary
+
+
 @frappe.whitelist(methods=["POST"])
 def parse_import(name):
 	doc = _get_import(name, write=True, lock=True)
@@ -181,6 +199,7 @@ def parse_import(name):
 	errors = list(result["errors"])
 	seen = {}
 	for data in result["rows"]:
+		accounting_summary = receipt_summary(data)
 		previous = seen.setdefault(data["transaction_id"], data)
 		if not _equivalent(data, previous):
 			errors.append(
@@ -202,12 +221,12 @@ def parse_import(name):
 						"direction",
 						"currency",
 						"amount",
-						"summary",
 						"counterparty",
 						"business_type",
 						"position",
 					)
 				},
+				"summary": accounting_summary,
 				"page_number": data["page"],
 				"raw_data": json.dumps(data, ensure_ascii=False),
 				"status": "待处理",
@@ -215,7 +234,7 @@ def parse_import(name):
 		)
 		try:
 			existing = _existing_receipt(doc, data)
-			if existing:
+			if existing and existing.voucher_name:
 				parsed_row.receipt, parsed_row.status = existing.name, receipt_status(existing)
 		except frappe.ValidationError as exc:
 			errors.append({"page": data["page"], "message": str(exc)})
@@ -370,7 +389,28 @@ def suggest_account(company, data):
 		if code
 		else None
 	)
-	return {"account": account, "reason": reason}
+	if code or (data["tax_details"] and all("保险费" in r["item"] for r in data["tax_details"])):
+		return {"account": account, "reason": reason}
+
+	# Use the same reviewed summary mapping as the XLSX bank-statement flow for
+	# ordinary receipts. Structured receipt rules above remain authoritative for
+	# fees, payroll, taxes and social-insurance allocations.
+	from china_finance.services.bank_reconciliation import _resolve_account
+
+	account = _resolve_account(
+		data["summary"],
+		company,
+		reference_number=data["transaction_id"],
+		counterparty_name=data["counterparty"],
+	)
+	return {
+		"account": account,
+		"reason": (
+			"按银行流水摘要科目规则自动匹配；生成草稿后可在查凭证修改"
+			if account
+			else reason
+		),
+	}
 
 
 def voucher_bank_amount(voucher, bank):
@@ -419,6 +459,185 @@ def validate_linked_voucher(doc, method=None):
 			frappe.throw("凭证已关联银行回单，银行金额或方向不能与原回单不一致")
 
 
+def prepare_voucher_delete(doc, method=None):
+	"""Detach a deleted draft while retaining its receipt and bank transaction."""
+	if doc.doctype != "Journal Entry" or not frappe.db.exists("DocType", RECEIPT):
+		return
+	receipt_names = frappe.get_all(
+		RECEIPT,
+		filters={"voucher_type": doc.doctype, "voucher_name": doc.name},
+		pluck="name",
+	)
+	bank_transaction_name = doc.get("custom_china_bank_transaction")
+	if not receipt_names and not bank_transaction_name:
+		return
+	if doc.docstatus != 0:
+		frappe.throw("只有未记账草稿可以直接删除；已记账或已取消凭证必须保留审计记录")
+
+	parents = set()
+	for name in receipt_names:
+		receipt = frappe.get_doc(RECEIPT, name, for_update=True)
+		if (receipt.voucher_type, receipt.voucher_name) != (doc.doctype, doc.name):
+			continue
+		receipt.voucher_type = None
+		receipt.voucher_name = None
+		receipt.status = "待处理"
+		receipt.process_note = f"未记账草稿 {doc.name} 已删除，可重新生成或关联凭证"
+		receipt.processed_by = frappe.session.user
+		receipt.processed_on = now_datetime()
+		_save(receipt)
+		for row in frappe.get_all(
+			"China Bank Receipt Import Row",
+			filters={"receipt": name},
+			fields=["name", "parent"],
+		):
+			parents.add(row.parent)
+			frappe.db.set_value(
+				"China Bank Receipt Import Row",
+				row.name,
+				{
+					"receipt": None,
+					"status": "待处理",
+					"message": f"原草稿 {doc.name} 已删除，可重新生成",
+				},
+				update_modified=False,
+			)
+
+	if bank_transaction_name and frappe.db.exists("Bank Transaction", bank_transaction_name):
+		bank_transaction = frappe.get_doc("Bank Transaction", bank_transaction_name, for_update=True)
+		if bank_transaction.get("custom_china_journal_entry") == doc.name:
+			if any(row.allocated_amount for row in bank_transaction.payment_entries):
+				frappe.throw("该草稿对应的银行交易已有核销记录，不能直接删除")
+			frappe.db.set_value(
+				"Bank Transaction",
+				bank_transaction.name,
+				"custom_china_journal_entry",
+				None,
+				update_modified=False,
+			)
+
+	for parent in parents:
+		status = frappe.db.get_value(IMPORT, parent, "status")
+		if status in ("已作废", "识别失败"):
+			continue
+		remaining = frappe.db.count(
+			"China Bank Receipt Import Row",
+			{"parent": parent, "receipt": ["is", "set"]},
+		)
+		frappe.db.set_value(
+			IMPORT,
+			parent,
+			"status",
+			"部分处理" if remaining else "待处理",
+			update_modified=False,
+		)
+
+
+@frappe.whitelist(methods=["POST"])
+def delete_draft_vouchers(names):
+	"""Delete selected Journal Entry drafts and restore receipt rows for retry."""
+	if isinstance(names, str):
+		names = frappe.parse_json(names)
+	if not isinstance(names, list) or not 1 <= len(names) <= 300:
+		frappe.throw("请选择 1 至 300 张凭证草稿")
+
+	# Keep the response order stable while avoiding duplicate delete requests.
+	names = list(dict.fromkeys(str(name) for name in names if name))
+	if not names:
+		frappe.throw("请选择要删除的凭证草稿")
+	if not frappe.has_permission("Journal Entry", "delete"):
+		frappe.throw("当前用户没有删除记账凭证的权限", frappe.PermissionError)
+
+	deleted, failed = [], []
+	for index, name in enumerate(names):
+		point = f"delete_voucher_{index}"
+		frappe.db.savepoint(point)
+		try:
+			if not frappe.db.exists("Journal Entry", name):
+				frappe.throw(f"凭证 {name} 不存在")
+			voucher = frappe.get_doc("Journal Entry", name)
+			voucher.check_permission("delete")
+			if voucher.docstatus != 0:
+				frappe.throw(f"凭证 {name} 不是未记账草稿，不能直接删除")
+			frappe.delete_doc("Journal Entry", name, ignore_missing=False)
+			deleted.append(name)
+		except Exception as exc:
+			frappe.db.rollback(save_point=point)
+			failed.append({"name": name, "error": str(exc)})
+
+	return {"deleted": deleted, "failed": failed, "deleted_count": len(deleted), "failed_count": len(failed)}
+
+
+@frappe.whitelist(methods=["POST"])
+def refresh_import_draft_summaries(name):
+	"""Apply structured summaries to untouched drafts from an existing batch."""
+	from china_finance.services.bank_reconciliation import _apply_journal_entry_summary
+
+	doc = _get_import(name, write=True, lock=True)
+	updated, skipped, seen = [], [], set()
+	for row in doc.rows:
+		if not row.receipt or row.receipt in seen:
+			continue
+		seen.add(row.receipt)
+		receipt = frappe.get_doc(RECEIPT, row.receipt, for_update=True)
+		if receipt.voucher_type != "Journal Entry" or not receipt.voucher_name:
+			continue
+		if frappe.db.get_value("Journal Entry", receipt.voucher_name, "docstatus") != 0:
+			skipped.append({"voucher": receipt.voucher_name, "reason": "凭证已经记账或取消"})
+			continue
+		try:
+			data = json.loads(receipt.raw_data or row.raw_data)
+		except (TypeError, ValueError, json.JSONDecodeError):
+			skipped.append({"voucher": receipt.voucher_name, "reason": "回单结构化数据无效"})
+			continue
+		source_summary = str(data.get("source_summary") or data.get("summary") or "").strip()
+		target_summary = receipt_summary(data)
+		if not target_summary or target_summary == source_summary:
+			continue
+
+		voucher = frappe.get_doc("Journal Entry", receipt.voucher_name)
+		voucher.check_permission("write")
+		current_summaries = {
+			str(value).strip()
+			for value in [
+				voucher.get("remark"),
+				voucher.get("user_remark"),
+				*(entry.get("user_remark") for entry in voucher.accounts),
+			]
+			if str(value or "").strip()
+		}
+		if current_summaries and current_summaries <= {target_summary}:
+			continue
+		if current_summaries - {source_summary, target_summary}:
+			skipped.append({"voucher": voucher.name, "reason": "摘要已经人工修改"})
+			continue
+
+		_apply_journal_entry_summary(voucher, target_summary)
+		voucher.save()
+		data["source_summary"], data["summary"] = source_summary, target_summary
+		receipt.summary = target_summary
+		receipt.raw_data = json.dumps(data, ensure_ascii=False)
+		receipt.process_note = f"未记账草稿摘要已更新为：{target_summary}"
+		receipt.processed_by, receipt.processed_on = frappe.session.user, now_datetime()
+		_save(receipt)
+		if receipt.bank_transaction and frappe.db.has_column("Bank Transaction", "custom_summary"):
+			frappe.db.set_value(
+				"Bank Transaction",
+				receipt.bank_transaction,
+				"custom_summary",
+				target_summary,
+				update_modified=False,
+			)
+		for same in doc.rows:
+			if same.receipt == receipt.name:
+				same.summary = target_summary
+		updated.append({"voucher": voucher.name, "summary": target_summary})
+
+	if updated:
+		_save(doc)
+	return {"updated": updated, "skipped": skipped, "updated_count": len(updated), "skipped_count": len(skipped)}
+
+
 def voucher_candidates(doc, data, bank):
 	# Candidates are suggestions only; a user must confirm which business they represent.
 	amount = float(money(data["amount"]))
@@ -458,8 +677,20 @@ def voucher_candidates(doc, data, bank):
 			voucher = frappe.get_doc(doctype, name)
 			if not voucher.has_permission("read"):
 				# Never allow generating a duplicate just because a candidate is hidden.
-				result.append({"restricted": True, "description": "存在无权查看的疑似凭证，请财务管理员核对"})
+				result.append(
+					{
+						"restricted": True,
+						"blocking": True,
+						"description": "存在无权查看的疑似凭证，请财务管理员核对",
+					}
+				)
 				continue
+			reference = (
+				voucher.get("cheque_no")
+				if doctype == "Journal Entry"
+				else voucher.get("reference_no")
+			)
+			exact_reference = str(reference or "").strip() == str(data["transaction_id"]).strip()
 			result.append(
 				{
 					"doctype": doctype,
@@ -467,9 +698,15 @@ def voucher_candidates(doc, data, bank):
 					"posting_date": str(voucher.posting_date),
 					"docstatus": voucher.docstatus,
 					"summary": voucher.get("user_remark") or voucher.get("remarks") or "",
+					"match_type": "交易流水号" if exact_reference else "日期、金额和收支",
+					"blocking": exact_reference,
 				}
 			)
 	return result
+
+
+def has_blocking_voucher_candidates(candidates):
+	return any(candidate.get("blocking", True) for candidate in candidates or [])
 
 
 def receipt_status(receipt):
@@ -506,12 +743,14 @@ def preview_import(name):
 	rows = []
 	for row in doc.rows:
 		data = json.loads(row.raw_data)
-		entry = {**row.as_dict(), "suggestion": suggest_account(doc.company, data), "candidates": []}
+		data["summary"] = receipt_summary(data)
+		entry = {**row.as_dict(), "summary": data["summary"], "suggestion": suggest_account(doc.company, data), "candidates": []}
 		try:
 			receipt = _existing_receipt(doc, data)
 			bt = existing_transaction(doc.bank_account, data)
 			entry["bank_transaction"] = bt.name if bt else None
-			entry["receipt"] = receipt.name if receipt else None
+			entry["receipt_record"] = receipt.name if receipt else None
+			entry["receipt"] = receipt.name if receipt and receipt.voucher_name else None
 			if receipt and receipt.voucher_name:
 				entry.update(
 					status=receipt_status(receipt),
@@ -522,11 +761,19 @@ def preview_import(name):
 				entry["candidates"] = voucher_candidates(doc, data, bank)
 				entry["status"] = (
 					"待关联确认"
-					if entry["candidates"]
+					if has_blocking_voucher_candidates(entry["candidates"])
 					else ("待分类" if not entry["suggestion"].get("account") else "待处理")
 				)
 				if row.status == "处理失败":
-					entry["status"] = row.status
+					# A previous attempt may have failed only because the old
+					# date/amount candidate was blocking. Once it is a warning and
+					# the account is known, let the batch retry without stale status.
+					if has_blocking_voucher_candidates(entry["candidates"]) or not (
+						entry["suggestion"].get("account") or entry["suggestion"].get("allocations")
+					):
+						entry["status"] = row.status
+					else:
+						entry["status"], entry["message"] = "待处理", None
 				if bt:
 					linked = [
 						(r.payment_document, r.payment_entry)
@@ -541,9 +788,9 @@ def preview_import(name):
 						):
 							v = frappe.get_doc(dt, dn)
 							entry["candidates"].append(
-								{"doctype": dt, "name": dn}
+								{"doctype": dt, "name": dn, "blocking": True, "match_type": "银行交易已关联"}
 								if v.has_permission("read")
-								else {"restricted": True}
+								else {"restricted": True, "blocking": True}
 							)
 		except frappe.ValidationError as exc:
 			entry.update(status="冲突", message=str(exc))
@@ -625,6 +872,7 @@ def _create_voucher(
 	) * (1 if withdrawal else -1):
 		frappe.throw("计提及支付分录与银行交易金额不一致")
 	accounts = {}
+	party_not_required = False
 	for line in journal_lines:
 		account = line["account"]
 		if not account or account == bank.account:
@@ -636,7 +884,11 @@ def _create_voucher(
 			frappe.throw("请选择本公司启用的人民币明细科目")
 		if a.account_type == "Bank":
 			frappe.throw("银行内部转账请手工制证并核对两侧流水后关联回单")
-		if a.account_type in ("Receivable", "Payable") and not (party_type and party):
+		# Match the bank-statement flow for the unclassified validation/refund
+		# account. It intentionally carries no invented customer or supplier.
+		line_party_not_required = a.account_number == "122101"
+		party_not_required = party_not_required or line_party_not_required
+		if a.account_type in ("Receivable", "Payable") and not (party_type and party) and not line_party_not_required:
 			frappe.throw("往来科目必须选择真实往来单位；复杂拆分请手工制证后关联")
 	if party_type or party:
 		if party_type not in ("Customer", "Supplier", "Employee", "Shareholder") or not party:
@@ -653,6 +905,8 @@ def _create_voucher(
 			"custom_china_bank_transaction": bt.name,
 		}
 	)
+	if party_not_required:
+		je.party_not_required = 1
 	cost_center = frappe.db.get_value("Company", doc.company, "cost_center")
 	bank_line = {
 		"account": bank.account,
@@ -744,6 +998,11 @@ def _process_receipt(
 	# Account row lock is shared with legacy imports; it survives until request commit.
 	frappe.db.sql("SELECT name FROM `tabBank Account` WHERE name=%s FOR UPDATE", bank.name)
 	data = json.loads(row.raw_data)
+	source_summary = str(data.get("source_summary") or data.get("summary") or "").strip()
+	data["summary"] = receipt_summary(data)
+	if data["summary"] != source_summary:
+		data["source_summary"] = source_summary
+	row.summary = data["summary"]
 	validate_receipt_context(data, bank, doc.company)
 	bt = existing_transaction(bank.name, data, lock=True)
 	receipt = _existing_receipt(doc, data, lock=True)
@@ -763,7 +1022,7 @@ def _process_receipt(
 		if doc.mode != "新业务制证":
 			frappe.throw("历史补回单模式不允许生成新凭证")
 		_check_bt_links(bt)
-		if voucher_candidates(doc, data, bank):
+		if has_blocking_voucher_candidates(voucher_candidates(doc, data, bank)):
 			frappe.throw("存在疑似已有凭证，请先关联核对；若均非本笔业务，请手工制证后关联")
 		bt = _bank_transaction(doc, data, bank, bt)
 		decision = suggest_account(doc.company, data)
@@ -927,19 +1186,35 @@ def process_receipt(
 
 
 @frappe.whitelist(methods=["POST"])
-def process_import_batch(name, rows, confirmed=0):
-	"""One reviewed batch action; unknown and conflicting rows remain visible for correction."""
+def process_import_batch(name, rows=None, confirmed=0):
+	"""Create all unambiguous drafts with one batch confirmation.
+
+	An explicit row list remains supported for older callers. The current UI
+	omits it so every row is considered and exceptions remain visible.
+	"""
 	if not cint(confirmed):
-		frappe.throw("请确认已核对回单和业务依据")
+		frappe.throw("请确认生成本批回单的记账凭证草稿")
 	doc = _get_import(name, write=True)
 	from china_finance.services.month_end import guard_period_write
 	guard_period_write(doc)
 	if doc.mode != "新业务制证":
 		frappe.throw("历史补回单模式请关联已有凭证")
-	rows = frappe.parse_json(rows) if isinstance(rows, str) else rows
+	preview_rows = preview_import(name)["rows"]
+	if rows is None:
+		rows = [
+			{
+				"name": row["name"],
+				"account": row["suggestion"].get("account"),
+				"decision_hash": row["suggestion"].get("decision_hash"),
+				"social_not_accrued": 1 if row["suggestion"].get("allocations") else 0,
+			}
+			for row in preview_rows
+		]
+	else:
+		rows = frappe.parse_json(rows) if isinstance(rows, str) else rows
 	if not isinstance(rows, list) or not 1 <= len(rows) <= 300:
-		frappe.throw("请选择 1 至 300 笔回单")
-	preview = {r["name"]: r for r in preview_import(name)["rows"]}
+		frappe.throw("本批次应包含 1 至 300 笔回单")
+	preview = {r["name"]: r for r in preview_rows}
 	results = []
 	seen = set()
 	for selected in rows:
@@ -951,8 +1226,11 @@ def process_import_batch(name, rows, confirmed=0):
 			results.append({"name": row["name"], "reused": True})
 			continue
 		decision = row["suggestion"]
-		if row.get("candidates") or row["status"] == "冲突" or decision.get("blocked"):
-			results.append({"name": row["name"], "error": "请先处理疑似重复、冲突或分类问题"})
+		if has_blocking_voucher_candidates(row.get("candidates")) or row["status"] == "冲突" or decision.get("blocked"):
+			results.append({"name": row["name"], "error": "存在疑似已有凭证、冲突或分类异常，未重复制证"})
+			continue
+		if not (decision.get("account") or decision.get("allocations")):
+			results.append({"name": row["name"], "error": decision.get("reason") or "未匹配到会计科目"})
 			continue
 		if selected.get("account") != decision.get("account") or selected.get("decision_hash") != decision.get("decision_hash"):
 			results.append({"name": row["name"], "error": "建议科目或分摊规则已变化，请刷新核对"})
@@ -967,8 +1245,13 @@ def process_import_batch(name, rows, confirmed=0):
 		except Exception as exc:
 			frappe.db.rollback(save_point=point)
 			results.append({"name": row["name"], "error": str(exc)})
-	return {"results": results, "created": sum(bool(r.get("voucher_name")) for r in results),
-		"reused": sum(bool(r.get("reused")) for r in results), "failed": sum(bool(r.get("error")) for r in results)}
+	return {
+		"results": results,
+		"total": len(results),
+		"created": sum(bool(r.get("voucher_name")) for r in results),
+		"reused": sum(bool(r.get("reused")) for r in results),
+		"failed": sum(bool(r.get("error")) for r in results),
+	}
 
 
 @frappe.whitelist(methods=["POST"])

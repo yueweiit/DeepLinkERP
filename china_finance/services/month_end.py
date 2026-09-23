@@ -58,7 +58,7 @@ def guard_period_write(doc, method=None):
 				or any(getdate(run.from_date) <= date <= getdate(run.to_date) for date in dates)
 			):
 				frappe.throw(
-					_("本期正在统一记账（{0}），请先在月末处理中暂停，再修改或导入。").format(run.name)
+					_("本期正在进行月末记账（{0}），请先在月末结账中暂停，再修改或导入。").format(run.name)
 				)
 
 
@@ -68,7 +68,7 @@ def protect_run_fields(doc):
 		doc.set(field, old.get(field) if old else None)
 	if old and old.get("preparation_state"):
 		if any(doc.get(f) != old.get(f) for f in ("company", "from_date", "to_date", "closing_type")):
-			frappe.throw(_("月末处理已开始，不能修改公司或期间，请新建正确期间的处理单"))
+			frappe.throw(_("月末结账已开始，不能修改公司或期间，请新建正确期间的结账单"))
 
 
 def _run(name):
@@ -87,14 +87,14 @@ def _run(name):
 		or getdate(doc.from_date) != get_first_day(doc.from_date)
 		or getdate(doc.to_date) != get_last_day(doc.from_date)
 	):
-		frappe.throw(_("统一记账请选择完整自然月"))
+		frappe.throw(_("月末结账请选择完整自然月"))
 	other = frappe.db.sql(
 		"""SELECT name FROM `tabChina Closing Run` WHERE company=%s AND name!=%s
 		AND docstatus=0 AND preparation_state IN ('Posting','Checking','Closing') FOR UPDATE""",
 		(doc.company, doc.name),
 	)
 	if other:
-		frappe.throw(_("公司还有进行中的月末处理：{0}").format(other[0][0]))
+		frappe.throw(_("公司还有进行中的月末结账：{0}").format(other[0][0]))
 	return doc
 
 
@@ -124,7 +124,7 @@ def _drafts(doc):
 		{"company": doc.company, "docstatus": 0, "posting_date": ["between", [doc.from_date, doc.to_date]]},
 	)
 	if count != len(drafts):
-		frappe.throw(_("没有读取本期全部凭证的权限，不能统一记账"), frappe.PermissionError)
+		frappe.throw(_("没有读取本期全部凭证的权限，不能完成月末记账"), frappe.PermissionError)
 	return drafts
 
 
@@ -192,7 +192,7 @@ def start(name):
 		"started_by": frappe.session.user,
 		"started_on": str(now_datetime()),
 	}
-	return _store(doc, "Posting", data, _("已检查凭证范围，开始统一记账"))
+	return _store(doc, "Posting", data, _("凭证范围检查完成，开始月末记账"))
 
 
 @frappe.whitelist(methods=["POST"])
@@ -225,7 +225,7 @@ def _post_one(doc, data):
 	_complete_voucher_workflow(voucher)
 	_verify_posted(voucher.name)
 	preparation.promote_cash_plan(voucher, confirm=False)
-	voucher.add_comment("Comment", _("月末统一记账：{0}").format(doc.name))
+	voucher.add_comment("Comment", _("月末记账：{0}").format(doc.name))
 	data["done"].append(item)
 	return _store(doc, "Posting", data, _("已记账 {0}").format(voucher.name))
 
@@ -290,7 +290,7 @@ def _close_profit(doc, data):
 	bad = [r for r in checks if r["severity"] == "Blocking" and not r["passed"]]
 	if bad:
 		return _store(doc, "Paused", data, _("结账检查未通过，请处理下方问题后继续"))
-	return _store(doc, "Ready", data, _("记账与结转完成，请核对正式报表后确认结账"))
+	return _store(doc, "Ready", data, _("本期记账和损益结转已完成，请核对财务报表后确认结账"))
 
 
 @frappe.whitelist(methods=["POST"])
@@ -337,7 +337,7 @@ def finish(name):
 		}
 	doc = _run(name)
 	if doc.preparation_state != "Ready":
-		frappe.throw(_("请先完成统一记账和损益结转"))
+		frappe.throw(_("请先完成本期记账和损益结转"))
 	if _drafts(doc):
 		frappe.throw(_("本期仍有未记账凭证"))
 	if (

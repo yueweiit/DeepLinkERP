@@ -35,6 +35,12 @@ frappe.ui.form.on("China Bank Receipt Import", {
 		}
 		if (parsed && frm.doc.status !== "已作废") {
 			frm.add_custom_button(__("刷新处理状态"), () => render_receipt_preview(frm));
+			if ((frm.doc.rows || []).some(r => r.receipt)) frm.add_custom_button(__("更新本批草稿摘要"), async () => {
+				const result = await receipt_call("refresh_import_draft_summaries", { name: frm.doc.name });
+				await frm.reload_doc();
+				const skipped = (result.skipped || []).map(r => `${receipt_escape(r.voucher)}：${receipt_escape(r.reason)}`).join("<br>");
+				frappe.msgprint(`已更新 ${result.updated_count} 张未记账草稿。${skipped ? `<br>跳过 ${result.skipped_count} 张：<br>${skipped}` : ""}`);
+			});
 			if (!(frm.doc.rows || []).some(r => r.receipt)) frm.add_custom_button(__("作废批次"), () => {
 				frappe.prompt({ fieldname: "reason", label: __("作废原因"), fieldtype: "Small Text", reqd: 1 }, async ({ reason }) => {
 					await receipt_call("abandon_import", { name: frm.doc.name, reason });
@@ -66,22 +72,26 @@ async function render_receipt_preview(frm) {
 	const e = receipt_escape;
 	const amount = value => frappe.format(value, { fieldtype: "Currency", options: "currency" }, { only_value: true }, { currency: "CNY" });
 	const blocked = data.errors.length || ["已作废", "识别失败"].includes(data.status);
+	const is_processable = r => !r.receipt && !r.candidates.some(c => c.blocking !== false) && (r.suggestion.account || r.suggestion.allocations) && !r.suggestion.blocked && r.status !== "冲突";
+	const needs_manual = r => !r.receipt && !is_processable(r);
+	const processable = data.rows.filter(is_processable);
+	const exceptions = data.rows.filter(needs_manual);
 	const $wrapper = frm.fields_dict.preview.$wrapper;
 	$wrapper.html(`
 		<p>${e(data.mode)} · ${data.rows.length} 张回单 / ${data.transaction_count ?? data.rows.length} 笔交易 · 收入 ${amount(data.deposit_total)} · 支出 ${amount(data.withdrawal_total)}（按流水号去重合计）</p>
-		<p class="text-muted">历史补回单只关联已有凭证。新业务仅生成草稿，审核记账后才进入报表。原件页码及页内位置可用于逐笔核对。</p>
+		<p class="text-muted">新业务确认一次即按建议科目生成全部可处理草稿，草稿可在查凭证修改，月末统一记账后才进入报表。流水号重复会阻止重复制证；仅日期和金额相同的历史凭证只作提示。</p>
 		${data.errors.length ? `<div class="alert alert-danger">${data.errors.map(x => `第 ${e(x.page)} 页：${e(x.message)}`).join("<br>")}<br>请作废本批次并重新上传完整、正确的回单。</div>` : ""}
-		${!blocked && data.mode === "新业务制证" ? '<button class="btn btn-default btn-sm receipt-batch">确认导入并生成所选草稿</button>' : ""}
+		${exceptions.length && data.mode === "新业务制证" ? `<p class="china-receipt-exception-summary">${exceptions.length} 笔需要人工处理，暂不生成凭证草稿。</p>` : ""}
+		${!blocked && data.mode === "新业务制证" && processable.length ? `<button class="btn btn-primary btn-sm receipt-batch">确认导入并生成草稿（${processable.length}）</button>` : ""}
 		<div style="overflow:auto;margin-top:12px"><table class="table table-bordered"><thead><tr>
-		<th>选择</th><th>日期 / 原件</th><th>收支 / 金额</th><th>对方 / 摘要</th><th>建议科目 / 依据</th><th>状态 / 已有凭证</th><th>操作</th>
-		</tr></thead><tbody>${data.rows.map((r, index) => `<tr>
-		<td>${!blocked && data.mode === "新业务制证" && !r.receipt && !r.candidates.length && (r.suggestion.account || r.suggestion.allocations) && !r.suggestion.blocked && r.status !== "冲突" ? `<input type="checkbox" class="receipt-selected" checked data-index="${index}">` : ""}</td>
+		<th>日期 / 原件</th><th>收支 / 金额</th><th>对方 / 摘要</th><th>建议科目 / 依据</th><th>状态 / 已有凭证</th><th>操作</th>
+		</tr></thead><tbody>${data.rows.map((r, index) => `<tr class="${needs_manual(r) ? "china-receipt-row-danger" : ""}">
 		<td>${e(r.posting_date)}<br><a href="${e(data.source_file)}#page=${r.page_number}" target="_blank" rel="noopener">第 ${r.page_number} 页第 ${r.position} 张</a><br>${e(r.transaction_id)}</td>
 		<td>${e(r.direction)}<br>${amount(r.amount)}</td><td>${e(r.counterparty)}<br>${e(r.summary)}</td>
-		<td>${r.suggestion.allocations ? r.suggestion.allocations.map(a => `${e(a.account)}：${amount(a.amount)}`).join("<br>") : e(r.suggestion.account || "待人工分类")}<br><small>${e(r.suggestion.reason)}</small>${r.suggestion.allocations && !r.receipt ? `<br><label><input type="checkbox" class="receipt-social-confirm" data-index="${index}"> 已核对所属期，该期社保尚未计提</label>` : ""}</td>
-		<td>${e(r.status)}${r.message ? `<br><small>${e(r.message)}</small>` : ""}${r.voucher_name ? `<br>${frappe.utils.get_form_link(r.voucher_type, r.voucher_name, true)}` : ""}
-		${r.candidates.map(c => c.restricted ? '<br>存在需管理员核对的凭证' : `<br>${frappe.utils.get_form_link(c.doctype, c.name, true)} ${e(c.posting_date || "")}`).join("")}</td>
-		<td>${r.receipt ? `${frappe.utils.get_form_link("China Bank Receipt", r.receipt, true, "查看回单记录")}${r.status === "已关联待核销" ? `<br><button class="btn btn-xs btn-default receipt-reconcile" data-index="${index}">核销</button>` : ""}${r.status === "凭证已取消或缺失" ? `<br><button class="btn btn-xs btn-default receipt-process" data-index="${index}">关联修订凭证</button>` : ""}` : !blocked && r.status !== "冲突" ? `<button class="btn btn-xs btn-default receipt-process" data-index="${index}">核对处理</button>` : ""}</td>
+		<td>${r.suggestion.allocations ? r.suggestion.allocations.map(a => `${e(a.account)}：${amount(a.amount)}`).join("<br>") : e(r.suggestion.account || "待人工分类")}<br><small>${e(r.suggestion.reason)}</small></td>
+		<td class="${needs_manual(r) ? "china-receipt-status-danger" : ""}">${e(r.status)}${r.message ? `<br><small>${e(r.message)}</small>` : ""}${r.voucher_name ? `<br>${frappe.utils.get_form_link(r.voucher_type, r.voucher_name, true)}` : ""}
+		${r.candidates.map(c => c.restricted ? '<br>存在需管理员核对的凭证' : `<br>${c.blocking === false ? "仅提示：" : "疑似凭证："}${frappe.utils.get_form_link(c.doctype, c.name, true)} ${e(c.posting_date || "")} ${e(c.match_type || "")}`).join("")}</td>
+		<td>${r.receipt ? `${frappe.utils.get_form_link("China Bank Receipt", r.receipt, true, "查看回单记录")}${r.status === "已关联待核销" ? `<br><button class="btn btn-xs btn-default receipt-reconcile" data-index="${index}">核销</button>` : ""}${r.status === "凭证已取消或缺失" ? `<br><button class="btn btn-xs btn-default receipt-process" data-index="${index}">关联修订凭证</button>` : ""}` : !blocked && needs_manual(r) && r.status !== "冲突" ? `<button class="btn btn-xs btn-danger receipt-process" data-index="${index}">处理异常</button>` : is_processable(r) ? "确认后生成" : ""}</td>
 		</tr>`).join("")}</tbody></table></div>`);
 	$wrapper.find(".receipt-process").on("click", event => receipt_dialog(frm, data.rows[event.currentTarget.dataset.index]));
 	$wrapper.find(".receipt-reconcile").on("click", event => {
@@ -91,22 +101,20 @@ async function render_receipt_preview(frm) {
 			await frm.reload_doc();
 		});
 	});
-	$wrapper.find(".receipt-batch").on("click", () => {
-		const selected = $wrapper.find(".receipt-selected:checked").map((_, el) => data.rows[el.dataset.index]).get();
-		if (!selected.length) return frappe.msgprint(__("请勾选已核对的回单"));
-		frappe.confirm(__("已核对这 {0} 笔业务尚未记账，建议科目及业务依据正确，确认生成凭证草稿？", [selected.length]), async () => {
-			const result = await receipt_call("process_import_batch", {name: frm.doc.name, confirmed: 1, rows: selected.map(row => ({
-				name: row.name, account: row.suggestion.account, decision_hash: row.suggestion.decision_hash,
-				social_not_accrued: $wrapper.find(`.receipt-social-confirm[data-index="${data.rows.indexOf(row)}"]`).is(":checked") ? 1 : 0,
-			}))});
+	$wrapper.find(".receipt-batch").on("click", async event => {
+		const $button = $(event.currentTarget).prop("disabled", true);
+		try {
+			const result = await receipt_call("process_import_batch", {name: frm.doc.name, confirmed: 1});
 			await frm.reload_doc();
-			frappe.msgprint(`新增草稿 ${result.created} 张，复用 ${result.reused} 笔，待处理 ${result.failed} 笔。<br>` + result.results.filter(r => r.error).map(r => `${e(r.name)}：${e(r.error)}`).join("<br>"));
-		});
+			frappe.msgprint(`新增草稿 ${result.created} 张，复用 ${result.reused} 笔，需处理 ${result.failed} 笔。<br>` + result.results.filter(r => r.error).map(r => `${e(r.name)}：${e(r.error)}`).join("<br>"));
+		} finally {
+			$button.prop("disabled", false);
+		}
 	});
 }
 
 function receipt_dialog(frm, row) {
-	const can_create = frm.doc.mode === "新业务制证" && !row.receipt && !row.candidates.length && !row.suggestion.blocked;
+	const can_create = frm.doc.mode === "新业务制证" && !row.receipt && !row.candidates.some(c => c.blocking !== false) && !row.suggestion.blocked;
 	const create_label = row.suggestion.allocations ? "按社保计提及支付生成草稿" : "生成凭证草稿";
 	const candidate = row.candidates.find(c => !c.restricted);
 	const dialog = new frappe.ui.Dialog({ title: __("核对回单"), fields: [

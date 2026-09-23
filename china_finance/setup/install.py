@@ -22,7 +22,7 @@ DAILY_NAVIGATION = (
 
 VOUCHER_NAVIGATION = (
 	("China Voucher Ledger", "查凭证", "Report"),
-	("China Closing Run", "月末处理", "DocType"),
+	("China Closing Run", "月末结账", "DocType"),
 )
 
 REPORT_NAVIGATION = (

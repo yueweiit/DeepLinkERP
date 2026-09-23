@@ -329,7 +329,7 @@ def run_closing_checks(company, from_date, to_date, period_closing_voucher=None,
 		)
 
 	pcv_ok = bool(period_closing_voucher and frappe.db.get_value("Period Closing Voucher", period_closing_voucher, "docstatus") == 1)
-	add("PERIOD_CLOSING", _("ERPNext 损益结转凭证已提交"), pcv_ok)
+	add("PERIOD_CLOSING", _("损益结转已完成"), pcv_ok)
 	return checks
 
 
@@ -563,7 +563,7 @@ def create_closing_archive(closing_run_name):
 	"""
 	closing_run = frappe.get_doc("China Closing Run", closing_run_name)
 	if closing_run.docstatus != 1 or closing_run.status != "Closed":
-		frappe.throw(_("期末智能结转 {0} 尚未完成，不能生成归档").format(closing_run.name))
+		frappe.throw(_("月末结账单 {0} 尚未完成，不能生成结账档案").format(closing_run.name))
 	if closing_run.archive_package:
 		return closing_run.archive_package
 
@@ -722,9 +722,9 @@ def submit_closing_run(name):
 	snapshots, after-commit archive generation, and account-freeze behavior.
 	"""
 	if not name:
-		frappe.throw(_("请选择需要提交的期末智能结转"))
+		frappe.throw(_("请选择需要确认的月末结账单"))
 	if not frappe.db.exists("China Closing Run", name):
-		frappe.throw(_("期末智能结转 {0} 不存在").format(name))
+		frappe.throw(_("月末结账单 {0} 不存在").format(name))
 
 	frappe.db.sql("SELECT name FROM `tabChina Closing Run` WHERE name=%s FOR UPDATE", (name,))
 	doc = frappe.get_doc("China Closing Run", name)
@@ -732,7 +732,7 @@ def submit_closing_run(name):
 
 	if doc.docstatus == 1:
 		if doc.status != "Closed":
-			frappe.throw(_("期末智能结转 {0} 已提交，但当前状态为 {1}").format(doc.name, doc.status))
+			frappe.throw(_("月末结账单 {0} 已提交，但当前状态为 {1}").format(doc.name, doc.status))
 		return {
 			"name": doc.name,
 			"docstatus": int(doc.docstatus),
@@ -741,14 +741,14 @@ def submit_closing_run(name):
 			"archive_package": doc.archive_package,
 		}
 	if doc.docstatus != 0:
-		frappe.throw(_("只有草稿状态的期末智能结转可以提交"))
+		frappe.throw(_("只有草稿状态的月末结账单可以确认结账"))
 
 	try:
 		doc.submit()
 	except Exception:
 		frappe.log_error(
 			message=frappe.get_traceback(),
-			title=_("期末智能结转提交失败：{0}").format(name),
+			title=_("月末结账失败：{0}").format(name),
 		)
 		raise
 	return {
@@ -829,35 +829,34 @@ def save_and_complete_period_closing_voucher(name):
 	}
 
 
-@frappe.whitelist()
-def reopen_closing(name, reason):
-	frappe.only_for(("System Manager", "China Finance Manager"))
-	if not reason:
-		frappe.throw(_("重新开账必须填写原因"))
-	doc = frappe.get_doc("China Closing Run", name)
-	if doc.docstatus != 1 or doc.status != "Closed":
-		frappe.throw(_("只有已结账的期末智能结转可以重新开账"))
-	# A closing run freezes the company cumulatively through its end date. If a
-	# user needs to reopen an earlier period, every later closed run must be
-	# reopened first; otherwise its later snapshots and freeze boundary would
-	# claim that the earlier period is still closed. Process the chain in
-	# reverse chronological order, while leaving the Period Closing Vouchers
-	# themselves submitted for an explicit, auditable cancellation step.
-	runs = frappe.get_all(
-		"China Closing Run",
-		filters={
-			"company": doc.company,
-			"to_date": [">=", doc.to_date],
-			"status": "Closed",
-			"docstatus": 1,
-		},
-		fields=["name", "to_date", "period_closing_voucher"],
-		order_by="to_date desc, creation desc",
-		ignore_permissions=True,
-	)
+def _closing_runs_to_reverse(doc, *, for_update=False):
+	query = """
+		SELECT name, from_date, to_date, period_closing_voucher
+		FROM `tabChina Closing Run`
+		WHERE company=%s AND to_date >= %s AND status='Closed' AND docstatus=1
+		ORDER BY to_date DESC, creation DESC
+	"""
+	if for_update:
+		query += " FOR UPDATE"
+	runs = frappe.db.sql(query, (doc.company, doc.to_date), as_dict=True)
 	if not any(run.name == doc.name for run in runs):
-		frappe.throw(_("未找到需要重新开账的当前期末智能结转"))
+		frappe.throw(_("未找到需要反结账的当前月末结账单"))
+	return runs
 
+
+def _get_closing_run_for_reverse(name, *, for_update=False):
+	if not name or not frappe.db.exists("China Closing Run", name):
+		frappe.throw(_("请选择需要反结账的月末结账单"))
+	if for_update:
+		frappe.db.sql("SELECT name FROM `tabChina Closing Run` WHERE name=%s FOR UPDATE", name)
+	doc = frappe.get_doc("China Closing Run", name)
+	doc.check_permission("write")
+	if doc.docstatus != 1 or doc.status != "Closed":
+		frappe.throw(_("只有已结账的月末结账单可以反结账"))
+	return doc
+
+
+def _reverse_closing_runs(doc, runs, reason):
 	reopened_on = now_datetime()
 	for run in runs:
 		frappe.db.set_value(
@@ -871,14 +870,114 @@ def reopen_closing(name, reason):
 			},
 			update_modified=True,
 		)
-
 	frappe.db.set_value("Company", doc.company, "accounts_frozen_till_date", doc.previous_frozen_date)
+
+
+def _period_closing_vouchers_to_cancel(doc, runs):
+	vouchers = []
+	seen = set()
+	for run in runs:
+		name = run.period_closing_voucher
+		if not name or name in seen:
+			continue
+		seen.add(name)
+		row = frappe.db.get_value(
+			"Period Closing Voucher",
+			name,
+			["name", "company", "period_start_date", "period_end_date", "docstatus", "gle_processing_status"],
+			as_dict=True,
+		)
+		if not row:
+			frappe.throw(_("月末结账单 {0} 关联的损益结转凭证 {1} 不存在").format(run.name, name))
+		if row.company != doc.company:
+			frappe.throw(_("损益结转凭证 {0} 不属于公司 {1}").format(name, doc.company))
+		if getdate(row.period_start_date) != getdate(run.from_date) or getdate(row.period_end_date) != getdate(run.to_date):
+			frappe.throw(_("损益结转凭证 {0} 与月末结账单 {1} 的期间不一致").format(name, run.name))
+		if row.docstatus == 0:
+			frappe.throw(_("损益结转凭证 {0} 仍是草稿，不能执行反结账").format(name))
+		if row.docstatus == 1 and row.gle_processing_status == "In Progress":
+			frappe.throw(_("损益结转凭证 {0} 的总账仍在处理中，请稍后再反结账").format(name))
+		vouchers.append(row)
+	return vouchers
+
+
+@frappe.whitelist()
+def preview_reverse_closing(name):
+	"""Show the exact periods and closing vouchers affected by one-click reversal."""
+	frappe.only_for(("System Manager", "China Finance Manager"))
+	doc = _get_closing_run_for_reverse(name)
+	runs = _closing_runs_to_reverse(doc)
+	vouchers = _period_closing_vouchers_to_cancel(doc, runs)
+	return {
+		"name": doc.name,
+		"company": doc.company,
+		"runs": runs,
+		"period_closing_vouchers": vouchers,
+		"previous_frozen_date": doc.previous_frozen_date,
+	}
+
+
+@frappe.whitelist(methods=["POST"])
+def reverse_closing(name, reason):
+	"""Reopen affected periods and cancel their P&L closing vouchers in one action."""
+	frappe.only_for(("System Manager", "China Finance Manager"))
+	reason = str(reason or "").strip()
+	if not reason:
+		frappe.throw(_("反结账必须填写原因"))
+	if len(reason) > 500:
+		frappe.throw(_("反结账原因不能超过 500 个字符"))
+
+	doc = _get_closing_run_for_reverse(name)
+	frappe.db.sql("SELECT name FROM `tabCompany` WHERE name=%s FOR UPDATE", doc.company)
+	doc = _get_closing_run_for_reverse(name, for_update=True)
+	runs = _closing_runs_to_reverse(doc, for_update=True)
+	vouchers = _period_closing_vouchers_to_cancel(doc, runs)
+
+	# The native cancellation is allowed only after restoring the prior freeze
+	# boundary. It still creates the normal reversal GL and audit snapshot.
+	_reverse_closing_runs(doc, runs, reason)
+	cancelled = []
+	already_cancelled = []
+	pending = []
+	for row in vouchers:
+		if row.docstatus == 2:
+			already_cancelled.append(row.name)
+			continue
+		voucher = frappe.get_doc("Period Closing Voucher", row.name, for_update=True)
+		voucher.flags.ignore_permissions = True
+		voucher.cancel()
+		cancelled.append(voucher.name)
+		if frappe.db.get_value("Period Closing Voucher", voucher.name, "gle_processing_status") != "Completed":
+			pending.append(voucher.name)
+
 	return {
 		"name": doc.name,
 		"status": "Reopened",
 		"reopened_runs": runs,
-		"period_closing_vouchers": [
-			run.period_closing_voucher for run in runs if run.period_closing_voucher
-		],
+		"cancelled_period_closing_vouchers": cancelled,
+		"already_cancelled_period_closing_vouchers": already_cancelled,
+		"pending_period_closing_vouchers": pending,
+		"previous_frozen_date": doc.previous_frozen_date,
+	}
+
+
+@frappe.whitelist(methods=["POST"])
+def reopen_closing(name, reason):
+	"""Compatibility endpoint for integrations that explicitly cancel PCVs themselves."""
+	frappe.only_for(("System Manager", "China Finance Manager"))
+	reason = str(reason or "").strip()
+	if not reason:
+		frappe.throw(_("反结账必须填写原因"))
+	doc = _get_closing_run_for_reverse(name)
+	frappe.db.sql("SELECT name FROM `tabCompany` WHERE name=%s FOR UPDATE", doc.company)
+	doc = _get_closing_run_for_reverse(name, for_update=True)
+	runs = _closing_runs_to_reverse(doc, for_update=True)
+	_period_closing_vouchers_to_cancel(doc, runs)
+	_reverse_closing_runs(doc, runs, reason)
+	return {
+		"name": doc.name,
+		"status": "Reopened",
+		"reopened_runs": runs,
+		"period_closing_vouchers": [run.period_closing_voucher for run in runs if run.period_closing_voucher],
 		"previous_frozen_date": doc.previous_frozen_date,
 	}

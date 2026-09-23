@@ -9,6 +9,7 @@ import frappe
 from china_finance.services import bank_receipt_import as receipts
 from china_finance.services import month_end
 from china_finance.services import voucher_preparation as prep
+from china_finance.services.closing import preview_reverse_closing, reverse_closing
 from china_finance.tests.test_bank_receipt_import import TestReceiptIntegration
 
 
@@ -199,16 +200,9 @@ class TestVoucherPreparation(unittest.TestCase):
 	def test_batch_creation_retry_and_draft_allowed_only_before_posting(self):
 		batch = self.batch()
 		row = receipts.preview_import(batch.name)["rows"][0]
-		selection = [
-			{
-				"name": row["name"],
-				"account": row["suggestion"].get("account"),
-				"decision_hash": row["suggestion"].get("decision_hash"),
-			}
-		]
-		result = receipts.process_import_batch(batch.name, selection, confirmed=1)
+		result = receipts.process_import_batch(batch.name, confirmed=1)
 		self.assertEqual(result["created"], 1, result)
-		retry = receipts.process_import_batch(batch.name, selection, confirmed=1)
+		retry = receipts.process_import_batch(batch.name, confirmed=1)
 		self.assertEqual(retry["created"], 0)
 		self.assertEqual(retry["reused"], 1)
 		strict = receipts.pending_receipts(self.company, "2026-08-01", "2026-08-31")
@@ -335,3 +329,22 @@ class TestVoucherPreparation(unittest.TestCase):
 			str(frappe.db.get_value("Company", self.company, "accounts_frozen_till_date")), "2026-08-31"
 		)
 		self.assertEqual(frappe.db.count("China Accounting Voucher", {"source_name": doc.name}), 1)
+
+		preview = preview_reverse_closing(run.name)
+		self.assertEqual([row.name for row in preview["runs"]], [run.name])
+		self.assertEqual(
+			[row.name for row in preview["period_closing_vouchers"]],
+			[run.period_closing_voucher],
+		)
+		with self.assertRaisesRegex(frappe.ValidationError, "请先在月末结账单"):
+			frappe.get_doc("Period Closing Voucher", run.period_closing_voucher).run_method("on_cancel")
+		with patch("frappe.enqueue"):
+			reversed_result = reverse_closing(run.name, "测试反结账")
+		run.reload()
+		self.assertEqual(run.status, "Reopened")
+		self.assertEqual(reversed_result["cancelled_period_closing_vouchers"], [run.period_closing_voucher])
+		self.assertEqual(
+			frappe.db.get_value("Period Closing Voucher", run.period_closing_voucher, "docstatus"),
+			2,
+		)
+		self.assertIsNone(frappe.db.get_value("Company", self.company, "accounts_frozen_till_date"))

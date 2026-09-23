@@ -71,6 +71,26 @@ def receipt_text(
 
 
 class TestReceiptParser(unittest.TestCase):
+	def test_accounting_summary_includes_reimbursement_recipient(self):
+		data = parse_receipt_text(receipt_text(business="支付", summary="报销", details=""))
+		data["counterparty"] = "张三"
+		self.assertEqual(service.receipt_summary(data), "报销-张三")
+		data["summary"] = "报销款"
+		self.assertEqual(service.receipt_summary(data), "报销款-张三")
+
+	def test_personal_income_tax_summary_uses_coverage_period(self):
+		data = parse_receipt_text(
+			receipt_text(
+				amount="￥655.20",
+				business="TIPS缴税出账",
+				summary="实时缴税",
+				details="税(费)种名称 所属时期 实缴金额\n个人所得税 20260701--20260731 ￥655.20",
+			)
+		)
+		self.assertEqual(service.receipt_summary(data), "支付7月个人所得税")
+		data["posting_date"] = "2027-01-05"
+		self.assertEqual(service.receipt_summary(data), "支付2026年7月个人所得税")
+
 	def test_user_social_percentages_round_each_item_and_balance(self):
 		suggestion = social_suggestion(social_rule(), social_data(parse_receipt_text(receipt_text())))
 		self.assertEqual(
@@ -219,10 +239,16 @@ class TestReceiptParser(unittest.TestCase):
 			self.assertEqual(result["account"], "fee")
 			self.assertEqual(get.call_args.args[1]["account_number"], "660303")
 
-	def test_ambiguous_reimbursement_does_not_inherit_old_office_rule(self):
+	def test_reimbursement_reuses_bank_statement_office_rule(self):
 		data = parse_receipt_text(receipt_text(business="支付", summary="报销", details=""))
-		with patch.object(frappe, "get_all", return_value=[]):
-			self.assertIsNone(service.suggest_account("Test", data)["account"])
+		with (
+			patch.object(frappe, "get_all", return_value=[]),
+			patch.object(frappe.db, "get_value", return_value="office") as get,
+		):
+			result = service.suggest_account("Test", data)
+			self.assertEqual(result["account"], "office")
+			self.assertIn("银行流水摘要", result["reason"])
+			self.assertEqual(get.call_args.args[1]["account_number"], "660201")
 
 	def test_conflicting_company_rules_are_not_arbitrarily_chosen(self):
 		data = parse_receipt_text(receipt_text())
@@ -332,6 +358,76 @@ class TestReceiptIntegration(unittest.TestCase):
 		self.assertEqual(second.rows[0].receipt, result["receipt"])
 		self.assertEqual(second.status, "处理完成")
 
+	def test_deleted_draft_restores_receipt_for_regeneration(self):
+		batch = self.batch()
+		created = service.process_import_batch(batch.name, confirmed=1)
+		self.assertEqual(created["created"], 1, created)
+		result = created["results"][0]
+		bank_transaction = result["bank_transaction"]
+		deleted = service.delete_draft_vouchers([result["voucher_name"]])
+		self.assertEqual(deleted["deleted_count"], 1, deleted)
+
+		receipt = frappe.get_doc(service.RECEIPT, result["receipt"])
+		self.assertFalse(receipt.voucher_name)
+		self.assertEqual(receipt.status, "待处理")
+		self.assertEqual(receipt.bank_transaction, bank_transaction)
+		self.assertFalse(
+			frappe.db.get_value("Bank Transaction", bank_transaction, "custom_china_journal_entry")
+		)
+		batch.reload()
+		self.assertEqual(batch.status, "待处理")
+		self.assertFalse(batch.rows[0].receipt)
+		preview = service.preview_import(batch.name)["rows"][0]
+		self.assertFalse(preview["receipt"])
+		self.assertEqual(preview["receipt_record"], receipt.name)
+		self.assertEqual(preview["status"], "待处理")
+
+		recreated = service.process_import_batch(batch.name, confirmed=1)
+		self.assertEqual(recreated["created"], 1, recreated)
+		self.assertEqual(recreated["results"][0]["receipt"], receipt.name)
+		self.assertEqual(recreated["results"][0]["bank_transaction"], bank_transaction)
+		self.assertTrue(frappe.db.exists("Journal Entry", recreated["results"][0]["voucher_name"]))
+
+	def test_one_click_batch_books_reimbursement_with_statement_mapping(self):
+		data = {
+			**self.data,
+			"amount": "432.19",
+			"business_type": "支付",
+			"summary": "报销款",
+			"fee_details": [],
+			"tax_details": [],
+		}
+		batch = self.batch(data=data)
+		result = service.process_import_batch(batch.name, confirmed=1)
+		self.assertEqual(result["created"], 1, result)
+		voucher = frappe.get_doc("Journal Entry", result["results"][0]["voucher_name"])
+		office = frappe.db.get_value(
+			"Account", {"company": self.company, "account_number": "660201", "is_group": 0}, "name"
+		)
+		self.assertIn(office, [row.account for row in voucher.accounts])
+		self.assertEqual(voucher.user_remark, "报销款-测试收款人")
+		self.assertEqual({row.user_remark for row in voucher.accounts}, {"报销款-测试收款人"})
+		self.assertEqual(json.loads(batch.rows[0].raw_data)["summary"], "报销款")
+
+		# An existing untouched draft can be upgraded explicitly without replacing
+		# a summary that finance has edited for another business reason.
+		frappe.db.set_value(
+			"Journal Entry", voucher.name, {"remark": "报销款", "user_remark": "报销款"}, update_modified=False
+		)
+		for row in voucher.accounts:
+			frappe.db.set_value("Journal Entry Account", row.name, "user_remark", "报销款", update_modified=False)
+		refreshed = service.refresh_import_draft_summaries(batch.name)
+		self.assertEqual(refreshed["updated_count"], 1, refreshed)
+		voucher.reload()
+		self.assertEqual(voucher.user_remark, "报销款-测试收款人")
+		self.assertEqual(service.refresh_import_draft_summaries(batch.name)["updated_count"], 0)
+		frappe.db.set_value(
+			"Journal Entry Account", voucher.accounts[0].name, "user_remark", "差旅费报销-测试收款人", update_modified=False
+		)
+		manual = service.refresh_import_draft_summaries(batch.name)
+		self.assertEqual(manual["updated_count"], 0)
+		self.assertEqual(manual["skipped"][0]["reason"], "摘要已经人工修改")
+
 	def test_history_mode_cannot_create_a_new_voucher(self):
 		batch = self.batch("历史补回单")
 		before = frappe.db.count("Bank Transaction")
@@ -396,11 +492,31 @@ class TestReceiptIntegration(unittest.TestCase):
 
 	def test_candidates_prevent_automatic_duplicate_voucher(self):
 		je = self.manual_voucher()
-		batch = self.batch()
-		self.assertTrue(
-			any(r.get("name") == je.name for r in service.preview_import(batch.name)["rows"][0]["candidates"])
+		frappe.db.set_value(
+			"Journal Entry",
+			je.name,
+			{"cheque_no": self.data["transaction_id"], "cheque_date": self.data["posting_date"]},
+			update_modified=False,
 		)
+		batch = self.batch()
+		candidates = service.preview_import(batch.name)["rows"][0]["candidates"]
+		self.assertTrue(any(r.get("name") == je.name and r.get("blocking") for r in candidates))
 		self.assertIn("疑似已有凭证", self.process(batch, action="create")["error"])
+		before = frappe.db.count("Journal Entry")
+		result = service.process_import_batch(batch.name, confirmed=1)
+		self.assertEqual(result["created"], 0)
+		self.assertEqual(result["failed"], 1)
+		self.assertEqual(frappe.db.count("Journal Entry"), before)
+
+	def test_amount_date_candidate_is_warning_and_does_not_block_new_receipt(self):
+		je = self.manual_voucher()
+		batch = self.batch()
+		candidates = service.preview_import(batch.name)["rows"][0]["candidates"]
+		self.assertTrue(any(r.get("name") == je.name and r.get("blocking") is False for r in candidates))
+		self.assertEqual(service.preview_import(batch.name)["rows"][0]["status"], "待处理")
+		result = self.process(batch, action="create")
+		self.assertNotIn("error", result, result)
+		self.assertNotEqual(result["voucher_name"], je.name)
 
 	def test_statement_first_receipt_reuses_bank_and_voucher(self):
 		bt = frappe.get_doc(
@@ -654,12 +770,9 @@ class TestReceiptIntegration(unittest.TestCase):
 			"规则已变化",
 			self.process(batch, action="create_social", social_not_accrued=1, decision_hash="stale")["error"],
 		)
-		result = self.process(
-			batch,
-			action="create_social",
-			social_not_accrued=1,
-			decision_hash=service.suggest_account(self.company, data)["decision_hash"],
-		)
+		batch_result = service.process_import_batch(batch.name, confirmed=1)
+		self.assertEqual(batch_result["created"], 1, batch_result)
+		result = batch_result["results"][0]
 		self.assertNotIn("error", result)
 		je = frappe.get_doc("Journal Entry", result["voucher_name"])
 		self.assertEqual(len(je.accounts), 5)

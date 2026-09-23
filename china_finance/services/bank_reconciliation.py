@@ -753,9 +753,12 @@ def _resolve_account(description, company, reference_number=None, counterparty_n
 		account_number = "4001"
 	elif "办公" in search_text and "报销" in search_text:
 		account_number = "660201"
-	elif "报销" in search_text and _extract_bank_metadata(raw_description, "对方"):
+	elif "报销" in search_text and (
+		_extract_bank_metadata(raw_description, "对方") or (counterparty_name or "").strip()
+	):
 		# The CMB statement identifies these rows as employee reimbursements;
-		# the reviewed aaa policy books them to Management Expense - Office.
+		# receipt imports carry the same counterparty in a structured field.
+		# The reviewed aaa policy books both sources to Management Expense - Office.
 		account_number = "660201"
 	elif ("租金" in search_text or "房租" in search_text) and not any(term in search_text for term in ("物业", "水电", "电费")):
 		account_number = "660202"

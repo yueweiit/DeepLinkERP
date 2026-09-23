@@ -48,3 +48,21 @@ class ChinaFinancePeriodClosingVoucher(PeriodClosingVoucher):
 
 		if period_end_date > getdate(self.fy_end_date):
 			frappe.throw(_("Period End Date cannot be greater than Fiscal Year End Date"))
+
+	def on_cancel(self):
+		linked_runs = frappe.get_all(
+			"China Closing Run",
+			filters={"period_closing_voucher": self.name, "docstatus": 1},
+			fields=["name", "status"],
+		)
+		closed_runs = [run.name for run in linked_runs if run.status == "Closed"]
+		if closed_runs:
+			frappe.throw(
+				_("请先在月末结账单 {0} 中执行反结账").format("、".join(closed_runs)),
+				title=_("请先反结账"),
+			)
+
+		super().on_cancel()
+		self.ignore_linked_doctypes = tuple(
+			dict.fromkeys((*self.ignore_linked_doctypes, "China Closing Run"))
+		)

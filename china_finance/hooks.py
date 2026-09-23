@@ -241,6 +241,7 @@ _gl_source_approval_events = {
 _journal_entry_events = {
 	"before_naming": "china_finance.services.naming.sync_journal_entry_series",
 	**_gl_source_approval_events,
+	"on_trash": "china_finance.services.bank_receipt_import.prepare_voucher_delete",
 	"on_submit": [
 		"china_finance.services.voucher.on_gl_source_submit",
 		"china_finance.services.bank_reconciliation.on_journal_entry_submit",

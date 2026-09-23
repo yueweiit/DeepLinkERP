@@ -191,3 +191,25 @@
 .china-period-closing-entries__loading {
 	padding: 12px 0;
 }
+
+.china-receipt-exception-summary {
+	margin: 8px 0;
+	padding: 8px 12px;
+	border-left: 3px solid var(--red-600);
+	background: var(--red-50, #fff1f0);
+	color: var(--red-700, #b42318);
+	font-weight: 600;
+}
+
+.china-receipt-row-danger {
+	background: var(--red-50, #fff1f0);
+}
+
+.china-receipt-row-danger > td:first-child {
+	border-left: 3px solid var(--red-600);
+}
+
+.china-receipt-status-danger {
+	color: var(--red-700, #b42318);
+	font-weight: 600;
+}
