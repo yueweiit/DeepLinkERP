@@ -45,6 +45,7 @@ if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
 from overseas_costing.integrations.dingtalk_approval_source import ApprovalSourceConfig, PostgresApprovalSource
+from overseas_costing.services.supplier_resolution_service import resolve_supplier_reference
 from overseas_costing.utils.dingtalk import build_dingtalk_order_payload, extract_dingtalk_instance_id
 from overseas_costing.utils.field_mapper import (
     map_oa_row_to_item,
@@ -228,11 +229,6 @@ PURCHASE_RELATE_FIELD_ALIASES = (
     "Asociar ordenes de compra",
     "órdenes de compra",
     "ordenes de compra",
-)
-SUPPLIER_FIELD_ALIASES = (
-    "供应商Proveedor",
-    "供应商",
-    "Proveedor",
 )
 PURCHASE_APPROVAL_KEYWORDS = (
     "采购支出",
@@ -3432,7 +3428,6 @@ def summarize_approval(instance: dict, *, process_instance_id: str = "", include
         "transport_mode": detect_approval_transport_mode(transport_mode_raw),
         "transport_mode_raw": transport_mode_raw,
         "logistics_no": _find_field_value(fields, BATCH_NO_FIELD_ALIASES),
-        "supplier": _find_field_value(fields, SUPPLIER_FIELD_ALIASES),
         "linked_purchase_count": len(linked_purchase_approvals),
         "linked_purchase_approvals": linked_purchase_approvals,
         "oa_attachment_count": len(oa_attachments),
@@ -3747,7 +3742,6 @@ def extract_oa_goods_rows(item: dict) -> list[dict]:
     project_ownership = extract_project_candidates_from_approval(item)
     common_values = {
         "project_collection": project_ownership["candidates"][0]["name"] if len(project_ownership["candidates"]) == 1 else "",
-        "供应商Proveedor": item.get("supplier"),
         "项目proyecto": form_fields.get("项目proyecto"),
         "物料类别TIPO": form_fields.get("物料类别TIPO"),
         "物流方式Camino Envío": item.get("transport_mode_raw"),
@@ -4120,6 +4114,16 @@ def build_oa_item_values_from_approval(item: dict) -> list[dict]:
     values: list[dict] = []
     for index, row in enumerate(rows, start=1):
         mapped = map_oa_row_to_item(row)
+        supplier_field_present = any(
+            _field_matches_alias(column, ("供应商Proveedor", "供应商", "Proveedor"))
+            for column in (row.get("_oa_goods_columns") or [])
+        )
+        supplier_resolution = resolve_supplier_reference(mapped.get("supplier"))
+        mapped["supplier"] = (
+            supplier_resolution.get("canonical_supplier")
+            if supplier_resolution.get("status") == "EXACT"
+            else ""
+        )
         mapped.update(
             {
                 "row_no": index,
@@ -4139,8 +4143,13 @@ def build_oa_item_values_from_approval(item: dict) -> list[dict]:
                         "source": "dingtalk_oa_logistics_form",
                         "approval_no": source_approval_no,
                         "instance_id": source_instance_id,
-                        "dingtalk_row_number": row.get("_dingtalk_row_number"),
+                        "dingtalk_goods_row_no": row.get("_dingtalk_row_number") or index,
                         "goods_table_columns": row.get("_oa_goods_columns") or [],
+                        "supplier_raw_value": supplier_resolution.get("raw_value") or "",
+                        "supplier_field_present": supplier_field_present,
+                        "supplier_match_status": supplier_resolution.get("status") or "UNRESOLVED",
+                        "supplier_canonical_name": supplier_resolution.get("canonical_supplier") or "",
+                        "supplier_candidates": supplier_resolution.get("candidates") or [],
                         "project_candidates": project_ownership.get("candidates") or [],
                         "project_source_field": project_ownership.get("source_field") or "",
                     }

@@ -20,6 +20,7 @@ from overseas_costing.services import (
     version_service,
 )
 from overseas_costing.services.material_value_semantics import is_effectively_missing
+from overseas_costing.services.supplier_resolution_service import resolve_supplier_reference
 
 
 # --- First usable implementation for the Excel -> recalculate MVP. ---
@@ -46,15 +47,24 @@ REASON_REQUIRED_ITEM_FIELDS = PURCHASE_CORRECTION_FIELDS | frozenset({
     "volume_m3",
     "chargeable_weight_kg",
     "project_collection",
+    "supplier",
 })
 SHIPMENT_VALUE_EDIT_FIELDS = frozenset({"shipment_value_rmb", "goods_value"})
 SHIPMENT_VALUE_INPUT_FIELDS = frozenset({
     "unit_price", "purchase_currency", "unit_price_uom", "purchase_uom",
     "quantity", "unit", "actual_shipped_qty", "shipped_uom", "source_doc_no",
 })
-SERVER_ITEM_METADATA_FIELDS = frozenset(
-    {"shipment_valuation", "manual_shipment_valuation", "logistics_row", "autofill_review"}
-)
+SERVER_ITEM_METADATA_FIELDS = frozenset({
+    "shipment_valuation",
+    "manual_shipment_valuation",
+    "logistics_row",
+    "autofill_review",
+    "supplier_raw_value",
+    "supplier_field_present",
+    "supplier_match_status",
+    "supplier_canonical_name",
+    "supplier_candidates",
+})
 EDITABLE_ITEM_FIELDS = frozenset(
     {
         "material_code",
@@ -122,6 +132,7 @@ EDITABLE_ITEM_FIELDS = frozenset(
         "volume_weight_kg",
         "chargeable_weight_kg",
         "project_collection",
+        "supplier",
         "transport_mode",
         "source_type",
         "source_doc_no",
@@ -349,6 +360,14 @@ def _coerce_edit_value(fieldname: str, value):
         if text and text not in SELECT_ITEM_OPTIONS[fieldname]:
             raise ValueError(f"字段 {fieldname} 的值 {text} 不在允许范围内。")
         return text
+    if fieldname == "supplier":
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        resolution = resolve_supplier_reference(text)
+        if resolution.get("status") != "EXACT" or not resolution.get("canonical_supplier"):
+            raise ValueError("供应商必须从启用中的 ERP 供应商列表选择。")
+        return str(resolution["canonical_supplier"])
     if isinstance(value, (dict, list)):
         return _json_dumps(value)
     return "" if value is None else str(value).strip()
@@ -1596,6 +1615,11 @@ def update_item_field(
         item_doc.extra_json = _json.dumps(overlay,ensure_ascii=False,default=str)
     else:
         setattr(item_doc, fieldname, coerced_value)
+        if fieldname == "supplier":
+            supplier_metadata = object_json(getattr(item_doc, "extra_json", None))
+            supplier_metadata["supplier_match_status"] = "MANUAL_CONFIRMED" if coerced_value else "EMPTY"
+            supplier_metadata["supplier_canonical_name"] = coerced_value or ""
+            item_doc.extra_json = _json.dumps(supplier_metadata, ensure_ascii=False, default=str)
     if fieldname == "actual_shipped_qty" and not expense_physical:
         shipping_uom = str(
             getattr(item_doc, "shipped_uom", "")

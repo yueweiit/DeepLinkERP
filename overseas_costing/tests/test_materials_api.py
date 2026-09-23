@@ -34,6 +34,33 @@ def test_grid_checks_read_permission_before_query(monkeypatch) -> None:
     assert calls == [("BATCH-NO", "read")]
 
 
+def test_supplier_resolution_checks_read_permission_and_delegates_to_central_service(monkeypatch) -> None:
+    api = _load_api(monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        api,
+        "require_batch_permission",
+        lambda batch, ptype: calls.append((batch, ptype)) or "BATCH-DOC",
+    )
+    monkeypatch.setattr(
+        api.supplier_resolution_service,
+        "resolve_supplier_reference",
+        lambda raw: {
+            "raw_value": raw,
+            "status": "SUGGESTED",
+            "canonical_supplier": "",
+            "candidates": [{"name": "SUP-1", "score": 0.94, "high_confidence": True}],
+        },
+    )
+
+    result = api.resolve_supplier_options("BATCH-NO", "Alpha Tradng")
+
+    assert calls == [("BATCH-NO", "read")]
+    assert result["raw_value"] == "Alpha Tradng"
+    assert result["canonical_supplier"] == ""
+    assert result["candidates"][0]["name"] == "SUP-1"
+
+
 def test_preview_checks_permission_and_rejects_paths_or_urls(monkeypatch) -> None:
     api = _load_api(monkeypatch)
     monkeypatch.setattr(api, "require_batch_permission", lambda _batch, _ptype: "BATCH-DOC")

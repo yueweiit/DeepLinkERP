@@ -6,7 +6,12 @@ import json
 
 import frappe
 
-from overseas_costing.services import material_ai_fill_service, material_import_service, material_input_service
+from overseas_costing.services import (
+    material_ai_fill_service,
+    material_import_service,
+    material_input_service,
+    supplier_resolution_service,
+)
 from overseas_costing.services.access_control import require_batch_permission
 from overseas_costing.services.material_ai_errors import source_review_endpoint
 
@@ -26,6 +31,14 @@ def list_project_route_options(batch_name: str) -> dict:
 
     require_batch_permission(batch_name, "read")
     return list_options()
+
+
+@frappe.whitelist()
+def resolve_supplier_options(batch_name: str, raw_value: str = "") -> dict:
+    """Return active ERP Supplier matches without writing or creating a supplier."""
+
+    require_batch_permission(batch_name, "read")
+    return supplier_resolution_service.resolve_supplier_reference(raw_value)
 
 
 def _choices_payload(value) -> dict:

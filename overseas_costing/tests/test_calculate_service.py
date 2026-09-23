@@ -488,6 +488,68 @@ def test_existing_physical_value_requires_reason_before_server_save(monkeypatch)
     assert "修改原因" in result["message"]
 
 
+def test_supplier_fill_is_editable_but_changing_existing_supplier_requires_reason(monkeypatch) -> None:
+    items = {
+        "EMPTY": {"supplier": "", "extra_json": json.dumps({
+            "supplier_field_present": True,
+            "supplier_raw_value": "Supplier A typo",
+            "supplier_match_status": "SUGGESTED",
+        })},
+        "EXISTING": {"supplier": "SUPPLIER-A"},
+    }
+    service, _db = _install_item_edit_frappe(monkeypatch, items)
+    monkeypatch.setattr(
+        service,
+        "resolve_supplier_reference",
+        lambda raw: {
+            "raw_value": raw,
+            "status": "EXACT" if raw in {"SUPPLIER-A", "SUPPLIER-B"} else "UNRESOLVED",
+            "canonical_supplier": raw if raw in {"SUPPLIER-A", "SUPPLIER-B"} else "",
+            "candidates": [],
+        },
+    )
+
+    filled = service.update_item_field(
+        "EMPTY", "supplier", "SUPPLIER-A", _skip_edit_check=True,
+    )
+    rejected = service.update_item_field(
+        "EXISTING", "supplier", "SUPPLIER-B", _skip_edit_check=True,
+    )
+    corrected = service.update_item_field(
+        "EXISTING", "supplier", "SUPPLIER-B", remark="供应商抬头核对", _skip_edit_check=True,
+    )
+
+    assert filled["ok"] is True and items["EMPTY"].supplier == "SUPPLIER-A"
+    filled_metadata = json.loads(items["EMPTY"].extra_json)
+    assert filled_metadata["supplier_match_status"] == "MANUAL_CONFIRMED"
+    assert filled_metadata["supplier_canonical_name"] == "SUPPLIER-A"
+    assert rejected["ok"] is False and rejected["edit_mode"] == "reason_required"
+    assert items["EXISTING"].supplier == "SUPPLIER-B"
+    assert corrected["ok"] is True
+    assert corrected["old_value"] == "SUPPLIER-A"
+    assert corrected["manual_override_reason"] == "供应商抬头核对"
+
+
+def test_supplier_edit_rejects_text_that_is_not_an_active_erp_supplier(monkeypatch) -> None:
+    from overseas_costing.services import calculate_service as service
+
+    monkeypatch.setattr(
+        service,
+        "resolve_supplier_reference",
+        lambda raw: {
+            "raw_value": raw,
+            "status": "SUGGESTED",
+            "canonical_supplier": "",
+            "candidates": [{"name": "SUPPLIER-A", "score": 0.92}],
+        },
+    )
+
+    result = service.update_item_field("ITEM-1", "supplier", "Supplier A typo")
+
+    assert result["ok"] is False
+    assert "ERP 供应商列表" in result["message"]
+
+
 def test_net_weight_is_an_editable_numeric_material_field() -> None:
     result = update_item_field(
         item_name="ITEM-1",

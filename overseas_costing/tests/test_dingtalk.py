@@ -509,7 +509,17 @@ def test_logistics_approval_summary_extracts_sea_trace_fields() -> None:
     assert summary["open_url"].startswith("dingtalk://")
 
 
-def test_logistics_approval_supplier_field_flows_to_item_rows() -> None:
+def test_logistics_approval_reads_supplier_per_goods_row_and_ignores_top_level_field(monkeypatch) -> None:
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "resolve_supplier_reference",
+        lambda raw: {
+            "raw_value": str(raw or "").strip(),
+            "status": "EXACT" if raw else "EMPTY",
+            "canonical_supplier": str(raw or "").strip(),
+            "candidates": [],
+        },
+    )
     instance = {
         "processInstanceId": "PROC-SEA-SUPPLIER",
         "businessId": "202609230001",
@@ -518,7 +528,7 @@ def test_logistics_approval_supplier_field_flows_to_item_rows() -> None:
             {"name": "物流方式Camino Envío", "value": "海运"},
             {
                 "name": "供应商Proveedor",
-                "value": "东莞悦为智能技术有限公司",
+                "value": "顶层旧值不得广播",
             },
             {
                 "name": "货物信息Bienes",
@@ -528,10 +538,29 @@ def test_logistics_approval_supplier_field_flows_to_item_rows() -> None:
                             "rowValue": [
                                 {"label": "物料编码 Código de material", "value": "YL000097"},
                                 {"label": "物料名称（中文）Nombre del material (chino)", "value": "TPU原料"},
+                                {"label": "供应商Proveedor", "value": "SUPPLIER-A"},
                                 {"label": "数量Cantidad", "value": "100"},
                                 {"label": "单位Unidad", "value": "KG"},
                             ]
-                        }
+                        },
+                        {
+                            "rowValue": [
+                                {"label": "物料编码 Código de material", "value": "YL000098"},
+                                {"label": "物料名称（中文）Nombre del material (chino)", "value": "塑料粒子"},
+                                {"label": "Proveedor", "value": "SUPPLIER-B"},
+                                {"label": "数量Cantidad", "value": "20"},
+                                {"label": "单位Unidad", "value": "KG"},
+                            ]
+                        },
+                        {
+                            "rowValue": [
+                                {"label": "物料编码 Código de material", "value": "YL000099"},
+                                {"label": "物料名称（中文）Nombre del material (chino)", "value": "色母"},
+                                {"label": "供应商Proveedor", "value": ""},
+                                {"label": "数量Cantidad", "value": "10"},
+                                {"label": "单位Unidad", "value": "KG"},
+                            ]
+                        },
                     ],
                     ensure_ascii=False,
                 ),
@@ -542,9 +571,53 @@ def test_logistics_approval_supplier_field_flows_to_item_rows() -> None:
     summary = summarize_approval(instance)
     items = build_oa_item_values_from_approval(summary)
 
-    assert summary["supplier"] == "东莞悦为智能技术有限公司"
-    assert len(items) == 1
-    assert items[0]["supplier"] == "东莞悦为智能技术有限公司"
+    assert "supplier" not in summary
+    assert [item["supplier"] for item in items] == ["SUPPLIER-A", "SUPPLIER-B", ""]
+    metadata = [json.loads(item["extra_json"]) for item in items]
+    assert [(item["supplier_raw_value"], item["supplier_field_present"]) for item in metadata] == [
+        ("SUPPLIER-A", True),
+        ("SUPPLIER-B", True),
+        ("", True),
+    ]
+    assert [item["dingtalk_goods_row_no"] for item in metadata] == [1, 2, 3]
+
+
+def test_logistics_approval_keeps_unmatched_supplier_only_in_metadata(monkeypatch) -> None:
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "resolve_supplier_reference",
+        lambda raw: {
+            "raw_value": str(raw or "").strip(),
+            "status": "SUGGESTED",
+            "canonical_supplier": "",
+            "candidates": [{"name": "SUP-ALPHA", "score": 0.94, "high_confidence": True}],
+        },
+    )
+    approval = {
+        "source_approval_no": "OA-SUPPLIER-UNMATCHED",
+        "source_instance_id": "PROC-SUPPLIER-UNMATCHED",
+        "form_fields": {
+            "货物信息Bienes": [{
+                "rowNumber": "TableField_9",
+                "rowValue": [
+                    {"label": "物料编码 Código de material", "value": "M-1"},
+                    {"label": "物料名称（中文）Nombre del material (chino)", "value": "原料"},
+                    {"label": "供应商Proveedor", "value": "Alpha Tradng Mexico"},
+                    {"label": "数量Cantidad", "value": "1"},
+                ],
+            }],
+        },
+    }
+
+    item = build_oa_item_values_from_approval(approval)[0]
+    metadata = json.loads(item["extra_json"])
+
+    assert item["supplier"] == ""
+    assert metadata["supplier_raw_value"] == "Alpha Tradng Mexico"
+    assert metadata["supplier_field_present"] is True
+    assert metadata["supplier_match_status"] == "SUGGESTED"
+    assert metadata["supplier_candidates"][0]["name"] == "SUP-ALPHA"
+    assert metadata["dingtalk_goods_row_no"] == "TableField_9"
 
 
 def test_extract_logistics_fee_from_approval_only_reads_explicit_amount() -> None:
