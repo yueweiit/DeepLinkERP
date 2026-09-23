@@ -430,9 +430,17 @@ def build_evidence_candidates(
         if owning_approval:
             # The approval inventory is the authority on process identity; the
             # local row is only a cache of one file inside that process.
+            #
+            # ``source_label`` 必须一起换成审批自己的标签。共享分类器把
+            # ``source_label`` 读进流程身份文本（``_workflow_identity_text``），
+            # 而它在比对“月结／报销”这类支付词之前并不先看 ``approval_role``。
+            # 若这里继续塞文件名，一份挂在国际物流审批下、只是名字叫
+            # “月结运费凭证.pdf”的附件，就会被名字抢进“费用申请”。
+            # 审批清单给得出归属时，流程只能由归属说了算，文件名不参与判定。
             evidence_source = {
                 **evidence_source,
                 "source_kind": evidence_source.get("source_kind") or "approval_attachment",
+                "source_label": owning_approval.get("source_label") or evidence_source.get("source_label"),
                 "approval_role": owning_approval.get("approval_role") or evidence_source.get("approval_role"),
                 "approval_title": owning_approval.get("approval_title") or evidence_source.get("approval_title"),
                 "process_title": owning_approval.get("process_title") or evidence_source.get("process_title"),
@@ -595,7 +603,13 @@ def _approval_identity_index(approval_detail: dict | None) -> dict[str, dict]:
 
 
 def _evidence_candidate_source(attachment: dict, parsed: dict, mapped: dict) -> dict:
-    """Project one attachment onto the shared workflow classifier's input contract."""
+    """Project one attachment onto the shared workflow classifier's input contract.
+
+    这里的 ``source_label`` 只是**拿不到审批归属时**的兜底：用户上传时常靠命名
+    表达“这是哪一类付款”，清单里查不到 instance 时只能认这个名字。一旦
+    ``build_evidence_candidates`` 用 ``process_instance_id`` 挂上了审批，
+    调用方会立刻把 ``source_label`` 换成审批标签，文件名不再参与流程判定。
+    """
 
     descriptor = parsed.get("settlement_document") or mapped.get("settlement_document")
     descriptor = descriptor if isinstance(descriptor, dict) else {}

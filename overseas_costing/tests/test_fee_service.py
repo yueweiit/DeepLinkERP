@@ -526,6 +526,76 @@ def test_evidence_candidates_resolve_process_identity_from_the_approval_inventor
     assert candidate["amount_candidates"] == []
 
 
+@pytest.mark.parametrize(
+    "file_name,instance_id,expected_stage",
+    [
+        ("月结运费凭证.pdf", "INST-LOGISTICS", "international_logistics"),
+        ("报销运费.pdf", "INST-LOGISTICS", "international_logistics"),
+        ("月结付款-货款.pdf", "INST-PURCHASE", "purchase"),
+    ],
+)
+def test_file_name_payment_words_never_override_the_owning_approval_stage(
+    file_name, instance_id, expected_stage
+) -> None:
+    """审批归属定了流程，文件名里的“月结／报销”不能把它抢走。
+
+    共享分类器会把 ``source_label`` 读进流程身份文本，而“月结／报销”这类支付词
+    的判定排在 ``approval_role`` 之前。早先费用链路把 ``file_name`` 直接当
+    ``source_label``，于是一份挂在国际物流审批下、只是名字带“月结”的附件，
+    会被抢进“费用申请”分组。清单查得到归属时，身份只认归属。
+    """
+
+    attachment = {
+        "name": "ATT-MISROUTE",
+        "file_name": file_name,
+        "source_type": "OA",
+        "parse_status": "Parsed",
+        "parse_result_json": json.dumps({"process_instance_id": instance_id}),
+        "mapped_result_json": "{}",
+    }
+    approval_detail = {
+        "ok": True,
+        "main_approval": {
+            "instance_id": "INST-LOGISTICS",
+            "title": "国际物流审批",
+            "form_fields": [{"label": "费用类型", "value": "海运运费"}],
+        },
+        "linked_purchase_approvals": [
+            {
+                "instance_id": "INST-PURCHASE",
+                "title": "采购审批",
+                "form_fields": [{"label": "供应商", "value": "ACME"}],
+            }
+        ],
+        "source_context": {"root_kind": "logistics"},
+    }
+
+    candidate = build_evidence_candidates([attachment], approval_detail=approval_detail)[0]
+
+    assert candidate["workflow_stage"] == expected_stage
+    assert candidate["workflow_source"] == "approval_inventory"
+    # 高亮仍按文件名走：判定归判定、展示归展示，改判定不该连带压掉高亮。
+    assert candidate["is_voucher_name"] is ("凭证" in file_name)
+
+
+def test_without_inventory_the_file_name_still_carries_the_payment_hint() -> None:
+    """拿不到审批清单时保留文件名兜底，否则月结凭证会整片退化成“其他来源”。"""
+
+    attachment = {
+        "name": "ATT-FALLBACK",
+        "file_name": "月结付款凭证.pdf",
+        "source_type": "OA",
+        "parse_status": "Parsed",
+        "parse_result_json": json.dumps({"process_instance_id": "INST-UNKNOWN"}),
+        "mapped_result_json": "{}",
+    }
+
+    candidate = build_evidence_candidates([attachment], approval_detail={"ok": False})[0]
+
+    assert candidate["workflow_stage"] == "payment"
+    assert candidate["workflow_source"] == "attachment_cache"
+
+
 def test_evidence_candidates_without_inventory_fall_back_to_the_attachment_cache() -> None:
     """拿不到审批清单时保留本地缓存判定，不把候选整体丢掉。"""
 
