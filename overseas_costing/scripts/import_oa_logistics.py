@@ -5490,9 +5490,12 @@ def _sync_oa_logistics_allocation_rule(
 ) -> dict:
     """Compatibility adapter for the manual primary-freight quote APIs.
 
-    Callers: ``confirm_logistics_quote_candidate`` and
-    ``save_manual_logistics_quote``. Remove after those APIs submit canonical
-    logical-fee descriptors directly.
+    Callers: ``confirm_logistics_quote_candidate``,
+    ``save_manual_logistics_quote`` and the historical
+    ``backfill_express_single_quote_freight_rules`` repair command. Retain
+    while those entry points accept legacy quote payloads; remove after both
+    public APIs submit canonical logical-fee descriptors and the backfill
+    command has left the supported replay window.
     """
 
     return _sync_oa_fee_descriptor(
