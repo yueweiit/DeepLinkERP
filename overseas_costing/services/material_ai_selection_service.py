@@ -223,7 +223,39 @@ def material_fingerprint(items,sources,context):
             continue
         row=ai._fingerprint_source(source);row['source_context']=packing(row.get('source_context'));clean_sources.append(row)
     return digest('ai-material-input-1',clean_items,clean_sources,packing(context.get('effective_source')),
-        context.get('fx_rates'),context.get('clarification_revision'))
+        context.get('fx_rates'),context.get('clarification_revision'),
+        _normalized_project_routing(context.get('project_routing')))
+
+
+def _normalized_project_routing(value):
+    """Keep only server-authoritative project policy fields in a stable order."""
+
+    routing = value if isinstance(value, dict) else {}
+    options = []
+    for option in routing.get('options') or []:
+        if not isinstance(option, dict):
+            continue
+        try:
+            revision = int(option.get('revision') or 0)
+        except (TypeError, ValueError):
+            revision = 0
+        options.append({
+            'project_collection': str(option.get('project_collection') or ''),
+            'subsidiary_code': str(option.get('subsidiary_code') or ''),
+            'site_code': str(option.get('site_code') or ''),
+            'revision': revision,
+            'ai_match_hint': str(option.get('ai_match_hint') or ''),
+            'is_approval_candidate': option.get('is_approval_candidate') in (1, True, '1', 'true', 'True'),
+        })
+    options.sort(key=lambda option: (
+        option['project_collection'], option['subsidiary_code'], option['site_code'],
+        option['revision'], option['ai_match_hint'], option['is_approval_candidate'],
+    ))
+    return {
+        'route_revision': str(routing.get('route_revision') or ''),
+        'options': options,
+        'conflicts': sorted(str(value or '') for value in routing.get('conflicts') or []),
+    }
 
 
 def _inputs(repo, batch, run, *, locked=False):

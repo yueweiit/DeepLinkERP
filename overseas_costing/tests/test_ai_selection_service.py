@@ -98,6 +98,82 @@ def test_unselected_source_materialization_does_not_invalidate_review_fingerprin
     )
 
 
+def test_material_fingerprint_normalizes_project_routing_and_detects_policy_changes():
+    items = [{'name': 'I1', 'material_code': 'SKU1'}]
+    routing = {
+        'route_revision': 'ROUTES-1',
+        'options': [{
+            'project_collection': 'LatinGo拉丁购',
+            'subsidiary_code': 'LATIN',
+            'site_code': 'DEEPLINKERP',
+            'revision': 3,
+            'ai_match_hint': '宠物用品',
+            'is_approval_candidate': True,
+            'ignored_ui_metadata': 'one',
+        }],
+    }
+    baseline = service.material_fingerprint(items, [], {'project_routing': routing})
+    reordered = {
+        'options': [{
+            **routing['options'][0],
+            'ignored_ui_metadata': 'two',
+        }],
+        'route_revision': 'ROUTES-1',
+        'ignored_response_metadata': True,
+    }
+    assert baseline == service.material_fingerprint(items, [], {'project_routing': reordered})
+
+    for fieldname, value in (
+        ('subsidiary_code', 'OTHER'),
+        ('site_code', 'MEXICO'),
+        ('revision', 4),
+        ('ai_match_hint', '宠物用品、户外用品'),
+        ('is_approval_candidate', False),
+    ):
+        changed = deepcopy(routing)
+        changed['options'][0][fieldname] = value
+        assert baseline != service.material_fingerprint(
+            items, [], {'project_routing': changed}
+        )
+    changed_revision = deepcopy(routing)
+    changed_revision['route_revision'] = 'ROUTES-2'
+    assert baseline != service.material_fingerprint(
+        items, [], {'project_routing': changed_revision}
+    )
+
+
+def test_ready_project_draft_becomes_stale_for_catalog_and_confirm_when_route_changes():
+    repo = Repo()
+    repo.context['project_routing'] = {
+        'route_revision': 'ROUTES-1',
+        'options': [{
+            'project_collection': 'LatinGo拉丁购',
+            'subsidiary_code': 'LATIN',
+            'site_code': 'DEEPLINKERP',
+            'revision': 3,
+            'ai_match_hint': '宠物用品',
+            'is_approval_candidate': True,
+        }],
+    }
+    repo.run['input_fingerprint'] = ai._source_review_fingerprint(
+        'B1', 'V1', repo.items, repo.sources, '', context=repo.context
+    )
+    repo.run['draft_json']['material_input_fingerprint'] = service.material_fingerprint(
+        repo.items, repo.sources, repo.context
+    )
+    preview = prepare(repo)
+
+    repo.context['project_routing']['route_revision'] = 'ROUTES-2'
+    repo.context['project_routing']['options'][0]['revision'] = 4
+    repo.context['project_routing']['options'][0]['ai_match_hint'] = '宠物用品、户外用品'
+
+    with pytest.raises(ValueError, match='重新分析'):
+        service.review_catalog(repo, 'B1', repo.run)
+    with pytest.raises(ValueError, match='重新分析'):
+        confirm(repo, preview)
+    assert repo.writes == []
+
+
 def test_pending_adopted_material_scope_can_reenter_review_prepare_and_confirm():
     repo=Repo();pending_adopted_scope(repo)
 
