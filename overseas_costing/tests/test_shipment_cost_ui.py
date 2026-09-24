@@ -5,6 +5,8 @@ from overseas_costing.tests.test_workbench_frontend_state import _fee_workspace_
 
 MATERIAL_GRID_PART = (Path(__file__).resolve().parents[1] / 'page' / 'overseas_cost_workbench'
                       / 'parts' / '78-material-fee-workspace.js')
+MATERIAL_GRID_CSS = (Path(__file__).resolve().parents[1] / 'page' / 'overseas_cost_workbench'
+                     / 'parts' / '48-material-fee-workspace.css')
 
 
 def test_stale_cost_is_collapsed_history_not_complete_badge():
@@ -470,6 +472,35 @@ def test_select_all_page_action_reuses_the_shared_page_toggle():
     assert 'renderMaterialFeeWorkspacePreservingPosition()' in handler
     assert 'materialPageSelectionState' in source and 'toggleMaterialPageSelection' in source
     assert source.count('state.packingGroupSelections.add(') == 1
+
+
+def test_batch_actions_sit_in_a_right_aligned_purple_group():
+    """全选本页 / 批量设置项目归属 / 批量设置供应商一按就成片影响物料行，
+    要跟左侧的逐行操作分开：靠右单独成组、用紫色区分，并整体留在同一条工具栏里。"""
+    result = _fee_workspace_result(r"""
+const w=Object.create(Harness.prototype);w.detailState={readOnly:false};const state=w.ensureMaterialFeeState();
+w.escape=v=>String(v??'');
+state.materials={packing_group_editable:true,items:[{stable_line_key:'L1',row_no:1}],packing_groups:[]};
+state.packingGroupSelections=new Set(['L1']);
+console.log(JSON.stringify({html:w.renderMaterialSelectionToolbar()}));
+""")
+    html = result['html']
+    batch = ['全选本页', '批量设置项目归属', '批量设置供应商']
+    group = html.split('ocw-mf-toolbar-batch', 1)[1].split('</span>', 1)[0]
+    assert group.count('ocw-mf-batch-btn') == 3
+    for label in batch:
+        assert label in group
+    # 左侧不能再出现这三个动作，否则「分组」只是摆设
+    head = html.split('ocw-mf-toolbar-batch', 1)[0]
+    for label in batch:
+        assert label not in head
+    assert '已选 1 行' in head and '新增物料' in head
+
+    css = MATERIAL_GRID_CSS.read_text(encoding='utf-8')
+    group_rule = css.split('.ocw-mf-selection-toolbar .ocw-mf-toolbar-batch {', 1)[1].split('}', 1)[0]
+    assert 'margin-left: auto' in group_rule
+    purple = css.split('.ocw-mf-selection-toolbar .ocw-mf-batch-btn {', 1)[1].split('}', 1)[0]
+    assert '#5b46b5' in purple and '#f6f2ff' in purple
 
 
 def test_top_toolbar_uses_atomic_batch_endpoints_and_clears_only_after_success():

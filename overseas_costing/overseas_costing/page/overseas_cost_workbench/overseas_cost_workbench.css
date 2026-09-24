@@ -7646,6 +7646,16 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
 .ocw-mf-selection-count { display: inline-flex; align-items: center; gap: 7px; min-width: 76px; color: #344054; font-size: 12px; font-weight: 700; }
 .ocw-mf-selection-count small { border-radius: 999px; padding: 3px 7px; background: #e4f2fd; color: #076fbe; font-size: 10px; font-weight: 500; white-space: nowrap; }
 
+/* 右侧批量组：这三个按钮一按就成片影响物料行，单独靠右并用紫色区分，避免和左侧逐行操作混成一条看不出差别的按钮带。 */
+.ocw-mf-selection-toolbar .ocw-mf-toolbar-batch { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; padding-left: 10px; border-left: 1px solid #ded3f7; }
+.ocw-mf-selection-toolbar .ocw-mf-batch-btn { color: #5b46b5; border-color: #b9a8e8; background: #f6f2ff; }
+.ocw-mf-selection-toolbar .ocw-mf-batch-btn:hover:not(:disabled) { border-color: #9d8bd8; background: #efeaff; }
+.ocw-mf-selection-toolbar .ocw-mf-batch-btn:disabled { color: #475467; border-color: #cbd5e1; background: #e4e7ec; cursor: not-allowed; }
+
+@media (max-width: 700px) {
+  .ocw-mf-selection-toolbar .ocw-mf-toolbar-batch { width: 100%; margin-left: 0; padding-left: 0; border-left: 0; }
+}
+
 .ocw-mf-grid-note {
   display: flex;
   flex-wrap: wrap;

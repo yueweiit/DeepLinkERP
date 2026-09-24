@@ -1276,17 +1276,22 @@
     const context = this.materialSelectionContext();
     const button = (label, action, spec, kind = "ocw-outline-btn") =>
       `<button class="${kind}" type="button" data-action="${action}" ${spec.enabled ? "" : "disabled"} title="${this.escape(spec.reason || label)}">${label}</button>`;
+    // 左组是逐行／整组的编辑动作；右组这三个一按就成片影响物料行（选中本页、批量改归属、批量改供应商），
+    // 靠右单独成组并用紫色区分，免得和左侧混成一条看不出差别的按钮带。
+    const batch = (label, action, spec) => button(label, action, spec, "ocw-outline-btn ocw-mf-batch-btn");
     return `<div class="ocw-mf-selection-toolbar" aria-label="物料批量操作">
       <span class="ocw-mf-selection-count">已选 ${context.selectedCount} 行${context.crossPageCount ? `<small>含 ${context.crossPageCount} 个跨页成员</small>` : ""}</span>
-      ${button(context.actions.selectPage.label, "mf-select-page", context.actions.selectPage)}
       ${button("新增物料", "mf-add-material", context.actions.add)}
       ${button("合并装箱组", "mf-create-packing-group", context.actions.merge)}
       ${button("编辑装箱组", "mf-edit-selected-packing-group", context.actions.edit)}
       ${button("解除合并", "mf-remove-selected-packing-groups", context.actions.unmerge)}
-      ${button("批量设置项目归属", "mf-set-project", context.actions.project)}
-      ${button("批量设置供应商", "mf-set-supplier", context.actions.supplier)}
       ${button("删除所选", "mf-exclude-selected", context.actions.remove, "ocw-outline-btn is-danger")}
       ${button("清除选择", "mf-clear-selection", context.actions.clear)}
+      <span class="ocw-mf-toolbar-batch" aria-label="批量设置">
+        ${batch(context.actions.selectPage.label, "mf-select-page", context.actions.selectPage)}
+        ${batch("批量设置项目归属", "mf-set-project", context.actions.project)}
+        ${batch("批量设置供应商", "mf-set-supplier", context.actions.supplier)}
+      </span>
     </div>`;
   }
 
