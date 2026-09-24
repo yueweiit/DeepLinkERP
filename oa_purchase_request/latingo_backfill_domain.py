@@ -42,6 +42,17 @@ UOM_MAP = {
 }
 
 
+def build_dingtalk_file_download_request(process_instance_id: str, file_id: str) -> dict:
+	"""Build the envelope required by DingTalk's approval-file URL API."""
+
+	return {
+		"request": {
+			"process_instance_id": process_instance_id,
+			"file_id": file_id,
+		}
+	}
+
+
 def _date(value) -> date | None:
 	if isinstance(value, datetime):
 		return value.date()

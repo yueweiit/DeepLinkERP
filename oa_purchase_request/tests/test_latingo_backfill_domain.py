@@ -2,6 +2,7 @@ from datetime import date
 
 import pytest
 
+import oa_purchase_request.latingo_backfill_domain as domain
 from oa_purchase_request.latingo_backfill_domain import (
 	GENERIC_PURCHASE_PROCESS_CODE,
 	LATINGO_PURCHASE_PROCESS_CODE,
@@ -13,6 +14,15 @@ from oa_purchase_request.latingo_backfill_domain import (
 	source_from_instance,
 	submission_blockers,
 )
+
+
+def test_build_dingtalk_file_download_request_uses_required_request_envelope():
+	assert domain.build_dingtalk_file_download_request("PI-001", "FILE-002") == {
+		"request": {
+			"process_instance_id": "PI-001",
+			"file_id": "FILE-002",
+		}
+	}
 
 
 def source(**overrides):

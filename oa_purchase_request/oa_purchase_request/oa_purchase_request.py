@@ -12,6 +12,8 @@ from frappe.utils.data import cint
 from frappe.utils.file_manager import save_file
 from frappe.utils import flt, getdate, nowdate
 
+from oa_purchase_request.latingo_backfill_domain import build_dingtalk_file_download_request
+
 
 DEFAULT_PURCHASE_WAREHOUSE = "采购 - YC"
 OA_PURCHASE_REQUEST_PROCESS_CODE = "PROC-BFDF6F09-4551-43B3-8C55-537AA74A241B"
@@ -723,10 +725,7 @@ def content_from_dingtalk_file_id(doc, file_id, filename=None):
 	response = requests.post(
 		"https://oapi.dingtalk.com/topapi/processinstance/file/url/get",
 		params={"access_token": access_token},
-		json={
-			"process_instance_id": process_instance_id,
-			"file_id": file_id,
-		},
+		json=build_dingtalk_file_download_request(process_instance_id, file_id),
 		timeout=20,
 	)
 	response.raise_for_status()
