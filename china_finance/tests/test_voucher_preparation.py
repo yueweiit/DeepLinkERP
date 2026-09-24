@@ -52,6 +52,33 @@ class TestVoucherPreparation(unittest.TestCase):
 			}
 		).insert()
 
+	def test_closing_month_derives_full_calendar_period(self):
+		doc = frappe.get_doc(
+			{
+				"doctype": "China Closing Run",
+				"company": self.company,
+				"closing_month": "2026-02",
+				"closing_type": "Monthly",
+			}
+		).insert()
+
+		self.assertEqual(str(doc.from_date), "2026-02-01")
+		self.assertEqual(str(doc.to_date), "2026-02-28")
+		self.assertEqual(doc.closing_month, "2026-02")
+
+	def test_closing_month_rejects_inconsistent_dates(self):
+		with self.assertRaises(frappe.ValidationError):
+			frappe.get_doc(
+				{
+					"doctype": "China Closing Run",
+					"company": self.company,
+					"closing_month": "2026-08",
+					"from_date": "2026-08-01",
+					"to_date": "2026-09-01",
+					"closing_type": "Monthly",
+				}
+			).insert()
+
 	def test_draft_visible_and_edit_has_no_posting_side_effects(self):
 		from china_finance.china_finance.report.china_voucher_ledger.china_voucher_ledger import execute
 

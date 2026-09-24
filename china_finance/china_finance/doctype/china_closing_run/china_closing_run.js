@@ -26,6 +26,52 @@ function lock_check_grid(frm) {
 	remove_empty_check_rows(frm);
 }
 
+function month_period(month) {
+	if (!/^\d{4}-\d{2}$/.test(month || "")) return null;
+	const [year, month_number] = month.split("-").map(Number);
+	if (month_number < 1 || month_number > 12) return null;
+
+	const last_day = new Date(year, month_number, 0).getDate();
+	return {
+		from_date: `${year}-${String(month_number).padStart(2, "0")}-01`,
+		to_date: `${year}-${String(month_number).padStart(2, "0")}-${String(last_day).padStart(2, "0")}`,
+	};
+}
+
+function sync_period_from_month(frm) {
+	if (frm.doc.closing_type !== "Monthly") return;
+	const period = month_period(frm.doc.closing_month);
+	if (!period) {
+		if (!frm.doc.closing_month) {
+			if (frm.doc.from_date) frm.set_value("from_date", null);
+			if (frm.doc.to_date) frm.set_value("to_date", null);
+		}
+		return;
+	}
+
+	if (frm.doc.from_date !== period.from_date) frm.set_value("from_date", period.from_date);
+	if (frm.doc.to_date !== period.to_date) frm.set_value("to_date", period.to_date);
+}
+
+function infer_month_from_period(frm) {
+	if (frm.doc.closing_type !== "Monthly" || frm.doc.closing_month || !frm.doc.from_date) return;
+	const match = String(frm.doc.from_date).match(/^(\d{4})-(\d{2})-\d{2}$/);
+	if (!match) return;
+	frm.doc.closing_month = `${match[1]}-${match[2]}`;
+	frm.refresh_field("closing_month");
+}
+
+function setup_month_picker(frm) {
+	const field = frm.get_field("closing_month");
+	if (!field || !field.$input) return;
+
+	field.$input.attr("type", "month");
+	field.$input.attr("placeholder", __("选择月份"));
+	field.$input.off("change.china_closing_month").on("change.china_closing_month", () => {
+		sync_period_from_month(frm);
+	});
+}
+
 function initialize_amended_closing_run(frm) {
 	if (!frm.is_new() || !frm.doc.amended_from || frm.__china_closing_amendment_initialized) return;
 
@@ -39,6 +85,7 @@ function initialize_amended_closing_run(frm) {
 		reopened_by: null,
 		reopened_on: null,
 		reopen_reason: null,
+		closing_month: null,
 	});
 	frm.clear_table("checks");
 	frm.refresh_fields();
@@ -120,6 +167,7 @@ async function create_reclosing_run(frm) {
 	frappe.new_doc("China Closing Run", {
 		company: frm.doc.company,
 		closing_type: frm.doc.closing_type,
+		closing_month: frm.doc.closing_month,
 		from_date: frm.doc.from_date,
 		to_date: frm.doc.to_date,
 	});
@@ -297,8 +345,15 @@ async function submit_and_complete_closing(frm) {
 }
 
 frappe.ui.form.on("China Closing Run", {
+	closing_month(frm) {
+		sync_period_from_month(frm);
+	},
+
 	async refresh(frm) {
 		initialize_amended_closing_run(frm);
+		infer_month_from_period(frm);
+		setup_month_picker(frm);
+		sync_period_from_month(frm);
 		if (frm.doc.company && frm.doc.from_date && frm.doc.to_date && frm.doc.docstatus === 0) {
 			const response = await frappe.call({method: "china_finance.services.voucher_preparation.get_mode", args: {company: frm.doc.company, posting_date: frm.doc.from_date}});
 			if (response.message?.enabled && frm.doc.closing_type === "Monthly") {
