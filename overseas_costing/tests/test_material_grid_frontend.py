@@ -373,3 +373,104 @@ def test_reference_picker_layout_is_compact_scrollable_and_responsive():
     responsive = css.split("@media (max-width: 700px)", 1)[1]
     assert ".ocw-mf-reference-option" in responsive
     assert "grid-template-columns: minmax(0, 1fr)" in responsive
+
+
+def test_reference_picker_saves_route_failures_to_the_shared_reporter():
+    """两个选择器点保存不再静默：错误必须交给统一出口，且不能谎报成功。
+
+    回归背景：`primary_action` 里抛出的错没人接，而 Frappe 的 Dialog 不会等它的
+    promise —— 乐观锁过期时表现为“点保存毫无反应”。
+    """
+
+    source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    project_dialog = source.split("async openProjectCollectionPicker", 1)[1].split("async loadSupplierResolution", 1)[0]
+    supplier_dialog = source.split("async openSupplierPicker", 1)[1].split("async openMaterialPackingGroupDialog", 1)[0]
+
+    assert "catch (error)" in project_dialog
+    assert "await this.reportMaterialReferenceWriteFailure(error)" in project_dialog
+    assert "if (!result?.ok) return;" in project_dialog
+    assert "catch (error)" in supplier_dialog
+    assert "await this.reportMaterialReferenceWriteFailure(error)" in supplier_dialog
+    assert "if (!applied?.ok) return;" in supplier_dialog
+    # 保存失败后必须先恢复再提示，恢复动作只有一处实现。
+    assert "recoverMaterialFeeReadonlyState(this.detailState.batchName)" in source
+
+
+def test_reference_write_failure_clears_the_cause_and_offers_one_next_step():
+    result = _fee_workspace_result(r'''
+    const w=Object.create(Harness.prototype);w.detailState={batchName:'B-1'};
+    w.normalizeErrorMessage=error=>String(error?.message||'操作失败');
+    const recovered=[];const shown=[];
+    w.recoverMaterialFeeReadonlyState=async name=>{recovered.push(name);return true;};
+    w.showError=error=>shown.push(String(error?.message||''));
+    await w.reportMaterialReferenceWriteFailure(new Error('RuntimeError: 批次数据已被更新，请刷新后重新确认本次修改。'));
+    w.recoverMaterialFeeReadonlyState=async name=>{recovered.push(name);return false;};
+    await w.reportMaterialReferenceWriteFailure(new Error('编辑会话已过期，请重新进入编辑。'));
+    console.log(JSON.stringify({recovered,shown}));
+    ''')
+    assert result["recovered"] == ["B-1", "B-1"]
+    assert result["shown"][0] == "批次数据已被更新，请刷新后重新确认本次修改。；已同步最新数据，请再点一次保存。"
+    assert result["shown"][1] == "编辑会话已过期，请重新进入编辑。；请刷新页面后重试。"
+
+
+def test_reference_write_failure_keeps_invalid_input_a_hint_without_resync_or_modal():
+    result = _fee_workspace_result(r'''
+    const w=Object.create(Harness.prototype);w.detailState={batchName:'B-1'};
+    w.normalizeErrorMessage=error=>String(error?.message||'操作失败');
+    const recovered=[];const shown=[];
+    w.recoverMaterialFeeReadonlyState=async name=>{recovered.push(name);return true;};
+    w.showError=error=>shown.push(String(error?.message||''));
+    const error=new Error('请从有效列表中选择，不能录入列表外的值。');
+    error.materialReferenceInputInvalid=true;
+    await w.reportMaterialReferenceWriteFailure(error);
+    const blocking=new Error('页面版本已失效，请刷新后继续使用。');blocking.workbenchReleaseBlocked=true;
+    await w.reportMaterialReferenceWriteFailure(blocking);
+    console.log(JSON.stringify({recovered,shown,alerts:global.alerts}));
+    ''')
+    assert result["recovered"] == []
+    assert result["shown"] == []
+    assert result["alerts"] == [{"message": "请从有效列表中选择，不能录入列表外的值。", "indicator": "orange"}]
+
+
+def test_batch_write_revision_is_advanced_through_one_helper_only():
+    """两条会刷新写令牌的路径都必须走 acceptBatchWriteRevision（不回退规则只写一处）。"""
+
+    source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    snapshot_block = source.split("applyMaterialFeeHeaderSnapshot(detail, batchName) {", 1)[1].split("async saveMaterialFeeCell", 1)[0]
+    updater_block = source.split("updateMaterialFeeExpectedModified(result) {", 1)[1].split("applyMaterialFeeHeaderSnapshot", 1)[0]
+
+    assert "this.acceptBatchWriteRevision(header.modified)" in snapshot_block
+    assert "this.acceptBatchWriteRevision(modified)" in updater_block
+    assert "this.detailState.expectedModified = header.modified" not in source
+    assert "this.detailState.expectedModified = modified;" not in source
+
+
+def test_older_workspace_snapshot_cannot_rewind_the_write_revision():
+    """写令牌只允许前进：缓存快照里的旧 detail.modified 不能把 revision 拉回去。
+
+    回归背景：资料页快照允许「先用缓存的、回头再校验」，它带的 detail 可能落后于数据库
+    （线上实测快照里还是 4 天前的 modified）。这份旧值一旦覆盖写令牌，edit_session 的
+    乐观锁就会把本页之后每次写入都判成「批次数据已被更新」—— 页面再也保存不了。
+    """
+
+    result = _fee_workspace_result(r'''
+    const w=Object.create(Harness.prototype);w.batches=[];
+    w.detailState={batchName:'B-1',versionName:'V-1',expectedModified:'2026-09-24 14:13:56.627458'};
+    const older={ok:true,batch_name:'B-1',header:{modified:'2026-09-20 17:53:04.118289'}};
+    w.applyMaterialFeeHeaderSnapshot(older,'B-1');
+    const afterOlder=w.detailState.expectedModified;
+    w.updateMaterialFeeExpectedModified({batch_modified:'2026-09-20 17:53:04.118289'});
+    const afterOlderWrite=w.detailState.expectedModified;
+    w.updateMaterialFeeExpectedModified({batch_modified:'2026-09-24 15:01:00.000001'});
+    const headerAfterForward=w.detailState.header.modified;
+    const newer={ok:true,batch_name:'B-1',header:{modified:'2026-09-24 15:02:00.000001'}};
+    w.applyMaterialFeeHeaderSnapshot(newer,'B-1');
+    const afterNewer=w.detailState.expectedModified;
+    console.log(JSON.stringify({afterOlder,afterOlderWrite,headerAfterForward,afterNewer,version:w.detailState.versionName}));
+    ''')
+    assert result["afterOlder"] == "2026-09-24 14:13:56.627458"
+    assert result["afterOlderWrite"] == "2026-09-24 14:13:56.627458"
+    assert result["headerAfterForward"] == "2026-09-24 15:01:00.000001"
+    assert result["afterNewer"] == "2026-09-24 15:02:00.000001"
+    assert result["version"] == "V-1"
+

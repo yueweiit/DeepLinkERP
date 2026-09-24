@@ -12265,7 +12265,11 @@ class OverseasCostWorkbench {
   async applyMaterialReferenceSelection(items, fieldname, value, options = {}) {
     const target = String(value || "").trim();
     const allowedValues = options.allowedValues instanceof Set ? options.allowedValues : new Set(options.allowedValues || []);
-    if (!target || !allowedValues.has(target)) throw new Error("请从有效列表中选择，不能录入列表外的值。");
+    if (!target || !allowedValues.has(target)) {
+      const error = new Error("请从有效列表中选择，不能录入列表外的值。");
+      error.materialReferenceInputInvalid = true;
+      throw error;
+    }
     const state = this.ensureMaterialFeeState();
     if (options.aiDraft && fieldname === "project_collection") {
       (items || []).forEach((item) => {
@@ -12317,6 +12321,31 @@ class OverseasCostWorkbench {
     return this.applyMaterialReferenceSelection(items, "project_collection", value, options);
   }
 
+  /**
+   * 项目归属 / 供应商两个选择器保存失败时的唯一出口。
+   *
+   * 里面抛的错以前没人接，而 Frappe 的 Dialog 不会等 `primary_action` 的 promise，
+   * 于是「编辑权没拿到」「乐观锁过期」这类失败都表现为点保存毫无反应、连原因都没有。
+   * 这里复用单元格保存那条已有的恢复动作（recoverMaterialFeeReadonlyState 会强制重建
+   * 资料页快照、把批次 revision 刷成最新），再把失败原因和下一步明确呈现出来。
+   */
+  async reportMaterialReferenceWriteFailure(error) {
+    if (error?.workbenchReleaseHandled || error?.workbenchReleaseBlocked) return;
+    const reason = this.normalizeErrorMessage(error).replace(/^[A-Za-z_]*Error:\s*/, "");
+    if (error?.materialReferenceInputInvalid) {
+      frappe.show_alert({ message:reason, indicator:"orange" });
+      return;
+    }
+    let recovered = false;
+    try {
+      recovered = await this.recoverMaterialFeeReadonlyState(this.detailState.batchName);
+    } catch (_recoveryError) {
+      recovered = false;
+    }
+    const nextStep = recovered ? "已同步最新数据，请再点一次保存。" : "请刷新页面后重试。";
+    this.showError(new Error(`${reason}；${nextStep}`));
+  }
+
   async openProjectCollectionForItem(itemName, suggestedValue = "") {
     const item = this.findMaterialFeeItem(itemName);
     if (!item) throw new Error("物料行已变化，请刷新后重试。");
@@ -12351,14 +12380,20 @@ class OverseasCostWorkbench {
       ],
       primary_action_label:source === "bulk" ? "确认批量设置" : "保存",
       primary_action:async () => {
-        const target = String(model.selectedValue || "");
-        const aiDraft = Boolean(this.isMaterialAIReadyStatus(state.aiFill?.status) && state.aiFill?.draftVisible);
-        await this.applyProjectCollectionSelection(items, target, {
-          aiDraft,
-          allowedValues:valid,
-        });
-        dialog.hide();
-        frappe.show_alert({message:aiDraft ? "项目归属已更新到 AI 草稿" : `已更新 ${items.length} 行项目归属`, indicator:"green"});
+        try {
+          const target = String(model.selectedValue || "");
+          const aiDraft = Boolean(this.isMaterialAIReadyStatus(state.aiFill?.status) && state.aiFill?.draftVisible);
+          const result = await this.applyProjectCollectionSelection(items, target, {
+            aiDraft,
+            allowedValues:valid,
+          });
+          // 编辑权没拿到时内部返回 ok:false（入口已给出提示），不能当成保存成功。
+          if (!result?.ok) return;
+          dialog.hide();
+          frappe.show_alert({message:aiDraft ? "项目归属已更新到 AI 草稿" : `已更新 ${items.length} 行项目归属`, indicator:"green"});
+        } catch (error) {
+          await this.reportMaterialReferenceWriteFailure(error);
+        }
       },
     });
     dialog.show();
@@ -12425,10 +12460,12 @@ class OverseasCostWorkbench {
     const supplier = String(result.supplier || "").trim();
     if (!supplier) throw new Error("ERP 未返回规范供应商 ID。");
     this.ensureMaterialFeeState().supplierOptionsCache.clear();
-    await this.applySupplierSelection(items, supplier, {
+    const applied = await this.applySupplierSelection(items, supplier, {
       allowedValues:new Set([supplier]),
       auditRemark:result.created ? "新建 ERP 供应商并设置物料" : "设置 ERP 供应商",
     });
+    // 供应商建好了但没落到物料行：如实上报，交给调用方按失败处理。
+    if (!applied?.ok) return applied;
     return result;
   }
 
@@ -12463,26 +12500,35 @@ class OverseasCostWorkbench {
       ],
       primary_action_label:source === "bulk" ? "确认批量设置" : "保存",
       primary_action:async () => {
-        if (!selection.kind || !selection.value) throw new Error("请选择已有供应商，或选择新建当前输入名称。");
-        if (selection.kind === "existing") {
-          const allowedValues = new Set(model.options.map((row) => row.name));
-          await this.applySupplierSelection(items, selection.value, { allowedValues });
-        } else {
-          let result = await this.createSupplierAndApply(items, selection.value, false);
-          if (result?.code === "SIMILAR_SUPPLIER_CONFIRMATION_REQUIRED") {
-            const candidates = (result.candidates || []).map((row) => row.name).filter(Boolean).join("、");
-            const confirmed = await new Promise((resolve) => frappe.confirm(
-              `发现近似供应商${candidates ? `：${this.escape(candidates)}` : ""}。确认“这是不同供应商”，并新建 ${this.escape(selection.value)}？`,
-              () => resolve(true),
-              () => resolve(false)
-            ));
-            if (!confirmed) return;
-            result = await this.createSupplierAndApply(items, selection.value, true);
+        try {
+          if (!selection.kind || !selection.value) {
+            const error = new Error("请选择已有供应商，或选择新建当前输入名称。");
+            error.materialReferenceInputInvalid = true;
+            throw error;
           }
-          if (!result?.ok) throw new Error(result?.message || "供应商创建失败。");
+          if (selection.kind === "existing") {
+            const allowedValues = new Set(model.options.map((row) => row.name));
+            const applied = await this.applySupplierSelection(items, selection.value, { allowedValues });
+            if (!applied?.ok) return;
+          } else {
+            let result = await this.createSupplierAndApply(items, selection.value, false);
+            if (result?.code === "SIMILAR_SUPPLIER_CONFIRMATION_REQUIRED") {
+              const candidates = (result.candidates || []).map((row) => row.name).filter(Boolean).join("、");
+              const confirmed = await new Promise((resolve) => frappe.confirm(
+                `发现近似供应商${candidates ? `：${this.escape(candidates)}` : ""}。确认“这是不同供应商”，并新建 ${this.escape(selection.value)}？`,
+                () => resolve(true),
+                () => resolve(false)
+              ));
+              if (!confirmed) return;
+              result = await this.createSupplierAndApply(items, selection.value, true);
+            }
+            if (!result?.ok) throw new Error(result?.message || "供应商创建失败。");
+          }
+          dialog.hide();
+          frappe.show_alert({message:`已更新 ${items.length} 行供应商`, indicator:"green"});
+        } catch (error) {
+          await this.reportMaterialReferenceWriteFailure(error);
         }
-        dialog.hide();
-        frappe.show_alert({message:`已更新 ${items.length} 行供应商`, indicator:"green"});
       },
     });
     dialog.show();
@@ -14953,10 +14999,26 @@ class OverseasCostWorkbench {
       || this.materialReplacementRows(items).find((row) => String(row.name) === String(itemName));
   }
 
+  /**
+   * 写令牌（expectedModified）只允许前进，不回退。
+   *
+   * 资料页快照允许「先用缓存的、回头再校验」，AI／导入接口也会回带它们各自读到的
+   * batch_modified；这些值都可能比本页已经拿到的 revision 更旧。一旦把写令牌回退成
+   * 旧值，edit_session 的乐观锁会把本页之后的每次写入都判成「批次数据已被更新」，
+   * 页面就再也保存不了任何东西。同一约定见 acceptSavedComprehensiveCost 的 hasNewerRevision。
+   */
+  acceptBatchWriteRevision(modified) {
+    const next = String(modified || "");
+    if (!next) return false;
+    const current = String(this.detailState?.expectedModified || "");
+    if (current && next < current) return false;
+    this.detailState.expectedModified = next;
+    return true;
+  }
+
   updateMaterialFeeExpectedModified(result) {
     const modified = result?.batch_modified;
-    if (!modified) return;
-    this.detailState.expectedModified = modified;
+    if (!modified || !this.acceptBatchWriteRevision(modified)) return;
     if (this.detailState.header) this.detailState.header.modified = modified;
     if (this.materialFeeState?.batchName === this.detailState.batchName) this.materialFeeState.cacheDirty = true;
   }
@@ -14973,7 +15035,7 @@ class OverseasCostWorkbench {
     const batchIndex = (this.batches || []).findIndex((row) => row.name === batchName);
     if (batchIndex >= 0) this.batches[batchIndex] = { ...this.batches[batchIndex], ...header };
     this.detailState.versionName = detail.version_name || header.current_version || this.detailState.versionName || "";
-    if (header.modified) this.detailState.expectedModified = header.modified;
+    if (header.modified) this.acceptBatchWriteRevision(header.modified);
   }
 
   async saveMaterialFeeCell($input) {
