@@ -1,6 +1,9 @@
 """Read-only purchase provenance; archive availability never gates costing or imports."""
 from __future__ import annotations
 
+import hashlib
+import json
+
 from overseas_costing.services import dingtalk_approval_service as approvals
 
 
@@ -8,6 +11,16 @@ LABELS = {
     'linked': '', 'unlinked': '未关联采购审批', 'unresolved': '采购审批待核实',
     'ambiguous': '采购明细匹配不唯一', 'error': '来源核验失败，请重试',
 }
+
+# 采购审批索引要跨内网查 OA 归档（Postgres），线上实测单次 3.3~4.2 秒：新建连接
+# 1.1~2.1 秒、四条 SQL 各 0.23~0.68 秒。而它每次渲染物料表都会被问一次，整份资料页
+# 快照重建的 92~95% 时间就花在这里（与物料行数无关，4 行批次同样要 3.9 秒）。
+#
+# 索引只由「批次的来源实例 + 关联实例」决定，且它是只读展示信息 —— 不参与任何试算、
+# 校验或写入，失败也只是显示"来源核验失败"。所以按这三者缓存，让同一批次在窗口内
+# 只付一次跨网成本；窗口内若归档确有变化，最迟一个窗口后自然对齐。
+INDEX_CACHE_TTL = 300
+EMPTY_INDEX_CACHE_TTL = 30
 
 
 def _text(value):
@@ -19,18 +32,55 @@ def _link(status, approval_no='', instance_id='', reason=''):
                 approval_no=approval_no, instance_id=instance_id)
 
 
-def _purchase_index(batch_name):
-    if approvals.frappe is None:
-        return []
-    batch = approvals.frappe.db.get_value(
-        'Overseas Cost Batch', batch_name,
-        ['name', 'batch_no', 'source_type', 'source_approval_no', 'source_instance_id', 'extra_json'],
-        as_dict=True,
-    ) or {}
-    main_id = _text(batch.get('source_instance_id'))
-    if not main_id:
-        return []
-    candidates = [value for value in approvals._linked_instance_ids(batch.get('extra_json')) if value != main_id]
+def _index_cache():
+    """缓存句柄；拿不到（测试桩、无请求上下文）就返回 None，调用方直通不缓存。"""
+    frappe = approvals.frappe
+    getter = getattr(frappe, 'cache', None)
+    if not callable(getter):
+        return None
+    try:
+        return getter()
+    except Exception:
+        return None
+
+
+def _index_cache_key(batch_name, batch, main_id, candidates):
+    fingerprint = json.dumps(
+        [str(batch_name or ''), _text(batch.get('source_type')), _text(batch.get('batch_no')),
+         _text(batch.get('source_approval_no')), main_id, list(candidates)],
+        ensure_ascii=False,
+    )
+    digest = hashlib.sha1(fingerprint.encode('utf-8')).hexdigest()
+    return 'ocw:purchase_index:%s' % digest
+
+
+def _read_cached_index(cache, cache_key):
+    try:
+        cached = cache.get_value(cache_key)
+    except Exception:
+        return None
+    if not isinstance(cached, list):
+        return None
+    rows = []
+    for row in cached:
+        if not isinstance(row, (list, tuple)) or len(row) != 2:
+            return None
+        rows.append((_text(row[0]), _text(row[1])))
+    return rows
+
+
+def _store_cached_index(cache, cache_key, rows):
+    try:
+        cache.set_value(
+            cache_key,
+            [[approval_no, instance_id] for approval_no, instance_id in rows],
+            expires_in_sec=INDEX_CACHE_TTL if rows else EMPTY_INDEX_CACHE_TTL,
+        )
+    except Exception:
+        pass
+
+
+def _load_purchase_index(batch, main_id, candidates):
     bundle = approvals._get_approval_source().get_instance_bundle([main_id, *candidates])
     instances = bundle.get('instances') or {}
     main = instances.get(main_id)
@@ -46,6 +96,30 @@ def _purchase_index(batch_name):
         if actual_id != instance_id:
             continue
         result.append((_text(payload.get('businessId') or payload.get('business_id')), instance_id))
+    return result
+
+
+def _purchase_index(batch_name):
+    if approvals.frappe is None:
+        return []
+    batch = approvals.frappe.db.get_value(
+        'Overseas Cost Batch', batch_name,
+        ['name', 'batch_no', 'source_type', 'source_approval_no', 'source_instance_id', 'extra_json'],
+        as_dict=True,
+    ) or {}
+    main_id = _text(batch.get('source_instance_id'))
+    if not main_id:
+        return []
+    candidates = [value for value in approvals._linked_instance_ids(batch.get('extra_json')) if value != main_id]
+    cache = _index_cache()
+    cache_key = _index_cache_key(batch_name, batch, main_id, candidates) if cache is not None else ''
+    if cache is not None:
+        cached = _read_cached_index(cache, cache_key)
+        if cached is not None:
+            return cached
+    result = _load_purchase_index(batch, main_id, candidates)
+    if cache is not None:
+        _store_cached_index(cache, cache_key, result)
     return result
 
 

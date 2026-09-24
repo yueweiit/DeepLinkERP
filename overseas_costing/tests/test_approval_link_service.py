@@ -126,6 +126,86 @@ def test_preview_dynamic_archive_state_does_not_change_revision(archive):
     assert not repo.writes and not repo.commits
 
 
+class _RecordingCache:
+    """只实现索引缓存用到的两个方法，并记下每次写入的过期时间。"""
+
+    def __init__(self):
+        self.values = {}
+        self.expiry = {}
+
+    def get_value(self, key, expires=False):
+        return self.values.get(key)
+
+    def set_value(self, key, value, expires_in_sec=None):
+        self.values[key] = value
+        self.expiry[key] = expires_in_sec
+
+
+def _with_cache():
+    """给 frappe 桩挂上 Redis 句柄，让索引缓存这条真实路径可见。"""
+    cache = _RecordingCache()
+    approvals.frappe.cache = lambda: cache
+    return cache
+
+
+def test_purchase_index_is_reused_inside_the_cache_window(archive):
+    from overseas_costing.services import approval_link_service as service
+    cache = _with_cache()
+    assert service._purchase_index('B1') == [('PO1', 'BUY')]
+    assert len(archive[2]) == 1
+    assert service._purchase_index('B1') == [('PO1', 'BUY')]
+    assert len(archive[2]) == 1  # 第二次渲染不再跨网查 OA
+    assert list(cache.values.values()) == [[['PO1', 'BUY']]]
+    assert set(cache.expiry.values()) == {service.INDEX_CACHE_TTL}
+
+
+def test_purchase_index_cache_key_follows_linked_instances(archive, monkeypatch):
+    from overseas_costing.services import approval_link_service as service
+    cache = _with_cache()
+    service._purchase_index('B1')
+    archive[0]['extra_json']['linked_purchase_approvals'].append({'source_instance_id': 'BUY2'})
+    archive[1]['instances']['BUY2'] = {'processInstanceId': 'BUY2', 'businessId': 'PO2'}
+    monkeypatch.setattr(approvals, '_trusted_linked_instance_ids', lambda payload: ['BUY'])
+    assert service._purchase_index('B1') == [('PO1', 'BUY')]
+    assert len(archive[2]) == 2  # 关联实例变了，指纹变了，必须重查
+    assert len(cache.values) == 2
+
+
+def test_empty_purchase_index_is_cached_with_a_shorter_window(archive, monkeypatch):
+    from overseas_costing.services import approval_link_service as service
+    cache = _with_cache()
+    monkeypatch.setattr(approvals, '_trusted_linked_instance_ids', lambda payload: [])
+    assert service._purchase_index('B1') == []
+    assert service._purchase_index('B1') == []
+    assert len(archive[2]) == 1
+    assert set(cache.expiry.values()) == {service.EMPTY_INDEX_CACHE_TTL}
+    assert service.EMPTY_INDEX_CACHE_TTL < service.INDEX_CACHE_TTL
+
+
+def test_purchase_index_without_a_cache_handle_stays_live(archive):
+    """测试桩与无请求上下文的场景拿不到 Redis，必须保持原有的每次实时读。"""
+    from overseas_costing.services import approval_link_service as service
+    assert service._purchase_index('B1') == [('PO1', 'BUY')]
+    assert service._purchase_index('B1') == [('PO1', 'BUY')]
+    assert len(archive[2]) == 2
+
+
+def test_broken_cache_falls_back_to_a_live_read(archive):
+    from overseas_costing.services import approval_link_service as service
+
+    class _Broken:
+        def get_value(self, key, expires=False):
+            raise RuntimeError('redis down')
+
+        def set_value(self, *args, **kwargs):
+            raise RuntimeError('redis down')
+
+    approvals.frappe.cache = lambda: _Broken()
+    assert service._purchase_index('B1') == [('PO1', 'BUY')]
+    assert service._purchase_index('B1') == [('PO1', 'BUY')]
+    assert len(archive[2]) == 2
+
+
 def test_conflicting_trusted_identifiers_are_ambiguous(archive, monkeypatch):
     from overseas_costing.services import approval_link_service as service
     archive[0]['extra_json']['linked_purchase_approvals'].append({'source_instance_id': 'BUY2'})
