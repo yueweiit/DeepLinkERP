@@ -177,6 +177,16 @@ def _validate_payment_reference(payment_entry, reference, invoice):
 		frappe.throw(_("采购应付单 {0} 尚未提交，不能付款").format(reference.reference_name))
 	if invoice.company != payment_entry.company or invoice.supplier != payment_entry.party:
 		frappe.throw(_("采购应付单 {0} 与付款单的公司或供应商不一致").format(reference.reference_name))
+	if flt(reference.allocated_amount) <= 0:
+		frappe.throw(_("采购应付单 {0} 的核销金额必须大于零").format(reference.reference_name))
+	payment_currency = payment_entry.get("paid_to_account_currency")
+	invoice_currency = invoice.get("party_account_currency") or invoice.get("currency")
+	if payment_currency and invoice_currency and payment_currency != invoice_currency:
+		frappe.throw(
+			_("采购应付单 {0} 的币种 {1} 与付款单往来币种 {2} 不一致").format(
+				reference.reference_name, invoice_currency, payment_currency
+			)
+		)
 	if flt(reference.allocated_amount) - flt(invoice.outstanding_amount) > DEFAULT_AMOUNT_TOLERANCE:
 		frappe.throw(_("采购应付单 {0} 的核销金额超过未付金额").format(reference.reference_name))
 	if flt(invoice.is_return):
@@ -187,20 +197,40 @@ def validate_payment_entry(doc, method=None):
 	"""Keep supplier payments anchored to submitted purchase payables."""
 	if doc.doctype != "Payment Entry" or doc.get("payment_type") != "Pay":
 		return
+	seen_references = set()
+	settlement_currencies = set()
 	for reference in doc.get("references") or []:
 		if reference.reference_doctype == "Purchase Receipt":
 			frappe.throw(_("付款单不能直接核销采购收货单，请先确认采购应付单"))
 		if reference.reference_doctype != "Purchase Invoice":
 			continue
+		key = (reference.reference_doctype, reference.reference_name)
+		if key in seen_references:
+			frappe.throw(_("付款单重复核销采购应付单 {0}").format(reference.reference_name))
+		seen_references.add(key)
 		if doc.get("party_type") != "Supplier" or not doc.get("party"):
 			frappe.throw(_("采购付款必须指定供应商"))
 		invoice = frappe.db.get_value(
 			"Purchase Invoice",
 			reference.reference_name,
-			["docstatus", "company", "supplier", "outstanding_amount", "is_return"],
+			[
+				"docstatus",
+				"company",
+				"supplier",
+				"currency",
+				"party_account_currency",
+				"outstanding_amount",
+				"is_return",
+			],
 			as_dict=True,
 		)
+		if invoice:
+			currency = invoice.get("party_account_currency") or invoice.get("currency")
+			if currency:
+				settlement_currencies.add(currency)
 		_validate_payment_reference(doc, reference, invoice)
+	if len(settlement_currencies) > 1:
+		frappe.throw(_("同一付款单不能核销不同往来币种的采购应付单"))
 
 
 @frappe.whitelist(methods=["POST"])

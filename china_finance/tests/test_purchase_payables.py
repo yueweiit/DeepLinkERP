@@ -165,6 +165,59 @@ class TestPurchasePayables(TestCase):
 			with self.assertRaises(frappe.ValidationError):
 				purchase_payables.validate_payment_entry(payment)
 
+	def test_payment_rejects_duplicate_reference(self):
+		reference = DocumentStub(reference_doctype="Purchase Invoice", reference_name="PINV-0001", allocated_amount=50)
+		payment = self.payment(references=[reference, reference])
+		with self.assertRaises(frappe.ValidationError):
+			purchase_payables.validate_payment_entry(payment)
+
+	def test_payment_rejects_currency_mismatch(self):
+		payment = self.payment(
+			paid_to_account_currency="USD",
+			references=[
+				DocumentStub(reference_doctype="Purchase Invoice", reference_name="PINV-0001", allocated_amount=50)
+			],
+		)
+		with patch.object(
+			frappe.db,
+			"get_value",
+			return_value=frappe._dict(
+				{
+					"docstatus": 1,
+					"company": "Test Company",
+					"supplier": "Test Supplier",
+					"currency": "CNY",
+					"party_account_currency": "CNY",
+					"outstanding_amount": 100,
+					"is_return": 0,
+				}
+			),
+		):
+			with self.assertRaises(frappe.ValidationError):
+				purchase_payables.validate_payment_entry(payment)
+
+	def test_payment_rejects_zero_reference_amount(self):
+		payment = self.payment(
+			references=[
+				DocumentStub(reference_doctype="Purchase Invoice", reference_name="PINV-0001", allocated_amount=0)
+			]
+		)
+		with patch.object(
+			frappe.db,
+			"get_value",
+			return_value=frappe._dict(
+				{
+					"docstatus": 1,
+					"company": "Test Company",
+					"supplier": "Test Supplier",
+					"outstanding_amount": 100,
+					"is_return": 0,
+				}
+			),
+		):
+			with self.assertRaises(frappe.ValidationError):
+				purchase_payables.validate_payment_entry(payment)
+
 	def test_receive_payment_is_not_checked_by_purchase_payable_rule(self):
 		payment = self.payment(payment_type="Receive", party_type="Customer", party="Test Customer")
 		payment.references = [
