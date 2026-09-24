@@ -1,5 +1,10 @@
+from pathlib import Path
+
 from overseas_costing.tests.test_saved_trial_regressions import _frontend_result, FRONTEND_SETUP
 from overseas_costing.tests.test_workbench_frontend_state import _fee_workspace_result
+
+MATERIAL_GRID_PART = (Path(__file__).resolve().parents[1] / 'page' / 'overseas_cost_workbench'
+                      / 'parts' / '78-material-fee-workspace.js')
 
 
 def test_stale_cost_is_collapsed_history_not_complete_badge():
@@ -413,6 +418,58 @@ console.log(JSON.stringify({partial,all,none,toolbar}));
     assert result['none']['checked'] is False and result['none']['indeterminate'] is False
     for label in ['已选 1 行', '新增物料', '合并装箱组', '编辑装箱组', '解除合并', '删除所选', '清除选择']:
         assert label in result['toolbar']
+
+
+def test_toolbar_carries_a_labelled_select_all_page_action():
+    """表头那个复选框是唯一入口且没有文字，用户找不到；工具栏上要有同名动作。"""
+    result = _fee_workspace_result(r"""
+const w=Object.create(Harness.prototype);w.detailState={readOnly:false};const state=w.ensureMaterialFeeState();
+w.escape=v=>String(v??'');
+state.materials={packing_group_editable:true,items:[
+  {stable_line_key:'L1',row_no:1},{stable_line_key:'L2',row_no:2}],packing_groups:[]};
+state.packingGroupSelections=new Set();
+const none=w.materialSelectionContext().actions.selectPage;
+const noneToolbar=w.renderMaterialSelectionToolbar();
+w.toggleMaterialPageSelection(true);
+const all=w.materialSelectionContext().actions.selectPage;
+const allToolbar=w.renderMaterialSelectionToolbar();
+console.log(JSON.stringify({none,noneToolbar,all,allToolbar,selected:w.materialPageSelectionState().selected}));
+""")
+    assert result['none']['label'] == '全选本页' and result['none']['enabled'] is True
+    assert result['none']['reason'] == ''
+    assert 'data-action="mf-select-page"' in result['noneToolbar']
+    assert result['all']['label'] == '取消全选本页'
+    assert result['selected'] == 2
+    assert '已选 2 行' in result['allToolbar'] and '取消全选本页' in result['allToolbar']
+
+
+def test_select_all_page_action_is_disabled_without_selectable_rows_or_edit_rights():
+    result = _fee_workspace_result(r"""
+const w=Object.create(Harness.prototype);w.detailState={readOnly:false};const state=w.ensureMaterialFeeState();
+w.escape=v=>String(v??'');
+state.materials={packing_group_editable:true,items:[],packing_groups:[]};
+state.packingGroupSelections=new Set();
+const emptyPage=w.materialSelectionContext().actions.selectPage;
+const emptyToolbar=w.renderMaterialSelectionToolbar();
+w.detailState={readOnly:true};
+state.materials={packing_group_editable:true,items:[{stable_line_key:'L1',row_no:1}],packing_groups:[]};
+const readonly=w.materialSelectionContext().actions.selectPage;
+console.log(JSON.stringify({emptyPage,emptyToolbar,readonly}));
+""")
+    assert result['emptyPage']['enabled'] is False
+    assert result['emptyPage']['reason'] == '当前页没有可选择的物料行'
+    assert 'disabled' in result['emptyToolbar']
+    assert result['readonly']['enabled'] is False
+
+
+def test_select_all_page_action_reuses_the_shared_page_toggle():
+    """点击入口必须落在既有的 toggleMaterialPageSelection 上，且只覆盖当前页。"""
+    source = MATERIAL_GRID_PART.read_text(encoding='utf-8')
+    handler = source.split('mf-select-page', 1)[1].split('});', 1)[0]
+    assert 'toggleMaterialPageSelection(!this.materialPageSelectionState().checked)' in handler
+    assert 'renderMaterialFeeWorkspacePreservingPosition()' in handler
+    assert 'materialPageSelectionState' in source and 'toggleMaterialPageSelection' in source
+    assert source.count('state.packingGroupSelections.add(') == 1
 
 
 def test_top_toolbar_uses_atomic_batch_endpoints_and_clears_only_after_success():

@@ -11101,6 +11101,11 @@ class OverseasCostWorkbench {
       const itemName = $(event.currentTarget).attr("data-item-name");
       this.openSupplierForItem(itemName).catch((error) => this.showError(error));
     });
+    this.$root.on("click", "[data-action='mf-select-page']", () => {
+      if (!this.materialSelectionContext().actions.selectPage.enabled) return;
+      this.toggleMaterialPageSelection(!this.materialPageSelectionState().checked);
+      this.renderMaterialFeeWorkspacePreservingPosition();
+    });
     this.$root.on("click", "[data-action='mf-clear-selection']", () => {
       this.clearMaterialSelection();
     });
@@ -12151,6 +12156,11 @@ class OverseasCostWorkbench {
       && !ungroupedKeys.length && selectedMemberKeys.length === selectedCount;
     const removeEnabled = editable && completeSelection && selectedCount > 0;
     const projectEnabled = editable && selectedCount > 0 && !unknownKeys.length && !lockedPageKeys.length;
+    // 表头那个复选框一直是本页全选的唯一入口，但它没有文字、贴在固定列最左边，
+    // 用户找不到。这里把同一份状态显式接到工具栏上，复用既有 materialPageSelectionState
+    // 与 toggleMaterialPageSelection，不新增选择逻辑。
+    const pageSelection = this.materialPageSelectionState();
+    const pageSelectEnabled = editable && pageSelection.total > 0;
     return {
       selectedKeys, selectedCount, crossPageCount, selectedGroupIds, incompleteGroupIds, ungroupedKeys, lockedPageKeys,
       actions: {
@@ -12166,6 +12176,10 @@ class OverseasCostWorkbench {
           : incompleteGroupIds.length ? "删除组员前请先解除合并" : "请先选择物料"},
         project:{enabled:projectEnabled, reason:projectEnabled ? "" : !editable ? readonlyReason : "请先选择有效物料行"},
         supplier:{enabled:projectEnabled, reason:projectEnabled ? "" : !editable ? readonlyReason : "请先选择有效物料行"},
+        selectPage:{enabled:pageSelectEnabled,
+          label:pageSelection.checked ? "取消全选本页" : "全选本页",
+          // 只覆盖当前页可操作的物料行；跨页选择靠逐页累积（已选计数会标出跨页成员数）。
+          reason:pageSelectEnabled ? "" : !editable ? readonlyReason : "当前页没有可选择的物料行"},
         clear:{enabled:selectedCount > 0, reason:selectedCount ? "" : "当前没有选中物料"},
       },
     };
@@ -12177,6 +12191,7 @@ class OverseasCostWorkbench {
       `<button class="${kind}" type="button" data-action="${action}" ${spec.enabled ? "" : "disabled"} title="${this.escape(spec.reason || label)}">${label}</button>`;
     return `<div class="ocw-mf-selection-toolbar" aria-label="物料批量操作">
       <span class="ocw-mf-selection-count">已选 ${context.selectedCount} 行${context.crossPageCount ? `<small>含 ${context.crossPageCount} 个跨页成员</small>` : ""}</span>
+      ${button(context.actions.selectPage.label, "mf-select-page", context.actions.selectPage)}
       ${button("新增物料", "mf-add-material", context.actions.add)}
       ${button("合并装箱组", "mf-create-packing-group", context.actions.merge)}
       ${button("编辑装箱组", "mf-edit-selected-packing-group", context.actions.edit)}
