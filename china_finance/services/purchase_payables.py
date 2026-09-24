@@ -67,6 +67,8 @@ def get_receipt_payment_summary(receipt_name):
 		status = PAYMENT_STATUS_UNPAID
 	return {
 		"purchase_receipt": receipt_name,
+		"company": receipt.company,
+		"supplier": receipt.supplier,
 		"purchase_invoices": [invoice.name for invoice in invoices],
 		"payable_purchase_invoices": [invoice.name for invoice in valid if invoice.outstanding_amount > DEFAULT_AMOUNT_TOLERANCE],
 		"invoice_amount": amount,
