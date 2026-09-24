@@ -92,8 +92,9 @@ class _Doc:
 
 
 class _Frappe:
-    def __init__(self, companies):
+    def __init__(self, companies, warehouses=None):
         self.companies = list(companies)
+        self.warehouses = list(warehouses or [])
         self.routes = []
         self.writes = []
         self.hint_writes = []
@@ -104,7 +105,11 @@ class _Frappe:
         assert role == "System Manager"
 
     def get_all(self, doctype, **kwargs):
-        return list(self.companies if doctype == "Company" else self.routes)
+        if doctype == "Company":
+            return list(self.companies)
+        if doctype == "Warehouse":
+            return list(self.warehouses)
+        return list(self.routes)
 
     def get_doc(self, values):
         return _Doc(self, values)
@@ -136,19 +141,39 @@ def test_management_command_conflict_performs_zero_writes(monkeypatch) -> None:
     assert fake.db.commits == 0
 
 
-def test_default_route_hint_is_idempotent_and_never_overwrites_admin_value(monkeypatch) -> None:
-    fake = _Frappe(_existing_core_companies())
+def test_route_defaults_seed_hint_and_receiving_warehouse_without_overwriting_admin_values(monkeypatch) -> None:
+    fake = _Frappe(
+        [
+            {"name": "拉丁购国际电子商务（东莞）有限公司", "abbr": "拉丁购"},
+            {"name": "AmigoMart", "abbr": "AMIG"},
+        ],
+        warehouses=[
+            {"name": "仓库 - 拉丁购", "company": "拉丁购国际电子商务（东莞）有限公司"},
+            {"name": "在途物料 - 拉丁购", "company": "拉丁购国际电子商务（东莞）有限公司"},
+            {"name": "Stores - AMIG", "company": "AmigoMart"},
+        ],
+    )
     fake.routes = [
-        {"name": "ROUTE-LATIN", "project_collection": "LatinGo拉丁购", "ai_match_hint": ""},
-        {"name": "ROUTE-ADMIN", "project_collection": "LatinGo拉丁购", "ai_match_hint": "管理员自定义"},
+        {"name": "ROUTE-LATIN", "project_collection": "LatinGo拉丁购", "subsidiary_code": "拉丁购国际电子商务（东莞）有限公司", "ai_match_hint": "", "warehouse": ""},
+        {"name": "ROUTE-ADMIN", "project_collection": "LatinGo拉丁购", "subsidiary_code": "拉丁购国际电子商务（东莞）有限公司", "ai_match_hint": "管理员自定义", "warehouse": "仓库 - 管理员指定"},
+        {"name": "ROUTE-AMIGO", "project_collection": "AmigoMart", "subsidiary_code": "AmigoMart", "ai_match_hint": "", "warehouse": ""},
+        {"name": "ROUTE-NOWHERE", "project_collection": "无仓库公司", "subsidiary_code": "某公司", "ai_match_hint": "", "warehouse": ""},
     ]
     monkeypatch.setattr(service, "frappe", fake)
 
-    first = service.ensure_default_route_hints()
-    second = service.ensure_default_route_hints()
+    first = service.ensure_route_defaults()
+    second = service.ensure_route_defaults()
 
-    assert first == {"updated": ["ROUTE-LATIN"]}
-    assert second == {"updated": []}
+    assert first == {
+        "updated": ["ROUTE-LATIN"],
+        "warehouse_updated": ["ROUTE-LATIN", "ROUTE-AMIGO"],
+        "unresolved_warehouse": [{"route": "ROUTE-NOWHERE", "subsidiary_code": "某公司"}],
+    }
+    assert second["updated"] == []
+    assert second["warehouse_updated"] == []
+    assert second["unresolved_warehouse"] == [{"route": "ROUTE-NOWHERE", "subsidiary_code": "某公司"}]
     assert fake.routes[0]["ai_match_hint"] == "宠物用品"
+    assert fake.routes[0]["warehouse"] == "仓库 - 拉丁购"
     assert fake.routes[1]["ai_match_hint"] == "管理员自定义"
-    assert len(fake.hint_writes) == 1
+    assert fake.routes[1]["warehouse"] == "仓库 - 管理员指定"
+    assert fake.routes[2]["warehouse"] == "Stores - AMIG"

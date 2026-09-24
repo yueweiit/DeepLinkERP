@@ -185,8 +185,8 @@ def test_common_fee_is_not_duplicated_across_sites() -> None:
             "fee_total_rmb": "30",
             "total_cost_rmb": "120",
             "items": [
-                {"stable_line_key": "P1", "route_status": "RESOLVED", "erp_site_code": "ERP_PROD", "subsidiary_code": "COMPANY-P", "total_cost_rmb": "70", "allocated_fee_rmb": "20", "supplier": "S", "purchase_currency": "CNY", "erp_stock_uom": "kg"},
-                {"stable_line_key": "E1", "route_status": "RESOLVED", "erp_site_code": "ERP_ECOM", "subsidiary_code": "COMPANY-E", "total_cost_rmb": "50", "allocated_fee_rmb": "10", "supplier": "S", "purchase_currency": "CNY", "erp_stock_uom": "件"},
+                {"stable_line_key": "P1", "route_status": "RESOLVED", "erp_site_code": "ERP_PROD", "subsidiary_code": "COMPANY-P", "erp_warehouse": "仓库 - 生产", "total_cost_rmb": "70", "allocated_fee_rmb": "20", "supplier": "S", "purchase_currency": "CNY", "erp_stock_uom": "kg"},
+                {"stable_line_key": "E1", "route_status": "RESOLVED", "erp_site_code": "ERP_ECOM", "subsidiary_code": "COMPANY-E", "erp_warehouse": "仓库 - 电商", "total_cost_rmb": "50", "allocated_fee_rmb": "10", "supplier": "S", "purchase_currency": "CNY", "erp_stock_uom": "件"},
             ],
         }
     )
@@ -202,8 +202,8 @@ def test_same_site_different_companies_never_share_one_purchase_group() -> None:
             "fee_total_rmb": "30",
             "total_cost_rmb": "120",
             "items": [
-                {"stable_line_key": "P1", "route_status": "RESOLVED", "erp_site_code": "DEEPLINKERP", "subsidiary_code": "YW MOLDES MX模具", "total_cost_rmb": "70", "allocated_fee_rmb": "20", "supplier": "S", "purchase_currency": "CNY", "erp_stock_uom": "kg"},
-                {"stable_line_key": "E1", "route_status": "RESOLVED", "erp_site_code": "DEEPLINKERP", "subsidiary_code": "AmigoMart", "total_cost_rmb": "50", "allocated_fee_rmb": "10", "supplier": "S", "purchase_currency": "CNY", "erp_stock_uom": "kg"},
+                {"stable_line_key": "P1", "route_status": "RESOLVED", "erp_site_code": "DEEPLINKERP", "subsidiary_code": "YW MOLDES MX模具", "erp_warehouse": "Stores - MOLD", "total_cost_rmb": "70", "allocated_fee_rmb": "20", "supplier": "S", "purchase_currency": "CNY", "erp_stock_uom": "kg"},
+                {"stable_line_key": "E1", "route_status": "RESOLVED", "erp_site_code": "DEEPLINKERP", "subsidiary_code": "AmigoMart", "erp_warehouse": "Stores - AMIG", "total_cost_rmb": "50", "allocated_fee_rmb": "10", "supplier": "S", "purchase_currency": "CNY", "erp_stock_uom": "kg"},
             ],
         }
     )
@@ -216,8 +216,8 @@ def test_same_company_different_suppliers_never_share_one_purchase_group() -> No
     preview = build_site_payload_preview(
         {
             "items": [
-                {"stable_line_key": "L1", "route_status": "RESOLVED", "erp_site_code": "DEEPLINKERP", "subsidiary_code": "Company A", "supplier": "Supplier A", "purchase_currency": "CNY", "purchase_uom": "件"},
-                {"stable_line_key": "L2", "route_status": "RESOLVED", "erp_site_code": "DEEPLINKERP", "subsidiary_code": "Company A", "supplier": "Supplier B", "purchase_currency": "CNY", "purchase_uom": "件"},
+                {"stable_line_key": "L1", "route_status": "RESOLVED", "erp_site_code": "DEEPLINKERP", "subsidiary_code": "Company A", "erp_warehouse": "仓库 - A", "supplier": "Supplier A", "purchase_currency": "CNY", "purchase_uom": "件"},
+                {"stable_line_key": "L2", "route_status": "RESOLVED", "erp_site_code": "DEEPLINKERP", "subsidiary_code": "Company A", "erp_warehouse": "仓库 - A", "supplier": "Supplier B", "purchase_currency": "CNY", "purchase_uom": "件"},
             ]
         },
         active_supplier_names={"Supplier A", "Supplier B"},
@@ -239,6 +239,7 @@ def test_real_material_purchase_uom_splits_purchase_groups() -> None:
                     "route_status": "RESOLVED",
                     "erp_site_code": "DEEPLINKERP",
                     "subsidiary_code": "Company A",
+                    "erp_warehouse": "仓库 - A",
                     "supplier": "SUP",
                     "purchase_currency": "CNY",
                     "purchase_uom": "kg",
@@ -249,6 +250,7 @@ def test_real_material_purchase_uom_splits_purchase_groups() -> None:
                     "route_status": "RESOLVED",
                     "erp_site_code": "DEEPLINKERP",
                     "subsidiary_code": "Company A",
+                    "erp_warehouse": "仓库 - A",
                     "supplier": "SUP",
                     "purchase_currency": "CNY",
                     "purchase_uom": "件",
@@ -273,6 +275,7 @@ def test_new_template_missing_supplier_blocks_only_that_material_group() -> None
                     "supplier": "Supplier A",
                     "purchase_currency": "CNY",
                     "purchase_uom": "件",
+                    "erp_warehouse": "仓库 - A",
                     "total_cost_rmb": "10",
                     "extra_json": '{"supplier_field_present":true,"supplier_match_status":"EXACT"}',
                 },
@@ -284,6 +287,7 @@ def test_new_template_missing_supplier_blocks_only_that_material_group() -> None
                     "supplier": "",
                     "purchase_currency": "CNY",
                     "purchase_uom": "件",
+                    "erp_warehouse": "仓库 - A",
                     "total_cost_rmb": "20",
                     "extra_json": '{"supplier_field_present":true,"supplier_raw_value":"未匹配供应商","supplier_match_status":"UNMATCHED"}',
                 },
@@ -317,6 +321,7 @@ def test_new_template_inactive_supplier_is_not_sent_to_erp() -> None:
                     "supplier": "Disabled Supplier",
                     "purchase_currency": "CNY",
                     "purchase_uom": "件",
+                    "erp_warehouse": "仓库 - A",
                     "extra_json": '{"supplier_field_present":true,"supplier_match_status":"EXACT"}',
                 }
             ]
@@ -340,6 +345,7 @@ def test_legacy_item_without_supplier_column_keeps_default_supplier_fallback_war
                     "supplier": "",
                     "purchase_currency": "CNY",
                     "purchase_uom": "件",
+                    "erp_warehouse": "仓库 - A",
                     "extra_json": "{}",
                 }
             ]
@@ -350,6 +356,7 @@ def test_legacy_item_without_supplier_column_keeps_default_supplier_fallback_war
     group = preview["sites"][0]["groups"][0]
     assert preview["ready"] is True
     assert group["supplier"] == ""
+    assert group["warehouse"] == "仓库 - A"
     assert group["warnings"] == [
         {"code": "LEGACY_DEFAULT_SUPPLIER", "message": "历史兼容默认供应商"}
     ]
@@ -366,3 +373,60 @@ def test_first_push_blocks_entire_batch_if_one_item_has_no_route() -> None:
 
     assert result["ready"] is False
     assert result["blocking"][0]["code"] == "ITEM_ROUTE_REQUIRED"
+
+
+def test_resolved_route_carries_its_receiving_warehouse() -> None:
+    result = resolve_item_routes(
+        [{"stable_line_key": "P1", "project_collection": "LatinGo拉丁购"}],
+        [{"project_collection": "LatinGo拉丁购", "subsidiary_code": "拉丁购", "warehouse": "仓库 - 拉丁购", "enabled": 1}],
+    )
+
+    assert result["by_item"]["P1"]["warehouse"] == "仓库 - 拉丁购"
+
+
+def test_overridden_route_carries_the_single_route_warehouse() -> None:
+    """人工覆盖归属的行，仓库仍取自该项目唯一的有效路由。"""
+
+    result = resolve_item_routes(
+        [
+            {
+                "stable_line_key": "P1",
+                "project_collection": "LatinGo拉丁购",
+                "route_status": "OVERRIDDEN",
+                "subsidiary_code": "拉丁购",
+                "erp_site_code": "DEEPLINKERP",
+            }
+        ],
+        [{"project_collection": "LatinGo拉丁购", "subsidiary_code": "拉丁购", "warehouse": "仓库 - 拉丁购", "enabled": 1}],
+    )
+
+    assert result["by_item"]["P1"]["warehouse"] == "仓库 - 拉丁购"
+
+
+def test_missing_receiving_warehouse_blocks_only_that_material_row() -> None:
+    preview = build_site_payload_preview(
+        {
+            "items": [
+                {"stable_line_key": "OK", "route_status": "RESOLVED", "erp_site_code": "DEEPLINKERP", "subsidiary_code": "Company A", "erp_warehouse": "仓库 - A", "supplier": "SUP", "purchase_uom": "件"},
+                {"stable_line_key": "NOWHERE", "route_status": "RESOLVED", "erp_site_code": "DEEPLINKERP", "subsidiary_code": "Company A", "erp_warehouse": "", "supplier": "SUP", "purchase_uom": "件"},
+            ]
+        },
+        active_supplier_names={"SUP"},
+    )
+
+    assert preview["ready"] is False
+    assert preview["blocking"] == [{"code": "ITEM_WAREHOUSE_REQUIRED", "stable_line_key": "NOWHERE"}]
+    assert [row["stable_line_key"] for row in preview["sites"][0]["groups"][0]["items"]] == ["OK"]
+
+
+def test_group_exposes_the_warehouse_for_the_purchase_order_row() -> None:
+    preview = build_site_payload_preview(
+        {
+            "items": [
+                {"stable_line_key": "L1", "route_status": "RESOLVED", "erp_site_code": "DEEPLINKERP", "subsidiary_code": "Company A", "erp_warehouse": "仓库 - A", "supplier": "SUP", "purchase_uom": "件"},
+            ]
+        },
+        active_supplier_names={"SUP"},
+    )
+
+    assert preview["sites"][0]["groups"][0]["warehouse"] == "仓库 - A"

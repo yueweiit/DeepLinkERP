@@ -5,11 +5,12 @@
   "autoname": "hash",
   "title_field": "project_collection",
   "track_changes": 1,
-  "field_order": ["project_collection", "subsidiary_code", "erp_site", "enabled", "valid_from", "valid_to", "revision", "ai_match_hint", "remark"],
+  "field_order": ["project_collection", "subsidiary_code", "erp_site", "warehouse", "enabled", "valid_from", "valid_to", "revision", "ai_match_hint", "remark"],
   "fields": [
     {"fieldname": "project_collection", "fieldtype": "Data", "label": "项目归属", "reqd": 1, "in_list_view": 1},
     {"fieldname": "subsidiary_code", "fieldtype": "Link", "label": "ERP公司", "options": "Company", "reqd": 1, "in_list_view": 1},
     {"fieldname": "erp_site", "fieldtype": "Link", "label": "ERP站点", "options": "Overseas Cost ERP Site", "in_list_view": 1},
+    {"fieldname": "warehouse", "fieldtype": "Link", "label": "收货仓库", "options": "Warehouse", "description": "该 ERP 公司接收本路由采购行的仓库，写入采购单行"},
     {"fieldname": "enabled", "fieldtype": "Check", "label": "启用", "default": "1", "in_list_view": 1},
     {"fieldname": "valid_from", "fieldtype": "Date", "label": "生效日期"},
     {"fieldname": "valid_to", "fieldtype": "Date", "label": "失效日期"},

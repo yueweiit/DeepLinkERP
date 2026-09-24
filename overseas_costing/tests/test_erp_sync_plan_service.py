@@ -312,6 +312,7 @@ def test_grouped_push_rows_keep_the_cost_formula_used_by_the_purchase_order() ->
                 "project_collection": "AmigoMart",
                 "subsidiary_code": "AmigoMart",
                 "erp_site": "",
+                "warehouse": "Stores - AMIG",
                 "enabled": 1,
                 "valid_from": None,
                 "valid_to": None,
@@ -323,12 +324,14 @@ def test_grouped_push_rows_keep_the_cost_formula_used_by_the_purchase_order() ->
     )
     requests = plan["request_specs"]["requests"]
     assert len(requests) == 1
+    assert requests[0]["payload"]["warehouse"] == "Stores - AMIG"
 
     body = _build_purchase_order_body(requests[0]["payload"], {})
     row = body["items"][0]
 
     assert row["qty"] == 1700
     assert row["rate"] == 1.2
+    assert row["warehouse"] == "Stores - AMIG"
     assert row["custom_overseas_comprehensive_amount"] == 4795.57
     assert row["custom_overseas_clearance_alloc_amount"] >= 0
     assert row["custom_overseas_stable_line_key"] == "logistics:abc"

@@ -29,6 +29,8 @@ ALL_PROJECT_ROUTES = {
     **{name: name for name, _abbr in MEXICO_COMPANIES},
 }
 DEFAULT_ROUTE_AI_HINTS = {"LatinGo拉丁购": "宠物用品"}
+# ErpNext 的仓库自动命名为“<仓库名> - <公司缩写>”；收货仓只认这两个仓库名。
+RECEIVING_WAREHOUSE_NAMES = ("仓库", "Stores")
 
 
 def build_provision_plan(existing_companies: list[dict], existing_routes: list[dict]) -> dict:
@@ -110,34 +112,72 @@ def build_provision_plan(existing_companies: list[dict], existing_routes: list[d
     }
 
 
-def ensure_default_route_hints() -> dict:
-    """Seed missing business hints without overwriting administrator content."""
+def ensure_route_defaults() -> dict:
+    """Seed missing route business defaults without overwriting administrator content.
+
+    每个路由补齐两类默认值：AI 匹配提示、收货仓库。仓库名由 ERP 自己的
+    ``<仓库名> - <公司缩写>`` 命名推导；推不出唯一结果时留空并登记，绝不猜。
+    """
 
     _require_frappe()
     updated = []
+    warehouse_updated = []
+    unresolved = []
     routes = frappe.get_all(
         "Overseas Cost Project Route",
         filters={"enabled": 1},
-        fields=["name", "project_collection", "ai_match_hint", "enabled"],
+        fields=["name", "project_collection", "subsidiary_code", "ai_match_hint", "warehouse", "enabled"],
         limit_page_length=10000,
     )
+    warehouses_by_company = _warehouse_names_by_company()
+    company_abbrs = _company_abbrs()
     for route in routes:
-        project = _text(route.get("project_collection"))
-        hint = DEFAULT_ROUTE_AI_HINTS.get(project)
-        if (
-            hint
-            and route.get("enabled") not in (0, False, "0")
-            and not _text(route.get("ai_match_hint"))
-        ):
-            frappe.db.set_value(
-                "Overseas Cost Project Route",
-                route.get("name"),
-                "ai_match_hint",
-                hint,
-                update_modified=False,
-            )
-            updated.append(_text(route.get("name")))
-    return {"updated": updated}
+        if route.get("enabled") in (0, False, "0"):
+            continue
+        name = _text(route.get("name"))
+        hint = DEFAULT_ROUTE_AI_HINTS.get(_text(route.get("project_collection")))
+        if hint and not _text(route.get("ai_match_hint")):
+            _set_route_value(name, "ai_match_hint", hint)
+            updated.append(name)
+        if _text(route.get("warehouse")):
+            continue
+        warehouse = _receiving_warehouse(route.get("subsidiary_code"), company_abbrs, warehouses_by_company)
+        if warehouse:
+            _set_route_value(name, "warehouse", warehouse)
+            warehouse_updated.append(name)
+        else:
+            unresolved.append({"route": name, "subsidiary_code": _text(route.get("subsidiary_code"))})
+    return {"updated": updated, "warehouse_updated": warehouse_updated, "unresolved_warehouse": unresolved}
+
+
+def _receiving_warehouse(subsidiary_code, company_abbrs: dict[str, str], warehouses_by_company: dict[str, set[str]]) -> str:
+    company = _text(subsidiary_code)
+    available = warehouses_by_company.get(company) or set()
+    abbr = _text(company_abbrs.get(company))
+    if not available or not abbr:
+        return ""
+    candidates = [f"{warehouse_name} - {abbr}" for warehouse_name in RECEIVING_WAREHOUSE_NAMES]
+    matched = [name for name in candidates if name in available]
+    return matched[0] if len(matched) == 1 else ""
+
+
+def _warehouse_names_by_company() -> dict[str, set[str]]:
+    rows = frappe.get_all(
+        "Warehouse", filters={"is_group": 0}, fields=["name", "company"], limit_page_length=0
+    )
+    by_company: dict[str, set[str]] = {}
+    for row in rows:
+        by_company.setdefault(_text(row.get("company")), set()).add(_text(row.get("name")))
+    return by_company
+
+
+def _company_abbrs() -> dict[str, str]:
+    rows = frappe.get_all("Company", fields=["name", "abbr"], limit_page_length=0)
+    return {_text(row.get("name")): _text(row.get("abbr")) for row in rows}
+
+
+def _set_route_value(name: str, fieldname: str, value) -> None:
+    frappe.db.set_value("Overseas Cost Project Route", name, fieldname, value, update_modified=False)
 
 
 def provision_company_routes(*, dry_run: bool = True) -> dict:

@@ -46,6 +46,7 @@ def resolve_item_routes(
                 "status": "OVERRIDDEN",
                 "subsidiary_code": _text(item.get("subsidiary_code")),
                 "site_code": _text(item.get("erp_site_code")) or DEFAULT_SITE_CODE,
+                "warehouse": _route_warehouse(by_project.get(project_route_identity(project), []) if project else []),
                 "route_revision": item.get("route_revision") or 1,
                 "reason": "人工确认的 ERP 路由",
             }
@@ -67,6 +68,7 @@ def resolve_item_routes(
                 "status": "RESOLVED",
                 "subsidiary_code": subsidiary_code,
                 "site_code": site_code,
+                "warehouse": _text(route.get("warehouse")),
                 "route_revision": route.get("revision") or 1,
             }
 
@@ -115,9 +117,15 @@ def build_site_payload_preview(
             )
             continue
 
+        warehouse = _text(item.get("erp_warehouse"))
+        if not warehouse:
+            blocking.append({"code": "ITEM_WAREHOUSE_REQUIRED", "stable_line_key": item_key})
+            continue
+
         group_key = (
             site_code,
             subsidiary_code,
+            warehouse,
             _text(item.get("supplier")),
             normalize_currency(item.get("purchase_currency")),
             resolve_item_uom(item),
@@ -127,9 +135,10 @@ def build_site_payload_preview(
             {
                 "site_code": site_code,
                 "subsidiary_code": subsidiary_code,
-                "supplier": group_key[2],
-                "purchase_currency": group_key[3],
-                "erp_stock_uom": group_key[4],
+                "warehouse": warehouse,
+                "supplier": group_key[3],
+                "purchase_currency": group_key[4],
+                "erp_stock_uom": group_key[5],
                 "warnings": [],
                 "items": [],
                 "total_cost_rmb": Decimal("0"),
@@ -352,6 +361,13 @@ def _route_target(route: dict) -> tuple[str, str]:
     )
 
 
+def _route_warehouse(routes: list[dict]) -> str:
+    """只在候选路由给出同一个收货仓库时返回，避免猜测。"""
+
+    warehouses = {_text(route.get("warehouse")) for route in routes if _text(route.get("warehouse"))}
+    return next(iter(warehouses)) if len(warehouses) == 1 else ""
+
+
 def _route_revision(route: dict) -> int:
     try:
         return max(1, int(route.get("revision") or 1))
@@ -426,6 +442,7 @@ def _serialise_group(group: dict) -> dict:
     return {
         "site_code": group["site_code"],
         "subsidiary_code": group["subsidiary_code"],
+        "warehouse": group["warehouse"],
         "supplier": group["supplier"],
         "purchase_currency": group["purchase_currency"],
         "erp_stock_uom": group["erp_stock_uom"],

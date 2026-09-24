@@ -39,12 +39,12 @@ def test_after_migrate_restores_deeplink_desktop_entry(monkeypatch) -> None:
     from overseas_costing.services import company_route_provision_service
     monkeypatch.setattr(
         company_route_provision_service,
-        "ensure_default_route_hints",
-        lambda: calls.append("route_hints"),
+        "ensure_route_defaults",
+        lambda: calls.append("route_defaults"),
     )
     install.after_migrate()
 
-    assert "route_hints" in calls
+    assert "route_defaults" in calls
     assert calls[-3:] == [
         "ensure_workspace_sidebar",
         "ensure_desktop_icon",

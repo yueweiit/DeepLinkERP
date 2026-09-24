@@ -132,8 +132,8 @@ def test_site_sync_plan_routes_mixed_container_without_duplicate_fee() -> None:
             {"name": "I2", "project_collection": "电商", "total_cost_rmb": "50", "allocated_fee_rmb": "10", "supplier": "S", "purchase_currency": "CNY", "stock_uom": "Nos"},
         ],
         routes=[
-            {"project_collection": "生产", "subsidiary_code": "PROD", "erp_site": "S1", "enabled": 1},
-            {"project_collection": "电商", "subsidiary_code": "ECOM", "erp_site": "S2", "enabled": 1},
+            {"project_collection": "生产", "subsidiary_code": "PROD", "erp_site": "S1", "warehouse": "仓库 - 生产", "enabled": 1},
+            {"project_collection": "电商", "subsidiary_code": "ECOM", "erp_site": "S2", "warehouse": "仓库 - 电商", "enabled": 1},
         ],
         site_configs=[{"site_code": "S1", "enabled": 1}, {"site_code": "S2", "enabled": 1}],
     )
@@ -158,7 +158,7 @@ def test_site_sync_plan_keeps_valid_supplier_group_executable_when_another_row_i
             {**common, "name": "I1", "supplier": "Supplier A", "total_cost_rmb": "10"},
             {**common, "name": "I2", "supplier": "", "total_cost_rmb": "20"},
         ],
-        routes=[{"project_collection": "项目A", "subsidiary_code": "COMPANY-A", "enabled": 1}],
+        routes=[{"project_collection": "项目A", "subsidiary_code": "COMPANY-A", "warehouse": "仓库 - A", "enabled": 1}],
         site_configs=[],
         active_supplier_names={"Supplier A"},
     )
@@ -185,7 +185,7 @@ def test_global_confirmation_gate_still_blocks_all_generated_groups() -> None:
                 "extra_json": '{"supplier_field_present":true}',
             }
         ],
-        routes=[{"project_collection": "项目A", "subsidiary_code": "COMPANY-A", "enabled": 1}],
+        routes=[{"project_collection": "项目A", "subsidiary_code": "COMPANY-A", "warehouse": "仓库 - A", "enabled": 1}],
         site_configs=[],
         active_supplier_names={"Supplier A"},
     )
@@ -199,7 +199,7 @@ def test_material_change_with_same_totals_changes_cost_result_identity() -> None
     common = {
         "batch": {"name": "B1", "confirm_status": "Confirmed"},
         "version": {"name": "V1"},
-        "routes": [{"project_collection": "项目A", "subsidiary_code": "COMPANY-A", "enabled": 1}],
+        "routes": [{"project_collection": "项目A", "subsidiary_code": "COMPANY-A", "warehouse": "仓库 - A", "enabled": 1}],
         "site_configs": [],
     }
     first = build_site_sync_plan(
@@ -246,7 +246,7 @@ def test_shared_default_site_needs_no_duplicate_site_configuration() -> None:
         batch={"name": "B1", "confirm_status": "Confirmed"},
         version={"name": "V1"},
         items=[{"name": "I1", "project_collection": "YW MOLDES MX模具", "total_cost_rmb": "70", "allocated_fee_rmb": "20", "supplier": "S", "purchase_currency": "CNY", "stock_uom": "kg"}],
-        routes=[{"project_collection": "YW MOLDES MX模具", "subsidiary_code": "YW MOLDES MX模具", "erp_site": "", "enabled": 1}],
+        routes=[{"project_collection": "YW MOLDES MX模具", "subsidiary_code": "YW MOLDES MX模具", "erp_site": "", "warehouse": "Stores - MOLD", "enabled": 1}],
         site_configs=[],
     )
 
@@ -254,6 +254,7 @@ def test_shared_default_site_needs_no_duplicate_site_configuration() -> None:
     request = result["request_specs"]["requests"][0]
     assert request["site_code"] == "DEEPLINKERP"
     assert request["payload"]["subsidiary_code"] == "YW MOLDES MX模具"
+    assert request["payload"]["warehouse"] == "Stores - MOLD"
 
 
 def test_site_sync_plan_blocks_unrouted_item_before_creating_requests() -> None:

@@ -56,6 +56,7 @@ def build_sync_request_specs(
                 (
                     _text(site.get("site_code")),
                     _text(group.get("subsidiary_code")),
+                    _text(group.get("warehouse")),
                     _text(group.get("supplier")),
                     _text(group.get("purchase_currency")),
                     _text(group.get("erp_stock_uom")),
@@ -79,6 +80,7 @@ def build_sync_request_specs(
                 "cost_result_hash": _text(cost_result_hash),
                 "site_code": _text(site.get("site_code")),
                 "subsidiary_code": _text(group.get("subsidiary_code")),
+                "warehouse": _text(group.get("warehouse")),
                 "supplier": _text(group.get("supplier")),
                 "purchase_currency": _text(group.get("purchase_currency")),
                 "erp_stock_uom": _text(group.get("erp_stock_uom")),
@@ -134,6 +136,7 @@ def build_site_sync_plan(
         row["route_status"] = route.get("status") or "UNRESOLVED"
         row["erp_site_code"] = route.get("site_code") or ""
         row["subsidiary_code"] = route.get("subsidiary_code") or ""
+        row["erp_warehouse"] = route.get("warehouse") or ""
         row["route_revision"] = route.get("route_revision") or 0
         routed_items.append(row)
 

@@ -263,7 +263,7 @@ def _active_routes() -> list[dict]:
     return frappe.get_all(
         "Overseas Cost Project Route",
         filters={"enabled": 1},
-        fields=["project_collection", "subsidiary_code", "erp_site", "enabled", "valid_from", "valid_to", "revision", "ai_match_hint"],
+        fields=["project_collection", "subsidiary_code", "erp_site", "warehouse", "enabled", "valid_from", "valid_to", "revision", "ai_match_hint"],
         limit_page_length=1000,
     )
 

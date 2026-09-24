@@ -48,6 +48,16 @@ def test_project_route_links_company_and_shared_site_is_optional() -> None:
     assert not fields["erp_site"].get("reqd")
 
 
+def test_project_route_carries_the_receiving_warehouse() -> None:
+    """采购单行必须带收货仓库，因此路由表持有该公司的收货仓库。"""
+
+    route = _doctype("overseas_cost_project_route")
+    fields = {row["fieldname"]: row for row in route["fields"]}
+
+    assert fields["warehouse"]["fieldtype"] == "Link"
+    assert fields["warehouse"]["options"] == "Warehouse"
+
+
 def test_erp_sync_doctypes_are_valid_json() -> None:
     for name in (
         "overseas_cost_erp_site",

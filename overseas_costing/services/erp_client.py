@@ -230,12 +230,14 @@ def _push_standard_purchase_flow(payload: dict, config: dict) -> dict:
         item_results = [_ensure_item(item, payload, config) for item in payload.get("items") or []]
 
         if purchase_order_name:
+            submit = _submit_purchase_order(purchase_order_name, config)
             return {
-                "ok": True,
-                "status": "Success",
+                "ok": bool(submit.get("ok")),
+                "status": "Success" if submit.get("ok") else "Failed",
                 "config_ready": True,
                 "erp_target_doc": purchase_order_name,
-                "message": f"DeepLinkERP 已存在采购订单 {purchase_order_name}，本次未重复创建。",
+                "submit": submit,
+                "message": f"DeepLinkERP 已存在采购订单 {purchase_order_name}，本次未重复创建；{submit.get('message')}",
                 "request": _redact_request_config(config),
                 "response": {
                     "purchase_order": {"name": purchase_order_name, "deduplicated": True},
@@ -248,18 +250,24 @@ def _push_standard_purchase_flow(payload: dict, config: dict) -> dict:
         request = _build_request(config, url=url, method="POST", body=po_body)
         with urlopen(request, timeout=config["timeout"]) as response:
             response_text = response.read().decode("utf-8", errors="ignore")
-            response_body = _load_json_response(response_text)
-            target_doc = _extract_target_doc(response_body)
-            return {
-                "ok": True,
-                "status": "Success",
-                "config_ready": True,
-                "http_status": getattr(response, "status", 200),
-                "erp_target_doc": target_doc,
-                "message": f"已推送到 DeepLinkERP：物料 {len(item_results)} 条，采购订单 {target_doc or '已创建'}。",
-                "request": _redact_request_config(config),
-                "response": {"purchase_order": response_body, "items": item_results},
-            }
+            http_status = getattr(response, "status", 200)
+        response_body = _load_json_response(response_text)
+        target_doc = _extract_target_doc(response_body)
+        submit = _submit_purchase_order(target_doc, config) if target_doc else {
+            "ok": False,
+            "message": "DeepLinkERP 未返回采购订单号，无法提交。",
+        }
+        return {
+            "ok": bool(submit.get("ok")),
+            "status": "Success" if submit.get("ok") else "Failed",
+            "config_ready": True,
+            "http_status": http_status,
+            "erp_target_doc": target_doc,
+            "submit": submit,
+            "message": f"已推送到 DeepLinkERP：物料 {len(item_results)} 条；{submit.get('message')}",
+            "request": _redact_request_config(config),
+            "response": {"purchase_order": response_body, "items": item_results},
+        }
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="ignore")
         response_body = _load_json_response(detail)
@@ -284,15 +292,21 @@ def _push_standard_purchase_flow(payload: dict, config: dict) -> dict:
 
 
 def create_purchase(payload: dict, config: dict) -> dict:
-    """以显式站点配置创建采购订单，先核验稳定业务键防止重复创建。"""
+    """以显式站点配置创建并提交采购订单，先核验稳定业务键防止重复创建。"""
 
     existing = lookup_purchase_by_business_key(payload, config)
     if existing["found"]:
+        # 上一次可能在“创建成功、提交失败”之间中断；按业务键重入时补齐提交态。
+        submit = _submit_purchase_order(existing["name"], config)
         return {
-            "ok": True,
-            "status": "EXISTS",
+            "ok": bool(submit.get("ok")),
+            "status": "EXISTS" if submit.get("ok") else "SUBMIT_FAILED",
             "erp_target_doc": existing["name"],
-            "message": f"DeepLinkERP 已存在采购订单 {existing['name']}，本次未写入物料或采购订单。",
+            "submit": submit,
+            "message": (
+                f"DeepLinkERP 已存在采购订单 {existing['name']}，本次未写入物料或采购订单；"
+                f"{submit.get('message')}"
+            ),
         }
 
     item_results = [_ensure_item(item, payload, config) for item in payload.get("items") or []]
@@ -302,12 +316,60 @@ def create_purchase(payload: dict, config: dict) -> dict:
         url=_build_doctype_url(config, "Purchase Order"),
         body=_build_purchase_order_body(payload, config),
     )
+    target_doc = _extract_target_doc(response_body)
+    submit = _submit_purchase_order(target_doc, config) if target_doc else {
+        "ok": False,
+        "message": "DeepLinkERP 未返回采购订单号，无法提交。",
+    }
+    return {
+        "ok": bool(submit.get("ok")),
+        "status": "SUBMITTED" if submit.get("ok") else "SUBMIT_FAILED",
+        "erp_target_doc": target_doc,
+        "items": item_results,
+        "submit": submit,
+        "message": submit.get("message") or "",
+        "response": response_body,
+    }
+
+
+def _submit_purchase_order(docname: str, config: dict) -> dict:
+    """提交采购订单；已提交视为成功，避免重试时重复提交。"""
+
+    remote = _read_remote_document(config, "Purchase Order", docname)
+    if remote is None:
+        return {"ok": False, "docstatus": None, "message": f"未能读取采购订单 {docname}，无法确认提交状态。"}
+    docstatus = int(remote.get("docstatus") or 0)
+    if docstatus == 1:
+        return {
+            "ok": True,
+            "docstatus": docstatus,
+            "already_submitted": True,
+            "message": f"采购订单 {docname} 已是已提交状态。",
+        }
+    if docstatus == 2:
+        return {"ok": False, "docstatus": docstatus, "message": f"采购订单 {docname} 已取消，无法提交。"}
+
+    try:
+        _request_json(
+            config,
+            method="POST",
+            url=_build_method_url(config, "frappe.client.submit"),
+            body={"doc": {"doctype": "Purchase Order", "name": docname}},
+        )
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        return {
+            "ok": False,
+            "docstatus": docstatus,
+            "http_status": exc.code,
+            "message": f"采购订单 {docname} 已创建，但提交失败：HTTP {exc.code} {_compact_text(detail)}",
+            "response": _load_json_response(detail),
+        }
     return {
         "ok": True,
-        "status": "CREATED",
-        "erp_target_doc": _extract_target_doc(response_body),
-        "items": item_results,
-        "response": response_body,
+        "docstatus": 1,
+        "already_submitted": False,
+        "message": f"采购订单 {docname} 已提交。",
     }
 
 
@@ -597,6 +659,16 @@ def _build_doctype_url(config: dict, doctype: str, docname: str | None = None) -
     return f"{base_url}/{doctype}"
 
 
+def _build_method_url(config: dict, method: str) -> str:
+    """把 ``/api/resource`` 前缀换成 ``/api/method``，用于调用站点白名单方法。"""
+
+    base_url = str(config.get("base_url") or "").rstrip("/")
+    prefix = "/api/resource"
+    if base_url.endswith(prefix):
+        base_url = f"{base_url[: -len(prefix)]}/api/method"
+    return f"{base_url}/{str(method or '').strip()}"
+
+
 def _build_request(config: dict, url: str, method: str, body: dict | None = None) -> Request:
     data = None
     if body is not None:
@@ -841,6 +913,8 @@ def _build_purchase_order_item(item: dict, payload: dict, config: dict, schedule
     row = {
         "item_code": item.get("material_code") or "",
         "item_name": item.get("material_name") or "",
+        # ErpNext 要求 stock item 的采购行必须带收货仓库，值来自路由表的“收货仓库”。
+        "warehouse": payload.get("warehouse") or "",
         "qty": qty,
         "uom": item_uom,
         "stock_uom": item_uom,
