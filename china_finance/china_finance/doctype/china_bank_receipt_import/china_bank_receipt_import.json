@@ -40,12 +40,12 @@
    "label": "用途",
    "fieldtype": "Select",
    "options": "历史补回单\n新业务制证",
-   "default": "历史补回单",
+   "default": "新业务制证",
    "reqd": 1
   },
   {
    "fieldname": "source_file",
-   "label": "招商银行回单 PDF",
+   "label": "银行回单 PDF",
    "fieldtype": "Attach",
    "reqd": 1
   },

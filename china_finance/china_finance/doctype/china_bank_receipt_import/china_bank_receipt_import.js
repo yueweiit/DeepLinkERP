@@ -22,6 +22,13 @@ frappe.ui.form.on("China Bank Receipt Import", {
 				medical_company_percent: 86.30, unemployment_company_percent: 80,
 				notes: "按回单所属时期生成计提三行、支付两行。公司承担计入管理费用-社会保险费，个人承担计入其他应收款-社保；逐项四舍五入，个人承担取差额。使用前确认该所属期尚未计提。" });
 		});
+		if (frm.doc.company && frappe.model.can_create("China Bank Receipt Rule")) frm.add_custom_button(__("设置公积金分摊规则"), async () => {
+			const lookup = number => frappe.db.get_value("Account", { company: frm.doc.company, account_number: number, is_group: 0, disabled: 0 }, "name");
+			const [expense, personal, accrual] = await Promise.all([lookup("660229"), lookup("122103"), lookup("221104")]);
+			frappe.new_doc("China Bank Receipt Rule", { company: frm.doc.company, direction: "支出", rule_type: "公积金分摊", account: expense.message?.name,
+				personal_account: personal.message?.name, accrual_account: accrual.message?.name, housing_fund_company_percent: 50,
+				notes: "按回单所属时期生成计提三行、支付两行。公司承担计入管理费用-公积金，个人承担计入其他应收款-公积金；当前公司和个人各承担 50%，使用前确认该所属期尚未计提。" });
+		});
 		if (frm.is_new()) return;
 		const parsed = !!frm.doc.source_hash;
 		for (const field of ["company", "bank_account", "mode", "source_file"]) frm.set_df_property(field, "read_only", parsed);
@@ -115,12 +122,13 @@ async function render_receipt_preview(frm) {
 
 function receipt_dialog(frm, row) {
 	const can_create = frm.doc.mode === "新业务制证" && !row.receipt && !row.candidates.some(c => c.blocking !== false) && !row.suggestion.blocked;
-	const create_label = row.suggestion.allocations ? "按社保计提及支付生成草稿" : "生成凭证草稿";
+	const allocation_name = row.suggestion.rule_type === "公积金分摊" ? "公积金" : "社保";
+	const create_label = row.suggestion.allocations ? `按${allocation_name}计提及支付生成草稿` : "生成凭证草稿";
 	const candidate = row.candidates.find(c => !c.restricted);
 	const dialog = new frappe.ui.Dialog({ title: __("核对回单"), fields: [
 		{ fieldtype: "HTML", options: `<p>${receipt_escape(row.posting_date)} · ${receipt_escape(row.direction)} ${receipt_escape(row.amount)} CNY</p><p>${receipt_escape(row.summary)}</p><p>${receipt_escape(row.suggestion.reason)}</p>${china_finance.bank_receipts.allocation_html(row.suggestion, {account: frm.receipt_preview.bank_gl_account, amount: row.amount})}<details><summary>收付款方及费用明细</summary>${china_finance.bank_receipts.details_html(row.raw_data)}</details>` },
 		{ fieldname: "action", label: "处理方式", fieldtype: "Select", options: can_create ? `关联已有凭证\n${create_label}` : "关联已有凭证", default: can_create ? create_label : "关联已有凭证" },
-		{ fieldname: "social_not_accrued", label: "已核对回单所属时期，该期社保尚未计提，同意生成计提及支付分录；已计提时应手工冲应付科目后关联", fieldtype: "Check", depends_on: 'eval:doc.action=="按社保计提及支付生成草稿"' },
+		{ fieldname: "allocation_not_accrued", label: `已核对回单所属时期，该期${allocation_name}尚未计提，同意生成计提及支付分录；已计提时应手工冲应付科目后关联`, fieldtype: "Check", depends_on: 'eval:doc.action=="按社保计提及支付生成草稿" || doc.action=="按公积金计提及支付生成草稿"' },
 		{ fieldname: "account", label: "对方科目", fieldtype: "Link", options: "Account", default: row.suggestion.account,
 			depends_on: 'eval:doc.action=="生成凭证草稿"', get_query: () => ({ filters: { company: frm.doc.company, is_group: 0, disabled: 0 } }) },
 		{ fieldname: "party_type", label: "往来单位类型", fieldtype: "Select", options: "\nCustomer\nSupplier\nEmployee\nShareholder", depends_on: 'eval:doc.action=="生成凭证草稿"' },
@@ -134,7 +142,7 @@ function receipt_dialog(frm, row) {
 		if (!values.confirmed) return frappe.msgprint(__("请先核对并勾选确认"));
 		dialog.get_primary_btn().prop("disabled", true);
 		try {
-			const result = await receipt_call("process_receipt", { ...values, decision_hash: row.suggestion.decision_hash, action: values.action === "按社保计提及支付生成草稿" ? "create_social" : values.action === "生成凭证草稿" ? "create" : "link", name: frm.doc.name, row_name: row.name });
+			const result = await receipt_call("process_receipt", { ...values, decision_hash: row.suggestion.decision_hash, action: values.action === create_label && row.suggestion.allocations ? "create_allocation" : values.action === "生成凭证草稿" ? "create" : "link", name: frm.doc.name, row_name: row.name });
 			if (result.error) { frappe.msgprint(receipt_escape(result.error)); return; }
 			dialog.hide();
 			await frm.reload_doc();

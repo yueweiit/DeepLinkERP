@@ -2,12 +2,12 @@ import frappe
 from frappe.model.document import Document
 from frappe.utils import getdate
 
-from china_finance.services.bank_receipt_social import SOCIAL_ITEMS
+from china_finance.services.bank_receipt_social import ALLOCATION_RULE_TYPES, SOCIAL_ITEMS
 
 
 class ChinaBankReceiptRule(Document):
 	def validate(self):
-		if self.rule_type != "社保分摊" and not self.business_type and not self.keyword:
+		if self.rule_type not in ALLOCATION_RULE_TYPES and not self.business_type and not self.keyword:
 			frappe.throw("业务类型和关键词至少填写一项")
 		if (
 			self.effective_from
@@ -23,9 +23,10 @@ class ChinaBankReceiptRule(Document):
 			or account.account_currency != "CNY"
 		):
 			frappe.throw("请选择本公司启用的明细科目")
-		if self.rule_type == "社保分摊":
+		if self.rule_type in ALLOCATION_RULE_TYPES:
+			label = "公积金" if self.rule_type == "公积金分摊" else "社保"
 			if self.direction != "支出" or account.root_type != "Expense":
-				frappe.throw("社保分摊须为支出，公司承担科目须为费用科目")
+				frappe.throw(f"{label}分摊须为支出，公司承担科目须为费用科目")
 			personal = frappe.get_doc("Account", self.personal_account)
 			if (
 				personal.company != self.company
@@ -36,10 +37,10 @@ class ChinaBankReceiptRule(Document):
 				or personal.account_type in ("Bank", "Cash", "Receivable", "Payable")
 			):
 				frappe.throw(
-					"个人承担请选择本公司人民币其他应收款明细科目；需要逐人往来核算时请手工制证后关联"
+					f"{label}个人承担请选择本公司人民币其他应收款明细科目；需要逐人往来核算时请手工制证后关联"
 				)
 			if not self.accrual_account:
-				frappe.throw("请设置社保计提及支付使用的应付科目")
+				frappe.throw(f"请设置{label}计提及支付使用的应付科目")
 			accrual = frappe.get_doc("Account", self.accrual_account)
 			if (
 				accrual.company != self.company
@@ -50,8 +51,13 @@ class ChinaBankReceiptRule(Document):
 				or accrual.account_type in ("Bank", "Cash", "Receivable", "Payable")
 			):
 				frappe.throw(
-					"社保计提请选择本公司启用的人民币负债明细科目；需要往来单位的科目请手工制证后关联"
+					f"{label}计提请选择本公司启用的人民币负债明细科目；需要往来单位的科目请手工制证后关联"
 				)
-			for field in SOCIAL_ITEMS.values():
+			percent_fields = (
+				SOCIAL_ITEMS.values()
+				if self.rule_type == "社保分摊"
+				else ("housing_fund_company_percent",)
+			)
+			for field in percent_fields:
 				if self.get(field) is None or not 0 <= self.get(field) <= 100:
-					frappe.throw("请填写 0 至 100 之间的公司承担百分比")
+					frappe.throw(f"请填写 0 至 100 之间的{label}公司承担百分比")

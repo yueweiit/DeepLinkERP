@@ -14,10 +14,17 @@ from frappe.utils import add_days, cint, getdate, now_datetime
 from china_finance.services.bank_receipt_parser import (
 	PARSER_VERSION,
 	ReceiptParseError,
+	get_receipt_parser,
 	money,
 	parse_cmb_receipts,
 )
-from china_finance.services.bank_receipt_social import SOCIAL_ITEMS, social_period, social_suggestion
+from china_finance.services.bank_receipt_social import (
+	SOCIAL_ITEMS,
+	housing_fund_suggestion,
+	is_housing_fund_item,
+	social_period,
+	social_suggestion,
+)
 
 IMPORT = "China Bank Receipt Import"
 RECEIPT = "China Bank Receipt"
@@ -70,6 +77,17 @@ def _get_import(name, write=False, lock=False):
 	return doc
 
 
+def _get_bank_parser(bank_name):
+	"""Resolve a bank parser while keeping the legacy CMB patch point usable."""
+	parser = get_receipt_parser(bank_name)
+	if parser and parser["parser_key"] == "cmb_text_pdf_v1":
+		# ``parse_cmb_receipts`` has historically been imported here and is used
+		# as the test/integration replacement point.  Keep that compatibility as
+		# the registry grows to include parsers from other modules.
+		parser = {**parser, "parse": parse_cmb_receipts}
+	return parser
+
+
 def validate_bank_context(company, bank_account):
 	company_doc = frappe.get_doc("Company", company)
 	company_doc.check_permission("read")
@@ -77,13 +95,17 @@ def validate_bank_context(company, bank_account):
 	bank.check_permission("read")
 	if bank.company != company or not bank.is_company_account or bank.disabled or not bank.account:
 		frappe.throw("请选择本公司启用且关联银行科目的公司银行账户")
-	if "招商" not in (bank.bank or ""):
-		frappe.throw("第一期仅支持招商银行文字版回单")
+	parser = _get_bank_parser(bank.bank)
+	if not parser:
+		frappe.throw(f"暂未配置银行“{bank.bank or '未填写'}”的回单格式，请先配置解析器")
 	account = frappe.get_doc("Account", bank.account)
 	if account.company != company or account.is_group or account.disabled or account.account_type != "Bank":
 		frappe.throw("银行账户必须关联本公司启用的 Bank 明细科目")
-	if company_doc.default_currency != "CNY" or account.account_currency != "CNY":
-		frappe.throw("第一期仅支持人民币本位币及人民币银行账户")
+	if (
+		company_doc.default_currency != parser["currency"]
+		or account.account_currency != parser["currency"]
+	):
+		frappe.throw(f"当前银行回单解析器仅支持{parser['currency']}本位币及银行账户")
 	if not bank.bank_account_no:
 		frappe.throw("请先在银行账户填写完整银行账号，用于核对回单本方账号")
 	return bank
@@ -154,7 +176,20 @@ def normalized_name(value):
 
 
 def validate_receipt_context(row, bank, company):
-	if row["own_account"] != "".join(bank.bank_account_no.split()):
+	configured_account = "".join(bank.bank_account_no.split())
+	payer_account = "".join(str(row.get("payer_account") or "").split())
+	payee_account = "".join(str(row.get("payee_account") or "").split())
+	if not row.get("direction"):
+		payer_match = payer_account == configured_account
+		payee_match = payee_account == configured_account
+		if payer_match == payee_match:
+			frappe.throw("无法根据所选银行账户确定回单收支方向")
+		row["direction"] = "支出" if payer_match else "收入"
+		row["own_account"] = payer_account if payer_match else payee_account
+		row["own_name"] = row.get("payer") if payer_match else row.get("payee")
+		row["counterparty"] = row.get("payee") if payer_match else row.get("payer")
+		row["counterparty_account"] = payee_account if payer_match else payer_account
+	if row["own_account"] != configured_account:
 		frappe.throw("回单本方账号与所选银行账户不一致")
 	legal_name = frappe.db.get_value("Company", company, "company_name") or company
 	if normalized_name(row["own_name"]) != normalized_name(legal_name):
@@ -171,13 +206,20 @@ def receipt_summary(data):
 		return f"{summary}-{counterparty}"
 
 	tax_details = data.get("tax_details") or []
-	if tax_details and all(str(detail.get("item") or "").strip() == "个人所得税" for detail in tax_details):
+	personal_income_tax = tax_details and all(
+		str(detail.get("item") or "").strip() == "个人所得税" for detail in tax_details
+	)
+	housing_fund = tax_details and all(
+		is_housing_fund_item(detail.get("item")) for detail in tax_details
+	)
+	if personal_income_tax or housing_fund:
 		try:
 			period = social_period(tax_details, data.get("posting_date"))
 		except (TypeError, ValueError):
 			period = None
 		if period:
-			return f"支付{period['label']}个人所得税"
+			item = "个人所得税" if personal_income_tax else "公积金"
+			return f"支付{period['label']}{item}"
 	return summary
 
 
@@ -187,19 +229,19 @@ def parse_import(name):
 	if doc.source_hash:
 		return preview_import(name)
 	bank = validate_bank_context(doc.company, doc.bank_account)
+	parser = _get_bank_parser(bank.bank)
 	content = _source(doc)
 	try:
-		result = parse_cmb_receipts(content)
+		result = parser["parse"](content)
 	except ReceiptParseError as exc:
 		result = {
 			"rows": [],
 			"errors": [{"page": "-", "message": str(exc)}],
-			"parser_version": PARSER_VERSION,
+			"parser_version": parser["parser_version"],
 		}
 	errors = list(result["errors"])
 	seen = {}
 	for data in result["rows"]:
-		accounting_summary = receipt_summary(data)
 		previous = seen.setdefault(data["transaction_id"], data)
 		if not _equivalent(data, previous):
 			errors.append(
@@ -209,6 +251,7 @@ def parse_import(name):
 			validate_receipt_context(data, bank, doc.company)
 		except frappe.ValidationError as exc:
 			errors.append({"page": data["page"], "position": data["position"], "message": str(exc)})
+		accounting_summary = receipt_summary(data)
 		parsed_row = doc.append(
 			"rows",
 			{
@@ -330,6 +373,7 @@ def suggest_account(company, data):
 			"accrual_account",
 			"effective_from",
 			"effective_to",
+			"housing_fund_company_percent",
 			*SOCIAL_ITEMS.values(),
 		],
 		order_by="priority, name",
@@ -341,7 +385,17 @@ def suggest_account(company, data):
 		and (not r.keyword or r.keyword in text)
 		and (not r.get("effective_from") or getdate(data["posting_date"]) >= getdate(r.effective_from))
 		and (not r.get("effective_to") or getdate(data["posting_date"]) <= getdate(r.effective_to))
-		and (r.get("rule_type") != "社保分摊" or any("保险费" in t["item"] for t in data["tax_details"]))
+		and (
+			r.get("rule_type") != "社保分摊"
+			or (data["tax_details"] and all(t.get("item") in SOCIAL_ITEMS for t in data["tax_details"]))
+		)
+		and (
+			r.get("rule_type") != "公积金分摊"
+			or (
+				data["tax_details"]
+				and all(is_housing_fund_item(t.get("item")) for t in data["tax_details"])
+			)
+		)
 	]
 	if matches:
 		best = [r for r in matches if r.priority == matches[0].priority]
@@ -353,6 +407,7 @@ def suggest_account(company, data):
 						r.get("rule_type"),
 						r.get("personal_account"),
 						r.get("accrual_account"),
+						r.get("housing_fund_company_percent"),
 						*(r.get(f) for f in SOCIAL_ITEMS.values()),
 					)
 					for r in best
@@ -363,6 +418,8 @@ def suggest_account(company, data):
 			return {"account": None, "reason": "同优先级规则冲突，需人工选择"}
 		if best[0].get("rule_type") == "社保分摊":
 			return social_suggestion(best[0], data)
+		if best[0].get("rule_type") == "公积金分摊":
+			return housing_fund_suggestion(best[0], data)
 		return {
 			"account": best[0].account,
 			"reason": "公司规则：" + (best[0].notes or best[0].name),
@@ -376,6 +433,10 @@ def suggest_account(company, data):
 			code, reason = "222112", "税费明细明确为个人所得税，请核对已计提余额"
 		elif "工资" in data["summary"] or data["business_type"] == "自助代发付款":
 			code, reason = "221101", "工资支付建议；请核对已计提及已付款记录"
+		elif data["tax_details"] and all(
+			is_housing_fund_item(r.get("item")) for r in data["tax_details"]
+		):
+			reason = "公积金明细已识别，请先设置该公司的公积金分摊规则"
 		elif "公积金" in text:
 			code, reason = "221104", "公积金支付建议；个人与公司承担金额需结合业务明细核对"
 		elif data["tax_details"] and all("保险费" in r["item"] for r in data["tax_details"]):
@@ -389,7 +450,13 @@ def suggest_account(company, data):
 		if code
 		else None
 	)
-	if code or (data["tax_details"] and all("保险费" in r["item"] for r in data["tax_details"])):
+	if code or (
+		data["tax_details"]
+		and (
+			all("保险费" in r["item"] for r in data["tax_details"])
+			or all(is_housing_fund_item(r.get("item")) for r in data["tax_details"])
+		)
+	):
 		return {"account": account, "reason": reason}
 
 	# Use the same reviewed summary mapping as the XLSX bank-statement flow for
@@ -841,7 +908,7 @@ def _bank_transaction(doc, data, bank, bt):
 
 
 def _create_voucher(
-	doc, data, bank, bt, account, party_type=None, party=None, allocations=None, social_plan=None
+	doc, data, bank, bt, account, party_type=None, party=None, allocations=None, allocation_plan=None
 ):
 	from china_finance.services.bank_reconciliation import (
 		_apply_journal_entry_summary,
@@ -855,8 +922,8 @@ def _create_voucher(
 	if sum(money(line["amount"]) for line in allocations) != money(data["amount"]):
 		frappe.throw("分录合计与银行交易金额不一致")
 	journal_lines = (
-		social_plan["journal_lines"]
-		if social_plan
+		allocation_plan["journal_lines"]
+		if allocation_plan
 		else [
 			{
 				"account": line["account"],
@@ -916,10 +983,11 @@ def _create_voucher(
 		"credit": amount if withdrawal else 0,
 		"debit_in_account_currency": 0 if withdrawal else amount,
 		"credit_in_account_currency": amount if withdrawal else 0,
-		"summary": social_plan["bank_summary"] if social_plan else data["summary"],
+		"summary": allocation_plan["bank_summary"] if allocation_plan else data["summary"],
 	}
-	# Keep the source order: accrual first, payment second, bank last for social insurance.
-	if not social_plan:
+	# Ordinary vouchers follow the accounting display convention: debit rows first.
+	# Allocation plans keep their business sequence (accrual first, payment second).
+	if not allocation_plan and not withdrawal:
 		je.append("accounts", {k: v for k, v in bank_line.items() if k != "summary"})
 	for line in journal_lines:
 		debit, credit = float(money(line["debit"])), float(money(line["credit"]))
@@ -942,10 +1010,12 @@ def _create_voucher(
 		)
 		if not withdrawal and accounts[line["account"]].account_number == "660302":
 			_restore_interest_offset_debit(je, line["account"])
-	if social_plan:
+	if allocation_plan or withdrawal:
 		je.append("accounts", {k: v for k, v in bank_line.items() if k != "summary"})
-	_apply_journal_entry_summary(je, social_plan["voucher_summary"] if social_plan else data["summary"])
-	if social_plan:
+	_apply_journal_entry_summary(
+		je, allocation_plan["voucher_summary"] if allocation_plan else data["summary"]
+	)
+	if allocation_plan:
 		active_lines = [line for line in journal_lines if money(line["debit"]) or money(line["credit"])]
 		for row, line in zip(je.accounts, [*active_lines, bank_line], strict=True):
 			row.user_remark = line["summary"]
@@ -983,6 +1053,7 @@ def _process_receipt(
 	notes=None,
 	social_not_accrued=0,
 	decision_hash=None,
+	allocation_not_accrued=0,
 ):
 	if not cint(confirmed):
 		frappe.throw("请先核对回单、业务依据及重复记账情况并确认")
@@ -1018,7 +1089,8 @@ def _process_receipt(
 			doc.status = "处理完成" if all(r.receipt for r in doc.rows) else "部分处理"
 			_save(doc)
 			return {"receipt": receipt.name, "status": row.status, "reused": True}
-	if action in ("create", "create_social"):
+	allocation_action = action in ("create_social", "create_allocation")
+	if action == "create" or allocation_action:
 		if doc.mode != "新业务制证":
 			frappe.throw("历史补回单模式不允许生成新凭证")
 		_check_bt_links(bt)
@@ -1029,14 +1101,16 @@ def _process_receipt(
 		if decision.get("blocked"):
 			frappe.throw(decision["reason"])
 		allocations = None
-		if action == "create_social":
-			if not cint(social_not_accrued) or not decision.get("allocations"):
-				frappe.throw("社保拆分需有效的公司分摊规则，并确认该费用尚未计提")
+		if allocation_action:
+			allocation_label = "公积金" if decision.get("rule_type") == "公积金分摊" else "社保"
+			not_accrued = cint(allocation_not_accrued) or cint(social_not_accrued)
+			if not not_accrued or not decision.get("allocations"):
+				frappe.throw(f"{allocation_label}拆分需有效的公司分摊规则，并确认该所属期尚未计提")
 			if decision_hash != decision.get("decision_hash"):
-				frappe.throw("社保分摊规则已变化，请刷新预览重新核对金额")
+				frappe.throw(f"{allocation_label}分摊规则已变化，请刷新预览重新核对金额")
 			allocations = decision["allocations"]
 		elif decision.get("allocations"):
-			frappe.throw("请按社保分摊明细核对并确认，不能忽略个人承担部分")
+			frappe.throw("请按分摊明细核对并确认，不能忽略个人承担部分")
 		voucher = _create_voucher(
 			doc,
 			data,
@@ -1046,16 +1120,21 @@ def _process_receipt(
 			party_type,
 			party,
 			allocations,
-			social_plan=decision if action == "create_social" else None,
+			allocation_plan=decision if allocation_action else None,
 		)
 		data["accounting_decision"] = {
 			"rule": decision.get("rule"),
+			"rule_type": decision.get("rule_type"),
 			"allocations": allocations or [{"account": account, "amount": data["amount"]}],
 			"breakdown": decision.get("breakdown"),
+			"allocation_not_accrued": bool(
+				cint(allocation_not_accrued) or cint(social_not_accrued)
+			),
 			"social_not_accrued": bool(cint(social_not_accrued)),
-			"social_period": decision.get("social_period") if action == "create_social" else None,
-			"journal_lines": decision.get("journal_lines") if action == "create_social" else None,
-			"bank_summary": decision.get("bank_summary") if action == "create_social" else None,
+			"coverage_period": decision.get("coverage_period") or decision.get("social_period"),
+			"social_period": decision.get("social_period"),
+			"journal_lines": decision.get("journal_lines") if allocation_action else None,
+			"bank_summary": decision.get("bank_summary") if allocation_action else None,
 			"bank_gl_account": bank.account,
 			"bank_amount": data["amount"],
 		}
@@ -1121,7 +1200,9 @@ def _process_receipt(
 	receipt.bank_transaction = bt.name if bt else None
 	receipt.voucher_type, receipt.voucher_name = voucher.doctype, voucher.name
 	receipt.process_note = notes or (
-		"确认生成凭证草稿" if action in ("create", "create_social") else "确认关联已有凭证"
+		"确认生成凭证草稿"
+		if action in ("create", "create_social", "create_allocation")
+		else "确认关联已有凭证"
 	)
 	receipt.processed_by, receipt.processed_on = frappe.session.user, now_datetime()
 	receipt.status = receipt_status(receipt)
@@ -1155,6 +1236,7 @@ def process_receipt(
 	notes=None,
 	social_not_accrued=0,
 	decision_hash=None,
+	allocation_not_accrued=0,
 ):
 	_get_import(name, write=True)
 	point = "receipt_" + frappe.generate_hash(length=10)
@@ -1174,6 +1256,7 @@ def process_receipt(
 			notes,
 			social_not_accrued,
 			decision_hash,
+			allocation_not_accrued,
 		)
 	except frappe.ValidationError as exc:
 		frappe.db.rollback(save_point=point)
@@ -1206,7 +1289,7 @@ def process_import_batch(name, rows=None, confirmed=0):
 				"name": row["name"],
 				"account": row["suggestion"].get("account"),
 				"decision_hash": row["suggestion"].get("decision_hash"),
-				"social_not_accrued": 1 if row["suggestion"].get("allocations") else 0,
+				"allocation_not_accrued": 1 if row["suggestion"].get("allocations") else 0,
 			}
 			for row in preview_rows
 		]
@@ -1238,9 +1321,16 @@ def process_import_batch(name, rows=None, confirmed=0):
 		point = "receipt_batch_" + frappe.generate_hash(length=8)
 		frappe.db.savepoint(point)
 		try:
-			result = process_receipt(name, row["name"], "create_social" if decision.get("allocations") else "create",
-				account=decision.get("account"), confirmed=1, social_not_accrued=selected.get("social_not_accrued", 0),
-				decision_hash=selected.get("decision_hash"))
+			result = process_receipt(
+				name,
+				row["name"],
+				"create_allocation" if decision.get("allocations") else "create",
+				account=decision.get("account"),
+				confirmed=1,
+				social_not_accrued=selected.get("social_not_accrued", 0),
+				allocation_not_accrued=selected.get("allocation_not_accrued", 0),
+				decision_hash=selected.get("decision_hash"),
+			)
 			results.append({"name": row["name"], **result})
 		except Exception as exc:
 			frappe.db.rollback(save_point=point)
@@ -1373,11 +1463,16 @@ def update_receipt_status(doc, method=None):
 			frappe.db.set_value(RECEIPT, name, "status", status, update_modified=False)
 
 
-def has_social_receipt_lines(doc):
+def has_structured_receipt_lines(doc):
 	if doc.doctype != "Journal Entry" or not frappe.db.exists("DocType", RECEIPT):
 		return False
 	data = frappe.db.get_value(RECEIPT, {"voucher_type": doc.doctype, "voucher_name": doc.name}, "raw_data")
 	return bool(data and json.loads(data).get("accounting_decision", {}).get("journal_lines"))
+
+
+def has_social_receipt_lines(doc):
+	"""Backward-compatible wrapper retained for existing integrations."""
+	return has_structured_receipt_lines(doc)
 
 
 @frappe.whitelist()

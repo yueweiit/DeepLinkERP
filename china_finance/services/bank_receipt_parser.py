@@ -1,5 +1,6 @@
 """Local, strict parser for CMB text receipts. No OCR or network service."""
 
+import importlib
 import io
 import re
 from datetime import date
@@ -8,9 +9,73 @@ from decimal import Decimal, InvalidOperation
 PARSER_VERSION = "cmb-text-v1"
 TITLE = re.compile(r"[出入]\s*账\s*回\s*单")
 
+# Keep bank-specific formats behind a small registry.  A parser is selected
+# from the Bank Account's bank name; adding another bank must not change the
+# common import and accounting workflow.
+PARSER_REGISTRY = {
+	"cmb_text_pdf_v1": {
+		"bank_keywords": ("招商银行", "招商"),
+		"currency": "CNY",
+		"parser": "china_finance.services.bank_receipt_parser.parse_cmb_receipts",
+		"parser_version": PARSER_VERSION,
+		"label": "招商银行文字版回单 PDF",
+	},
+	"boc_text_pdf_v1": {
+		"bank_keywords": ("中国银行",),
+		"currency": "CNY",
+		"parser": "china_finance.services.bank_receipt_parsers_cn.parse_boc_receipts",
+		"parser_version": "boc-text-v1",
+		"label": "中国银行文字版回单 PDF",
+	},
+	"abc_text_pdf_v1": {
+		"bank_keywords": ("中国农业银行", "农业银行"),
+		"currency": "CNY",
+		"parser": "china_finance.services.bank_receipt_parsers_cn.parse_abc_receipts",
+		"parser_version": "abc-text-v1",
+		"label": "中国农业银行文字版回单 PDF",
+	},
+	"icbc_text_pdf_v1": {
+		"bank_keywords": ("中国工商银行", "工商银行"),
+		"currency": "CNY",
+		"parser": "china_finance.services.bank_receipt_parsers_cn.parse_icbc_receipts",
+		"parser_version": "icbc-text-v1",
+		"label": "中国工商银行文字版回单 PDF",
+	},
+	"cgb_text_pdf_v1": {
+		"bank_keywords": ("广发银行", "广东发展银行"),
+		"currency": "CNY",
+		"parser": "china_finance.services.bank_receipt_parsers_cn.parse_cgb_receipts",
+		"parser_version": "cgb-text-v1",
+		"label": "广发银行文字版回单 PDF",
+	},
+}
+
 
 class ReceiptParseError(ValueError):
 	pass
+
+
+def get_receipt_parser(bank_name):
+	"""Return the configured parser for a bank name, or ``None``.
+
+	The callable is resolved at lookup time so tests and integrations can
+	replace ``parse_cmb_receipts`` without leaving a stale function reference in
+	the registry.
+	"""
+	bank_name = str(bank_name or "").strip()
+	for parser_version, config in PARSER_REGISTRY.items():
+		if any(keyword in bank_name for keyword in config["bank_keywords"]):
+			module_name, function_name = config["parser"].rsplit(".", 1)
+			parser = getattr(importlib.import_module(module_name), function_name, None)
+			if not callable(parser):
+				raise ReceiptParseError(f"银行回单解析器配置不完整：{parser_version}")
+			return {
+				**config,
+				"parser_version": config.get("parser_version", parser_version),
+				"parser_key": parser_version,
+				"parse": parser,
+			}
+	return None
 
 
 def money(value):

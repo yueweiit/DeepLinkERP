@@ -10,8 +10,13 @@ import frappe
 from frappe.utils.file_manager import save_file
 
 from china_finance.services import bank_receipt_import as service
-from china_finance.services.bank_receipt_parser import ReceiptParseError, parse_receipt_text
-from china_finance.services.bank_receipt_social import social_suggestion
+from china_finance.services.bank_receipt_parser import (
+	PARSER_VERSION,
+	ReceiptParseError,
+	get_receipt_parser,
+	parse_receipt_text,
+)
+from china_finance.services.bank_receipt_social import housing_fund_suggestion, social_suggestion
 
 
 def social_data(data):
@@ -47,6 +52,35 @@ def social_rule(**kwargs):
 	)
 
 
+def housing_fund_data(data):
+	return {
+		**data,
+		"amount": "416.00",
+		"fee_details": [],
+		"business_type": "公积金扣款",
+		"summary": "住房公积金",
+		"tax_details": [
+			{
+				"item": "住房公积金",
+				"amount": "416.00",
+				"period_from": "20260501",
+				"period_to": "20260531",
+			}
+		],
+	}
+
+
+def housing_fund_rule(**kwargs):
+	return frappe._dict(
+		name="housing-fund-rule",
+		account="housing-expense",
+		personal_account="housing-personal",
+		accrual_account="housing-accrual",
+		housing_fund_company_percent=50,
+		**kwargs,
+	)
+
+
 def receipt_text(
 	direction="出",
 	amount="CNY3.52",
@@ -71,6 +105,22 @@ def receipt_text(
 
 
 class TestReceiptParser(unittest.TestCase):
+	def test_bank_parser_registry_selects_cmb_and_rejects_unknown_bank(self):
+		for bank_name, parser_key in (
+			("招商银行 - 招商", "cmb_text_pdf_v1"),
+			("中国银行", "boc_text_pdf_v1"),
+			("中国农业银行股份有限公司", "abc_text_pdf_v1"),
+			("中国工商银行", "icbc_text_pdf_v1"),
+			("广发银行股份有限公司", "cgb_text_pdf_v1"),
+		):
+			with self.subTest(bank_name=bank_name):
+				parser = get_receipt_parser(bank_name)
+				self.assertIsNotNone(parser)
+				self.assertEqual(parser["parser_key"], parser_key)
+				self.assertEqual(parser["currency"], "CNY")
+		self.assertEqual(get_receipt_parser("招商银行")["parser_version"], PARSER_VERSION)
+		self.assertIsNone(get_receipt_parser("未配置测试银行"))
+
 	def test_accounting_summary_includes_reimbursement_recipient(self):
 		data = parse_receipt_text(receipt_text(business="支付", summary="报销", details=""))
 		data["counterparty"] = "张三"
@@ -90,6 +140,38 @@ class TestReceiptParser(unittest.TestCase):
 		self.assertEqual(service.receipt_summary(data), "支付7月个人所得税")
 		data["posting_date"] = "2027-01-05"
 		self.assertEqual(service.receipt_summary(data), "支付2026年7月个人所得税")
+
+	def test_housing_fund_summary_and_five_lines_use_coverage_period(self):
+		data = housing_fund_data(parse_receipt_text(receipt_text()))
+		data["posting_date"] = "2026-08-21"
+		self.assertEqual(service.receipt_summary(data), "支付5月公积金")
+		result = housing_fund_suggestion(housing_fund_rule(), data)
+		self.assertEqual(result["coverage_period"], "2026-05")
+		self.assertEqual([row["amount"] for row in result["allocations"]], ["208.00", "208.00"])
+		self.assertEqual(
+			[row["summary"] for row in result["journal_lines"]],
+			["计提5月公积金", "计提5月公积金", "计提5月公积金", "支付5月公积金"],
+		)
+		self.assertEqual(result["bank_summary"], "支付5月公积金")
+		data["posting_date"] = "2027-01-05"
+		self.assertEqual(service.receipt_summary(data), "支付2026年5月公积金")
+		self.assertEqual(
+			housing_fund_suggestion(housing_fund_rule(), data)["bank_summary"],
+			"支付2026年5月公积金",
+		)
+
+	def test_housing_fund_requires_clean_details_period_and_rule(self):
+		data = housing_fund_data(parse_receipt_text(receipt_text()))
+		data["tax_details"].append(
+			{"item": "个人所得税", "amount": "0.00", "period_from": "20260501", "period_to": "20260531"}
+		)
+		self.assertIsNone(housing_fund_suggestion(housing_fund_rule(), data)["account"])
+		data = housing_fund_data(parse_receipt_text(receipt_text()))
+		data["tax_details"][0]["period_to"] = "20260630"
+		self.assertIn("所属时期", housing_fund_suggestion(housing_fund_rule(), data)["reason"])
+		rule = housing_fund_rule()
+		rule.housing_fund_company_percent = None
+		self.assertIn("承担比例", housing_fund_suggestion(rule, housing_fund_data(parse_receipt_text(receipt_text())))["reason"])
 
 	def test_user_social_percentages_round_each_item_and_balance(self):
 		suggestion = social_suggestion(social_rule(), social_data(parse_receipt_text(receipt_text())))
@@ -336,6 +418,11 @@ class TestReceiptIntegration(unittest.TestCase):
 			batch.name, batch.rows[0].name, account=self.account, confirmed=1, **kwargs
 		)
 
+	def test_unconfigured_bank_format_is_rejected_before_import(self):
+		frappe.db.set_value("Bank Account", self.bank.name, "bank", "未配置测试银行")
+		with self.assertRaisesRegex(frappe.ValidationError, "暂未配置银行.*回单格式"):
+			service.validate_bank_context(self.company, self.bank.name)
+
 	def test_preview_creates_no_bank_or_accounting_entries(self):
 		before = {
 			dt: frappe.db.count(dt)
@@ -405,6 +492,9 @@ class TestReceiptIntegration(unittest.TestCase):
 			"Account", {"company": self.company, "account_number": "660201", "is_group": 0}, "name"
 		)
 		self.assertIn(office, [row.account for row in voucher.accounts])
+		self.assertEqual([row.account for row in voucher.accounts], [office, self.bank.account])
+		self.assertEqual(voucher.accounts[0].debit_in_account_currency, 432.19)
+		self.assertEqual(voucher.accounts[1].credit_in_account_currency, 432.19)
 		self.assertEqual(voucher.user_remark, "报销款-测试收款人")
 		self.assertEqual({row.user_remark for row in voucher.accounts}, {"报销款-测试收款人"})
 		self.assertEqual(json.loads(batch.rows[0].raw_data)["summary"], "报销款")
@@ -558,6 +648,37 @@ class TestReceiptIntegration(unittest.TestCase):
 			)
 		with patch.object(service, "_source", return_value=b"changed"):
 			self.assertIn("原件内容已变化", self.process(batch, action="create")["error"])
+
+	def test_direction_can_be_resolved_from_selected_bank_account(self):
+		outgoing = {
+			**self.data,
+			"direction": "",
+			"own_account": "",
+			"own_name": "",
+			"counterparty": "",
+			"counterparty_account": "",
+			"payer": self.company,
+			"payer_account": self.bank.bank_account_no,
+			"payee": "测试收款人",
+			"payee_account": "98765432101234",
+		}
+		service.validate_receipt_context(outgoing, self.bank, self.company)
+		self.assertEqual(outgoing["direction"], "支出")
+		self.assertEqual(outgoing["counterparty"], "测试收款人")
+
+		incoming = {
+			**outgoing,
+			"direction": "",
+			"own_account": "",
+			"own_name": "",
+			"payer": "测试付款人",
+			"payer_account": "98765432101234",
+			"payee": self.company,
+			"payee_account": self.bank.bank_account_no,
+		}
+		service.validate_receipt_context(incoming, self.bank, self.company)
+		self.assertEqual(incoming["direction"], "收入")
+		self.assertEqual(incoming["counterparty"], "测试付款人")
 
 	def test_cannot_forge_receipt_or_change_parsed_batch(self):
 		batch = self.batch()
@@ -840,3 +961,90 @@ class TestReceiptIntegration(unittest.TestCase):
 		self.assertEqual(decision["breakdown"][1]["company_percent"], "66.67")
 		self.assertEqual(decision["social_period"], "2026-07")
 		self.assertEqual([r["summary"] for r in decision["journal_lines"]], expected_summaries[:4])
+
+	def test_housing_fund_rule_creates_five_line_draft(self):
+		def account(number, account_name, root_type):
+			existing = frappe.db.get_value(
+				"Account", {"company": self.company, "account_number": number, "is_group": 0}, "name"
+			)
+			if existing:
+				return existing
+			parent = frappe.db.get_value(
+				"Account", {"company": self.company, "root_type": root_type, "is_group": 1}, "name"
+			)
+			return frappe.get_doc(
+				{
+					"doctype": "Account",
+					"company": self.company,
+					"account_name": account_name,
+					"account_number": number,
+					"parent_account": parent,
+					"account_currency": "CNY",
+					"is_group": 0,
+				}
+			).insert().name
+
+		accounts = {
+			"660229": account("660229", "回单测试管理费用公积金", "Expense"),
+			"122103": account("122103", "回单测试其他应收公积金", "Asset"),
+			"221104": account("221104", "回单测试应付公积金", "Liability"),
+		}
+		rule_data = housing_fund_rule(
+			company=self.company,
+			rule_type="公积金分摊",
+			direction="支出",
+			priority=-1000,
+			enabled=1,
+			notes="测试公积金公司和个人各承担 50%",
+		)
+		rule_data.pop("name")
+		rule_data.update(
+			doctype="China Bank Receipt Rule",
+			account=accounts["660229"],
+			personal_account=accounts["122103"],
+			accrual_account=accounts["221104"],
+		)
+		rule = frappe.get_doc(rule_data).insert()
+		data = housing_fund_data(self.data)
+		data["posting_date"] = "2026-08-21"
+		batch = self.batch(data=data)
+		preview = service.preview_import(batch.name)["rows"][0]
+		self.assertEqual(preview["summary"], "支付5月公积金")
+		self.assertEqual(preview["suggestion"]["rule"], rule.name)
+
+		batch_result = service.process_import_batch(batch.name, confirmed=1)
+		self.assertEqual(batch_result["created"], 1, batch_result)
+		result = batch_result["results"][0]
+		self.assertNotIn("error", result)
+		voucher = frappe.get_doc("Journal Entry", result["voucher_name"])
+		self.assertEqual(len(voucher.accounts), 5)
+		self.assertEqual(
+			[row.account for row in voucher.accounts],
+			[
+				accounts["660229"],
+				accounts["122103"],
+				accounts["221104"],
+				accounts["221104"],
+				self.bank.account,
+			],
+		)
+		self.assertEqual(
+			[row.user_remark for row in voucher.accounts],
+			[
+				"计提5月公积金",
+				"计提5月公积金",
+				"计提5月公积金",
+				"支付5月公积金",
+				"支付5月公积金",
+			],
+		)
+		self.assertEqual(voucher.accounts[0].debit_in_account_currency, 208)
+		self.assertEqual(voucher.accounts[1].debit_in_account_currency, 208)
+		self.assertEqual(voucher.accounts[2].credit_in_account_currency, 416)
+		self.assertEqual(voucher.accounts[3].debit_in_account_currency, 416)
+		self.assertEqual(voucher.accounts[4].credit_in_account_currency, 416)
+		decision = json.loads(
+			frappe.db.get_value(service.RECEIPT, result["receipt"], "raw_data")
+		)["accounting_decision"]
+		self.assertEqual(decision["rule_type"], "公积金分摊")
+		self.assertEqual(decision["coverage_period"], "2026-05")

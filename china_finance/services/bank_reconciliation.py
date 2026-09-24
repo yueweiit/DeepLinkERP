@@ -567,9 +567,9 @@ def repair_draft_bank_journal_entry_summaries(company, from_date=None, to_date=N
 			skipped += 1
 			continue
 		journal_entry = frappe.get_doc("Journal Entry", journal_entry_name)
-		from china_finance.services.bank_receipt_import import has_social_receipt_lines
+		from china_finance.services.bank_receipt_import import has_structured_receipt_lines
 
-		if has_social_receipt_lines(journal_entry):
+		if has_structured_receipt_lines(journal_entry):
 			# Keep receipt-period accrual/payment summaries on their individual lines.
 			skipped += 1
 			continue

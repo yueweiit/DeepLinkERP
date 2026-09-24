@@ -13,10 +13,10 @@ class ChinaFinanceJournalEntry(JournalEntry):
 		self.validate_total_debit_and_credit()
 
 	def build_gl_map(self):
-		from china_finance.services.bank_receipt_import import has_social_receipt_lines
+		from china_finance.services.bank_receipt_import import has_structured_receipt_lines
 
 		gl_map = super().build_gl_map()
-		if has_social_receipt_lines(self):
+		if has_structured_receipt_lines(self):
 			# Accrual and payment need separate audit lines even when the site's
 			# "merge similar account heads" option is enabled.
 			for entry in gl_map:
