@@ -128,6 +128,20 @@ frappe.ui.form.on("Purchase Invoice", {
 					.add_indicator(status.reconciliation_reason, "orange")
 					.attr("data-china-purchase-payable-status", "1");
 			}
+			const taxInvoices = (status.tax_invoices || "").split(", ").filter(Boolean);
+			frm.dashboard
+				.add_indicator(
+					__("进项税票：{0}", [taxInvoices.length ? taxInvoices.join(", ") : "未关联"]),
+					taxInvoices.length ? "green" : "gray"
+				)
+				.attr("data-china-purchase-payable-status", "1");
+			if (taxInvoices.length) {
+				frm.add_custom_button(
+					__("查看进项税票"),
+					() => open_tax_invoices(taxInvoices),
+					__("查看")
+				);
+			}
 			if (frappe.model.can_create("Payment Entry") && status.outstanding_amount > 0) {
 				frm.add_custom_button(
 					__("发起付款"),
@@ -154,6 +168,15 @@ function payment_status_indicator(status) {
 	if (status === "部分付款") return "orange";
 	if (status === "异常" || status === "已取消") return "red";
 	return "gray";
+}
+
+function open_tax_invoices(names) {
+	if (names.length === 1) {
+		frappe.set_route("Form", "China Tax Invoice", names[0]);
+		return;
+	}
+	frappe.route_options = { name: ["in", names] };
+	frappe.set_route("List", "China Tax Invoice");
 }
 
 frappe.ui.form.on("Purchase Order", {

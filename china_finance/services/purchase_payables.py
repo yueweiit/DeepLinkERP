@@ -318,6 +318,7 @@ def get_purchase_invoice_status_for_user(purchase_invoice):
 		"purchase_invoice": invoice.name,
 		"purchase_orders": evaluation["purchase_orders"],
 		"purchase_receipts": evaluation["purchase_receipts"],
+		"tax_invoices": evaluation["tax_invoices"],
 		"payment_entries": payment_summary["payment_entries"],
 		"paid_amount": payment_summary["paid_amount"],
 		"outstanding_amount": flt(invoice.outstanding_amount),

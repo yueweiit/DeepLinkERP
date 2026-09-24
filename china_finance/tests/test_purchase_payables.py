@@ -185,6 +185,7 @@ class TestPurchasePayables(TestCase):
 		evaluation = {
 			"purchase_orders": "PO-0001",
 			"purchase_receipts": "PR-0001",
+			"tax_invoices": "CTI-0001",
 			"reconciliation_status": "Ready",
 			"reconciliation_reason": "",
 		}
@@ -197,6 +198,7 @@ class TestPurchasePayables(TestCase):
 		):
 			result = purchase_payables.get_purchase_invoice_status_for_user("PINV-0001")
 		self.assertEqual(result["payment_status"], purchase_payables.PAYMENT_STATUS_PARTIAL)
+		self.assertEqual(result["tax_invoices"], "CTI-0001")
 		self.assertEqual(result["reconciliation_status"], "Ready")
 		self.assertEqual(result["payment_entries"], "ACC-PAY-0001")
 		invoice.check_permission.assert_called_once_with("read")
