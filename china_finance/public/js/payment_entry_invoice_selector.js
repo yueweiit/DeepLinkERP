@@ -20,9 +20,96 @@ function update_invoice_selector_button(frm) {
 		});
 	} else if (frm.doc.payment_type === "Pay") {
 		frm.add_custom_button(__("选采购应付单"), () => {
-			open_invoice_selector(frm, "Purchase Invoice", "supplier", "Supplier");
+			open_purchase_invoice_selector(frm);
 		});
 	}
+}
+
+function open_purchase_invoice_selector(frm) {
+	if (!frm.doc.company) {
+		frappe.msgprint(__("请先选择公司"));
+		return;
+	}
+
+	const dialog = new frappe.ui.Dialog({
+		title: __("选择采购应付单"),
+		fields: [
+			{
+				fieldname: "search",
+				label: __("搜索采购应付单"),
+				fieldtype: "Data",
+				placeholder: __("输入采购应付单号"),
+			},
+			{ fieldname: "invoice_table", fieldtype: "HTML" },
+		],
+		primary_action_label: __("添加到付款单"),
+		primary_action() {
+			const names = dialog.$wrapper
+				.find(".china-purchase-invoice-option:checked")
+				.map((_index, element) => element.dataset.name)
+				.get();
+			if (!names.length) {
+				frappe.msgprint(__("请选择至少一张采购应付单"));
+				return;
+			}
+			dialog.hide();
+			load_selected_invoices(frm, "Purchase Invoice", "supplier", "Supplier", names);
+		},
+	});
+
+	let search_timeout;
+	dialog.show();
+	dialog.get_field("search").$input.on("input", () => {
+		clearTimeout(search_timeout);
+		search_timeout = setTimeout(
+			() => load_purchase_invoice_candidates(frm, dialog),
+			250
+		);
+	});
+	load_purchase_invoice_candidates(frm, dialog);
+}
+
+async function load_purchase_invoice_candidates(frm, dialog) {
+	const response = await frappe.call({
+		method: "china_finance.services.purchase_payables.get_purchase_payment_candidates",
+		args: {
+			company: frm.doc.company,
+			supplier: frm.doc.party || "",
+			txt: dialog.get_value("search") || "",
+		},
+	});
+	const rows = response.message || [];
+	const table = rows.length
+		? `<div class="table-responsive"><table class="table table-bordered table-hover">
+			<thead><tr>
+				<th style="width: 32px"><input type="checkbox" class="china-purchase-invoice-select-all"></th>
+				<th>${__("采购应付单")}</th><th>${__("采购订单")}</th><th>${__("采购收货单")}</th>
+				<th>${__("到期日")}</th><th class="text-right">${__("未付金额")}</th>
+			</tr></thead><tbody>
+			${rows.map(purchase_invoice_selection_row).join("")}
+			</tbody></table></div>`
+		: `<div class="text-muted text-center p-4">${__("没有可付款的采购应付单")}</div>`;
+	dialog.get_field("invoice_table").$wrapper.html(table);
+	dialog.get_field("invoice_table").$wrapper.find(".china-purchase-invoice-select-all").on("change", (event) => {
+		dialog
+			.get_field("invoice_table")
+			.$wrapper
+			.find(".china-purchase-invoice-option")
+			.prop("checked", event.currentTarget.checked);
+	});
+}
+
+function purchase_invoice_selection_row(row) {
+	const escape = (value) => frappe.utils.escape_html(String(value || ""));
+	const amount = format_currency(row.outstanding_amount || 0, row.currency);
+	return `<tr>
+		<td><input type="checkbox" class="china-purchase-invoice-option" data-name="${escape(row.name)}"></td>
+		<td><a href="/app/purchase-invoice/${encodeURIComponent(row.name)}" target="_blank">${escape(row.name)}</a><br><small class="text-muted">${escape(row.supplier)}</small></td>
+		<td>${escape(row.purchase_orders) || "-"}</td>
+		<td>${escape(row.purchase_receipts) || "-"}</td>
+		<td>${escape(row.due_date) || "-"}</td>
+		<td class="text-right">${escape(amount)}</td>
+	</tr>`;
 }
 
 function open_invoice_selector(frm, doctype, party_field, party_type) {

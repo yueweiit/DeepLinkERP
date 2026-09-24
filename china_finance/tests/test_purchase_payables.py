@@ -201,6 +201,29 @@ class TestPurchasePayables(TestCase):
 		self.assertEqual(result["payment_entries"], "ACC-PAY-0001")
 		invoice.check_permission.assert_called_once_with("read")
 
+	def test_purchase_payment_candidates_include_order_and_receipt_links(self):
+		invoices = [
+			frappe._dict(
+				{
+					"name": "PINV-0001",
+					"supplier": "Test Supplier",
+					"grand_total": 100,
+					"outstanding_amount": 40,
+				}
+			)
+		]
+		items = [
+			frappe._dict({"parent": "PINV-0001", "purchase_order": "PO-0001", "purchase_receipt": "PR-0001"}),
+			frappe._dict({"parent": "PINV-0001", "purchase_order": "PO-0002", "purchase_receipt": "PR-0001"}),
+		]
+		with patch.object(purchase_payables.frappe, "get_list", return_value=invoices) as get_list, patch.object(
+			purchase_payables.frappe, "get_all", return_value=items
+		):
+			result = purchase_payables.get_purchase_payment_candidates("Test Company", "Test Supplier", "PINV")
+		self.assertEqual(result[0]["purchase_orders"], "PO-0001, PO-0002")
+		self.assertEqual(result[0]["purchase_receipts"], "PR-0001")
+		self.assertEqual(get_list.call_args.kwargs["filters"]["is_return"], 0)
+
 	def test_purchase_order_status_api_returns_live_chain_state(self):
 		order = DocumentStub(
 			doctype="Purchase Order",

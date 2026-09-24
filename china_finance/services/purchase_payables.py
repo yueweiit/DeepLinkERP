@@ -239,6 +239,70 @@ def get_receipt_payment_summary_for_user(purchase_receipt):
 
 
 @frappe.whitelist()
+def get_purchase_payment_candidates(company, supplier=None, txt=None, limit=100):
+	"""List payable invoices with their order and receipt links for payment selection."""
+	if not company:
+		frappe.throw(_("选择采购应付单时必须先指定公司"))
+	try:
+		limit = min(max(int(limit), 1), 200)
+	except (TypeError, ValueError):
+		limit = 100
+
+	filters = {
+		"company": company,
+		"docstatus": 1,
+		"outstanding_amount": [">", DEFAULT_AMOUNT_TOLERANCE],
+		"is_return": 0,
+	}
+	if supplier:
+		filters["supplier"] = supplier
+	if txt:
+		filters["name"] = ["like", f"%{txt.strip()}%"]
+
+	invoices = frappe.get_list(
+		"Purchase Invoice",
+		filters=filters,
+		fields=[
+			"name",
+			"supplier",
+			"posting_date",
+			"due_date",
+			"currency",
+			"grand_total",
+			"outstanding_amount",
+		],
+		order_by="due_date asc, posting_date asc, name asc",
+		limit_page_length=limit,
+	)
+	if not invoices:
+		return []
+
+	names = [invoice.name for invoice in invoices]
+	items = frappe.get_all(
+		"Purchase Invoice Item",
+		filters={"parent": ["in", names]},
+		fields=["parent", "purchase_order", "purchase_receipt"],
+		limit_page_length=0,
+	)
+	links = {name: {"purchase_orders": [], "purchase_receipts": []} for name in names}
+	for item in items:
+		link = links[item.parent]
+		if item.purchase_order and item.purchase_order not in link["purchase_orders"]:
+			link["purchase_orders"].append(item.purchase_order)
+		if item.purchase_receipt and item.purchase_receipt not in link["purchase_receipts"]:
+			link["purchase_receipts"].append(item.purchase_receipt)
+
+	return [
+		{
+			**invoice,
+			"purchase_orders": ", ".join(links[invoice.name]["purchase_orders"]),
+			"purchase_receipts": ", ".join(links[invoice.name]["purchase_receipts"]),
+		}
+		for invoice in invoices
+	]
+
+
+@frappe.whitelist()
 def get_purchase_invoice_status_for_user(purchase_invoice):
 	"""Return live matching and payment status for a submitted payable."""
 	invoice = frappe.get_doc("Purchase Invoice", purchase_invoice)
