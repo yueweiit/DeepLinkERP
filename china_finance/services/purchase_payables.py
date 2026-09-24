@@ -90,7 +90,14 @@ def get_receipt_payment_summary(receipt_name):
 	amount = sum(flt(invoice.grand_total) for invoice in valid)
 	outstanding = sum(flt(invoice.outstanding_amount) for invoice in valid)
 	if not valid:
-		status = PAYMENT_STATUS_NOT_APPLICABLE if not invoices else PAYMENT_STATUS_UNPAID
+		if not invoices:
+			status = PAYMENT_STATUS_NOT_APPLICABLE
+		elif all(invoice.docstatus == 2 for invoice in invoices):
+			status = PAYMENT_STATUS_CANCELLED
+		elif any(flt(invoice.get("is_return")) for invoice in invoices):
+			status = PAYMENT_STATUS_EXCEPTION
+		else:
+			status = PAYMENT_STATUS_UNPAID
 	else:
 		status = get_purchase_payment_status(amount, amount - outstanding, outstanding)
 	return {

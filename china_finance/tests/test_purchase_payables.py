@@ -332,3 +332,31 @@ class TestPurchasePayables(TestCase):
 			purchase_payables.get_purchase_payment_status(100, 0, 100, is_return=1),
 			purchase_payables.PAYMENT_STATUS_EXCEPTION,
 		)
+
+	def test_receipt_summary_does_not_treat_cancelled_or_return_invoice_as_unpaid(self):
+		receipt = self.receipt()
+		cancelled = frappe._dict(
+			{
+				"name": "PINV-CANCELLED",
+				"docstatus": 2,
+				"is_return": 0,
+				"grand_total": 100,
+				"outstanding_amount": 100,
+			}
+		)
+		with patch.object(purchase_payables.frappe, "get_doc", return_value=receipt), patch.object(
+			purchase_payables, "get_purchase_invoices_for_receipt", return_value=[cancelled]
+		):
+			self.assertEqual(
+				purchase_payables.get_receipt_payment_summary("PR-0001")["payment_status"],
+				purchase_payables.PAYMENT_STATUS_CANCELLED,
+			)
+
+		returned = frappe._dict({**cancelled, "docstatus": 1, "is_return": 1})
+		with patch.object(purchase_payables.frappe, "get_doc", return_value=receipt), patch.object(
+			purchase_payables, "get_purchase_invoices_for_receipt", return_value=[returned]
+		):
+			self.assertEqual(
+				purchase_payables.get_receipt_payment_summary("PR-0001")["payment_status"],
+				purchase_payables.PAYMENT_STATUS_EXCEPTION,
+			)
