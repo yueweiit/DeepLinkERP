@@ -13,7 +13,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from overseas_costing.services.erp_routing_service import resolve_item_uom
+from overseas_costing.services.erp_routing_service import raw_item_uom, resolve_item_uom
 
 try:
     import frappe
@@ -228,6 +228,9 @@ def _push_standard_purchase_flow(payload: dict, config: dict) -> dict:
         # compatibility boundary; grouped requests take the path above.
         purchase_order_name = _find_existing_purchase_order(payload, config)
         item_results = [_ensure_item(item, payload, config) for item in payload.get("items") or []]
+        blocked = _blocked_item_result(item_results)
+        if blocked:
+            return {**blocked, "config_ready": True}
 
         if purchase_order_name:
             submit = _submit_purchase_order(purchase_order_name, config)
@@ -291,6 +294,27 @@ def _push_standard_purchase_flow(payload: dict, config: dict) -> dict:
         }
 
 
+def _blocked_item_result(item_results: list[dict]) -> dict | None:
+    """物料没准备好时给出可直接返回的失败结果；全部就绪返回 ``None``。
+
+    两条标准采购路径（账本分组推送与历史直调）共用这一判定：只要有物料没准备好，
+    就不要再建采购单，否则远端只会回一句“物料不存在/单位无效”，看不出是哪一行、为什么。
+    """
+
+    blocked = [row for row in item_results if not row.get("ok")]
+    if not blocked:
+        return None
+    preview = "；".join(_clean(row.get("message")) for row in blocked[:3])
+    suffix = f"（共 {len(blocked)} 行未通过）" if len(blocked) > 3 else ""
+    return {
+        "ok": False,
+        "status": "ITEM_PREPARE_FAILED",
+        "items": item_results,
+        "blocked_item_codes": [_clean(row.get("item_code")) for row in blocked],
+        "message": f"物料准备未通过，已停止创建采购订单：{preview}{suffix}",
+    }
+
+
 def create_purchase(payload: dict, config: dict) -> dict:
     """以显式站点配置创建并提交采购订单，先核验稳定业务键防止重复创建。"""
 
@@ -310,6 +334,9 @@ def create_purchase(payload: dict, config: dict) -> dict:
         }
 
     item_results = [_ensure_item(item, payload, config) for item in payload.get("items") or []]
+    blocked = _blocked_item_result(item_results)
+    if blocked:
+        return blocked
     response_body = _request_json(
         config,
         method="POST",
@@ -783,6 +810,34 @@ def _find_existing_purchase_order(payload: dict, config: dict) -> str:
     return ""
 
 
+def _load_remote_uom_names(config: dict) -> set[str]:
+    """读取目标 ERP 的计量单位词表；读不到时返回空集合，表示本次不做单位校验。
+
+    单位校验是推送前的加分项：远端读不到词表（网络、权限）时降级为不校验，
+    不让它把整次推送带垮 —— 真有问题时远端仍会回单位相关错误。
+    结果缓存在 ``config`` 上，一次推送只读一次。
+    """
+
+    cached = config.get("available_uoms")
+    if cached is not None:
+        return set(cached)
+    names: set[str] = set()
+    try:
+        body = _request_json(
+            config,
+            method="GET",
+            url=_build_doctype_url(config, "UOM") + "?fields=%5B%22name%22%5D&limit_page_length=0",
+        )
+        rows = body.get("data") if isinstance(body, dict) else body
+        for row in rows or []:
+            if isinstance(row, dict) and _clean(row.get("name")):
+                names.add(_clean(row.get("name")))
+    except (HTTPError, URLError, TimeoutError, OSError):
+        names = set()
+    config["available_uoms"] = names
+    return set(names)
+
+
 def _ensure_item(item: dict, payload: dict, config: dict) -> dict:
     item_code = str(item.get("material_code") or "").strip()
     if not item_code:
@@ -793,6 +848,28 @@ def _ensure_item(item: dict, payload: dict, config: dict) -> dict:
     remote_uom = _clean((remote_item or {}).get("stock_uom"))
     if remote_uom:
         item["erp_stock_uom"] = remote_uom
+    elif remote_item is None:
+        # 新建物料时先把本地写法翻译成 ERP 计量单位；译不出或 ERP 没这个单位就停下报清楚，
+        # 不把 ERPNext 的单位校验错误留给远端返回（那边只说 unit not found，看不出是哪一行）。
+        target_uom = resolve_item_uom(
+            item, payload.get("erp_stock_uom") or config.get("stock_uom") or ""
+        )
+        available_uoms = _load_remote_uom_names(config)
+        if available_uoms and target_uom not in available_uoms:
+            local_uom = raw_item_uom(item)
+            reason = (
+                f"单位“{local_uom}”不是 DeepLinkERP 的计量单位" if local_uom else "物料行没有填单位"
+            )
+            return {
+                "ok": False,
+                "item_code": item_code,
+                "action": "blocked",
+                "uom": target_uom,
+                "message": (
+                    f"物料 {item_code} 在 DeepLinkERP 里还不存在，需要新建，但{reason}，"
+                    "无法确定 ERP 计量单位。"
+                ),
+            }
 
     body = _build_item_body(item, payload, config, include_stock_uom=remote_item is None)
     method = "PUT" if remote_item is not None else "POST"

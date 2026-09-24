@@ -284,6 +284,8 @@ def test_push_standard_purchase_flow_creates_item_and_purchase_order(monkeypatch
             return FakeResponse({"data": []})
         if request.get_method() == "GET" and request.full_url.endswith("/Purchase%20Order/PO-0001"):
             return FakeResponse({"data": {"name": "PO-0001", "docstatus": 0}})
+        if request.get_method() == "GET" and "/UOM?" in request.full_url:
+            return FakeResponse({"data": [{"name": "件：pieza"}, {"name": "个：pieza"}, {"name": "kg"}]})
         if request.get_method() == "GET" and "/Item/YL000001" in request.full_url:
             raise HTTPError(request.full_url, 404, "Not Found", None, io.BytesIO(b"{}"))
         if request.get_method() == "POST" and request.full_url.endswith("/Item"):
@@ -309,6 +311,7 @@ def test_push_standard_purchase_flow_creates_item_and_purchase_order(monkeypatch
                     "material_name": "太阳眼镜",
                     "supplier": "HUAFON",
                     "purchase_currency": "RMB",
+                    "purchase_uom": "件",
                     "source_quantity": 2,
                     "original_unit_price": 8,
                     "comprehensive_unit_price": 12.5,
@@ -334,7 +337,8 @@ def test_push_standard_purchase_flow_creates_item_and_purchase_order(monkeypatch
     submit_row = next(row for row in captured if row["method"] == "PUT" and row["url"].endswith("/Purchase%20Order/PO-0001"))
     assert submit_row["body"] == {"docstatus": 1}
     assert item_body["item_code"] == "YL000001"
-    assert item_body["stock_uom"] == "Nos"
+    assert item_body["stock_uom"] == "件：pieza"
+    assert po_body["items"][0]["uom"] == "件：pieza"
     assert result["response"]["items"][0]["uom_source"] == "local"
     assert item_body["custom_overseas_supplier"] == "HUAFON"
     assert item_body["custom_overseas_comprehensive_unit_price"] == 12.5
@@ -598,6 +602,8 @@ def test_standard_purchase_flow_uses_default_supplier_when_item_suppliers_confli
             return FakeResponse({"data": []})
         if request.get_method() == "GET" and request.full_url.endswith("/Purchase%20Order/PO-0002"):
             return FakeResponse({"data": {"name": "PO-0002", "docstatus": 0}})
+        if request.get_method() == "GET" and "/UOM?" in request.full_url:
+            return FakeResponse({"data": [{"name": "件：pieza"}, {"name": "个：pieza"}, {"name": "kg"}]})
         if request.get_method() == "GET" and "/Item/" in request.full_url:
             raise HTTPError(request.full_url, 404, "Not Found", None, io.BytesIO(b"{}"))
         if request.get_method() == "POST" and request.full_url.endswith("/Item"):
@@ -616,8 +622,8 @@ def test_standard_purchase_flow_uses_default_supplier_when_item_suppliers_confli
             "version_code": "V1",
             "subsidiary_code": "Empresas Mexico",
             "items": [
-                {"material_code": "A001", "material_name": "A", "supplier": "Supplier A", "source_quantity": 1, "original_unit_price": 1},
-                {"material_code": "B001", "material_name": "B", "supplier": "Supplier B", "source_quantity": 1, "original_unit_price": 1},
+                {"material_code": "A001", "material_name": "A", "supplier": "Supplier A", "purchase_uom": "件", "source_quantity": 1, "original_unit_price": 1},
+                {"material_code": "B001", "material_name": "B", "supplier": "Supplier B", "purchase_uom": "件", "source_quantity": 1, "original_unit_price": 1},
             ],
         }
     )
@@ -927,3 +933,201 @@ def test_created_purchase_order_is_submitted_through_the_resource_endpoint(monke
     ]
     assert calls[0][2]["items"][0]["warehouse"] == "仓库 - 拉丁购"
     assert calls[1][2] == {"docstatus": 1}
+
+
+def _unit_push_config() -> dict:
+    """单位相关用例共用的最小可用推送配置。"""
+
+    return {
+        "enabled": True,
+        "base_url": "https://erp.example.com/api/resource",
+        "authorization": "token abc:def",
+        "push_mode": "standard_purchase",
+        "company": "Empresas Mexico",
+        "supplier": "Default Supplier",
+        "cost_center": "",
+        "item_group": "Products",
+        "stock_uom": "Nos",
+        "default_currency": "CNY",
+        "schedule_date": "2026-08-20",
+        "target_doctype": "",
+        "method": "POST",
+        "timeout": 30,
+        "field_map": {},
+        "payload_field": "payload_json",
+    }
+
+
+def _unit_fake_urlopen(captured, remote_items, uom_names=("件：pieza", "个：pieza", "kg")):
+    """带 UOM 词表与可配置 Item 远端状态的 fake；未登记物料按 404 处理。"""
+
+    def fake_urlopen(request, timeout):
+        body = json.loads(request.data.decode("utf-8")) if request.data else None
+        captured.append({"url": request.full_url, "method": request.get_method(), "body": body})
+        if request.get_method() == "GET" and "/Purchase%20Order?" in request.full_url:
+            return _JsonResponse({"data": []})
+        if request.get_method() == "GET" and request.full_url.endswith("/Purchase%20Order/PO-UOM"):
+            return _JsonResponse({"data": {"name": "PO-UOM", "docstatus": 0}})
+        if request.get_method() == "GET" and "/UOM?" in request.full_url:
+            return _JsonResponse({"data": [{"name": name} for name in uom_names]})
+        if request.get_method() == "GET" and "/Item/" in request.full_url:
+            code = request.full_url.rsplit("/", 1)[-1]
+            remote = remote_items.get(code)
+            if remote is None:
+                raise HTTPError(request.full_url, 404, "Not Found", None, io.BytesIO(b"{}"))
+            return _JsonResponse({"data": remote})
+        if request.get_method() == "POST" and request.full_url.endswith("/Item"):
+            return _JsonResponse({"data": {"name": body["item_code"]}})
+        if request.get_method() == "PUT" and "/Item/" in request.full_url:
+            return _JsonResponse({"data": {"name": request.full_url.rsplit("/", 1)[-1]}})
+        if request.get_method() == "POST" and request.full_url.endswith("/Purchase%20Order"):
+            return _JsonResponse({"data": {"name": "PO-UOM"}})
+        if request.get_method() == "PUT" and request.full_url.endswith("/Purchase%20Order/PO-UOM"):
+            return _JsonResponse({"data": {"name": "PO-UOM", "docstatus": 1}})
+        raise AssertionError(f"unexpected request {request.get_method()} {request.full_url}")
+
+    return fake_urlopen
+
+
+def _unit_push_payload(items: list[dict], business_key: str = "OC-UOM-GROUP") -> dict:
+    """带业务键时走账本分组推送路径；传空串走历史直调路径。"""
+
+    payload = {
+        "batch_no": "BATCH-UOM",
+        "version_code": "V1",
+        "subsidiary_code": "Empresas Mexico",
+        "warehouse": "Stores - EM",
+        "items": items,
+    }
+    if business_key:
+        payload["business_key"] = business_key
+    return payload
+
+
+def test_new_item_with_unmapped_unit_stops_before_creating_the_purchase_order(monkeypatch) -> None:
+    """物料在 ERP 里还不存在、本地单位又翻译不出来时，不建采购单。"""
+
+    monkeypatch.setattr(erp_client, "get_erp_push_config", _unit_push_config)
+    captured = []
+    monkeypatch.setattr(
+        erp_client,
+        "urlopen",
+        _unit_fake_urlopen(captured, {}),
+    )
+
+    result = erp_client.push_overseas_cost_payload(
+        _unit_push_payload(
+            [
+                {
+                    "material_code": "NEW-1",
+                    "material_name": "新物料",
+                    "supplier": "HUAFON",
+                    "unit": "10",
+                    "source_quantity": 1,
+                    "original_unit_price": 1,
+                }
+            ]
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "ITEM_PREPARE_FAILED"
+    assert result["blocked_item_codes"] == ["NEW-1"]
+    assert "单位“10”不是 DeepLinkERP 的计量单位" in result["message"]
+    assert not [row for row in captured if row["url"].endswith("/Purchase%20Order")]
+
+
+def test_new_item_without_any_unit_stops_before_creating_the_purchase_order(monkeypatch) -> None:
+    """物料行没填单位时同样不建采购单，而不是拿默认值硬塞 stock_uom。"""
+
+    monkeypatch.setattr(erp_client, "get_erp_push_config", _unit_push_config)
+    captured = []
+    monkeypatch.setattr(erp_client, "urlopen", _unit_fake_urlopen(captured, {}))
+
+    result = erp_client.push_overseas_cost_payload(
+        _unit_push_payload(
+            [
+                {
+                    "material_code": "NEW-2",
+                    "material_name": "新物料",
+                    "supplier": "HUAFON",
+                    "source_quantity": 1,
+                    "original_unit_price": 1,
+                }
+            ]
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "ITEM_PREPARE_FAILED"
+    assert "物料行没有填单位" in result["message"]
+    assert not [row for row in captured if row["url"].endswith("/Purchase%20Order")]
+
+
+def test_existing_erp_item_keeps_the_remote_unit_even_when_the_local_text_is_junk(
+    monkeypatch,
+) -> None:
+    """已有物料的单位以 ERP 为准，本地写下什么都不参与校验、也不写回 ERP。"""
+
+    monkeypatch.setattr(erp_client, "get_erp_push_config", _unit_push_config)
+    captured = []
+    monkeypatch.setattr(
+        erp_client,
+        "urlopen",
+        _unit_fake_urlopen(captured, {"OLD-1": {"name": "OLD-1", "stock_uom": "个：pieza"}}),
+    )
+
+    result = erp_client.push_overseas_cost_payload(
+        _unit_push_payload(
+            [
+                {
+                    "material_code": "OLD-1",
+                    "material_name": "老物料",
+                    "supplier": "HUAFON",
+                    "unit": "10",
+                    "source_quantity": 1,
+                    "original_unit_price": 1,
+                }
+            ]
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "SUBMITTED"
+    item_body = next(
+        row["body"] for row in captured if row["method"] == "PUT" and row["url"].endswith("/Item/OLD-1")
+    )
+    assert "stock_uom" not in item_body
+    po_body = next(
+        row["body"] for row in captured if row["method"] == "POST" and row["url"].endswith("/Purchase%20Order")
+    )
+    assert po_body["items"][0]["uom"] == "个：pieza"
+
+
+def test_legacy_direct_push_also_stops_when_an_item_has_no_usable_unit(monkeypatch) -> None:
+    """没有业务键的历史直调路径同样遵守「物料没准备好就不建单」。"""
+
+    monkeypatch.setattr(erp_client, "get_erp_push_config", _unit_push_config)
+    captured = []
+    monkeypatch.setattr(erp_client, "urlopen", _unit_fake_urlopen(captured, {}))
+
+    result = erp_client.push_overseas_cost_payload(
+        _unit_push_payload(
+            [
+                {
+                    "material_code": "NEW-3",
+                    "material_name": "新物料",
+                    "supplier": "HUAFON",
+                    "unit": "Edgar Aldana",
+                    "source_quantity": 1,
+                    "original_unit_price": 1,
+                }
+            ],
+            business_key="",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "ITEM_PREPARE_FAILED"
+    assert result["config_ready"] is True
+    assert not [row for row in captured if row["url"].endswith("/Purchase%20Order")]

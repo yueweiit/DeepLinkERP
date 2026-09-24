@@ -16,6 +16,52 @@ LEGACY_PROJECT_IDENTITIES = {
     "yueweimx核心制造": "ywfabricacionmx核心制造",
 }
 
+# DeepLinkERP 计量单位词表快照（2026-09-24 线上实测导出，34 项）。
+# 该站点把 ERPNext 默认单位换成了「中文：西语」命名，本地物料行只写冒号前的部分，
+# 这里用于把本地自由文本补全成 ERP 实际存在的受控单位；运行时若读得到远端词表，
+# 由 `erp_client._ensure_item` 再校验一次（见 `_load_remote_uom_names`）。
+ERP_UOM_NAMES = (
+    "g", "kg", "m²", "个：pieza", "付：par", "件：pieza", "份：porción", "包：paquete",
+    "千克", "卷：rollo", "双：par", "台：unidad", "啤：vez", "块：pedazo", "套：conjunto",
+    "对：par", "张：hoja", "把：puño", "支：ramo", "本：ejemplar", "条：barra", "根：raíz",
+    "桶：barril", "片：hoja", "瓶：botella", "盒：caja", "码：yarda", "筒：tubo", "箱：caja",
+    "米：metro", "罐：lata", "袋：bolsa", "辆：unidad", "颗：grano",
+)
+
+# 同一计量单位的其他写法（西语/英语/粘连写法）→ ERP 计量单位。
+# 只收录有确定对应关系的写法；无法确定的（纯数字、人名等）一律不猜，交给下游阻断。
+ERP_UOM_ALIASES = {
+    "pcs": "个：pieza",
+    "pc": "个：pieza",
+    "pza": "个：pieza",
+    "pzs": "个：pieza",
+    "pieza": "个：pieza",
+    "piezas": "个：pieza",
+    "个pieza": "个：pieza",
+    "set": "套：conjunto",
+    "sets": "套：conjunto",
+    "juego": "套：conjunto",
+    "roll": "卷：rollo",
+    "rolls": "卷：rollo",
+    "rollo": "卷：rollo",
+    "卷roll": "卷：rollo",
+    "kgs": "kg",
+    "kilogramo": "kg",
+    "kilogramos": "kg",
+    "m2": "m²",
+    "par": "双：par",
+    "pares": "双：par",
+    "caja": "箱：caja",
+    "cajas": "箱：caja",
+    "bolsa": "袋：bolsa",
+    "botella": "瓶：botella",
+    "lata": "罐：lata",
+    "metro": "米：metro",
+    "metros": "米：metro",
+    "hoja": "张：hoja",
+    "hojas": "张：hoja",
+}
+
 
 def resolve_item_routes(
     items: list[dict],
@@ -224,8 +270,40 @@ def project_route_identity(value) -> str:
     return LEGACY_PROJECT_IDENTITIES.get(identity, identity)
 
 
-def resolve_item_uom(item: dict, fallback: str = "") -> str:
-    """Resolve the real material UOM used for ERP grouping and document rows."""
+def _uom_key(value) -> str:
+    """单位比较键：忽略大小写、空白与全角冒号差异。"""
+
+    return _text(value).replace(" ", "").replace("：", ":").lower()
+
+
+def normalize_erp_uom(unit) -> str:
+    """把本地自由文本单位翻译成 DeepLinkERP 计量单位表的写法。
+
+    依次尝试「本身就是 ERP 单位 → 已知别名 → 补全中文冒号前缀」；
+    都译不出时返回空串，由调用方决定阻断，绝不猜一个单位出来。
+    """
+
+    key = _uom_key(unit)
+    if not key:
+        return ""
+    for name in ERP_UOM_NAMES:
+        if _uom_key(name) == key:
+            return name
+    alias = ERP_UOM_ALIASES.get(key)
+    if alias:
+        alias_key = _uom_key(alias)
+        for name in ERP_UOM_NAMES:
+            if _uom_key(name) == alias_key:
+                return name
+    for name in ERP_UOM_NAMES:
+        head, separator, _tail = name.partition("：")
+        if separator and _uom_key(head) == key:
+            return name
+    return ""
+
+
+def raw_item_uom(item: dict, fallback: str = "") -> str:
+    """取本地行上的单位原文，不做 ERP 词表翻译。"""
 
     return _text(
         item.get("erp_stock_uom")
@@ -235,6 +313,19 @@ def resolve_item_uom(item: dict, fallback: str = "") -> str:
         or item.get("unit")
         or fallback
     )
+
+
+def resolve_item_uom(item: dict, fallback: str = "") -> str:
+    """Resolve the real material UOM used for ERP grouping and document rows.
+
+    取到本地写法后统一翻译成 ERP 计量单位；译不出时保留原样，
+    让 ``erp_client._ensure_item`` 在新建物料前报出明确原因。
+    """
+
+    raw = raw_item_uom(item, fallback)
+    if not raw:
+        return ""
+    return normalize_erp_uom(raw) or raw
 
 
 def preview_bulk_route(items: list[dict], target_site: str, target_subsidiary: str | None = None) -> dict:

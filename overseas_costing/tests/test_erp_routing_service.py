@@ -1,12 +1,16 @@
 from decimal import Decimal
 
 from overseas_costing.services.erp_routing_service import (
+    ERP_UOM_ALIASES,
+    ERP_UOM_NAMES,
     build_erp_push_state,
     build_site_payload_preview,
     list_unambiguous_project_routes,
+    normalize_erp_uom,
     preview_bulk_route,
     project_candidate_names,
     resolve_item_routes,
+    resolve_item_uom,
 )
 
 
@@ -260,7 +264,7 @@ def test_real_material_purchase_uom_splits_purchase_groups() -> None:
         }
     )
 
-    assert {group["erp_stock_uom"] for group in preview["sites"][0]["groups"]} == {"kg", "件"}
+    assert {group["erp_stock_uom"] for group in preview["sites"][0]["groups"]} == {"kg", "件：pieza"}
 
 
 def test_new_template_missing_supplier_blocks_only_that_material_group() -> None:
@@ -373,6 +377,42 @@ def test_first_push_blocks_entire_batch_if_one_item_has_no_route() -> None:
 
     assert result["ready"] is False
     assert result["blocking"][0]["code"] == "ITEM_ROUTE_REQUIRED"
+
+
+def test_local_unit_names_are_translated_into_erp_measure_units() -> None:
+    """本地单位（中文前缀/西语/英语/粘连写法）统一翻译成 ERP 计量单位。"""
+
+    assert normalize_erp_uom("个") == "个：pieza"
+    assert normalize_erp_uom("个pieza") == "个：pieza"
+    assert normalize_erp_uom("pcs") == "个：pieza"
+    assert normalize_erp_uom("PZS") == "个：pieza"
+    assert normalize_erp_uom("件") == "件：pieza"
+    assert normalize_erp_uom("套") == "套：conjunto"
+    assert normalize_erp_uom("set") == "套：conjunto"
+    assert normalize_erp_uom("卷roll") == "卷：rollo"
+    assert normalize_erp_uom("roll") == "卷：rollo"
+    assert normalize_erp_uom("双") == "双：par"
+    assert normalize_erp_uom("KG") == "kg"
+    assert normalize_erp_uom("千克") == "千克"
+    assert normalize_erp_uom("m2") == "m²"
+    assert resolve_item_uom({"purchase_uom": "个"}) == "个：pieza"
+
+
+def test_unknown_local_unit_is_left_raw_instead_of_guessed() -> None:
+    """译不出的单位不猜：原样返回，由推送层报出明确阻断原因。"""
+
+    assert normalize_erp_uom("10") == ""
+    assert normalize_erp_uom("Edgar Aldana") == ""
+    assert normalize_erp_uom("") == ""
+    assert resolve_item_uom({"unit": "10"}) == "10"
+    assert resolve_item_uom({"unit": "Edgar Aldana"}) == "Edgar Aldana"
+    assert resolve_item_uom({"unit": "Nos"}) == "Nos"
+
+
+def test_every_unit_alias_points_to_a_real_erp_measure_unit() -> None:
+    """别名表只能指向 ERP 词表里真实存在的单位，避免维护时写错目标值。"""
+
+    assert set(ERP_UOM_ALIASES.values()) <= set(ERP_UOM_NAMES)
 
 
 def test_resolved_route_carries_its_receiving_warehouse() -> None:
