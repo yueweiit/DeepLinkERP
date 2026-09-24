@@ -1,0 +1,174 @@
+"""Purchase receipt to payable and three-way matching controls."""
+
+import frappe
+from frappe import _
+from frappe.utils import flt
+
+
+PAYMENT_STATUS_UNPAID = "未付款"
+PAYMENT_STATUS_PARTIAL = "部分付款"
+PAYMENT_STATUS_PAID = "全部付款"
+PAYMENT_STATUS_NOT_APPLICABLE = "不适用"
+DEFAULT_AMOUNT_TOLERANCE = 0.01
+
+
+def _source_rows(receipt_name):
+	return frappe.get_all(
+		"Purchase Invoice Item",
+		filters={"purchase_receipt": receipt_name, "docstatus": ["!=", 2]},
+		fields=["parent", "docstatus"],
+		order_by="creation asc",
+		limit_page_length=0,
+	)
+
+
+def get_purchase_invoices_for_receipt(receipt_name, outstanding_only=False):
+	"""Return purchase invoices linked to a submitted purchase receipt."""
+	receipt = frappe.get_doc("Purchase Receipt", receipt_name)
+	receipt.check_permission("read")
+	filters = {"name": ["in", list(dict.fromkeys(row.parent for row in _source_rows(receipt_name)))]}
+	if outstanding_only:
+		filters.update({"docstatus": 1, "outstanding_amount": [">", DEFAULT_AMOUNT_TOLERANCE]})
+	return frappe.get_all(
+		"Purchase Invoice",
+		filters=filters,
+		fields=[
+			"name",
+			"supplier",
+			"company",
+			"currency",
+			"posting_date",
+			"due_date",
+			"grand_total",
+			"outstanding_amount",
+			"docstatus",
+		],
+		order_by="posting_date asc, name asc",
+		limit_page_length=0,
+	)
+
+
+def get_receipt_payment_summary(receipt_name):
+	"""Summarize payable and payment state without storing stale receipt totals."""
+	receipt = frappe.get_doc("Purchase Receipt", receipt_name)
+	receipt.check_permission("read")
+	invoices = get_purchase_invoices_for_receipt(receipt_name)
+	valid = [invoice for invoice in invoices if invoice.docstatus == 1 and not flt(invoice.get("is_return"))]
+	amount = sum(flt(invoice.grand_total) for invoice in valid)
+	outstanding = sum(flt(invoice.outstanding_amount) for invoice in valid)
+	if not valid:
+		status = PAYMENT_STATUS_NOT_APPLICABLE if not invoices else PAYMENT_STATUS_UNPAID
+	elif outstanding <= DEFAULT_AMOUNT_TOLERANCE:
+		status = PAYMENT_STATUS_PAID
+	elif outstanding < amount - DEFAULT_AMOUNT_TOLERANCE:
+		status = PAYMENT_STATUS_PARTIAL
+	else:
+		status = PAYMENT_STATUS_UNPAID
+	return {
+		"purchase_receipt": receipt_name,
+		"purchase_invoices": [invoice.name for invoice in invoices],
+		"payable_purchase_invoices": [invoice.name for invoice in valid if invoice.outstanding_amount > DEFAULT_AMOUNT_TOLERANCE],
+		"invoice_amount": amount,
+		"outstanding_amount": outstanding,
+		"payment_status": status,
+	}
+
+
+def _validate_purchase_order_link(invoice, row):
+	if not row.purchase_order:
+		return
+	order = frappe.db.get_value(
+		"Purchase Order",
+		row.purchase_order,
+		["docstatus", "company", "supplier"],
+		as_dict=True,
+	)
+	if not order:
+		frappe.throw(_("采购订单 {0} 不存在").format(row.purchase_order))
+	if order.docstatus != 1:
+		frappe.throw(_("采购订单 {0} 尚未审核，不能确认采购应付").format(row.purchase_order))
+	if order.company != invoice.company or order.supplier != invoice.supplier:
+		frappe.throw(_("采购订单 {0} 与采购应付单的公司或供应商不一致").format(row.purchase_order))
+
+
+def _validate_purchase_receipt_link(invoice, row):
+	if not row.purchase_receipt:
+		return
+	receipt = frappe.db.get_value(
+		"Purchase Receipt",
+		row.purchase_receipt,
+		["docstatus", "company", "supplier", "is_return"],
+		as_dict=True,
+	)
+	if not receipt:
+		frappe.throw(_("采购收货单 {0} 不存在").format(row.purchase_receipt))
+	if receipt.docstatus != 1:
+		frappe.throw(_("采购收货单 {0} 尚未提交，不能确认采购应付").format(row.purchase_receipt))
+	if receipt.is_return:
+		frappe.throw(_("采购退货单 {0} 不能作为正常采购应付来源").format(row.purchase_receipt))
+	if receipt.company != invoice.company or receipt.supplier != invoice.supplier:
+		frappe.throw(_("采购收货单 {0} 与采购应付单的公司或供应商不一致").format(row.purchase_receipt))
+	if not row.pr_detail:
+		frappe.throw(_("采购应付明细 {0} 缺少采购收货明细关联").format(row.idx))
+
+	pr_item = frappe.db.get_value(
+		"Purchase Receipt Item",
+		row.pr_detail,
+		["parent", "qty", "item_code", "purchase_order", "purchase_order_item"],
+		as_dict=True,
+	)
+	if not pr_item or pr_item.parent != row.purchase_receipt:
+		frappe.throw(_("采购应付明细 {0} 的收货明细关联无效").format(row.idx))
+	if flt(row.qty) - flt(pr_item.qty) > DEFAULT_AMOUNT_TOLERANCE:
+		frappe.throw(_("采购应付明细 {0} 数量超过采购收货数量").format(row.idx))
+
+
+def validate_purchase_invoice_submission(doc, method=None):
+	"""Validate source links before a purchase invoice is submitted.
+
+	Invoices without purchase-order/receipt links remain valid for service and
+	direct expense purchases. Once a line claims a receipt source, every source
+	link is checked so the normal inventory purchasing flow is three-way matched.
+	"""
+	if doc.doctype != "Purchase Invoice" or doc.get("is_return"):
+		return
+	if not any(row.get("purchase_order") or row.get("purchase_receipt") for row in doc.items):
+		return
+	for row in doc.items:
+		_validate_purchase_order_link(doc, row)
+		_validate_purchase_receipt_link(doc, row)
+
+
+@frappe.whitelist(methods=["POST"])
+def create_purchase_invoice_from_receipt(purchase_receipt, merge_taxes=False):
+	"""Create an idempotent purchase invoice draft from a submitted receipt."""
+	receipt = frappe.get_doc("Purchase Receipt", purchase_receipt)
+	receipt.check_permission("read")
+	if receipt.docstatus != 1:
+		frappe.throw(_("只有已提交的采购收货单才能创建采购应付单"))
+	if receipt.is_return:
+		frappe.throw(_("采购退货单不能创建正常采购应付单"))
+
+	existing = _source_rows(purchase_receipt)
+	for row in existing:
+		if row.docstatus == 1:
+			return {"name": row.parent, "created": False, "docstatus": 1}
+		if row.docstatus == 0:
+			return {"name": row.parent, "created": False, "docstatus": 0}
+
+	from erpnext.stock.doctype.purchase_receipt.purchase_receipt import make_purchase_invoice
+
+	invoice = make_purchase_invoice(
+		purchase_receipt,
+		args={"merge_taxes": bool(merge_taxes)},
+	)
+	if not invoice or not invoice.get("items"):
+		frappe.throw(_("采购收货单没有可确认的未开票明细"))
+	invoice.check_permission("create")
+	invoice.insert()
+	return {"name": invoice.name, "created": True, "docstatus": invoice.docstatus}
+
+
+@frappe.whitelist()
+def get_receipt_payment_summary_for_user(purchase_receipt):
+	return get_receipt_payment_summary(purchase_receipt)

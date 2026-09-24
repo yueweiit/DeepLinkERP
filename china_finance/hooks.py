@@ -72,7 +72,7 @@ doctype_js = {
 		"public/js/source_voucher_amendment.js",
 	],
 	"Purchase Invoice": "public/js/gl_source_snapshot.js",
-	"Purchase Receipt": "public/js/gl_source_snapshot.js",
+	"Purchase Receipt": ["public/js/gl_source_snapshot.js", "public/js/purchase_payables.js"],
 	"Stock Entry": "public/js/gl_source_snapshot.js",
 	"Asset": "public/js/gl_source_snapshot.js",
 	"Asset Capitalization": "public/js/gl_source_snapshot.js",
@@ -316,6 +316,13 @@ doc_events["Sales Invoice"] = {
 	],
 	"before_cancel": "china_finance.services.voucher.prepare_source_cancellation",
 	"on_cancel": "china_finance.services.sales_settlement.handle_sales_invoice_cancellation",
+}
+doc_events["Purchase Invoice"] = {
+	"before_submit": [
+		"china_finance.services.voucher.validate_source_approval",
+		"china_finance.services.purchase_payables.validate_purchase_invoice_submission",
+	],
+	"before_cancel": "china_finance.services.voucher.prepare_source_cancellation",
 }
 doc_events["*"] = {
 	"on_submit": "china_finance.services.voucher.on_gl_source_submit",
