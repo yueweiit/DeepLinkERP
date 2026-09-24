@@ -11,7 +11,10 @@ def run_ui(body):
     script += "const Harness=Function('return class {'+source+'}')();"
     script += r"""
 const w=new Harness();w.escape=v=>String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
-w.detailState={batchName:'B',versionName:'V',tab:'documents',editToken:'token',expectedModified:'before'};
+// expectedModified 的真源是服务端 batch 的 modified（Frappe 定宽 DATETIME(6)）：
+// 写令牌只前进不回退，比较就建立在这个格式上，所以夹具必须用真实有序的时间戳。
+const REV_OLD='2026-09-24 09:00:00.000000';const REV_NEW='2026-09-24 13:00:00.000000';
+w.detailState={batchName:'B',versionName:'V',tab:'documents',editToken:'token',expectedModified:REV_OLD};
 const state=w.ensureMaterialFeeState();w.renderMaterialAIReviewDialog=()=>{};w.renderMaterialFeeWorkspacePreservingPosition=()=>{};
 w.loadMaterialFeeWorkspace=async()=>true;w.ensureEditSession=async()=>true;
 global.frappe={show_alert:()=>{}};
@@ -833,9 +836,9 @@ const fill=ready();w.call=async()=>({ok:true,preview:{id:'p',revision:7,can_appl
 w.call=async(method,args)=>{calls.push({method,args});return {ok:false,message:'并发修改，请重试'}};
 await w.applyMaterialAIFill();assert.equal(fill.rowSelection.error,'并发修改，请重试');assert.equal(state.aiFill,fill);assert.deepEqual([...fill.rowSelection.rows],['source']);
 assert.equal(calls[0].method,'overseas_costing.api.materials.confirm_source_ai_selection');
-assert.deepEqual(calls[0].args,{batch_name:'B',run_id:'run',preview_id:'p',preview_revision:7,edit_token:'token',expected_modified:'before'});
-w.call=async()=>({ok:true,status:'APPLIED',version_name:'V2',batch_modified:'after'});await w.applyMaterialAIFill();
-assert.equal(state.aiFill,null);assert.equal(w.detailState.versionName,'V2');assert.equal(w.detailState.expectedModified,'after');
+assert.deepEqual(calls[0].args,{batch_name:'B',run_id:'run',preview_id:'p',preview_revision:7,edit_token:'token',expected_modified:REV_OLD});
+w.call=async()=>({ok:true,status:'APPLIED',version_name:'V2',batch_modified:REV_NEW});await w.applyMaterialAIFill();
+assert.equal(state.aiFill,null);assert.equal(w.detailState.versionName,'V2');assert.equal(w.detailState.expectedModified,REV_NEW);
 """)
 
 
@@ -848,7 +851,7 @@ run1.source_progress=[{source_id:'SOURCE-1'}];run1.rowSelection.preview={id:'pre
 run1.rowSelection.previewKey=w.materialAIRowSelectionKey(run1);
 w.openMaterialAIProgressDialog=()=>{};w.updateMaterialAIProgressSurface=()=>{};
 const nextReview={...catalog,fingerprint:'fp-2',rows:[{row_id:'new-source',origin:'source',action:'update',values:{material_code:'NEW'},can_fill:true,can_update:true,can_replace:true,default_selected:true,default_update_selected:true,default_replace_selected:true}]};
-w.call=async()=>({ok:true,status:'APPLIED',version_name:'V2',batch_modified:'after'});
+w.call=async()=>({ok:true,status:'APPLIED',version_name:'V2',batch_modified:REV_NEW});
 w.loadMaterialFeeWorkspace=async()=>{state.aiFill={...run1,status:'APPLIED',source_progress:[{source_id:'SOURCE-1'}]};return true};
 await w.applyMaterialAIFill();assert.equal(w.detailState.versionName,'V2');
 let releaseStart;w.call=()=>new Promise(resolve=>{releaseStart=resolve});
@@ -991,14 +994,14 @@ assert.equal((finalTable.match(/rowspan="2">1<small>共享 1 箱总计/g)||[]).l
 def test_material_row_recovery_is_previewed_before_confirming_new_version():
     run_ui(r"""
 let confirmation='';global.frappe.confirm=(html,yes)=>{confirmation=html;yes()};
-w.call=async(method,args)=>{calls.push({method,args});if(method.endsWith('preview_material_row_recovery'))return {ok:true,can_confirm:true,id:'restore',revision:'r1',current_version:'V',current_count:1,restored_count:7,before_rows:[{action:'current',material_code:'A'}],after_rows:[{action:'keep_updated',material_code:'A'},{action:'restore',material_code:'B'}]};return {ok:true,version_name:'V2',batch_modified:'after',restored_count:7,item_count:8}};
+w.call=async(method,args)=>{calls.push({method,args});if(method.endsWith('preview_material_row_recovery'))return {ok:true,can_confirm:true,id:'restore',revision:'r1',current_version:'V',current_count:1,restored_count:7,before_rows:[{action:'current',material_code:'A'}],after_rows:[{action:'keep_updated',material_code:'A'},{action:'restore',material_code:'B'}]};return {ok:true,version_name:'V2',batch_modified:REV_NEW,restored_count:7,item_count:8}};
 await w.previewMaterialRowRecovery();
 assert(confirmation.includes('将恢复 7 行'));assert(confirmation.includes('A'));assert(confirmation.includes('B'));
 assert(confirmation.includes('恢复前'));assert(confirmation.includes('恢复后'));
 assert(calls[0].method.endsWith('preview_material_row_recovery'));
 assert(calls[1].method.endsWith('confirm_material_row_recovery'));
-assert.deepEqual(calls[1].args,{batch_name:'B',version_name:'V',preview_id:'restore',revision:'r1',edit_token:'token',expected_modified:'before'});
-assert.equal(w.detailState.versionName,'V2');assert.equal(w.detailState.expectedModified,'after');
+assert.deepEqual(calls[1].args,{batch_name:'B',version_name:'V',preview_id:'restore',revision:'r1',edit_token:'token',expected_modified:REV_OLD});
+assert.equal(w.detailState.versionName,'V2');assert.equal(w.detailState.expectedModified,REV_NEW);
 """)
 
 

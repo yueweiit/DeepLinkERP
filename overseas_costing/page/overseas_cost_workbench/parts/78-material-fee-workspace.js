@@ -4089,6 +4089,7 @@
   /**
    * 写令牌（expectedModified）只允许前进，不回退。
    *
+   * 值域是服务端 batch 的 modified（Frappe 定宽 DATETIME(6)），因此字典序即时序。
    * 资料页快照允许「先用缓存的、回头再校验」，AI／导入接口也会回带它们各自读到的
    * batch_modified；这些值都可能比本页已经拿到的 revision 更旧。一旦把写令牌回退成
    * 旧值，edit_session 的乐观锁会把本页之后的每次写入都判成「批次数据已被更新」，
