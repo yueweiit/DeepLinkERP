@@ -160,3 +160,5 @@
 "MES已汇报生产进度","MES reportó el progreso de producción"
 "本次生产：{0}","Producción actual: {0}"
 "{0} {1}个","{0} {1} unidades"
+"入库数量（库存单位）","Cantidad recibida (unidad de stock)"
+"目标仓当前库存","Stock actual del almacén de destino"

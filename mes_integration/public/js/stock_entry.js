@@ -25,6 +25,7 @@ frappe.ui.form.on("Stock Entry", {
 	},
 
 	stock_entry_type: function(frm) {
+		refresh_mes_receipt_quantity_labels(frm);
 		if (!is_mes_integration_enabled(frm)) {
 			return;
 		}
@@ -139,6 +140,7 @@ function is_mes_integration_enabled(frm) {
 }
 
 function refresh_mes_stock_entry_ui(frm) {
+	refresh_mes_receipt_quantity_labels(frm);
 	if (!is_mes_integration_enabled(frm)) {
 		frm.remove_custom_button(__("保存并提交"));
 		frm.remove_custom_button(__("推送至DLM"));
@@ -167,6 +169,7 @@ const MES_RECEIPT_STOCK_ENTRY_TYPES = [
 	"Semi Finished Goods Receipt",
 	"Finished Goods Receipt"
 ];
+const STANDARD_MATERIAL_RECEIPT = "Material Receipt";
 const MES_DLM_STOCK_ENTRY_TYPES = [
 	"Material Issue",
 	"Material Transfer for Manufacture",
@@ -175,6 +178,57 @@ const MES_DLM_STOCK_ENTRY_TYPES = [
 
 function is_mes_receipt_stock_entry(frm) {
 	return frm && frm.doc && MES_RECEIPT_STOCK_ENTRY_TYPES.includes(frm.doc.stock_entry_type);
+}
+
+function is_mes_receipt_quantity_stock_entry(frm) {
+	if (!frm || !frm.doc) {
+		return false;
+	}
+
+	return (
+		MES_RECEIPT_STOCK_ENTRY_TYPES.includes(frm.doc.stock_entry_type) ||
+		(
+			frm.doc.stock_entry_type === STANDARD_MATERIAL_RECEIPT &&
+			cint(frm.doc.custom_mes_receipt) === 1
+		)
+	);
+}
+
+function refresh_mes_receipt_quantity_labels(frm) {
+	const grid = frm && frm.fields_dict && frm.fields_dict.items
+		? frm.fields_dict.items.grid
+		: null;
+	if (!grid) {
+		return;
+	}
+
+	if (!frm._mes_original_stock_entry_quantity_labels) {
+		const transferQty = grid.docfields.find(function(df) {
+			return df.fieldname === "transfer_qty";
+		});
+		const actualQty = grid.docfields.find(function(df) {
+			return df.fieldname === "actual_qty";
+		});
+		frm._mes_original_stock_entry_quantity_labels = {
+			transfer_qty: transferQty && transferQty.label,
+			actual_qty: actualQty && actualQty.label
+		};
+	}
+
+	const originalLabels = frm._mes_original_stock_entry_quantity_labels;
+	const useReceiptLabels = (
+		is_mes_integration_enabled(frm) && is_mes_receipt_quantity_stock_entry(frm)
+	);
+	grid.update_docfield_property(
+		"transfer_qty",
+		"label",
+		useReceiptLabels ? __("入库数量（库存单位）") : originalLabels.transfer_qty
+	);
+	grid.update_docfield_property(
+		"actual_qty",
+		"label",
+		useReceiptLabels ? __("目标仓当前库存") : originalLabels.actual_qty
+	);
 }
 
 function is_dlm_issue_stock_entry(frm) {
