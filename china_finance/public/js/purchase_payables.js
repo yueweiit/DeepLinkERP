@@ -2,7 +2,29 @@ frappe.ui.form.on("Purchase Receipt", {
 	refresh(frm) {
 		frm.remove_custom_button(__("创建采购应付单"), __("创建"));
 		frm.remove_custom_button(__("发起付款"), __("创建"));
+		frm.remove_custom_button(__("查看采购应付单"), __("查看"));
+		frm.dashboard.stats_area_row.find("[data-china-purchase-receipt-status]").remove();
 		if (frm.doc.docstatus !== 1 || frm.doc.is_return || !frm.has_perm("read")) return;
+
+		const summary_request = frappe.call({
+			method: "china_finance.services.purchase_payables.get_receipt_payment_summary_for_user",
+			args: { purchase_receipt: frm.doc.name },
+		});
+		summary_request.then((response) => {
+			const summary = response.message || {};
+			const invoices = summary.purchase_invoices || [];
+			if (invoices.length) {
+				frm.add_custom_button(
+					__("查看采购应付单"),
+					() => open_purchase_invoices(invoices),
+					__("查看")
+				);
+			}
+			const status = receipt_payment_status(summary);
+			frm.dashboard
+				.add_indicator(__("应付状态：{0}", [status.label]), status.color)
+				.attr("data-china-purchase-receipt-status", "1");
+		});
 
 		frm.add_custom_button(
 			__("创建采购应付单"),
@@ -29,12 +51,7 @@ frappe.ui.form.on("Purchase Receipt", {
 			frm.add_custom_button(
 				__("发起付款"),
 				async () => {
-					const response = await frappe.call({
-						method: "china_finance.services.purchase_payables.get_receipt_payment_summary_for_user",
-						args: { purchase_receipt: frm.doc.name },
-						freeze: true,
-						freeze_message: __("正在检查可付款的采购应付单..."),
-					});
+					const response = await summary_request;
 					const summary = response.message || {};
 					const candidates = summary.payable_purchase_invoices || [];
 					if (!candidates.length) {
@@ -70,6 +87,22 @@ frappe.ui.form.on("Purchase Receipt", {
 		}
 	},
 });
+
+function receipt_payment_status(summary) {
+	if (!summary.purchase_invoices?.length) return { label: "未生成应付", color: "gray" };
+	if (summary.payment_status === "全部付款") return { label: "全部付款", color: "green" };
+	if (summary.payment_status === "部分付款") return { label: "部分付款", color: "orange" };
+	return { label: "待付款", color: "orange" };
+}
+
+function open_purchase_invoices(names) {
+	if (names.length === 1) {
+		frappe.set_route("Form", "Purchase Invoice", names[0]);
+		return;
+	}
+	frappe.route_options = { name: ["in", names] };
+	frappe.set_route("List", "Purchase Invoice");
+}
 
 frappe.ui.form.on("Purchase Invoice", {
 	refresh(frm) {
