@@ -257,7 +257,10 @@ _payment_entry_events = {
 }
 
 for _events in (_journal_entry_events, _payment_entry_events):
-	_events["validate"] = "china_finance.services.bank_receipt_import.validate_linked_voucher"
+	_events["validate"] = [
+		"china_finance.services.bank_receipt_import.validate_linked_voucher",
+		"china_finance.services.purchase_payables.validate_payment_entry",
+	]
 	_events["before_cancel"] = [_events["before_cancel"], "china_finance.services.bank_receipt_import.allow_voucher_cancellation"]
 	for _event in ("on_cancel", "on_update"):
 		_existing = _events.get(_event)

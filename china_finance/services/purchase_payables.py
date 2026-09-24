@@ -41,6 +41,7 @@ def get_purchase_invoices_for_receipt(receipt_name, outstanding_only=False):
 			"due_date",
 			"grand_total",
 			"outstanding_amount",
+			"is_return",
 			"docstatus",
 		],
 		order_by="posting_date asc, name asc",
@@ -137,6 +138,39 @@ def validate_purchase_invoice_submission(doc, method=None):
 	for row in doc.items:
 		_validate_purchase_order_link(doc, row)
 		_validate_purchase_receipt_link(doc, row)
+
+
+def _validate_payment_reference(payment_entry, reference, invoice):
+	if not invoice:
+		frappe.throw(_("采购应付单 {0} 不存在").format(reference.reference_name))
+	if invoice.docstatus != 1:
+		frappe.throw(_("采购应付单 {0} 尚未提交，不能付款").format(reference.reference_name))
+	if invoice.company != payment_entry.company or invoice.supplier != payment_entry.party:
+		frappe.throw(_("采购应付单 {0} 与付款单的公司或供应商不一致").format(reference.reference_name))
+	if flt(reference.allocated_amount) - flt(invoice.outstanding_amount) > DEFAULT_AMOUNT_TOLERANCE:
+		frappe.throw(_("采购应付单 {0} 的核销金额超过未付金额").format(reference.reference_name))
+	if flt(invoice.is_return):
+		frappe.throw(_("采购红字应付单 {0} 不能作为正常付款来源").format(reference.reference_name))
+
+
+def validate_payment_entry(doc, method=None):
+	"""Keep supplier payments anchored to submitted purchase payables."""
+	if doc.doctype != "Payment Entry" or doc.get("payment_type") != "Pay":
+		return
+	for reference in doc.get("references") or []:
+		if reference.reference_doctype == "Purchase Receipt":
+			frappe.throw(_("付款单不能直接核销采购收货单，请先确认采购应付单"))
+		if reference.reference_doctype != "Purchase Invoice":
+			continue
+		if doc.get("party_type") != "Supplier" or not doc.get("party"):
+			frappe.throw(_("采购付款必须指定供应商"))
+		invoice = frappe.db.get_value(
+			"Purchase Invoice",
+			reference.reference_name,
+			["docstatus", "company", "supplier", "outstanding_amount", "is_return"],
+			as_dict=True,
+		)
+		_validate_payment_reference(doc, reference, invoice)
 
 
 @frappe.whitelist(methods=["POST"])
