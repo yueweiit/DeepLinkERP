@@ -70,3 +70,55 @@ frappe.ui.form.on("Purchase Receipt", {
 		}
 	},
 });
+
+frappe.ui.form.on("Purchase Invoice", {
+	refresh(frm) {
+		frm.dashboard.stats_area_row.find("[data-china-purchase-payable-status]").remove();
+		frm.remove_custom_button(__("发起付款"), __("创建"));
+		if (frm.doc.docstatus !== 1 || frm.doc.is_return || !frm.has_perm("read")) return;
+
+		frappe.call({
+			method: "china_finance.services.purchase_payables.get_purchase_invoice_status_for_user",
+			args: { purchase_invoice: frm.doc.name },
+		}).then((response) => {
+			const status = response.message;
+			if (!status) return;
+			const reconciliationIndicator = status.reconciliation_status === "Blocked" ? "orange" : "green";
+			frm.dashboard
+				.add_indicator(__("三单匹配：{0}", [status.reconciliation_status]), reconciliationIndicator)
+				.attr("data-china-purchase-payable-status", "1");
+			frm.dashboard
+				.add_indicator(__("付款状态：{0}", [status.payment_status]), payment_status_indicator(status.payment_status))
+				.attr("data-china-purchase-payable-status", "1");
+			if (status.reconciliation_reason) {
+				frm.dashboard
+					.add_indicator(status.reconciliation_reason, "orange")
+					.attr("data-china-purchase-payable-status", "1");
+			}
+			if (frappe.model.can_create("Payment Entry") && status.outstanding_amount > 0) {
+				frm.add_custom_button(
+					__("发起付款"),
+					async () => {
+						const payment = await frappe.call({
+							method: "erpnext.accounts.doctype.payment_entry.payment_entry.get_payment_entry",
+							args: { dt: "Purchase Invoice", dn: frm.doc.name },
+							freeze: true,
+							freeze_message: __("正在创建付款单草稿..."),
+						});
+						if (!payment.message?.name) return;
+						frappe.model.sync(payment.message);
+						frappe.set_route("Form", "Payment Entry", payment.message.name);
+					},
+					__("创建")
+				);
+			}
+		});
+	},
+});
+
+function payment_status_indicator(status) {
+	if (status === "全部付款") return "green";
+	if (status === "部分付款") return "orange";
+	if (status === "异常" || status === "已取消") return "red";
+	return "gray";
+}

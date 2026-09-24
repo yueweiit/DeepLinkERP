@@ -172,6 +172,35 @@ class TestPurchasePayables(TestCase):
 		]
 		purchase_payables.validate_payment_entry(payment)
 
+	def test_purchase_invoice_status_api_returns_matching_and_payment_state(self):
+		invoice = DocumentStub(
+			doctype="Purchase Invoice",
+			name="PINV-0001",
+			grand_total=100,
+			outstanding_amount=40,
+			docstatus=1,
+			is_return=0,
+			check_permission=Mock(),
+		)
+		evaluation = {
+			"purchase_orders": "PO-0001",
+			"purchase_receipts": "PR-0001",
+			"reconciliation_status": "Ready",
+			"reconciliation_reason": "",
+		}
+		payment_summary = {"payment_entries": "ACC-PAY-0001", "paid_amount": 60}
+		with patch.object(purchase_payables.frappe, "get_doc", return_value=invoice), patch(
+			"china_finance.services.purchase_reconciliation.evaluate_purchase_invoice", return_value=evaluation
+		), patch(
+			"china_finance.services.purchase_reconciliation.get_purchase_invoice_payment_summary",
+			return_value=payment_summary,
+		):
+			result = purchase_payables.get_purchase_invoice_status_for_user("PINV-0001")
+		self.assertEqual(result["payment_status"], purchase_payables.PAYMENT_STATUS_PARTIAL)
+		self.assertEqual(result["reconciliation_status"], "Ready")
+		self.assertEqual(result["payment_entries"], "ACC-PAY-0001")
+		invoice.check_permission.assert_called_once_with("read")
+
 	def test_purchase_payment_status_covers_lifecycle_and_amount_boundaries(self):
 		cases = [
 			((100, 0, 100), purchase_payables.PAYMENT_STATUS_UNPAID),

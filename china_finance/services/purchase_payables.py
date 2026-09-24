@@ -236,3 +236,34 @@ def create_purchase_invoice_from_receipt(purchase_receipt, merge_taxes=False):
 @frappe.whitelist()
 def get_receipt_payment_summary_for_user(purchase_receipt):
 	return get_receipt_payment_summary(purchase_receipt)
+
+
+@frappe.whitelist()
+def get_purchase_invoice_status_for_user(purchase_invoice):
+	"""Return live matching and payment status for a submitted payable."""
+	invoice = frappe.get_doc("Purchase Invoice", purchase_invoice)
+	invoice.check_permission("read")
+	from china_finance.services.purchase_reconciliation import (
+		evaluate_purchase_invoice,
+		get_purchase_invoice_payment_summary,
+	)
+
+	payment_summary = get_purchase_invoice_payment_summary(invoice.name)
+	evaluation = evaluate_purchase_invoice(invoice.name)
+	return {
+		"purchase_invoice": invoice.name,
+		"purchase_orders": evaluation["purchase_orders"],
+		"purchase_receipts": evaluation["purchase_receipts"],
+		"payment_entries": payment_summary["payment_entries"],
+		"paid_amount": payment_summary["paid_amount"],
+		"outstanding_amount": flt(invoice.outstanding_amount),
+		"payment_status": get_purchase_payment_status(
+			invoice.grand_total,
+			payment_summary["paid_amount"],
+			invoice.outstanding_amount,
+			invoice.docstatus,
+			invoice.is_return,
+		),
+		"reconciliation_status": evaluation["reconciliation_status"],
+		"reconciliation_reason": evaluation["reconciliation_reason"],
+	}
