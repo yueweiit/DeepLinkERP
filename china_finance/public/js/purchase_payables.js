@@ -182,6 +182,7 @@ function open_tax_invoices(names) {
 frappe.ui.form.on("Purchase Order", {
 	refresh(frm) {
 		frm.dashboard.stats_area_row.find("[data-china-purchase-order-status]").remove();
+		frm.remove_custom_button(__("发起预付款"), __("创建"));
 		if (frm.doc.docstatus !== 1 || !frm.has_perm("read")) return;
 
 		frappe.call({
@@ -193,10 +194,34 @@ frappe.ui.form.on("Purchase Order", {
 			add_purchase_order_indicator(frm, `收货：${status.receive_status}`, status_color(status.receive_status));
 			add_purchase_order_indicator(frm, `应付：${status.payable_status}`, status_color(status.payable_status));
 			add_purchase_order_indicator(frm, `付款：${status.payment_status}`, payment_status_indicator(status.payment_status));
+			if (status.order_amount > 0) {
+				add_purchase_order_indicator(
+					frm,
+					`预付款：${status.advance_paid} / ${status.order_amount}`,
+					status.advance_outstanding > 0 ? "orange" : "green"
+				);
+			}
 			if (status.reconciliation_status === "Blocked") {
 				add_purchase_order_indicator(frm, `三单匹配：${status.reconciliation_reason || "异常"}`, "orange");
 			}
 		});
+		if (frappe.model.can_create("Payment Entry") && (frm.doc.grand_total || 0) > (frm.doc.advance_paid || 0)) {
+			frm.add_custom_button(
+				__("发起预付款"),
+				async () => {
+					const payment = await frappe.call({
+						method: "erpnext.accounts.doctype.payment_entry.payment_entry.get_payment_entry",
+						args: { dt: "Purchase Order", dn: frm.doc.name },
+						freeze: true,
+						freeze_message: __("正在创建预付款单草稿..."),
+					});
+					if (!payment.message?.name) return;
+					frappe.model.sync(payment.message);
+					frappe.set_route("Form", "Payment Entry", payment.message.name);
+				},
+				__("创建")
+			);
+		}
 	},
 });
 

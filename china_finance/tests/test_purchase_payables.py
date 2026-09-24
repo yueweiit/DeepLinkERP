@@ -218,6 +218,51 @@ class TestPurchasePayables(TestCase):
 			with self.assertRaises(frappe.ValidationError):
 				purchase_payables.validate_payment_entry(payment)
 
+	def test_payment_rejects_unsubmitted_purchase_order_advance(self):
+		payment = self.payment(
+			references=[
+				DocumentStub(reference_doctype="Purchase Order", reference_name="PO-0001", allocated_amount=50)
+			]
+		)
+		with patch.object(
+			frappe.db,
+			"get_value",
+			return_value=frappe._dict(
+				{
+					"docstatus": 0,
+					"company": "Test Company",
+					"supplier": "Test Supplier",
+					"grand_total": 100,
+					"advance_paid": 0,
+				}
+			),
+		):
+			with self.assertRaises(frappe.ValidationError):
+				purchase_payables.validate_payment_entry(payment)
+
+	def test_payment_rejects_purchase_order_advance_over_balance(self):
+		payment = self.payment(
+			references=[
+				DocumentStub(reference_doctype="Purchase Order", reference_name="PO-0001", allocated_amount=51)
+			]
+		)
+		with patch.object(
+			frappe.db,
+			"get_value",
+			return_value=frappe._dict(
+				{
+					"docstatus": 1,
+					"company": "Test Company",
+					"supplier": "Test Supplier",
+					"currency": "CNY",
+					"grand_total": 100,
+					"advance_paid": 50,
+				}
+			),
+		):
+			with self.assertRaises(frappe.ValidationError):
+				purchase_payables.validate_payment_entry(payment)
+
 	def test_receive_payment_is_not_checked_by_purchase_payable_rule(self):
 		payment = self.payment(payment_type="Receive", party_type="Customer", party="Test Customer")
 		payment.references = [
@@ -285,6 +330,8 @@ class TestPurchasePayables(TestCase):
 			name="PO-0001",
 			company="Test Company",
 			transaction_date="2026-09-24",
+			grand_total=100,
+			advance_paid=20,
 			check_permission=Mock(),
 		)
 		row = frappe._dict(

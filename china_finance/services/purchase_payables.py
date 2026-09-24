@@ -200,6 +200,20 @@ def _validate_payment_reference(payment_entry, reference, invoice):
 		frappe.throw(_("采购红字应付单 {0} 不能作为正常付款来源").format(reference.reference_name))
 
 
+def _validate_purchase_order_payment_reference(payment_entry, reference, order):
+	if not order:
+		frappe.throw(_("采购订单 {0} 不存在").format(reference.reference_name))
+	if order.docstatus != 1:
+		frappe.throw(_("采购订单 {0} 尚未审核，不能支付预付款").format(reference.reference_name))
+	if order.company != payment_entry.company or order.supplier != payment_entry.party:
+		frappe.throw(_("采购订单 {0} 与付款单的公司或供应商不一致").format(reference.reference_name))
+	if flt(reference.allocated_amount) <= 0:
+		frappe.throw(_("采购订单 {0} 的预付款金额必须大于零").format(reference.reference_name))
+	available = max(0, flt(order.grand_total) - flt(order.advance_paid))
+	if flt(reference.allocated_amount) - available > DEFAULT_AMOUNT_TOLERANCE:
+		frappe.throw(_("采购订单 {0} 的预付款超过未预付金额").format(reference.reference_name))
+
+
 def validate_payment_entry(doc, method=None):
 	"""Keep supplier payments anchored to submitted purchase payables."""
 	if doc.doctype != "Payment Entry" or doc.get("payment_type") != "Pay":
@@ -209,7 +223,7 @@ def validate_payment_entry(doc, method=None):
 	for reference in doc.get("references") or []:
 		if reference.reference_doctype == "Purchase Receipt":
 			frappe.throw(_("付款单不能直接核销采购收货单，请先确认采购应付单"))
-		if reference.reference_doctype != "Purchase Invoice":
+		if reference.reference_doctype not in ("Purchase Invoice", "Purchase Order"):
 			continue
 		key = (reference.reference_doctype, reference.reference_name)
 		if key in seen_references:
@@ -217,6 +231,17 @@ def validate_payment_entry(doc, method=None):
 		seen_references.add(key)
 		if doc.get("party_type") != "Supplier" or not doc.get("party"):
 			frappe.throw(_("采购付款必须指定供应商"))
+		if reference.reference_doctype == "Purchase Order":
+			order = frappe.db.get_value(
+				"Purchase Order",
+				reference.reference_name,
+				["docstatus", "company", "supplier", "currency", "grand_total", "advance_paid"],
+				as_dict=True,
+			)
+			_validate_purchase_order_payment_reference(doc, reference, order)
+			if order and order.currency:
+				settlement_currencies.add(order.currency)
+			continue
 		invoice = frappe.db.get_value(
 			"Purchase Invoice",
 			reference.reference_name,
@@ -388,6 +413,8 @@ def get_purchase_order_status_for_user(purchase_order):
 	ordered_qty = flt(row.get("ordered_qty"))
 	received_qty = flt(row.get("received_qty"))
 	billed_qty = flt(row.get("billed_qty"))
+	order_amount = flt(order.grand_total)
+	advance_paid = flt(order.advance_paid)
 	tolerance = 0.0001
 	return {
 		"purchase_order": order.name,
@@ -414,4 +441,7 @@ def get_purchase_order_status_for_user(purchase_order):
 		"ordered_qty": ordered_qty,
 		"received_qty": received_qty,
 		"billed_qty": billed_qty,
+		"order_amount": order_amount,
+		"advance_paid": advance_paid,
+		"advance_outstanding": max(0, order_amount - advance_paid),
 	}
