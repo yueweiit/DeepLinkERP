@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal, ROUND_HALF_UP
 
 try:  # Pure unit tests run outside a bench environment.
 	import frappe
@@ -591,8 +592,21 @@ def _create_purchase_order(plan: dict, oa_doc):
 		doc.append("items", row)
 	for tax in plan.get("taxes") or []:
 		doc.append("taxes", {"category": "Total", "add_deduct_tax": "Add", **tax})
+	_reconcile_purchase_order_total(doc, plan.get("grand_total"))
 	doc.insert(ignore_permissions=True)
 	return doc
+
+
+def _reconcile_purchase_order_total(doc, expected_grand_total) -> None:
+	"""Offset ERPNext's currency-precision line rounding at order level."""
+
+	doc.run_method("calculate_taxes_and_totals")
+	adjustment = (
+		Decimal(str(doc.get("grand_total") or 0)) - Decimal(str(expected_grand_total or 0))
+	).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+	if adjustment:
+		doc.apply_discount_on = "Grand Total"
+		doc.discount_amount = float(adjustment)
 
 
 def _create_backfill_pair(plan: dict) -> dict:

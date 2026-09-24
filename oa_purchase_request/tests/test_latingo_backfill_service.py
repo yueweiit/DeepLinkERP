@@ -524,6 +524,30 @@ class FakePurchaseOrder(dict):
 	def __getattr__(self, name):
 		return self.get(name)
 
+	def __setattr__(self, name, value):
+		self[name] = value
+
+
+@pytest.mark.parametrize(
+	("calculated_total", "expected_total", "expected_discount"),
+	[(1935.0, 1930.11, 4.89), (22110.0, 22119.0, -9.0)],
+)
+def test_purchase_order_total_adjustment_reconciles_erpnext_currency_rounding(
+	calculated_total,
+	expected_total,
+	expected_discount,
+):
+	class CalculatedPurchaseOrder(FakePurchaseOrder):
+		def run_method(self, method):
+			assert method == "calculate_taxes_and_totals"
+			self.grand_total = calculated_total
+
+	doc = CalculatedPurchaseOrder()
+	service._reconcile_purchase_order_total(doc, expected_total)
+
+	assert doc.apply_discount_on == "Grand Total"
+	assert doc.discount_amount == expected_discount
+
 
 def test_submission_guard_ignores_ordinary_purchase_orders(monkeypatch):
 	monkeypatch.setattr(service, "frappe", FakeFrappe())
