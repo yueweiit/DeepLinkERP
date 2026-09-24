@@ -72,6 +72,7 @@ doctype_js = {
 		"public/js/source_voucher_amendment.js",
 	],
 	"Purchase Invoice": ["public/js/gl_source_snapshot.js", "public/js/purchase_payables.js"],
+	"Purchase Order": "public/js/purchase_payables.js",
 	"Purchase Receipt": ["public/js/gl_source_snapshot.js", "public/js/purchase_payables.js"],
 	"Stock Entry": "public/js/gl_source_snapshot.js",
 	"Asset": "public/js/gl_source_snapshot.js",

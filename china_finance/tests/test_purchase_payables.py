@@ -201,6 +201,38 @@ class TestPurchasePayables(TestCase):
 		self.assertEqual(result["payment_entries"], "ACC-PAY-0001")
 		invoice.check_permission.assert_called_once_with("read")
 
+	def test_purchase_order_status_api_returns_live_chain_state(self):
+		order = DocumentStub(
+			doctype="Purchase Order",
+			name="PO-0001",
+			company="Test Company",
+			transaction_date="2026-09-24",
+			check_permission=Mock(),
+		)
+		row = frappe._dict(
+			{
+				"purchase_receipts": "PR-0001",
+				"purchase_invoices": "PINV-0001",
+				"payment_entries": "ACC-PAY-0001",
+				"ordered_qty": 10,
+				"received_qty": 5,
+				"billed_qty": 5,
+				"remaining_bill_qty": 5,
+				"payment_status": purchase_payables.PAYMENT_STATUS_PARTIAL,
+				"reconciliation_status": "Ready",
+				"reconciliation_reason": "",
+			}
+		)
+		with patch.object(purchase_payables.frappe, "get_doc", return_value=order), patch(
+			"china_finance.services.purchase_reconciliation.get_purchase_order_reconciliation_rows",
+			return_value=[row],
+		):
+			result = purchase_payables.get_purchase_order_status_for_user("PO-0001")
+		self.assertEqual(result["receive_status"], "部分收货")
+		self.assertEqual(result["payable_status"], "部分应付")
+		self.assertEqual(result["payment_status"], purchase_payables.PAYMENT_STATUS_PARTIAL)
+		order.check_permission.assert_called_once_with("read")
+
 	def test_purchase_payment_status_covers_lifecycle_and_amount_boundaries(self):
 		cases = [
 			((100, 0, 100), purchase_payables.PAYMENT_STATUS_UNPAID),

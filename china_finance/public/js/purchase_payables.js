@@ -122,3 +122,35 @@ function payment_status_indicator(status) {
 	if (status === "异常" || status === "已取消") return "red";
 	return "gray";
 }
+
+frappe.ui.form.on("Purchase Order", {
+	refresh(frm) {
+		frm.dashboard.stats_area_row.find("[data-china-purchase-order-status]").remove();
+		if (frm.doc.docstatus !== 1 || !frm.has_perm("read")) return;
+
+		frappe.call({
+			method: "china_finance.services.purchase_payables.get_purchase_order_status_for_user",
+			args: { purchase_order: frm.doc.name },
+		}).then((response) => {
+			const status = response.message;
+			if (!status) return;
+			add_purchase_order_indicator(frm, `收货：${status.receive_status}`, status_color(status.receive_status));
+			add_purchase_order_indicator(frm, `应付：${status.payable_status}`, status_color(status.payable_status));
+			add_purchase_order_indicator(frm, `付款：${status.payment_status}`, payment_status_indicator(status.payment_status));
+			if (status.reconciliation_status === "Blocked") {
+				add_purchase_order_indicator(frm, `三单匹配：${status.reconciliation_reason || "异常"}`, "orange");
+			}
+		});
+	},
+});
+
+function add_purchase_order_indicator(frm, label, color) {
+	frm.dashboard.add_indicator(__(label), color).attr("data-china-purchase-order-status", "1");
+}
+
+function status_color(status) {
+	if (["全部收货", "全部应付"].includes(status)) return "green";
+	if (["部分收货", "部分应付"].includes(status)) return "orange";
+	if (["异常"].includes(status)) return "red";
+	return "gray";
+}

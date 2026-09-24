@@ -267,3 +267,49 @@ def get_purchase_invoice_status_for_user(purchase_invoice):
 		"reconciliation_status": evaluation["reconciliation_status"],
 		"reconciliation_reason": evaluation["reconciliation_reason"],
 	}
+
+
+@frappe.whitelist()
+def get_purchase_order_status_for_user(purchase_order):
+	"""Return live receipt, payable, payment, and matching status for an order."""
+	order = frappe.get_doc("Purchase Order", purchase_order)
+	order.check_permission("read")
+	from china_finance.services.purchase_reconciliation import get_purchase_order_reconciliation_rows
+
+	rows = get_purchase_order_reconciliation_rows(
+		order.company,
+		order.transaction_date,
+		order.transaction_date,
+		purchase_order=order.name,
+	)
+	row = rows[0] if rows else frappe._dict()
+	ordered_qty = flt(row.get("ordered_qty"))
+	received_qty = flt(row.get("received_qty"))
+	billed_qty = flt(row.get("billed_qty"))
+	tolerance = 0.0001
+	return {
+		"purchase_order": order.name,
+		"purchase_receipts": row.get("purchase_receipts") or "",
+		"purchase_invoices": row.get("purchase_invoices") or "",
+		"payment_entries": row.get("payment_entries") or "",
+		"receive_status": (
+			"未收货"
+			if received_qty <= tolerance
+			else "全部收货"
+			if received_qty + tolerance >= ordered_qty
+			else "部分收货"
+		),
+		"payable_status": (
+			"未生成应付"
+			if not row.get("purchase_invoices")
+			else "全部应付"
+			if flt(row.get("remaining_bill_qty")) <= tolerance
+			else "部分应付"
+		),
+		"payment_status": row.get("payment_status") or PAYMENT_STATUS_NOT_APPLICABLE,
+		"reconciliation_status": row.get("reconciliation_status") or "Ready",
+		"reconciliation_reason": row.get("reconciliation_reason") or "",
+		"ordered_qty": ordered_qty,
+		"received_qty": received_qty,
+		"billed_qty": billed_qty,
+	}
