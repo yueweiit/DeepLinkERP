@@ -12,8 +12,7 @@
   {"fieldname":"supplier","fieldtype":"Link","label":"供应商","options":"Supplier"},
   {"fieldname":"purchase_order","fieldtype":"Link","label":"采购订单","options":"Purchase Order"},
   {"default":"0","fieldname":"exception_only","fieldtype":"Check","label":"仅异常"},
-  {"fieldname":"reconciliation_status","fieldtype":"Select","label":"齐套状态","options":"\nReady\nBlocked"},
-  {"fieldname":"payment_status","fieldtype":"Select","label":"付款状态","options":"\n未付款\n部分付款\n全部付款\n已取消\n异常\n不适用"}
+  {"fieldname":"reconciliation_status","fieldtype":"Select","label":"齐套状态","options":"\nReady\nBlocked"}
  ],
  "is_standard": "Yes",
  "modified": "2026-07-17 00:00:00.000000",

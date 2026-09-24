@@ -2,11 +2,6 @@ import frappe
 from frappe import _
 from frappe.utils import flt, getdate, now_datetime
 
-from china_finance.services.purchase_payables import (
-	PAYMENT_STATUS_NOT_APPLICABLE,
-	get_purchase_payment_status,
-)
-
 
 POLICY_DIRECT = "Direct"
 POLICY_RECEIPT_AND_INVOICE = "Receipt and Invoice"
@@ -321,11 +316,6 @@ def get_purchase_order_reconciliation_rows(company, from_date, to_date, supplier
 		row.remaining_bill_qty = max(0, flt(row.ordered_qty) - flt(row.billed_qty))
 		row.reconciliation_status = STATUS_BLOCKED if issues else STATUS_READY
 		row.reconciliation_reason = "；".join(issues)
-		row.payment_status = (
-			get_purchase_payment_status(row.invoice_amount, row.invoice_amount - row.paid_amount, row.outstanding_amount)
-			if row.purchase_invoices
-			else PAYMENT_STATUS_NOT_APPLICABLE
-		)
 	return rows
 
 

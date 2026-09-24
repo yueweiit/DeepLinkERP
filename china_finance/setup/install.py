@@ -168,7 +168,6 @@ def after_install():
 	from china_finance.setup.china_coa_profile import sync_enabled_company_profiles
 	sync_enabled_company_profiles()
 	sync_sales_settlement_custom_fields()
-	sync_purchase_payment_custom_fields()
 	sync_china_financial_statement_report_filters()
 	sync_china_financial_statement_print_format()
 	sync_china_accounting_voucher_print_format()
@@ -196,7 +195,6 @@ def after_migrate():
 	from china_finance.setup.china_coa_profile import sync_enabled_company_profiles
 	sync_enabled_company_profiles()
 	sync_sales_settlement_custom_fields()
-	sync_purchase_payment_custom_fields()
 	sync_china_financial_statement_report_filters()
 	sync_china_financial_statement_print_format()
 	sync_china_accounting_voucher_print_format()
@@ -506,33 +504,6 @@ def sync_sales_settlement_custom_fields():
 	}, update=True)
 	sync_period_closing_voucher_number_field()
 	backfill_source_voucher_numbers()
-
-
-def sync_purchase_payment_custom_fields():
-	"""Install metadata used by the purchase payable and payment workflow."""
-	from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
-
-	create_custom_fields(
-		{
-			"Payment Entry": [
-				{
-					"fieldname": "custom_china_dingtalk_request_no",
-					"label": "钉钉申请单号",
-					"fieldtype": "Data",
-					"in_list_view": 1,
-					"insert_after": "reference_no",
-				},
-				{
-					"fieldname": "custom_china_bank_reference_no",
-					"label": "银行交易流水号",
-					"fieldtype": "Data",
-					"in_list_view": 1,
-					"insert_after": "custom_china_dingtalk_request_no",
-				},
-			],
-		},
-		update=True,
-	)
 
 
 def sync_period_closing_voucher_number_field():
