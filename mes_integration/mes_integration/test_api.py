@@ -26,6 +26,33 @@ from mes_integration.mes_integration.stock_entry import (
 
 
 class TestMESAPIHTTPMethods(UnitTestCase):
+	@patch(
+		"mes_integration.mes_integration.stock_entry.create_draft_stock_entry_from_mes"
+	)
+	def test_create_stock_entry_submits_by_default(self, create_stock_entry):
+		api.create_stock_entry(data={"stock_entry_type": "Finished Goods Receipt"})
+
+		create_stock_entry.assert_called_once_with(
+			data={"stock_entry_type": "Finished Goods Receipt"},
+			stock_entry=None,
+			submit=True,
+		)
+
+	@patch(
+		"mes_integration.mes_integration.stock_entry.create_draft_stock_entry_from_mes"
+	)
+	def test_create_stock_entry_allows_explicit_draft(self, create_stock_entry):
+		api.create_stock_entry(
+			stock_entry={"stock_entry_type": "Semi Finished Goods Receipt"},
+			submit=0,
+		)
+
+		create_stock_entry.assert_called_once_with(
+			data=None,
+			stock_entry={"stock_entry_type": "Semi Finished Goods Receipt"},
+			submit=0,
+		)
+
 	def test_inventory_distinguishes_zero_disabled_nonstock_and_missing_items(self):
 		bin_rows = [
 			frappe._dict(

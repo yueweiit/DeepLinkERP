@@ -237,6 +237,29 @@ class TestMESStockEntry(UnitTestCase):
 		self.assertEqual(result.name, "SAL-ORD-2026-00218")
 		get_doc.assert_called_once_with("Sales Order", "SAL-ORD-2026-00218")
 
+	def test_sales_order_reference_prefers_erp_order_number(self):
+		sales_order = frappe._dict(
+			name="SAL-ORD-2026-00218",
+			custom_crm_order_no="CRM-2026-00218",
+		)
+
+		with patch(
+			"mes_integration.mes_integration.stock_entry.frappe.db.exists",
+			return_value=True,
+		), patch(
+			"mes_integration.mes_integration.stock_entry.frappe.get_doc",
+			return_value=sales_order,
+		) as get_doc, patch(
+			"mes_integration.mes_integration.stock_entry.frappe.get_list"
+		) as get_list:
+			result = get_sales_order_by_reference(
+				{"sales_order": "SAL-ORD-2026-00218"}, {}, required=True
+			)
+
+		self.assertEqual(result.name, "SAL-ORD-2026-00218")
+		get_doc.assert_called_once_with("Sales Order", "SAL-ORD-2026-00218")
+		get_list.assert_not_called()
+
 	def test_resolved_sales_order_is_written_to_stock_entry_payload(self):
 		stock_entry_data = {}
 		sales_order = frappe._dict(name="SAL-ORD-2026-00218")

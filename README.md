@@ -59,17 +59,19 @@ MES 可调用以下接口创建入库 Stock Entry：
 
     POST /api/method/mes_integration.api.create_stock_entry
 
-该接口默认创建草稿；如果 MES 需要一次完成创建和提交，可使用：
+该接口默认创建并提交入库单。需要明确保留草稿用于人工审核时，才在请求顶层传 `submit=0`。兼容入口如下，同样固定创建并提交：
 
     POST /api/method/mes_integration.api.create_and_submit_stock_entry
 
-或者在 `create_stock_entry` 请求中传递 `submit=1`。请求数据应至少包含 `company`、`stock_entry_type` 和 `items`，其中 `stock_entry_type` 支持 `Material Receipt`、`Semi Finished Goods Receipt` 和 `Finished Goods Receipt`。每行入库明细需要 `item_code`、正数 `qty` 和 `t_warehouse`；未传目标仓库时 ERP 会按物料默认仓库或配置的兜底仓库补齐。
+`create_stock_entry` 的 `submit` 必须放在请求顶层，放在 `data` 内不会生效。请求数据应至少包含 `company`、`stock_entry_type` 和 `items`，其中 `stock_entry_type` 支持 `Material Receipt`、`Semi Finished Goods Receipt` 和 `Finished Goods Receipt`。每行入库明细需要 `item_code`、正数 `qty` 和 `t_warehouse`；未传目标仓库时 ERP 会按物料默认仓库或配置的兜底仓库补齐。
 
-入库接口必须传 `sales_order`。该字段优先填写 CRM 销售订单号（ERP Sales Order 的 `custom_crm_order_no`）；系统会自动解析对应的 ERP 销售订单，并写入 Stock Entry 的 `custom_sales_order` Link 字段。为兼容旧调用，也支持直接填写 ERP Sales Order 内部单号。创建并提交成功的响应会返回 ERP 销售订单号 `sales_order` 和 CRM 订单号 `sales_order_crm_order_no`，以及 `stock_entry_docstatus: 1`、`submitted: true`。
+入库接口必须传 `sales_order`，新调用应填写 ERP Sales Order 内部号（`Sales Order.name`）。系统会读取该订单并写入 Stock Entry 的 `custom_sales_order` Link 字段；CRM 销售订单号由 ERP 销售订单的 `custom_crm_order_no` 保存，MES 不需要提供。为兼容旧调用，服务端仍支持用 CRM 订单号反查 ERP 销售订单。创建并提交成功的响应会返回 ERP 销售订单号 `sales_order` 和 CRM 订单号 `sales_order_crm_order_no`，以及 `stock_entry_docstatus: 1`、`submitted: true`。
 
 MES 重试入库请求时必须继续使用原来的 `custom_stock_entry_no`，ERP 会按“公司 + MES 入库编号”复用原 Stock Entry，并在响应中返回 `idempotent_reuse: true`；不会再次创建 ERP 单据。相同编号但公司、销售订单或明细不一致时，ERP 返回 HTTP 409 和 `ERP_STOCK_ENTRY_IDENTITY_CONFLICT`，MES 不应生成新编号绕过该错误。
 
 提交入库后，系统会向 `mes_status_callback_url` 回调 Stock Entry 状态；MES 接口需要返回 HTTP 2xx 的 JSON，并且 `success: true`、`data.status: "processed"`。
+
+入库单在 `docstatus=1` 后才生成库存流水并增加 `t_warehouse` 的库存；`docstatus=0` 的草稿不影响库存。服务端统一使用 `Material Receipt` purpose，入库明细不保留来源仓，因此不会扣减 ERP 库存。
 
 异步接口返回的是“已接收并返回任务号”，压测脚本统计的是 MES 到 ERP 的接收耗时，不是后台建单耗时。
 

@@ -786,8 +786,9 @@ def create_and_submit_stock_entry_from_mes(data=None, stock_entry=None):
 def get_sales_order_by_reference(payload, stock_entry_data, required=True):
     """Resolve an ERP Sales Order by ERP name or CRM order number.
 
-    MES should send the CRM order number in ``sales_order``.  ERP document
-    names remain supported so existing integrations do not break.
+    MES should send the ERP Sales Order.name in ``sales_order``.  CRM order
+    numbers remain supported as a backward-compatible fallback for older
+    callers, but MES does not need to know or store that number.
     """
     sales_order_reference = (
         payload.get("sales_order")

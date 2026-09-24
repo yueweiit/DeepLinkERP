@@ -15,11 +15,14 @@ BATCH_BIN_FIELDS = [
 
 
 @frappe.whitelist(methods=["POST"])
-def create_stock_entry(data=None, stock_entry=None, submit=False):
-    """Create a MES receipt Stock Entry; pass submit=1 to submit it too."""
+def create_stock_entry(data=None, stock_entry=None, submit=None):
+    """Create and submit a MES receipt; pass submit=0 to keep it as a draft."""
     from mes_integration.mes_integration.stock_entry import (
         create_draft_stock_entry_from_mes,
     )
+
+    if submit is None:
+        submit = True
 
     return create_draft_stock_entry_from_mes(
         data=data,
