@@ -290,8 +290,8 @@ def test_push_standard_purchase_flow_creates_item_and_purchase_order(monkeypatch
             return FakeResponse({"data": {"name": "YL000001"}})
         if request.get_method() == "POST" and request.full_url.endswith("/Purchase%20Order"):
             return FakeResponse({"data": {"name": "PO-0001"}})
-        if request.get_method() == "POST" and request.full_url.endswith("/frappe.client.submit"):
-            return FakeResponse({"message": "submitted"})
+        if request.get_method() == "PUT" and request.full_url.endswith("/Purchase%20Order/PO-0001"):
+            return FakeResponse({"data": {"name": "PO-0001", "docstatus": 1}})
         raise AssertionError(f"unexpected request {request.get_method()} {request.full_url}")
 
     monkeypatch.setattr(erp_client, "urlopen", fake_urlopen)
@@ -331,8 +331,8 @@ def test_push_standard_purchase_flow_creates_item_and_purchase_order(monkeypatch
     assert result["submit"]["docstatus"] == 1
     item_body = next(row["body"] for row in captured if row["method"] == "POST" and row["url"].endswith("/Item"))
     po_body = next(row["body"] for row in captured if row["method"] == "POST" and row["url"].endswith("/Purchase%20Order"))
-    submit_body = next(row["body"] for row in captured if row["method"] == "POST" and row["url"].endswith("/frappe.client.submit"))
-    assert submit_body == {"doc": {"doctype": "Purchase Order", "name": "PO-0001"}}
+    submit_row = next(row for row in captured if row["method"] == "PUT" and row["url"].endswith("/Purchase%20Order/PO-0001"))
+    assert submit_row["body"] == {"docstatus": 1}
     assert item_body["item_code"] == "YL000001"
     assert item_body["stock_uom"] == "Nos"
     assert result["response"]["items"][0]["uom_source"] == "local"
@@ -604,8 +604,8 @@ def test_standard_purchase_flow_uses_default_supplier_when_item_suppliers_confli
             return FakeResponse({"data": {"name": body["item_code"]}})
         if request.get_method() == "POST" and request.full_url.endswith("/Purchase%20Order"):
             return FakeResponse({"data": {"name": "PO-0002"}})
-        if request.get_method() == "POST" and request.full_url.endswith("/frappe.client.submit"):
-            return FakeResponse({"message": "submitted"})
+        if request.get_method() == "PUT" and request.full_url.endswith("/Purchase%20Order/PO-0002"):
+            return FakeResponse({"data": {"name": "PO-0002", "docstatus": 1}})
         raise AssertionError(f"unexpected request {request.get_method()} {request.full_url}")
 
     monkeypatch.setattr(erp_client, "urlopen", fake_urlopen)
@@ -681,8 +681,8 @@ def test_existing_erp_item_uses_remote_uom_without_overwriting_it(monkeypatch) -
             return FakeResponse({"data": {"name": "YL000001"}})
         if request.get_method() == "POST" and request.full_url.endswith("/Purchase%20Order"):
             return FakeResponse({"data": {"name": "PO-0002"}})
-        if request.get_method() == "POST" and request.full_url.endswith("/frappe.client.submit"):
-            return FakeResponse({"message": "submitted"})
+        if request.get_method() == "PUT" and request.full_url.endswith("/Purchase%20Order/PO-0002"):
+            return FakeResponse({"data": {"name": "PO-0002", "docstatus": 1}})
         raise AssertionError(f"unexpected request {request.get_method()} {request.full_url}")
 
     monkeypatch.setattr(erp_client, "urlopen", fake_urlopen)
@@ -806,12 +806,6 @@ def test_normalize_currency_accepts_historical_chinese_labels() -> None:
     assert erp_client._normalize_currency("墨西哥比索MXN") == "MXN"
 
 
-def test_method_url_replaces_the_resource_prefix() -> None:
-    assert erp_client._build_method_url(
-        {"base_url": "https://erp.example.com/api/resource"}, "frappe.client.submit"
-    ) == "https://erp.example.com/api/method/frappe.client.submit"
-
-
 def test_purchase_order_item_carries_the_route_warehouse() -> None:
     row = erp_client._build_purchase_order_item(
         {"material_code": "M1"},
@@ -864,8 +858,26 @@ def test_submit_failure_keeps_the_created_purchase_order_retryable(monkeypatch) 
     assert "已创建，但提交失败" in result["message"]
 
 
-def test_created_purchase_order_is_submitted_through_the_method_endpoint(monkeypatch) -> None:
-    """创建成功后必须提交，且提交走 /api/method 而不是资源端点。"""
+def test_submit_reports_failure_when_the_remote_keeps_the_draft_status(monkeypatch) -> None:
+    """远端 200 但单据仍是草稿时必须如实报失败，不能记成已提交。"""
+
+    def fake_urlopen(request, timeout):
+        return _JsonResponse({"data": {"name": "PO-9", "docstatus": 0}})
+
+    monkeypatch.setattr(erp_client, "urlopen", fake_urlopen)
+
+    result = erp_client._submit_purchase_order(
+        "PO-9",
+        {"base_url": "https://erp.example.com/api/resource", "authorization": "token abc:def", "timeout": 5},
+    )
+
+    assert result["ok"] is False
+    assert result["docstatus"] == 0
+    assert "提交未生效" in result["message"]
+
+
+def test_created_purchase_order_is_submitted_through_the_resource_endpoint(monkeypatch) -> None:
+    """创建成功后必须提交；提交走资源端点的 docstatus 变更，不用 frappe.client.submit。"""
 
     monkeypatch.setattr(erp_client, "lookup_purchase_by_business_key", lambda payload, config: {"found": False, "name": ""})
     monkeypatch.setattr(erp_client, "_ensure_item", lambda item, payload, config: {"ok": True})
@@ -878,9 +890,9 @@ def test_created_purchase_order_is_submitted_through_the_method_endpoint(monkeyp
 
     def fake_request_json(config, *, method, url, body=None):
         calls.append((method, url, body))
-        if url.endswith("/Purchase%20Order"):
+        if method == "POST":
             return {"data": {"name": "PO-NEW"}}
-        return {"message": "submitted"}
+        return {"data": {"name": "PO-NEW", "docstatus": 1}}
 
     monkeypatch.setattr(erp_client, "_request_json", fake_request_json)
     config = {
@@ -909,9 +921,9 @@ def test_created_purchase_order_is_submitted_through_the_method_endpoint(monkeyp
     assert result["status"] == "SUBMITTED"
     assert result["erp_target_doc"] == "PO-NEW"
     assert result["submit"]["docstatus"] == 1
-    assert [url for _method, url, _body in calls] == [
-        "https://erp.example.com/api/resource/Purchase%20Order",
-        "https://erp.example.com/api/method/frappe.client.submit",
+    assert [(method, url) for method, url, _body in calls] == [
+        ("POST", "https://erp.example.com/api/resource/Purchase%20Order"),
+        ("PUT", "https://erp.example.com/api/resource/Purchase%20Order/PO-NEW"),
     ]
     assert calls[0][2]["items"][0]["warehouse"] == "仓库 - 拉丁购"
-    assert calls[1][2] == {"doc": {"doctype": "Purchase Order", "name": "PO-NEW"}}
+    assert calls[1][2] == {"docstatus": 1}

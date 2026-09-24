@@ -191,6 +191,8 @@ ERP 推送额外要求本批全部待推送物料的项目映射、子公司、�
 
 必须先核验每类目标 ERP 的更新能力：允许的单据状态和字段、采购/收货等关联单据约束、只读识别方式、版本并发控制及结果查询方式。未验证或不支持时保留“待更新/需人工处理”，不得展示虚假同步成功。
 
+已实测核验（DeepLinkERP 站点）：状态转移走资源端点 `PUT /api/resource/Purchase Order/<name>` + `{"docstatus": 1}`；`frappe.client.submit` 只传 `doctype`/`name` 会在目标端 `check_if_latest` 上抛 `TimestampMismatchError`（HTTP 417），不可用。该站点 `Purchase Order` 的 `on_submit` 钩子（`oa_purchase_request.auto_create_purchase_receipt`）会在提交时自动生成一张草稿采购入库单，因此“已提交”单据的下游链（采购入库）必须一并处置后才能取消或删除。
+
 本期不承诺已提交、已收货甚至已领用的单据均能直接修改。不自动撤销单据、改账或扩大操作权限。未具备经验证的后续更新路径前，不对该站点启用新的“暂估推送后自动可更新”承诺；需要用户明确接受的人工处理方案另行确认。
 
 ## 8. 模块职责与现有代码衔接

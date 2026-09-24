@@ -333,7 +333,14 @@ def create_purchase(payload: dict, config: dict) -> dict:
 
 
 def _submit_purchase_order(docname: str, config: dict) -> dict:
-    """提交采购订单；已提交视为成功，避免重试时重复提交。"""
+    """提交采购订单；已提交视为成功，避免重试时重复提交。
+
+    走资源端点 ``PUT /api/resource/Purchase Order/<name>`` + ``{"docstatus": 1}``，
+    而不是 ``frappe.client.submit``：后者要求传入整份单据 JSON，只给
+    ``doctype``/``name`` 时远端会在 ``check_if_latest`` 上抛
+    ``TimestampMismatchError``（实测 HTTP 417）。资源端点已实测能真正提交
+    （ERPNext 的 ``status`` 落到 ``To Receive and Bill``，``on_submit`` 钩子照常触发）。
+    """
 
     remote = _read_remote_document(config, "Purchase Order", docname)
     if remote is None:
@@ -350,11 +357,11 @@ def _submit_purchase_order(docname: str, config: dict) -> dict:
         return {"ok": False, "docstatus": docstatus, "message": f"采购订单 {docname} 已取消，无法提交。"}
 
     try:
-        _request_json(
+        response = _request_json(
             config,
-            method="POST",
-            url=_build_method_url(config, "frappe.client.submit"),
-            body={"doc": {"doctype": "Purchase Order", "name": docname}},
+            method="PUT",
+            url=_build_doctype_url(config, "Purchase Order", docname),
+            body={"docstatus": 1},
         )
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="ignore")
@@ -364,6 +371,14 @@ def _submit_purchase_order(docname: str, config: dict) -> dict:
             "http_status": exc.code,
             "message": f"采购订单 {docname} 已创建，但提交失败：HTTP {exc.code} {_compact_text(detail)}",
             "response": _load_json_response(detail),
+        }
+    submitted_status = int((response.get("data") or {}).get("docstatus") or 0)
+    if submitted_status != 1:
+        return {
+            "ok": False,
+            "docstatus": submitted_status,
+            "message": f"采购订单 {docname} 已创建，但提交未生效（远端 docstatus={submitted_status}）。",
+            "response": response,
         }
     return {
         "ok": True,
@@ -657,16 +672,6 @@ def _build_doctype_url(config: dict, doctype: str, docname: str | None = None) -
     if docname:
         return f"{base_url}/{doctype}/{quote(str(docname), safe='')}"
     return f"{base_url}/{doctype}"
-
-
-def _build_method_url(config: dict, method: str) -> str:
-    """把 ``/api/resource`` 前缀换成 ``/api/method``，用于调用站点白名单方法。"""
-
-    base_url = str(config.get("base_url") or "").rstrip("/")
-    prefix = "/api/resource"
-    if base_url.endswith(prefix):
-        base_url = f"{base_url[: -len(prefix)]}/api/method"
-    return f"{base_url}/{str(method or '').strip()}"
 
 
 def _build_request(config: dict, url: str, method: str, body: dict | None = None) -> Request:
