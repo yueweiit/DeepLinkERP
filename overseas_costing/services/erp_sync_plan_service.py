@@ -235,13 +235,26 @@ def _batch_project_candidate_names(batch_name: str) -> list[str]:
 
 
 def _prepared_items(items: list[dict]) -> list[dict]:
+    """把物料行补齐成 ERP 报文形态。
+
+    行级报文字段口径复用 ``batch_service.build_erp_payload_item``：
+    分组/路由需要的原始列（``stable_line_key``、``erp_stock_uom`` 等）保留，
+    同时带上 ``erp_client`` 组装采购单时要读的 ``cost_formula`` 等字段。
+    """
+
     prepared = []
     for item in items:
-        row = batch_service._effective_calculated_item(dict(item))
-        formula = batch_service._build_cost_formula(row)
-        row["total_cost_rmb"] = formula["total_cost"]
-        row["allocated_fee_rmb"] = formula["allocated_total_cost"]
-        prepared.append(row)
+        row = dict(item)
+        payload_item = batch_service.build_erp_payload_item(row)
+        formula = payload_item["cost_formula"]
+        prepared.append(
+            {
+                **row,
+                **payload_item,
+                "total_cost_rmb": formula["total_cost"],
+                "allocated_fee_rmb": formula["allocated_total_cost"],
+            }
+        )
     return prepared
 
 

@@ -270,3 +270,65 @@ def test_partial_group_execution_never_marks_the_whole_batch_success(monkeypatch
     assert result["writeback_status"] == "Failed"
     assert "1 个物料组未推送" in result["message"]
     assert recorded["status"] == "Failed"
+
+
+def test_grouped_push_rows_keep_the_cost_formula_used_by_the_purchase_order() -> None:
+    """分组链路的报文行必须带上 cost_formula，否则采购单数量/单价归零。"""
+
+    from overseas_costing.services.erp_client import _build_purchase_order_body
+    from overseas_costing.services.erp_sync_service import build_site_sync_plan
+
+    prepared = plans._prepared_items(
+        [
+            {
+                "name": "ITEM-1",
+                "stable_line_key": "logistics:abc",
+                "material_code": "CW000214",
+                "product_name": "狗牌Dog tag",
+                "project_collection": "AmigoMart",
+                "supplier": "Tiffany",
+                "quantity": 1700,
+                "actual_shipped_qty": 1700,
+                "unit_price": 1.2,
+                "purchase_currency": "USD",
+                "erp_stock_uom": "PCS",
+                "goods_value": 2040,
+                "total_cost_rmb": "4795.57",
+                "freight_alloc_rmb": 2385.37,
+            }
+        ]
+    )
+
+    assert prepared[0]["cost_formula"]["quantity"] == 1700
+    assert prepared[0]["stable_line_key"] == "logistics:abc"
+    assert prepared[0]["erp_stock_uom"] == "PCS"
+
+    plan = build_site_sync_plan(
+        batch={"name": "B1", "confirm_status": "CONFIRMED"},
+        version={"name": "V1"},
+        items=prepared,
+        routes=[
+            {
+                "project_collection": "AmigoMart",
+                "subsidiary_code": "AmigoMart",
+                "erp_site": "",
+                "enabled": 1,
+                "valid_from": None,
+                "valid_to": None,
+                "revision": 1,
+            }
+        ],
+        site_configs=[],
+        active_supplier_names={"Tiffany"},
+    )
+    requests = plan["request_specs"]["requests"]
+    assert len(requests) == 1
+
+    body = _build_purchase_order_body(requests[0]["payload"], {})
+    row = body["items"][0]
+
+    assert row["qty"] == 1700
+    assert row["rate"] == 1.2
+    assert row["custom_overseas_comprehensive_amount"] == 4795.57
+    assert row["custom_overseas_clearance_alloc_amount"] >= 0
+    assert row["custom_overseas_stable_line_key"] == "logistics:abc"

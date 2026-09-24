@@ -2893,6 +2893,37 @@ def _build_writeback_readiness(
     }
 
 
+def build_erp_payload_item(
+    item: dict,
+    *,
+    subsidiary_code: str = "",
+    business_type: str = "",
+) -> dict:
+    """构造单条 ERP 报文行。
+
+    行级报文字段只有这一处真源：批量推送与分站点分组推送共用，
+    否则分组链路会发出缺 ``cost_formula`` 的行，导致采购单数量/单价归零。
+    """
+
+    row = _effective_purchase_item(item)
+    formula = _build_cost_formula(row)
+    return {
+        "subsidiary_code": subsidiary_code or row.get("subsidiary_code") or "",
+        "business_type": business_type or row.get("business_type") or "",
+        "material_code": row.get("material_code") or "",
+        "material_name": row.get("product_name") or "",
+        "supplier": row.get("supplier") or "",
+        "original_unit_price": formula["original_unit_price"],
+        "purchase_currency": row.get("purchase_currency") or "",
+        "adopted_price": row.get("adopted_price") or {},
+        "comprehensive_unit_price": formula["comprehensive_unit_price"],
+        "outbound_quantity": _round_payload_amount(row.get("actual_shipped_qty")),
+        "source_quantity": _round_payload_amount(row.get("quantity")),
+        "cost_formula": formula,
+        "expense_detail": _item_expense_detail(row, formula),
+    }
+
+
 def _build_erp_push_payload(
     batch: dict,
     version: dict,
@@ -2902,27 +2933,14 @@ def _build_erp_push_payload(
 ) -> dict:
     subsidiary_code = _resolve_batch_subsidiary_code(batch)
     supplier = _resolve_payload_supplier(items)
-    payload_items = []
-    for item in items:
-        item = _effective_purchase_item(item)
-        formula = _build_cost_formula(item)
-        payload_items.append(
-            {
-                "subsidiary_code": subsidiary_code,
-                "business_type": batch.get("business_type") or "",
-                "material_code": item.get("material_code") or "",
-                "material_name": item.get("product_name") or "",
-                "supplier": item.get("supplier") or "",
-                "original_unit_price": formula["original_unit_price"],
-                "purchase_currency": item.get("purchase_currency") or "",
-                "adopted_price": item.get("adopted_price") or {},
-                "comprehensive_unit_price": formula["comprehensive_unit_price"],
-                "outbound_quantity": _round_payload_amount(item.get("actual_shipped_qty")),
-                "source_quantity": _round_payload_amount(item.get("quantity")),
-                "cost_formula": formula,
-                "expense_detail": _item_expense_detail(item, formula),
-            }
+    payload_items = [
+        build_erp_payload_item(
+            item,
+            subsidiary_code=subsidiary_code,
+            business_type=batch.get("business_type") or "",
         )
+        for item in items
+    ]
 
     return {
         "target_system": "DeepLinkERP",
