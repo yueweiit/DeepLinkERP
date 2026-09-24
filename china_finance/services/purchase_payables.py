@@ -9,7 +9,39 @@ PAYMENT_STATUS_UNPAID = "未付款"
 PAYMENT_STATUS_PARTIAL = "部分付款"
 PAYMENT_STATUS_PAID = "全部付款"
 PAYMENT_STATUS_NOT_APPLICABLE = "不适用"
+PAYMENT_STATUS_CANCELLED = "已取消"
+PAYMENT_STATUS_EXCEPTION = "异常"
 DEFAULT_AMOUNT_TOLERANCE = 0.01
+
+
+def get_purchase_payment_status(
+	total_amount,
+	paid_amount,
+	outstanding_amount,
+	docstatus=1,
+	is_return=0,
+	tolerance=DEFAULT_AMOUNT_TOLERANCE,
+):
+	"""Return a purchase payable payment status from current ledger amounts."""
+	if docstatus == 2:
+		return PAYMENT_STATUS_CANCELLED
+	if is_return:
+		return PAYMENT_STATUS_EXCEPTION
+
+	total = flt(total_amount)
+	paid = flt(paid_amount)
+	outstanding = flt(outstanding_amount)
+	if total < -tolerance or paid < -tolerance or outstanding < -tolerance:
+		return PAYMENT_STATUS_EXCEPTION
+	if total <= tolerance:
+		return PAYMENT_STATUS_NOT_APPLICABLE
+	if paid - total > tolerance or outstanding - total > tolerance:
+		return PAYMENT_STATUS_EXCEPTION
+	if outstanding <= tolerance:
+		return PAYMENT_STATUS_PAID
+	if paid > tolerance:
+		return PAYMENT_STATUS_PARTIAL
+	return PAYMENT_STATUS_UNPAID
 
 
 def _source_rows(receipt_name):
@@ -59,12 +91,8 @@ def get_receipt_payment_summary(receipt_name):
 	outstanding = sum(flt(invoice.outstanding_amount) for invoice in valid)
 	if not valid:
 		status = PAYMENT_STATUS_NOT_APPLICABLE if not invoices else PAYMENT_STATUS_UNPAID
-	elif outstanding <= DEFAULT_AMOUNT_TOLERANCE:
-		status = PAYMENT_STATUS_PAID
-	elif outstanding < amount - DEFAULT_AMOUNT_TOLERANCE:
-		status = PAYMENT_STATUS_PARTIAL
 	else:
-		status = PAYMENT_STATUS_UNPAID
+		status = get_purchase_payment_status(amount, amount - outstanding, outstanding)
 	return {
 		"purchase_receipt": receipt_name,
 		"company": receipt.company,

@@ -171,3 +171,25 @@ class TestPurchasePayables(TestCase):
 			DocumentStub(reference_doctype="Purchase Receipt", reference_name="PR-0001")
 		]
 		purchase_payables.validate_payment_entry(payment)
+
+	def test_purchase_payment_status_covers_lifecycle_and_amount_boundaries(self):
+		cases = [
+			((100, 0, 100), purchase_payables.PAYMENT_STATUS_UNPAID),
+			((100, 20, 80), purchase_payables.PAYMENT_STATUS_PARTIAL),
+			((100, 100, 0), purchase_payables.PAYMENT_STATUS_PAID),
+			((100, 100, 0.005), purchase_payables.PAYMENT_STATUS_PAID),
+			((0, 0, 0), purchase_payables.PAYMENT_STATUS_NOT_APPLICABLE),
+			((100, 100, 1), purchase_payables.PAYMENT_STATUS_PARTIAL),
+			((100, 110, -10), purchase_payables.PAYMENT_STATUS_EXCEPTION),
+		]
+		for amounts, expected in cases:
+			with self.subTest(amounts=amounts):
+				self.assertEqual(purchase_payables.get_purchase_payment_status(*amounts), expected)
+		self.assertEqual(
+			purchase_payables.get_purchase_payment_status(100, 0, 100, docstatus=2),
+			purchase_payables.PAYMENT_STATUS_CANCELLED,
+		)
+		self.assertEqual(
+			purchase_payables.get_purchase_payment_status(100, 0, 100, is_return=1),
+			purchase_payables.PAYMENT_STATUS_EXCEPTION,
+		)
