@@ -15,6 +15,7 @@ from frappe.utils import flt, getdate, nowdate
 
 DEFAULT_PURCHASE_WAREHOUSE = "采购 - YC"
 OA_PURCHASE_REQUEST_PROCESS_CODE = "PROC-BFDF6F09-4551-43B3-8C55-537AA74A241B"
+OA_LATINGO_PURCHASE_REQUEST_PROCESS_CODE = "PROC-6E11B527-2F82-439C-817D-C868DE086C97"
 OA_LOGISTICS_PROCESS_CODE = "PROC-RIYJTXWV-CN52YRK70C5499JG0TJ03-3GSSHZQJ-5"
 
 ITEM_ALIASES = {
@@ -116,6 +117,8 @@ def normalize_child_tables(doc, method=None):
 
 
 def sync_attachments(doc, method=None):
+	if doc.get("backfill_imported"):
+		return
 	for attachment in extract_attachment_candidates(doc):
 		try:
 			attach_candidate(doc, attachment)
@@ -168,7 +171,10 @@ def get_oa_purchase_request_dingtalk_url(docname):
 		frappe.throw("缺少 OA Purchase Request 的 process_instance_id")
 
 	process_code = (doc.get("process_code") or "").strip()
-	if process_code and process_code != OA_PURCHASE_REQUEST_PROCESS_CODE:
+	if process_code and process_code not in {
+		OA_PURCHASE_REQUEST_PROCESS_CODE,
+		OA_LATINGO_PURCHASE_REQUEST_PROCESS_CODE,
+	}:
 		frappe.throw(f"OA Purchase Request 模板码不匹配：{process_code}")
 
 	return {"dingtalk_url": get_dingtalk_approval_url(process_instance_id)}

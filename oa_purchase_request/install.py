@@ -100,23 +100,105 @@ FIELDS = [
 	("Process Code", "process_code", "Data", None),
 	("Form Name", "form_name", "Data", None),
 	("Raw Payload", "raw_payload", "Code", None),
-	("Sync Status", "sync_status", "Select", "Pending Purchase Order\nPurchase Order Created\nFailed\nClosed"),
+	(
+		"Sync Status",
+		"sync_status",
+		"Select",
+		"Pending Purchase Order\nPurchase Order Created\nFailed\nClosed\n来源失效\n来源已变化\n待复核\n已建草稿",
+	),
 	("Purchase Order", "purchase_order", "Link", "Purchase Order"),
 	("OA Logistics Code", "oa_logistics_code", "Data", None),
 	("Error Message", "error_message", "Small Text", None),
+	("来源指纹", "source_fingerprint", "Data", None),
+	("最新来源指纹", "latest_source_fingerprint", "Data", None),
+	("目标公司", "target_company", "Link", "Company"),
+	("目标仓库", "target_warehouse", "Link", "Warehouse"),
+	("临时供应商", "temporary_supplier", "Link", "Supplier"),
+	("原始收款方", "original_payee", "Small Text", None),
+	("来源币种", "source_currency", "Link", "Currency"),
+	("来源汇率", "source_exchange_rate", "Float", None),
+	("来源状态", "source_state", "Select", "待复核\n已建草稿\n来源失效\n来源已变化"),
+	("来源审批中", "source_pending", "Check", None),
+	("来源已变化", "source_stale", "Check", None),
+	("来源失效", "source_invalid", "Check", None),
+	("汇率待复核", "exchange_rate_pending", "Check", None),
+	("价格待补", "price_pending", "Check", None),
+	("临时供应商待替换", "temporary_supplier_pending", "Check", None),
+	("拉丁购历史回填", "backfill_imported", "Check", None),
 ]
 
 FIELDNAMES_TO_UPDATE = {
 	"approval_completed_at",
 	"approval_status",
+	"backfill_imported",
 	"created_time",
+	"exchange_rate_pending",
 	"items",
+	"latest_source_fingerprint",
 	"payments",
 	"oa_logistics_code",
+	"original_payee",
+	"price_pending",
+	"process_instance_id",
 	"purchase_order",
 	"processors",
+	"source_currency",
+	"source_exchange_rate",
+	"source_fingerprint",
+	"source_invalid",
+	"source_pending",
+	"source_stale",
+	"source_state",
 	"sync_status",
+	"target_company",
+	"target_warehouse",
+	"temporary_supplier",
+	"temporary_supplier_pending",
 	"updated_time",
+}
+
+FIELD_PROPERTIES = {
+	"process_instance_id": {"unique": 1},
+	"source_fingerprint": {"read_only": 1},
+	"latest_source_fingerprint": {"read_only": 1},
+	"backfill_imported": {"read_only": 1},
+}
+
+STANDARD_CUSTOM_FIELDS = {
+	"Purchase Order": [
+		{"fieldname": "custom_latingo_backfill", "label": "拉丁购历史回填", "fieldtype": "Check", "read_only": 1},
+		{
+			"fieldname": "custom_latingo_source_instance_id",
+			"label": "拉丁购来源实例 ID",
+			"fieldtype": "Data",
+			"unique": 1,
+			"read_only": 1,
+		},
+		{
+			"fieldname": "custom_latingo_source_fingerprint",
+			"label": "拉丁购来源指纹",
+			"fieldtype": "Data",
+			"read_only": 1,
+		},
+		{"fieldname": "custom_latingo_source_status", "label": "来源审批状态", "fieldtype": "Data", "read_only": 1},
+		{"fieldname": "custom_latingo_source_result", "label": "来源审批结果", "fieldtype": "Data", "read_only": 1},
+		{"fieldname": "custom_latingo_source_pending", "label": "来源审批中", "fieldtype": "Check", "read_only": 1},
+		{"fieldname": "custom_latingo_source_stale", "label": "来源已变化", "fieldtype": "Check", "read_only": 1},
+		{"fieldname": "custom_latingo_source_invalid", "label": "来源失效", "fieldtype": "Check", "read_only": 1},
+		{
+			"fieldname": "custom_latingo_exchange_rate_pending",
+			"label": "MXN 汇率待复核",
+			"fieldtype": "Check",
+		},
+		{"fieldname": "custom_latingo_price_pending", "label": "价格待补", "fieldtype": "Check", "read_only": 1},
+		{
+			"fieldname": "custom_latingo_temporary_supplier_pending",
+			"label": "临时供应商待替换",
+			"fieldtype": "Check",
+			"read_only": 1,
+		},
+		{"fieldname": "custom_latingo_original_payee", "label": "原始收款方", "fieldtype": "Small Text", "read_only": 1},
+	],
 }
 
 LIST_VIEW_FIELDS = {
@@ -208,6 +290,8 @@ def create_or_update_oa_purchase_request():
 			if fieldname in LIST_VIEW_FIELDS:
 				fields_by_name[fieldname].hidden = 0
 				fields_by_name[fieldname].in_list_view = 1
+			for property_name, value in FIELD_PROPERTIES.get(fieldname, {}).items():
+				setattr(fields_by_name[fieldname], property_name, value)
 			continue
 
 		field = {
@@ -221,10 +305,12 @@ def create_or_update_oa_purchase_request():
 			field["hidden"] = 1
 		if fieldname in LIST_VIEW_FIELDS:
 			field["in_list_view"] = 1
+		field.update(FIELD_PROPERTIES.get(fieldname, {}))
 
 		doc.append("fields", field)
 
 	doc.save(ignore_permissions=True)
+	create_or_update_standard_custom_fields()
 	backfill_existing_child_tables()
 	create_or_update_client_script()
 	create_or_update_list_client_script()
@@ -232,6 +318,12 @@ def create_or_update_oa_purchase_request():
 	frappe.clear_cache(doctype=DOCTYPE)
 
 	return f"{DOCTYPE} created/updated successfully"
+
+
+def create_or_update_standard_custom_fields():
+	from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
+
+	create_custom_fields(STANDARD_CUSTOM_FIELDS, update=True)
 
 
 def create_or_update_child_doctype(doctype, fields):
