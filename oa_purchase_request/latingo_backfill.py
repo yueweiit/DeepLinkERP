@@ -10,6 +10,8 @@ except ModuleNotFoundError:  # pragma: no cover - exercised by service tests thr
 	frappe = None
 
 from oa_purchase_request.latingo_backfill_domain import (
+	BACKFILL_END_DATE,
+	BACKFILL_START_DATE,
 	GENERIC_PURCHASE_PROCESS_CODE,
 	LATINGO_COMPANY,
 	LATINGO_COST_CENTER,
@@ -23,15 +25,25 @@ from oa_purchase_request.latingo_backfill_domain import (
 	build_approval_plan,
 	build_preview_fingerprint,
 	build_source_fingerprint,
-	iter_month_windows,
+	iter_archive_month_windows,
 	is_generic_organization_in_scope,
 	source_from_instance,
 	submission_blockers,
 )
 
 
-def _whitelist(function):
-	return frappe.whitelist()(function) if frappe is not None else function
+def _whitelist(function=None, **options):
+	if frappe is None:
+		return function if function is not None else (lambda wrapped: wrapped)
+	decorator = frappe.whitelist(**options)
+	return decorator(function) if function is not None else decorator
+
+
+def _validate_backfill_range(start_date, end_date) -> None:
+	if str(start_date) != BACKFILL_START_DATE or str(end_date) != BACKFILL_END_DATE:
+		raise ValueError(
+			f"拉丁购历史回填固定范围为 {BACKFILL_START_DATE} 至 {BACKFILL_END_DATE}"
+		)
 
 
 def _merged_purchase_row(raw_row: dict, mapped_row: dict) -> dict:
@@ -68,7 +80,7 @@ def collect_backfill_plans(
 	duplicate_ids = set()
 	updated_values = []
 	lag_values = []
-	for window_start, window_end in iter_month_windows(start_date, end_date):
+	for window_start, window_end in iter_archive_month_windows(start_date, end_date):
 		for process_code in (LATINGO_PURCHASE_PROCESS_CODE, GENERIC_PURCHASE_PROCESS_CODE):
 			result = source.list_instances(
 				process_code=process_code,
@@ -92,6 +104,7 @@ def collect_backfill_plans(
 
 	plans = []
 	out_of_scope_count = 0
+	out_of_date_count = 0
 	for instance_id in sorted(instances_by_id):
 		instance = instances_by_id[instance_id]
 		fields = extract_form_fields(instance)
@@ -109,6 +122,9 @@ def collect_backfill_plans(
 			out_of_scope_count += 1
 			continue
 		plan = build_approval_plan(source_record, start_date, end_date)
+		if plan.get("exclusion_reason") == "申请日期超出范围":
+			out_of_date_count += 1
+			continue
 		plan["source_fingerprint"] = build_source_fingerprint(plan)
 		plan["source_fields"] = fields
 		plan["source_snapshot"] = instance
@@ -118,6 +134,7 @@ def collect_backfill_plans(
 		"plans": plans,
 		"duplicate_source_ids": sorted(duplicate_ids),
 		"out_of_scope_count": out_of_scope_count,
+		"out_of_date_count": out_of_date_count,
 		"source_updated_at": max(updated_values) if updated_values else None,
 		"source_lag_seconds": max(lag_values) if lag_values else None,
 		"fingerprint": build_preview_fingerprint(plans),
@@ -138,6 +155,12 @@ def analyze_backfill_state(plans, *, item_lookup, oa_by_process, oa_by_business)
 		if oa_row:
 			if (oa_row.get("source_fingerprint") or "") != (plan.get("source_fingerprint") or ""):
 				conflicts.append(f"来源实例 {instance_id} 已存在但来源指纹不同")
+			elif not (
+				oa_row.get("purchase_order_exists")
+				if oa_row.get("purchase_order_exists") is not None
+				else bool(oa_row.get("purchase_order"))
+			):
+				conflicts.append(f"来源实例 {instance_id} 已存在但未关联有效采购订单")
 			else:
 				existing.append(
 					{
@@ -225,12 +248,17 @@ def _get_item_for_preflight(item_code):
 
 
 def _get_oa_for_preflight(filters):
-	return frappe.db.get_value(
+	row = frappe.db.get_value(
 		"OA Purchase Request",
 		filters,
 		["name", "process_instance_id", "source_fingerprint", "purchase_order"],
 		as_dict=True,
 	)
+	if row:
+		row["purchase_order_exists"] = bool(
+			row.get("purchase_order") and frappe.db.exists("Purchase Order", row.get("purchase_order"))
+		)
+	return row
 
 
 def _preview_counts(plans) -> dict:
@@ -248,6 +276,41 @@ def _preview_counts(plans) -> dict:
 	}
 
 
+def _master_data_preflight(plans) -> dict:
+	actions = []
+	for doctype, name in (
+		("Supplier Group", TEMP_SUPPLIER_GROUP),
+		("Item Group", SERVICE_ITEM_GROUP),
+		("UOM", SERVICE_UOM),
+		("Supplier", TEMP_SUPPLIER),
+	):
+		actions.append(
+			{
+				"doctype": doctype,
+				"name": name,
+				"action": "reuse" if frappe.db.exists(doctype, name) else "create",
+			}
+		)
+
+	conflicts = []
+	for doctype, name in (
+		("Company", LATINGO_COMPANY),
+		("Warehouse", LATINGO_WAREHOUSE),
+		("Cost Center", LATINGO_COST_CENTER),
+	):
+		if not frappe.db.exists(doctype, name):
+			conflicts.append(f"{doctype} 不存在：{name}")
+	if any(plan.get("taxes") for plan in plans) and not frappe.db.exists("Account", LATINGO_INPUT_TAX_ACCOUNT):
+		conflicts.append(f"税费科目不存在：{LATINGO_INPUT_TAX_ACCOUNT}")
+
+	for item in _item_specs(plans).values():
+		if item.get("item_group") != SERVICE_ITEM_GROUP and not frappe.db.exists("Item Group", item.get("item_group")):
+			conflicts.append(f"物料组不存在：{item.get('item_group')}")
+		if item.get("stock_uom") != SERVICE_UOM and not frappe.db.exists("UOM", item.get("stock_uom")):
+			conflicts.append(f"单位不存在：{item.get('stock_uom')}")
+	return {"actions": actions, "conflicts": sorted(set(conflicts))}
+
+
 def _build_preview(start_date, end_date) -> dict:
 	collection = _collect_from_archive(start_date, end_date)
 	plans = collection.get("plans") or []
@@ -259,6 +322,8 @@ def _build_preview(start_date, end_date) -> dict:
 	)
 	eligible = [plan for plan in plans if plan.get("included")]
 	excluded = [plan for plan in plans if not plan.get("included")]
+	master_state = _master_data_preflight(eligible)
+	conflicts = sorted(set(state["conflicts"] + master_state["conflicts"]))
 	warnings = [
 		{
 			"process_instance_id": plan.get("process_instance_id"),
@@ -269,7 +334,7 @@ def _build_preview(start_date, end_date) -> dict:
 		if plan.get("warnings")
 	]
 	return {
-		"ok": not state["conflicts"],
+		"ok": not conflicts,
 		"dry_run": True,
 		"start_date": str(start_date),
 		"end_date": str(end_date),
@@ -280,19 +345,22 @@ def _build_preview(start_date, end_date) -> dict:
 		"eligible": eligible,
 		"excluded": excluded,
 		"item_actions": state["item_actions"],
+		"master_data_actions": master_state["actions"],
 		"existing": state["existing"],
-		"conflicts": state["conflicts"],
+		"conflicts": conflicts,
 		"warnings": warnings,
 		"duplicate_source_ids": collection.get("duplicate_source_ids") or [],
 		"out_of_scope_count": collection.get("out_of_scope_count") or 0,
+		"out_of_date_count": collection.get("out_of_date_count") or 0,
 	}
 
 
-@_whitelist
+@_whitelist(methods=["GET"])
 def preview_latingo_purchase_backfill(start_date, end_date):
 	"""Strictly read-only preview of the LatinGo approval backfill."""
 
 	_assert_system_manager()
+	_validate_backfill_range(start_date, end_date)
 	return _without_raw_snapshots(_build_preview(start_date, end_date))
 
 
@@ -543,11 +611,12 @@ def _create_backfill_pair(plan: dict) -> dict:
 	}
 
 
-@_whitelist
+@_whitelist(methods=["POST"])
 def apply_latingo_purchase_backfill(start_date, end_date, expected_fingerprint):
 	"""Atomically create all missing OA requests and draft purchase orders."""
 
 	_assert_system_manager()
+	_validate_backfill_range(start_date, end_date)
 	lock_name = "oa_purchase_request:latingo_purchase_backfill"
 	lock_rows = frappe.db.sql("select get_lock(%s, 15)", (lock_name,))
 	if not lock_rows or int(lock_rows[0][0] or 0) != 1:
@@ -617,13 +686,15 @@ def _current_source_plan(process_instance_id: str) -> dict | None:
 		if isinstance(row, dict)
 	]
 	source_record = source_from_instance(instance, fields=fields, detail_rows=detail_rows)
-	plan = build_approval_plan(source_record, "2026-07-01", "2026-09-24")
+	plan = build_approval_plan(source_record, BACKFILL_START_DATE, BACKFILL_END_DATE)
 	plan["source_fingerprint"] = build_source_fingerprint(plan)
 	return plan
 
 
 def _refresh_oa_source_internal(docname: str) -> dict:
 	oa_doc = frappe.get_doc("OA Purchase Request", docname)
+	if not oa_doc.get("backfill_imported"):
+		raise ValueError("refresh_oa_purchase_source 仅支持拉丁购历史回填记录")
 	process_instance_id = (oa_doc.get("process_instance_id") or "").strip()
 	if not process_instance_id:
 		raise ValueError("OA Purchase Request 缺少 process_instance_id")
@@ -677,7 +748,7 @@ def _refresh_oa_source_internal(docname: str) -> dict:
 	return result
 
 
-@_whitelist
+@_whitelist(methods=["POST"])
 def refresh_oa_purchase_source(docname):
 	"""Refresh source status only; never overwrite manually edited business values."""
 

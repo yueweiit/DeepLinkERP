@@ -26,6 +26,8 @@ SERVICE_ITEM_GROUP = "LGO 服务采购"
 SERVICE_UOM = "项：servicio"
 LATINGO_INPUT_TAX_ACCOUNT = "22210101 - 应交税费－应交增值税－进项税额 - 拉丁购"
 KNOWN_TAX_APPROVAL = "202608241502000513674"
+BACKFILL_START_DATE = "2026-07-01"
+BACKFILL_END_DATE = "2026-09-24"
 
 ALLOWED_GENERIC_ORGANIZATIONS = {
 	"obg线上业务组grupodenegociosenlinea",
@@ -193,8 +195,37 @@ def iter_month_windows(start_date, end_date) -> list[tuple[date, date]]:
 	return windows
 
 
+def iter_archive_month_windows(start_date, end_date) -> list[tuple[date, date]]:
+	"""Pad adjacent months because the archive indexes creation, not application, date."""
+
+	requested = iter_month_windows(start_date, end_date)
+	start = requested[0][0]
+	end = requested[-1][1]
+	if start.month == 1:
+		query_start = date(start.year - 1, 12, 1)
+	else:
+		query_start = date(start.year, start.month - 1, 1)
+	if end.month == 12:
+		next_year, next_month = end.year + 1, 1
+	else:
+		next_year, next_month = end.year, end.month + 1
+	query_end = date(next_year, next_month, monthrange(next_year, next_month)[1])
+	return iter_month_windows(query_start, query_end)
+
+
 def is_generic_organization_in_scope(value) -> bool:
 	return _normalized(value) in ALLOWED_GENERIC_ORGANIZATIONS
+
+
+def duplicate_process_instance_ids(values) -> list[str]:
+	"""Return normalized, nonblank process IDs that cannot receive a unique index."""
+
+	counts = {}
+	for value in values:
+		instance_id = _text(value)
+		if instance_id:
+			counts[instance_id] = counts.get(instance_id, 0) + 1
+	return sorted(instance_id for instance_id, count in counts.items() if count > 1)
 
 
 def _exclusion_reason(source: dict, start_date, end_date) -> str:

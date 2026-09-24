@@ -32,7 +32,7 @@ class FakeSource:
 		}
 
 
-def approval(instance_id, process_code, *, organization="拉丁购", detail_rows=None):
+def approval(instance_id, process_code, *, organization="拉丁购", detail_rows=None, apply_date="2026-07-12"):
 	return {
 		"processInstanceId": instance_id,
 		"businessId": f"OA-{instance_id}",
@@ -40,7 +40,7 @@ def approval(instance_id, process_code, *, organization="拉丁购", detail_rows
 		"status": "COMPLETED",
 		"result": "agree",
 		"form": {
-			"申请日期": "2026-07-12",
+			"申请日期": apply_date,
 			"申请部门/组织": organization,
 			"币种": "RMB",
 			"金额": "20",
@@ -75,7 +75,9 @@ def test_collect_backfill_plans_reads_each_process_in_month_windows_and_deduplic
 		map_purchase_row=lambda row: row,
 	)
 
-	assert len(source.calls) == 6
+	assert len(source.calls) == 10
+	assert source.calls[0][1:3] == ("2026-06-01", "2026-06-30")
+	assert source.calls[-1][1:3] == ("2026-10-01", "2026-10-31")
 	assert {row["process_instance_id"] for row in result["plans"]} == {"PI-LATIN", "PI-GENERIC"}
 	assert result["duplicate_source_ids"] == ["PI-GENERIC", "PI-LATIN"]
 	assert result["source_updated_at"] == "2026-09-24T10:00:00Z"
@@ -138,6 +140,32 @@ def test_collect_backfill_plans_omits_generic_non_obg_sources_from_scoped_previe
 	)
 	assert result["plans"] == []
 	assert result["out_of_scope_count"] == 1
+
+
+def test_collect_backfill_plans_filters_by_application_date_not_archive_create_window():
+	class WindowSource(FakeSource):
+		def list_instances(self, *, process_code, start, end, limit):
+			self.calls.append((process_code, str(start), str(end), limit))
+			if process_code == LATINGO_PURCHASE_PROCESS_CODE and str(start) == "2026-06-01":
+				return {
+					"items": [
+						approval("PI-IN", process_code, apply_date="2026-07-01"),
+						approval("PI-OUT", process_code, apply_date="2026-06-30"),
+					],
+				}
+			return {"items": []}
+
+	result = collect_backfill_plans(
+		"2026-07-01",
+		"2026-09-24",
+		source=WindowSource({}),
+		extract_form_fields=lambda value: value["form"],
+		extract_purchase_rows=lambda value: value["rows"],
+		map_purchase_row=lambda value: value,
+	)
+
+	assert [plan["process_instance_id"] for plan in result["plans"]] == ["PI-IN"]
+	assert result["out_of_date_count"] == 1
 
 
 def test_analyze_backfill_state_reports_create_update_reuse_and_conflict():
@@ -224,6 +252,19 @@ def test_analyze_backfill_state_allows_exact_rerun_but_blocks_business_key_colli
 	)
 	assert collision["conflicts"] == ["审批编号 OA-A 已被另一来源实例占用"]
 
+	incomplete = analyze_backfill_state(
+		[plan],
+		item_lookup=lambda _code: None,
+		oa_by_process=lambda _instance_id: {
+			"name": "OA-A",
+			"source_fingerprint": "same",
+			"purchase_order": "",
+			"purchase_order_exists": False,
+		},
+		oa_by_business=lambda _business_id: None,
+	)
+	assert incomplete["conflicts"] == ["来源实例 A 已存在但未关联有效采购订单"]
+
 
 def test_assert_apply_safe_rejects_fingerprint_drift_and_preflight_conflicts():
 	with pytest.raises(ValueError, match="预览指纹已变化"):
@@ -248,6 +289,9 @@ class FakeDB:
 
 	def set_value(self, *args, **kwargs):
 		self.write_calls.append((args, kwargs))
+
+	def exists(self, doctype, name):
+		return doctype in {"Company", "Warehouse", "Cost Center", "Account", "Item Group", "UOM"}
 
 	def sql(self, query, values=None):
 		self.sql_calls.append((query, values))
@@ -365,6 +409,22 @@ def test_preview_endpoint_requires_system_manager(monkeypatch):
 		preview_latingo_purchase_backfill("2026-07-01", "2026-09-24")
 
 
+@pytest.mark.parametrize(
+	("endpoint", "arguments"),
+	[
+		(preview_latingo_purchase_backfill, ("2026-06-30", "2026-09-24")),
+		(apply_latingo_purchase_backfill, ("2026-07-01", "2026-09-25", "fingerprint")),
+	],
+)
+def test_public_backfill_endpoints_enforce_the_fixed_business_range(monkeypatch, endpoint, arguments):
+	fake_frappe = FakeFrappe()
+	monkeypatch.setattr(service, "frappe", fake_frappe)
+	monkeypatch.setattr(service, "_build_preview", lambda *_args: pytest.fail("must not read source"))
+	with pytest.raises(ValueError, match="固定范围"):
+		endpoint(*arguments)
+	assert fake_frappe.db.sql_calls == []
+
+
 def apply_preview(plans, *, existing=None, conflicts=None, fingerprint="fingerprint"):
 	return {
 		"ok": not conflicts,
@@ -469,6 +529,19 @@ def test_submission_guard_ignores_ordinary_purchase_orders(monkeypatch):
 	monkeypatch.setattr(service, "frappe", FakeFrappe())
 	monkeypatch.setattr(service, "_refresh_oa_source_internal", lambda *_args: pytest.fail("must not refresh"))
 	validate_latingo_purchase_order_submission(FakePurchaseOrder(custom_latingo_backfill=0))
+
+
+def test_source_refresh_rejects_legacy_manual_oa_requests(monkeypatch):
+	fake_frappe = FakeFrappe()
+	fake_frappe.get_doc = lambda *_args: FakePurchaseOrder(
+		name="OA-LEGACY",
+		backfill_imported=0,
+		process_instance_id="PI-LEGACY",
+	)
+	monkeypatch.setattr(service, "frappe", fake_frappe)
+	monkeypatch.setattr(service, "_current_source_plan", lambda *_args: pytest.fail("must not read source"))
+	with pytest.raises(ValueError, match="仅支持拉丁购历史回填"):
+		service._refresh_oa_source_internal("OA-LEGACY")
 
 
 def test_submission_guard_refreshes_source_and_blocks_every_unresolved_review(monkeypatch):

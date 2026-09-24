@@ -5,7 +5,7 @@ app_description = "OA purchase request DocType for ERPNext"
 app_email = "308642281@qq.com"
 app_license = "mit"
 
-required_apps = ["erpnext"]
+required_apps = ["erpnext", "overseas_costing"]
 
 after_install = "oa_purchase_request.install.after_install"
 after_migrate = "oa_purchase_request.install.create_or_update_oa_purchase_request"

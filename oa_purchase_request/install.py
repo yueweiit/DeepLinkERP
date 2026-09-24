@@ -1,6 +1,8 @@
 import frappe
 from frappe import scrub
 
+from oa_purchase_request.latingo_backfill_domain import duplicate_process_instance_ids
+
 DOCTYPE = "OA Purchase Request"
 MODULE = "Buying"
 CLIENT_SCRIPT_NAME = "OA Purchase Request Hide Empty Fields"
@@ -201,6 +203,12 @@ STANDARD_CUSTOM_FIELDS = {
 	],
 }
 
+for _field in STANDARD_CUSTOM_FIELDS["Purchase Order"]:
+	if _field["fieldname"] == "custom_latingo_backfill":
+		_field["hidden"] = 1
+	else:
+		_field["depends_on"] = "eval:doc.custom_latingo_backfill"
+
 LIST_VIEW_FIELDS = {
 	"approval_status",
 	"purchase_order",
@@ -249,6 +257,8 @@ def create_or_update_oa_purchase_request():
 		doc = frappe.get_doc("DocType", DOCTYPE)
 		existing = {field.fieldname for field in doc.fields}
 		fields_by_name = {field.fieldname: field for field in doc.fields}
+		if "process_instance_id" in existing:
+			_assert_existing_process_instances_unique()
 	else:
 		doc = frappe.new_doc("DocType")
 		doc.name = DOCTYPE
@@ -318,6 +328,16 @@ def create_or_update_oa_purchase_request():
 	frappe.clear_cache(doctype=DOCTYPE)
 
 	return f"{DOCTYPE} created/updated successfully"
+
+
+def _assert_existing_process_instances_unique():
+	rows = frappe.get_all(DOCTYPE, fields=["process_instance_id"])
+	duplicates = duplicate_process_instance_ids(row.get("process_instance_id") for row in rows)
+	if duplicates:
+		frappe.throw(
+			"无法为 OA Purchase Request 启用 process_instance_id 唯一约束；重复值："
+			+ "、".join(duplicates)
+		)
 
 
 def create_or_update_standard_custom_fields():

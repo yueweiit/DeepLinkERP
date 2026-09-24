@@ -7,6 +7,8 @@ from oa_purchase_request.latingo_backfill_domain import (
 	LATINGO_PURCHASE_PROCESS_CODE,
 	build_approval_plan,
 	build_preview_fingerprint,
+	duplicate_process_instance_ids,
+	iter_archive_month_windows,
 	iter_month_windows,
 	source_from_instance,
 	submission_blockers,
@@ -42,6 +44,20 @@ def test_month_windows_are_inclusive_and_bounded():
 		(date(2026, 8, 1), date(2026, 8, 31)),
 		(date(2026, 9, 1), date(2026, 9, 24)),
 	]
+
+
+def test_archive_month_windows_pad_adjacent_months_for_create_date_lookup():
+	assert iter_archive_month_windows("2026-07-01", "2026-09-24") == [
+		(date(2026, 6, 1), date(2026, 6, 30)),
+		(date(2026, 7, 1), date(2026, 7, 31)),
+		(date(2026, 8, 1), date(2026, 8, 31)),
+		(date(2026, 9, 1), date(2026, 9, 30)),
+		(date(2026, 10, 1), date(2026, 10, 31)),
+	]
+
+
+def test_duplicate_process_instance_ids_ignores_blanks_and_trims_values():
+	assert duplicate_process_instance_ids([None, "", " A ", "A", "B"]) == ["A"]
 
 
 @pytest.mark.parametrize(
