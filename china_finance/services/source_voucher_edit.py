@@ -1,15 +1,20 @@
 """Controlled editing of formal vouchers from the China voucher ledger."""
 
+# Chinese user-facing messages intentionally use Chinese punctuation.
+# ruff: noqa: RUF001
+
+import json
+
 import frappe
 from frappe import _
 from frappe.model.workflow import get_workflow_name
-from frappe.utils import flt, getdate
+from frappe.utils import cint, flt, getdate
 
 from china_finance.services.voucher import _complete_voucher_workflow, get_company, get_posting_date
 
-
 EDITABLE_SOURCE_DOCTYPES = ("Journal Entry", "Payment Entry")
 EDIT_TOLERANCE = 0.005
+MAX_INLINE_ACCOUNT_CHANGES = 50
 
 
 def _get_source_document(source_doctype, source_name):
@@ -55,9 +60,7 @@ def _get_closing_blockers(doc):
 
 	frozen_date = frappe.db.get_value("Company", company, "accounts_frozen_till_date")
 	if frozen_date and posting_date <= getdate(frozen_date):
-		blockers.append(
-			_("凭证日期 {0} 已被冻结（冻结至 {1}）").format(posting_date, getdate(frozen_date))
-		)
+		blockers.append(_("凭证日期 {0} 已被冻结（冻结至 {1}）").format(posting_date, getdate(frozen_date)))
 
 	period_closing_vouchers = frappe.db.get_all(
 		"Period Closing Voucher",
@@ -98,13 +101,13 @@ def _get_bank_transaction_names(doc):
 	names = []
 	if frappe.db.exists("DocType", "Bank Transaction Payments"):
 		names.extend(
-		frappe.db.get_all(
-			"Bank Transaction Payments",
-			filters={"payment_document": doc.doctype, "payment_entry": doc.name},
-			pluck="parent",
+			frappe.db.get_all(
+				"Bank Transaction Payments",
+				filters={"payment_document": doc.doctype, "payment_entry": doc.name},
+				pluck="parent",
+			)
+			or []
 		)
-		or []
-	)
 
 	if doc.meta.has_field("custom_china_bank_transaction") and doc.get("custom_china_bank_transaction"):
 		names.append(doc.custom_china_bank_transaction)
@@ -139,18 +142,15 @@ def _get_bank_blockers(doc):
 			},
 			"allocated_amount",
 		)
-		if (
-			flt(allocated_row) > EDIT_TOLERANCE
-			or doc.get("clearance_date")
-		):
+		if flt(allocated_row) > EDIT_TOLERANCE or doc.get("clearance_date"):
 			blockers.append(_("已参与银行对账（银行流水 {0}），请先撤销银行对账").format(name))
 
 	return list(dict.fromkeys(blockers))
 
 
 def _get_quick_unreconcile_info(doc):
-	"""Allow one-click editing only for a single, full, matched JE allocation."""
-	if doc.doctype != "Journal Entry" or doc.docstatus != 1:
+	"""Allow inline editing only for one unambiguous, full bank allocation."""
+	if doc.doctype not in EDITABLE_SOURCE_DOCTYPES or doc.docstatus != 1:
 		return None
 
 	names = _get_bank_transaction_names(doc)
@@ -180,15 +180,18 @@ def _get_quick_unreconcile_info(doc):
 		return None
 
 	if (
-		frappe.db.has_column("Bank Transaction", "custom_china_journal_entry")
+		doc.doctype == "Journal Entry"
+		and frappe.db.has_column("Bank Transaction", "custom_china_journal_entry")
 		and bank_transaction.get("custom_china_journal_entry") not in (None, "", doc.name)
 	):
 		return None
 
+	bank_account = frappe.db.get_value("Bank Account", bank_transaction.bank_account, "account")
 	return {
 		"bank_transaction": bank_transaction.name,
 		"amount": flt(entry.allocated_amount),
 		"currency": bank_transaction.currency,
+		"bank_account": bank_account,
 	}
 
 
@@ -206,15 +209,19 @@ def _get_bank_reconciliation_feedback(doc, bank_transaction_names):
 			["name", "docstatus", "status", "allocated_amount", "unallocated_amount"],
 			as_dict=True,
 		)
-		allocated_row = frappe.db.get_value(
-			"Bank Transaction Payments",
-			{
-				"parent": name,
-				"payment_document": doc.doctype,
-				"payment_entry": doc.name,
-			},
-			"allocated_amount",
-		) if frappe.db.exists("DocType", "Bank Transaction Payments") else None
+		allocated_row = (
+			frappe.db.get_value(
+				"Bank Transaction Payments",
+				{
+					"parent": name,
+					"payment_document": doc.doctype,
+					"payment_entry": doc.name,
+				},
+				"allocated_amount",
+			)
+			if frappe.db.exists("DocType", "Bank Transaction Payments")
+			else None
+		)
 
 		is_reconciled = bool(
 			bank_transaction
@@ -351,10 +358,338 @@ def _build_status(doc):
 	}
 
 
+def _account_values(account):
+	return frappe.db.get_value(
+		"Account",
+		account,
+		[
+			"name",
+			"company",
+			"account_number",
+			"account_name",
+			"account_currency",
+			"account_type",
+			"is_group",
+			"disabled",
+		],
+		as_dict=True,
+	)
+
+
+def _inline_edit_targets(doc):
+	"""Return the only source fields that the ledger may edit.
+
+	The edit key is deliberately resolved again on every request.  Clients never
+	get to submit an arbitrary field name or child-row mutation.
+	"""
+	targets = {}
+
+	def add(key, fieldname, account, *, row=None, parentfield=None, party_type=None, party=None, role=None):
+		if not account:
+			return
+		account_values = _account_values(account) or frappe._dict()
+		targets[key] = frappe._dict(
+			key=key,
+			fieldname=fieldname,
+			account=account,
+			account_currency=account_values.get("account_currency"),
+			account_type=account_values.get("account_type"),
+			row_name=row.name if row else None,
+			row_idx=row.idx if row else None,
+			parentfield=parentfield,
+			party_type=party_type,
+			party=party,
+			role=role,
+		)
+
+	if doc.doctype == "Journal Entry":
+		for row in doc.get("accounts") or []:
+			add(
+				f"je:{row.name}",
+				"account",
+				row.account,
+				row=row,
+				parentfield="accounts",
+				party_type=row.party_type,
+				party=row.party,
+				role="journal_line",
+			)
+		return targets
+
+	party_field = {
+		"Receive": "paid_from",
+		"Pay": "paid_to",
+	}.get(doc.payment_type)
+	for fieldname in ("paid_from", "paid_to"):
+		add(
+			f"pe:field:{fieldname}",
+			fieldname,
+			doc.get(fieldname),
+			party_type=doc.party_type if fieldname == party_field else None,
+			party=doc.party if fieldname == party_field else None,
+			role="payment_party" if fieldname == party_field else "payment_bank",
+		)
+	for row in doc.get("deductions") or []:
+		add(
+			f"pe:deductions:{row.name}",
+			"account",
+			row.account,
+			row=row,
+			parentfield="deductions",
+			role="payment_deduction",
+		)
+	for row in doc.get("taxes") or []:
+		add(
+			f"pe:taxes:{row.name}",
+			"account_head",
+			row.account_head,
+			row=row,
+			parentfield="taxes",
+			role="payment_tax",
+		)
+	return targets
+
+
+def _resolve_inline_edit_target(doc, edit_key):
+	target = _inline_edit_targets(doc).get(str(edit_key or ""))
+	if not target:
+		frappe.throw(_("该分录已变化或不支持表内修改，请刷新报表"))
+	return target
+
+
+def get_inline_row_edit_metadata(doc, ledger_row):
+	"""Map a rendered ledger row back to exactly one editable source field."""
+	targets = _inline_edit_targets(doc)
+	account = ledger_row.get("account")
+	voucher_detail_no = ledger_row.get("voucher_detail_no") or ledger_row.get("source_row_name")
+	candidates = []
+
+	if doc.doctype == "Journal Entry":
+		if voucher_detail_no:
+			candidate = targets.get(f"je:{voucher_detail_no}")
+			if candidate and candidate.account == account:
+				candidates.append(candidate)
+		else:
+			candidates.extend(target for target in targets.values() if target.account == account)
+	else:
+		# Main Payment Entry fields can produce several GL rows.  They deliberately
+		# share one edit key so the browser can update them as one linked group.
+		for fieldname in ("paid_from", "paid_to"):
+			candidate = targets.get(f"pe:field:{fieldname}")
+			if candidate and candidate.account == account:
+				candidates.append(candidate)
+		if voucher_detail_no:
+			for parentfield in ("deductions", "taxes"):
+				candidate = targets.get(f"pe:{parentfield}:{voucher_detail_no}")
+				if candidate and candidate.account == account:
+					candidates.append(candidate)
+		else:
+			candidates.extend(
+				target
+				for target in targets.values()
+				if target.parentfield in ("deductions", "taxes") and target.account == account
+			)
+
+	unique = {candidate.key: candidate for candidate in candidates}
+	if len(unique) != 1:
+		return {
+			"editable": False,
+			"reason": _("无法把该展示行唯一对应到来源单据字段")
+			if unique
+			else _("该展示行由系统计算，不能直接修改科目"),
+		}
+	target = next(iter(unique.values()))
+	return {
+		"editable": True,
+		"edit_key": target.key,
+		"edit_group": target.key,
+		"account_currency": target.account_currency,
+	}
+
+
+def annotate_inline_edit_rows(rows):
+	"""Attach non-persistent editing metadata to report rows in-place."""
+	documents = {}
+	statuses = {}
+	for row in rows:
+		doctype = row.get("source_doctype")
+		name = row.get("source_name")
+		if doctype not in EDITABLE_SOURCE_DOCTYPES or not name:
+			row["inline_edit_reason"] = _("该来源类型不支持表内修改")
+			continue
+		key = (doctype, name)
+		if key not in documents:
+			try:
+				documents[key] = _get_source_document(doctype, name)
+				statuses[key] = _build_status(documents[key])
+			except Exception as exc:
+				documents[key] = None
+				statuses[key] = {"can_edit": False, "reason": str(exc), "quick_unreconcile": None}
+		doc = documents[key]
+		status = statuses[key]
+		row["edit_source_doctype"] = doctype
+		row["edit_source_name"] = name
+		row["edit_voucher_key"] = f"{doctype}:{name}"
+		if not doc:
+			row["inline_edit_reason"] = status.get("reason")
+			continue
+		row["edit_source_modified"] = str(doc.modified)
+		mapping = get_inline_row_edit_metadata(doc, row)
+		can_edit = bool(status.get("can_edit") or status.get("quick_unreconcile"))
+		row["inline_bank_transaction"] = next(iter(status.get("bank_transactions") or []), None)
+		row["editable_account"] = bool(mapping.get("editable") and can_edit)
+		row["edit_key"] = mapping.get("edit_key")
+		row["edit_group"] = mapping.get("edit_group")
+		row["account_currency"] = mapping.get("account_currency") or row.get("account_currency")
+		row["inline_edit_reason"] = mapping.get("reason") or (None if can_edit else status.get("reason"))
+	return rows
+
+
+def _compatible_account_reason(doc, target, account):
+	values = _account_values(account)
+	if not values:
+		return _("科目不存在")
+	if values.company != get_company(doc) or values.is_group or values.disabled:
+		return _("只能选择本公司启用的明细科目")
+	if target.account_currency and values.account_currency != target.account_currency:
+		return _("只能选择币种为 {0} 的科目").format(target.account_currency)
+
+	expected_party_type = {"Customer": "Receivable", "Supplier": "Payable"}.get(target.party_type)
+	if expected_party_type and values.account_type != expected_party_type:
+		return _("当前往来单位要求使用{0}科目").format(_(expected_party_type))
+	if not expected_party_type and values.account_type in ("Receivable", "Payable"):
+		return _("当前分录没有往来单位，不能选择应收或应付科目")
+	if target.role in ("payment_party", "payment_bank") and target.account_type:
+		if values.account_type != target.account_type:
+			return _("收付款主科目必须保持科目类型 {0}").format(_(target.account_type))
+	return None
+
+
+def _validate_compatible_account(doc, target, account):
+	reason = _compatible_account_reason(doc, target, account)
+	if reason:
+		frappe.throw(reason)
+	return _account_values(account)
+
+
 @frappe.whitelist()
-def get_source_edit_status(source_doctype, source_name):
-	"""Return the server-side edit decision used by the voucher ledger UI."""
-	return _build_status(_get_source_document(source_doctype, source_name))
+@frappe.validate_and_sanitize_search_inputs
+def get_compatible_accounts(doctype, txt, searchfield, start, page_len, filters):
+	"""Link-field query for accounts that remain valid when only account changes."""
+	filters = frappe.parse_json(filters) if isinstance(filters, str) else frappe._dict(filters or {})
+	doc = _get_source_document(filters.get("source_doctype"), filters.get("source_name"))
+	target = _resolve_inline_edit_target(doc, filters.get("edit_key"))
+	frappe.has_permission("Account", "read", throw=True)
+
+	account_filters = {
+		"company": get_company(doc),
+		"is_group": 0,
+		"disabled": 0,
+		"account_currency": target.account_currency,
+	}
+	expected_party_type = {"Customer": "Receivable", "Supplier": "Payable"}.get(target.party_type)
+	if expected_party_type:
+		account_filters["account_type"] = expected_party_type
+	elif target.role in ("payment_party", "payment_bank") and target.account_type:
+		account_filters["account_type"] = target.account_type
+	else:
+		account_filters["account_type"] = ["not in", ["Receivable", "Payable"]]
+
+	rows = frappe.get_list(
+		"Account",
+		filters=account_filters,
+		or_filters={
+			"name": ["like", f"%{txt}%"],
+			"account_number": ["like", f"%{txt}%"],
+			"account_name": ["like", f"%{txt}%"],
+		},
+		fields=["name", "account_number", "account_name"],
+		order_by="account_number, account_name, name",
+		start=cint(start),
+		page_length=cint(page_len),
+	)
+	return [
+		[row.name, " - ".join(part for part in (row.account_number, row.account_name) if part)]
+		for row in rows
+	]
+
+
+def _parse_inline_changes(changes):
+	changes = frappe.parse_json(changes) if isinstance(changes, str) else changes
+	if not isinstance(changes, list) or not 1 <= len(changes) <= MAX_INLINE_ACCOUNT_CHANGES:
+		frappe.throw(_("一次只能修改 1 至 {0} 个科目").format(MAX_INLINE_ACCOUNT_CHANGES))
+	parsed = {}
+	for change in changes:
+		if not isinstance(change, dict) or not change.get("edit_key") or not change.get("account"):
+			frappe.throw(_("科目修改数据不完整，请刷新后重试"))
+		parsed[str(change["edit_key"])] = str(change["account"])
+	return parsed
+
+
+def _resolve_inline_changes(doc, changes):
+	diffs = []
+	for edit_key, account in _parse_inline_changes(changes).items():
+		target = _resolve_inline_edit_target(doc, edit_key)
+		if target.account == account:
+			continue
+		new_account = _validate_compatible_account(doc, target, account)
+		diffs.append(
+			frappe._dict(
+				edit_key=edit_key,
+				old_account=target.account,
+				new_account=account,
+				new_account_currency=new_account.account_currency,
+				new_account_type=new_account.account_type,
+				fieldname=target.fieldname,
+				parentfield=target.parentfield,
+				row_idx=target.row_idx,
+				role=target.role,
+			)
+		)
+	if not diffs:
+		frappe.throw(_("没有检测到需要保存的科目变化"))
+	return diffs
+
+
+def _assert_source_version(doc, modified):
+	if not modified or str(doc.modified) != str(modified):
+		frappe.throw(_("凭证已被其他人修改，请刷新后重试"), frappe.TimestampMismatchError)
+
+
+def _inline_preflight(doc, modified, changes):
+	_assert_source_version(doc, modified)
+	status = _build_status(doc)
+	can_apply = status.get("can_edit") or status.get("quick_unreconcile")
+	if not can_apply:
+		frappe.throw(_("当前凭证不能修改：{0}").format(status.get("reason") or _("不满足修改条件")))
+	diffs = _resolve_inline_changes(doc, changes)
+	quick_info = status.get("quick_unreconcile")
+	if quick_info and quick_info.get("bank_account"):
+		for diff in diffs:
+			if diff.old_account == quick_info.get("bank_account"):
+				frappe.throw(_("已核销凭证不能从查凭证修改银行流水对应的银行科目"))
+	return status, diffs
+
+
+@frappe.whitelist()
+def preview_inline_account_changes(source_doctype, source_name, modified, changes):
+	"""Validate staged changes without mutating the source voucher."""
+	doc = _get_source_document(source_doctype, source_name)
+	status, diffs = _inline_preflight(doc, modified, changes)
+	return {
+		"mode": "amend" if doc.docstatus == 1 else "draft",
+		"requires_confirmation": doc.docstatus == 1,
+		"changes": [
+			{
+				"edit_key": diff.edit_key,
+				"old_account": diff.old_account,
+				"new_account": diff.new_account,
+			}
+			for diff in diffs
+		],
+		"bank_action": "unreconcile_and_restore" if status.get("quick_unreconcile") else "none",
+		"bank_transaction": (status.get("quick_unreconcile") or {}).get("bank_transaction"),
+	}
 
 
 def _lock_source_row(source_doctype, source_name):
@@ -393,6 +728,7 @@ def prepare_source_voucher_edit(source_doctype, source_name):
 		frappe.throw(_("原凭证取消尚未完成，请稍后再试"))
 
 	amended = frappe.copy_doc(doc)
+	amended.docstatus = 0
 	amended.amended_from = source_name
 	_reset_amendment_workflow_state(amended)
 	if amended.meta.has_field("custom_china_voucher_number"):
@@ -404,7 +740,11 @@ def prepare_source_voucher_edit(source_doctype, source_name):
 		amended.custom_china_bank_transaction = bank_transaction_names[0]
 
 	amended.insert()
-	if bank_transaction_names and frappe.db.has_column("Bank Transaction", "custom_china_journal_entry"):
+	if (
+		source_doctype == "Journal Entry"
+		and bank_transaction_names
+		and frappe.db.has_column("Bank Transaction", "custom_china_journal_entry")
+	):
 		for bank_transaction_name in bank_transaction_names:
 			frappe.db.set_value(
 				"Bank Transaction",
@@ -427,17 +767,8 @@ def prepare_source_voucher_edit(source_doctype, source_name):
 	}
 
 
-@frappe.whitelist()
-def unreconcile_and_prepare_source_voucher_edit(source_doctype, source_name):
-	"""Remove this JE's sole full bank match, then immediately create its amendment draft."""
-	doc = _get_source_document(source_doctype, source_name)
-	if source_doctype != "Journal Entry":
-		frappe.throw(_("一键撤销核销并修改目前仅支持记账凭证"))
-
-	_lock_source_row(source_doctype, source_name)
-	doc = _get_source_document(source_doctype, source_name)
-	status = _build_status(doc)
-	quick_info = status.get("quick_unreconcile")
+def _remove_quick_reconciliation(doc, quick_info=None):
+	quick_info = quick_info or _get_quick_unreconcile_info(doc)
 	if not quick_info:
 		frappe.throw(_("当前银行流水不满足安全的一键撤销条件，请按提示先手动撤销核销"))
 
@@ -468,14 +799,19 @@ def unreconcile_and_prepare_source_voucher_edit(source_doctype, source_name):
 
 	bank_transaction.remove_payment_entry(entry)
 	bank_transaction.save()
-
-	result = prepare_source_voucher_edit(source_doctype, source_name)
-	if result.get("name"):
-		result["unreconciled_bank_transaction"] = bank_transaction_name
-		result["message"] = _(
-			"已撤销银行流水 {0} 中与当前凭证对应的核销，并生成修订草稿 {1}"
-		).format(bank_transaction_name, result["name"])
-	return result
+	if (
+		doc.doctype == "Journal Entry"
+		and frappe.db.has_column("Bank Transaction", "custom_china_journal_entry")
+		and bank_transaction.get("custom_china_journal_entry") == doc.name
+	):
+		frappe.db.set_value(
+			"Bank Transaction",
+			bank_transaction.name,
+			"custom_china_journal_entry",
+			None,
+			update_modified=False,
+		)
+	return quick_info
 
 
 @frappe.whitelist()
@@ -494,10 +830,26 @@ def complete_source_voucher_edit(source_doctype, source_name):
 			"name": doc.name,
 			"message": _("未检测到凭证内容变化，修订草稿暂未记账"),
 		}
+	if doc.doctype == "Journal Entry":
+		from china_finance.services.voucher_preparation import READY_FIELDS, content_hash, mode_enabled
+
+		if mode_enabled(doc.company, doc.posting_date):
+			doc.db_set(
+				{
+					READY_FIELDS[0]: content_hash(doc),
+					READY_FIELDS[1]: frappe.session.user,
+					READY_FIELDS[2]: frappe.utils.now_datetime(),
+				}
+			)
+			doc.reload()
 
 	doc = _complete_voucher_workflow(doc)
 	bank_transaction_names = _get_bank_transaction_names(doc)
-	if bank_transaction_names and frappe.db.has_column("Bank Transaction", "custom_china_journal_entry"):
+	if (
+		doc.doctype == "Journal Entry"
+		and bank_transaction_names
+		and frappe.db.has_column("Bank Transaction", "custom_china_journal_entry")
+	):
 		for bank_transaction_name in bank_transaction_names:
 			frappe.db.set_value(
 				"Bank Transaction",
@@ -523,4 +875,165 @@ def complete_source_voucher_edit(source_doctype, source_name):
 		"doc": doc.as_dict(),
 		"bank_reconciliation": bank_reconciliation,
 		"message": message,
+	}
+
+
+def _find_child_by_idx(doc, parentfield, row_idx):
+	rows = [row for row in doc.get(parentfield) or [] if row.idx == row_idx]
+	if len(rows) != 1:
+		frappe.throw(_("来源分录结构已变化，请刷新报表后重试"))
+	return rows[0]
+
+
+def _apply_inline_diffs(doc, diffs):
+	for diff in diffs:
+		if diff.parentfield:
+			target = _find_child_by_idx(doc, diff.parentfield, diff.row_idx)
+			target.set(diff.fieldname, diff.new_account)
+			if doc.doctype == "Journal Entry":
+				target.account_currency = diff.new_account_currency
+			continue
+
+		doc.set(diff.fieldname, diff.new_account)
+		if doc.doctype == "Payment Entry" and diff.fieldname in ("paid_from", "paid_to"):
+			doc.set(f"{diff.fieldname}_account_currency", diff.new_account_currency)
+			account_type_field = f"{diff.fieldname}_account_type"
+			if doc.meta.has_field(account_type_field):
+				doc.set(account_type_field, diff.new_account_type)
+
+
+def _audit_inline_changes(doc, diffs, *, amended_from=None):
+	lines = [
+		_("查凭证表内科目更正"),
+		*[
+			"{0} → {1}".format(
+				frappe.utils.escape_html(diff.old_account),
+				frappe.utils.escape_html(diff.new_account),
+			)
+			for diff in diffs
+		],
+	]
+	if amended_from:
+		lines.append(_("原凭证：{0}").format(frappe.utils.escape_html(amended_from)))
+	doc.add_comment("Comment", "<br>".join(lines))
+
+
+def _restore_quick_reconciliation(doc, quick_info):
+	if not quick_info:
+		return {"status": "not_applicable", "successful": [], "failed": []}
+	bank_transaction_name = quick_info["bank_transaction"]
+	if not frappe.db.sql(
+		"SELECT name FROM `tabBank Transaction` WHERE name=%s FOR UPDATE",
+		(bank_transaction_name,),
+	):
+		frappe.throw(_("银行流水不存在，无法恢复核销"))
+
+	bank_transaction = frappe.get_doc("Bank Transaction", bank_transaction_name)
+	if doc.doctype == "Journal Entry" and frappe.db.has_column(
+		"Bank Transaction", "custom_china_journal_entry"
+	):
+		frappe.db.set_value(
+			"Bank Transaction",
+			bank_transaction_name,
+			"custom_china_journal_entry",
+			doc.name,
+			update_modified=False,
+		)
+
+	existing = next(
+		(
+			row
+			for row in bank_transaction.payment_entries
+			if row.payment_document == doc.doctype and row.payment_entry == doc.name
+		),
+		None,
+	)
+	if not existing:
+		from erpnext.accounts.doctype.bank_reconciliation_tool.bank_reconciliation_tool import (
+			reconcile_vouchers,
+		)
+
+		reconcile_vouchers(
+			bank_transaction_name,
+			json.dumps(
+				[
+					{
+						"payment_doctype": doc.doctype,
+						"payment_name": doc.name,
+						"amount": quick_info["amount"],
+					}
+				]
+			),
+		)
+	feedback = _get_bank_reconciliation_feedback(doc, [bank_transaction_name])
+	if feedback["status"] != "success":
+		frappe.throw(_("更正后未能恢复银行流水 {0} 的核销，全部修改已回滚").format(bank_transaction_name))
+	return feedback
+
+
+@frappe.whitelist(methods=["POST"])
+def apply_inline_account_changes(source_doctype, source_name, modified, changes):
+	"""Apply one voucher's changes atomically, including cancellation and re-posting."""
+	savepoint = "inline_account_edit_" + frappe.generate_hash(length=8)
+	frappe.db.savepoint(savepoint)
+	try:
+		return _apply_inline_account_changes(source_doctype, source_name, modified, changes)
+	except Exception:
+		frappe.db.rollback(save_point=savepoint)
+		raise
+
+
+def _apply_inline_account_changes(source_doctype, source_name, modified, changes):
+	doc = _get_source_document(source_doctype, source_name)
+	_lock_source_row(source_doctype, source_name)
+	doc = _get_source_document(source_doctype, source_name)
+	status, diffs = _inline_preflight(doc, modified, changes)
+
+	if doc.docstatus == 0:
+		_apply_inline_diffs(doc, diffs)
+		doc.save(ignore_version=False)
+		_audit_inline_changes(doc, diffs)
+		return {
+			"mode": "draft",
+			"posted": False,
+			"source_doctype": doc.doctype,
+			"source_name": doc.name,
+			"modified": str(doc.modified),
+			"message": _("科目已保存；如该凭证原已核对，请重新核对后记账"),
+		}
+
+	quick_info = status.get("quick_unreconcile")
+	if quick_info:
+		_remove_quick_reconciliation(doc, quick_info)
+	prepare_result = prepare_source_voucher_edit(source_doctype, source_name)
+	if not prepare_result.get("name"):
+		frappe.throw(_("后台未生成修订凭证，全部修改已回滚"))
+
+	from china_finance.services.voucher import process_cancellation_snapshot
+
+	cancellation = process_cancellation_snapshot(source_doctype, source_name)
+	if cancellation.get("status") != "resolved":
+		frappe.throw(_("原凭证冲销审计记录生成失败，全部修改已回滚"))
+
+	amended = _get_source_document(source_doctype, prepare_result["name"])
+	_apply_inline_diffs(amended, diffs)
+	amended.save(ignore_version=False)
+	post_result = complete_source_voucher_edit(source_doctype, amended.name)
+	if not post_result.get("posted"):
+		frappe.throw(post_result.get("message") or _("修订凭证未完成记账，全部修改已回滚"))
+	amended = _get_source_document(source_doctype, amended.name)
+	reconciliation = _restore_quick_reconciliation(amended, quick_info)
+
+	original = _get_source_document(source_doctype, source_name)
+	_audit_inline_changes(original, diffs, amended_from=amended.name)
+	_audit_inline_changes(amended, diffs, amended_from=source_name)
+	return {
+		"mode": "amended",
+		"posted": True,
+		"source_doctype": amended.doctype,
+		"source_name": amended.name,
+		"amended_from": source_name,
+		"modified": str(amended.modified),
+		"bank_reconciliation": reconciliation,
+		"message": _("科目更正已完成，修订凭证 {0} 已重新记账").format(amended.name),
 	}

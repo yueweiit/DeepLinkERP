@@ -1,3 +1,5 @@
+/* global china_finance */
+
 frappe.query_reports["China Voucher Ledger"] = {
 	filters: [
 		{fieldname: "receipt_import", label: __("回单批次"), fieldtype: "Link", options: "China Bank Receipt Import"},
@@ -53,6 +55,7 @@ frappe.query_reports["China Voucher Ledger"] = {
 		// Keep one fixed width for each column so every row stays aligned.
 		datatable_options.layout = "fixed";
 		datatable_options.checkboxColumn = true;
+		datatable_options.getEditor = (...args) => create_inline_account_editor(frappe.query_report, ...args);
 		return datatable_options;
 	},
 	formatter(value, row, column, data, default_formatter) {
@@ -71,14 +74,17 @@ frappe.query_reports["China Voucher Ledger"] = {
 			const route = frappe.utils.get_form_link(data.source_doctype, data.source_name);
 			return `<a href="${route}" class="china-voucher-link" data-source-doctype="${encodeURIComponent(data.source_doctype)}" data-source-name="${encodeURIComponent(data.source_name)}">${formatted}</a>`;
 		}
-		const editable_source_doctypes = ["Journal Entry", "Payment Entry"];
-		if (
-			column.fieldname === "source_action" &&
-			data?.source_doctype &&
-			editable_source_doctypes.includes(data.source_doctype) &&
-			data?.source_name
-		) {
-			return `<button type="button" class="btn btn-xs btn-default china-voucher-edit-source" data-source-doctype="${encodeURIComponent(data.source_doctype)}" data-source-name="${encodeURIComponent(data.source_name)}">${__([0, 3].includes(data.voucher_status) ? "编辑草稿" : "受控更正")}</button>`;
+		if (column.fieldname === "account") {
+			const label = frappe.utils.escape_html(data?.account_label || value || "");
+			const title = frappe.utils.escape_html(
+				data?.editable_account ? __("点击选择兼容科目") : (data?.inline_edit_reason || __("该行不能直接修改"))
+			);
+			const dirty = data?._inline_account_dirty ? " is-dirty" : "";
+			const editable = data?.editable_account ? " is-editable" : " is-read-only";
+			return `<span class="china-inline-account${editable}${dirty}" title="${title}">${label}${data?.editable_account ? '<span class="china-inline-account__arrow">▾</span>' : ""}</span>`;
+		}
+		if (column.fieldname === "source_action" && data?.is_voucher_first_row && data?.edit_source_name) {
+			return render_inline_voucher_actions(frappe.query_report, data);
 		}
 		if (!data || !["posting_date", "statutory_number", "accounting_period"].includes(column.fieldname)) {
 			return formatted;
@@ -98,7 +104,8 @@ frappe.query_reports["China Voucher Ledger"] = {
 			const source_name = decodeURIComponent(event.currentTarget.dataset.sourceName);
 			frappe.set_route("Form", source_doctype, source_name);
 		});
-		bind_voucher_source_edit_click(report);
+		bind_inline_account_actions(report);
+		wrap_report_refresh_for_inline_edits(report);
 		report.page.wrapper.on("click", ".china-voucher-snapshot-link", (event) => {
 			event.preventDefault();
 			const snapshot_name = decodeURIComponent(event.currentTarget.dataset.snapshotName);
@@ -119,188 +126,287 @@ frappe.query_reports["China Voucher Ledger"] = {
 	},
 };
 
-function bind_voucher_source_edit_click(report) {
-	const page_wrapper = report?.page?.wrapper?.[0] || report?.page?.wrapper;
-	if (!page_wrapper?.addEventListener) return;
-
-	if (report._china_voucher_source_edit_click_handler) {
-		page_wrapper.removeEventListener(
-			"click",
-			report._china_voucher_source_edit_click_handler,
-			true
-		);
-	}
-
-	// Capture before DataTable handles the click. Its own cell handler can stop
-	// bubbling, which prevents delegated handlers on the report wrapper from
-	// seeing clicks on buttons rendered inside a cell.
-	report._china_voucher_source_edit_click_handler = (event) => {
-		const target = event.target instanceof Element ? event.target : event.target?.parentElement;
-		const button = target?.closest?.(".china-voucher-edit-source");
-		if (!button || !page_wrapper.contains(button)) return;
-
-		event.preventDefault();
-		event.stopPropagation();
-		edit_source_voucher(report, button);
-	};
-	page_wrapper.addEventListener("click", report._china_voucher_source_edit_click_handler, true);
+function get_inline_edit_state(report) {
+	return report?._china_inline_account_state || null;
 }
 
-function edit_source_voucher(report, button) {
-	const source_doctype = decodeURIComponent(button.dataset.sourceDoctype || "");
-	const source_name = decodeURIComponent(button.dataset.sourceName || "");
-	if (!source_doctype || !source_name) {
-		frappe.msgprint({
-			message: __("没有找到来源凭证信息，请刷新报表后重试"),
-			indicator: "orange",
-			title: __("无法编辑来源凭证"),
-		});
+function render_inline_voucher_actions(report, data) {
+	const state = get_inline_edit_state(report);
+	const active = state?.voucher_key === data.edit_voucher_key;
+	const disabled = active && state.pending ? " disabled" : "";
+	const source_doctype = encodeURIComponent(data.edit_source_doctype);
+	const source_name = encodeURIComponent(data.edit_source_name);
+	const common = `data-source-doctype="${source_doctype}" data-source-name="${source_name}" data-voucher-key="${frappe.utils.escape_html(data.edit_voucher_key)}"`;
+	const buttons = [
+		`<button type="button" class="btn btn-xs btn-default china-inline-open-source" ${common}>${__("打开原单")}</button>`,
+	];
+	if (active && state.changes.size) {
+		buttons.push(`<button type="button" class="btn btn-xs btn-primary china-inline-save" ${common}${state.confirming ? " hidden" : ""}${disabled}>${__("保存修改")}</button>`);
+		buttons.push(`<button type="button" class="btn btn-xs btn-danger china-inline-confirm" ${common}${state.confirming ? "" : " hidden"}${disabled}>${__("确认更正")}</button>`);
+		buttons.push(`<button type="button" class="btn btn-xs btn-default china-inline-cancel" ${common}${disabled}>${__("取消")}</button>`);
+	}
+	return `<div class="china-inline-actions">${buttons.join("")}</div>`;
+}
+
+function create_inline_account_editor(report, col_index, row_index, value, parent, column, row, data) {
+	if (column?.id !== "account") return false;
+	if (!data?.editable_account) {
+		show_inline_notice(
+			report,
+			data?.inline_edit_reason || __("该行不能直接修改科目"),
+			"orange",
+			data?.inline_bank_transaction,
+		);
+		return false;
+	}
+
+	const state = get_inline_edit_state(report);
+	if (state?.voucher_key && state.voucher_key !== data.edit_voucher_key) {
+		show_inline_notice(report, __("请先保存或取消当前凭证的修改，再编辑另一张凭证"), "orange");
+		return false;
+	}
+
+	let initializing = true;
+	const control = frappe.ui.form.make_control({
+		df: {
+			fieldname: "inline_account",
+			fieldtype: "Link",
+			options: "Account",
+			label: __("科目"),
+			get_query: () => ({
+				query: "china_finance.services.source_voucher_edit.get_compatible_accounts",
+				filters: {
+					source_doctype: data.edit_source_doctype,
+					source_name: data.edit_source_name,
+					edit_key: data.edit_key,
+				},
+			}),
+		},
+		parent,
+		render_input: true,
+	});
+	control.toggle_label(false);
+	control.toggle_description(false);
+	control.df.change = () => {
+		if (!initializing) window.setTimeout(() => report.datatable?.cellmanager?.deactivateEditing(), 0);
+	};
+
+	return {
+		initValue(initial_value) {
+			initializing = true;
+			Promise.resolve(control.set_value(initial_value)).finally(() => {
+				initializing = false;
+				control.set_focus();
+			});
+		},
+		getValue() {
+			return control.get_value();
+		},
+		setValue(new_value) {
+			control.set_value(new_value);
+			stage_inline_account_change(report, data, new_value);
+		},
+	};
+}
+
+function account_display_label(account, company) {
+	const suffix = company ? ` - ${company}` : "";
+	return suffix && account.endsWith(suffix) ? account.slice(0, -suffix.length) : account;
+}
+
+function stage_inline_account_change(report, data, account) {
+	if (!account) return;
+	let state = get_inline_edit_state(report);
+	if (!state) {
+		state = {
+			voucher_key: data.edit_voucher_key,
+			source_doctype: data.edit_source_doctype,
+			source_name: data.edit_source_name,
+			modified: data.edit_source_modified,
+			changes: new Map(),
+			originals: new Map(),
+			confirming: false,
+			pending: false,
+		};
+		report._china_inline_account_state = state;
+	}
+	if (!state.originals.has(data.edit_key)) {
+		state.originals.set(data.edit_key, { account: data.account, label: data.account_label });
+	}
+	const original = state.originals.get(data.edit_key);
+	if (account === original.account) state.changes.delete(data.edit_key);
+	else state.changes.set(data.edit_key, account);
+	state.confirming = false;
+
+	const label = account_display_label(account, report.get_filter_value("company"));
+	for (const report_row of report.data || []) {
+		if (report_row.edit_voucher_key !== state.voucher_key || report_row.edit_key !== data.edit_key) continue;
+		report_row.account = account;
+		report_row.account_label = label;
+		report_row._inline_account_dirty = state.changes.has(data.edit_key);
+	}
+	if (!state.changes.size) report._china_inline_account_state = null;
+	refresh_inline_voucher_rows(report, data.edit_voucher_key);
+	show_inline_notice(report, state.changes.size ? __("科目已修改但尚未保存") : "", "blue");
+}
+
+function refresh_inline_voucher_rows(report, voucher_key) {
+	(report.data || []).forEach((data, index) => {
+		if (data.edit_voucher_key !== voucher_key || !report.datatable) return;
+		const values = report.datatable.datamanager
+			.getColumns(true)
+			.map((column) => data[column.id]);
+		report.datatable.refreshRow(values, index);
+	});
+}
+
+function cancel_inline_account_changes(report, show_message = true) {
+	const state = get_inline_edit_state(report);
+	if (!state) return;
+	for (const [edit_key, original] of state.originals.entries()) {
+		for (const row of report.data || []) {
+			if (row.edit_voucher_key !== state.voucher_key || row.edit_key !== edit_key) continue;
+			row.account = original.account;
+			row.account_label = original.label;
+			delete row._inline_account_dirty;
+		}
+	}
+	report._china_inline_account_state = null;
+	refresh_inline_voucher_rows(report, state.voucher_key);
+	show_inline_notice(report, show_message ? __("未保存的科目修改已取消") : "", "blue");
+}
+
+function inline_changes_payload(state) {
+	return [...state.changes.entries()].map(([edit_key, account]) => ({ edit_key, account }));
+}
+
+async function save_inline_account_changes(report, confirmed = false) {
+	const state = get_inline_edit_state(report);
+	if (!state || !state.changes.size || state.pending) return;
+	state.pending = true;
+	refresh_inline_voucher_rows(report, state.voucher_key);
+	show_inline_notice(report, confirmed ? __("正在执行受控更正并重新记账…") : __("正在检查科目修改…"), "blue");
+	const args = {
+		source_doctype: state.source_doctype,
+		source_name: state.source_name,
+		modified: state.modified,
+		changes: inline_changes_payload(state),
+	};
+	try {
+		if (!confirmed) {
+			const preview = (await frappe.call({
+				method: "china_finance.services.source_voucher_edit.preview_inline_account_changes",
+				args,
+			})).message || {};
+			if (preview.requires_confirmation) {
+				state.pending = false;
+				state.confirming = true;
+				state.preview = preview;
+				refresh_inline_voucher_rows(report, state.voucher_key);
+				const bank_note = preview.bank_action === "unreconcile_and_restore"
+					? __("；系统将安全撤销并恢复银行核销")
+					: "";
+				show_inline_notice(
+					report,
+					__("该凭证已记账。确认后将取消原凭证、生成修订并重新记账{0}。", [bank_note]),
+					"orange",
+					preview.bank_transaction,
+				);
+				return;
+			}
+		}
+		const result = (await frappe.call({
+			method: "china_finance.services.source_voucher_edit.apply_inline_account_changes",
+			type: "POST",
+			args,
+		})).message || {};
+		const message = result.message || __("科目修改已保存");
+		report._china_inline_account_state = null;
+		show_inline_notice(report, message, "green");
+		frappe.show_alert({ message, indicator: "green" });
+		await report.refresh();
+	} catch (error) {
+		state.pending = false;
+		state.confirming = false;
+		refresh_inline_voucher_rows(report, state.voucher_key);
+		show_inline_notice(report, inline_error_message(error), "red");
+	}
+}
+
+function inline_error_message(error) {
+	if (error?.message) return error.message;
+	if (error?.exc) return error.exc;
+	try {
+		const messages = JSON.parse(error?._server_messages || "[]");
+		if (messages.length) return JSON.parse(messages[0]).message;
+	} catch (parse_error) {
+		// Fall through to the stable user-facing message.
+	}
+	return __("操作失败，请检查凭证状态后重试");
+}
+
+function ensure_inline_notice(report) {
+	if (report._china_inline_notice?.isConnected) return report._china_inline_notice;
+	const notice = document.createElement("div");
+	notice.className = "china-inline-edit-notice";
+	notice.hidden = true;
+	const report_element = report.$report?.[0];
+	report_element?.parentElement?.insertBefore(notice, report_element);
+	report._china_inline_notice = notice;
+	return notice;
+}
+
+function show_inline_notice(report, message, indicator = "blue", bank_transaction = null) {
+	const notice = ensure_inline_notice(report);
+	if (!notice) return;
+	if (!message) {
+		notice.hidden = true;
 		return;
 	}
-
-	const show_edit_error = (error) => {
-		button.disabled = false;
-		frappe.msgprint({
-			message: error?.message || error?.exc || __("检查来源凭证失败，请稍后重试"),
-			indicator: "red",
-			title: __("编辑来源凭证失败"),
-		});
-	};
-
-	button.disabled = true;
-	frappe.call({
-		method: "china_finance.services.source_voucher_edit.get_source_edit_status",
-		args: { source_doctype, source_name },
-		freeze: true,
-		freeze_message: __("正在检查凭证修改条件…"),
-		callback: (response) => {
-			button.disabled = false;
-			const status = response.message || {};
-			if (!status.can_edit) {
-				show_source_edit_blocker(status);
-				return;
-			}
-			if (status.action === "open_draft") {
-				frappe.require("/assets/china_finance/js/voucher_preparation.js", () => china_finance.preparation.edit(source_name, () => report.refresh()));
-				return;
-			}
-
-			frappe.confirm(
-				__("该凭证已提交。系统会先取消原凭证，再生成修订草稿；原中国会计凭证快照会保留为历史记录。是否继续？"),
-				() => {
-					button.disabled = true;
-					frappe.call({
-						method: "china_finance.services.source_voucher_edit.prepare_source_voucher_edit",
-						args: { source_doctype, source_name },
-						freeze: true,
-						freeze_message: __("正在取消原凭证并创建修订草稿…"),
-						callback: (amend_response) => {
-							const result = amend_response.message || {};
-							if (result.name) {
-								frappe.show_alert({
-									message: result.message || __("修订草稿已生成，请修改后保存并记账"),
-									indicator: "orange",
-								});
-								frappe.set_route("Form", source_doctype, result.name);
-								return;
-							}
-							show_edit_error({ message: __("后台未返回修订草稿，请刷新报表后重试") });
-						},
-						error: show_edit_error,
-						always: () => {
-							button.disabled = false;
-						},
-					});
-				},
-			);
-		},
-		error: show_edit_error,
-	});
+	notice.className = `china-inline-edit-notice ${indicator}`;
+	notice.textContent = message;
+	if (bank_transaction) {
+		const link = document.createElement("a");
+		link.href = frappe.utils.get_form_link("Bank Transaction", bank_transaction);
+		link.textContent = ` ${__("查看银行流水 {0}", [bank_transaction])}`;
+		notice.appendChild(link);
+	}
+	notice.hidden = false;
 }
 
-function show_source_edit_blocker(status) {
-	const reason = frappe.utils.escape_html(status.reason || __("当前凭证不满足修改条件"));
-	const quick_unreconcile = status.quick_unreconcile;
-	const bank_transactions = (status.bank_transactions || [])
-		.filter(Boolean)
-		.map((name) => {
-			const display_name = frappe.utils.escape_html(name);
-			return frappe.utils.get_form_link("Bank Transaction", name, true, display_name);
-		});
-
-	let message = `<div>${reason}</div>`;
-	if (bank_transactions.length) {
-		if (quick_unreconcile) {
-			message += `<div class="text-muted small mt-2">${__("可使用上方按钮只撤销当前凭证对应的核销；也可以打开流水手动处理。")}</div>`;
+function bind_inline_account_actions(report) {
+	const page_wrapper = report?.page?.wrapper?.[0] || report?.page?.wrapper;
+	if (!page_wrapper?.addEventListener) return;
+	report._china_inline_action_handler = (event) => {
+		const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+		const button = target?.closest?.(
+			".china-inline-open-source, .china-inline-save, .china-inline-confirm, .china-inline-cancel"
+		);
+		if (!button || !page_wrapper.contains(button)) return;
+		event.preventDefault();
+		event.stopPropagation();
+		if (button.classList.contains("china-inline-open-source")) {
+			frappe.set_route("Form", decodeURIComponent(button.dataset.sourceDoctype), decodeURIComponent(button.dataset.sourceName));
+		} else if (button.classList.contains("china-inline-save")) {
+			save_inline_account_changes(report, false);
+		} else if (button.classList.contains("china-inline-confirm")) {
+			save_inline_account_changes(report, true);
 		} else {
-			message += `
-				<hr>
-				<div><b>${__("处理步骤")}</b></div>
-				<ol class="mb-0 pl-4">
-					<li>${__("打开下面的银行流水，确认当前对账分配")}</li>
-					<li>${__("在银行流水中执行“撤销银行对账”或“Unreconcile Transaction”")}</li>
-					<li>${__("返回查凭证后重新点击“编辑来源凭证”")}</li>
-				</ol>
-				<div class="text-muted small mt-2">${__("撤销操作会清除该银行流水的对账分配，请确认没有影响同一流水上的其他凭证。")}</div>
-			`;
+			cancel_inline_account_changes(report);
 		}
-		message += `<div class="mt-2"><b>${__("关联银行流水")}</b>：${bank_transactions.join("、")}</div>`;
-	}
+	};
+	page_wrapper.addEventListener("click", report._china_inline_action_handler, true);
+}
 
-	frappe.msgprint({
-		message,
-		indicator: "orange",
-		title: __("不能修改凭证"),
-		...(quick_unreconcile
-			? {
-				primary_action: {
-					label: __("撤销本凭证核销并继续编辑"),
-					action: () => {
-						frappe.hide_msgprint();
-						const amount = format_currency(quick_unreconcile.amount, quick_unreconcile.currency);
-						frappe.confirm(
-							__(
-								"将只撤销银行流水 {0} 中与当前凭证对应的 {1} 分配，其他凭证的对账分配不变。随后系统会取消原凭证并打开修订草稿。是否继续？",
-								[quick_unreconcile.bank_transaction, amount]
-							),
-							() => {
-								frappe.call({
-									method: "china_finance.services.source_voucher_edit.unreconcile_and_prepare_source_voucher_edit",
-									args: {
-										source_doctype: status.source_doctype,
-										source_name: status.source_name,
-									},
-									freeze: true,
-									freeze_message: __("正在撤销当前凭证的银行核销并创建修订草稿…"),
-								}).then((response) => {
-									const result = response.message || {};
-									if (!result.name) {
-										frappe.msgprint({
-											message: __("后台未返回修订草稿，请刷新报表后重试"),
-											indicator: "red",
-											title: __("编辑来源凭证失败"),
-										});
-										return;
-									}
-									frappe.show_alert({
-										message: result.message || __("修订草稿已生成"),
-										indicator: "green",
-									});
-									frappe.set_route("Form", status.source_doctype, result.name);
-								}).catch((error) => {
-									frappe.msgprint({
-										message: error?.message || error?.exc || __("操作失败，请稍后重试"),
-										indicator: "red",
-										title: __("编辑来源凭证失败"),
-									});
-								});
-							}
-						);
-					},
-				},
-			}
-			: {}),
-	});
+function wrap_report_refresh_for_inline_edits(report) {
+	if (report._china_inline_native_refresh) return;
+	report._china_inline_native_refresh = report.refresh.bind(report);
+	report.refresh = (...args) => {
+		const dirty = Boolean(get_inline_edit_state(report)?.changes?.size);
+		if (dirty) cancel_inline_account_changes(report, false);
+		if (dirty) frappe.show_alert({ message: __("报表刷新，未保存的科目修改已取消"), indicator: "orange" });
+		return report._china_inline_native_refresh(...args);
+	};
 }
 
 function ensure_voucher_ledger_styles() {
@@ -308,6 +414,30 @@ function ensure_voucher_ledger_styles() {
 	$("<style>")
 		.attr("id", "china-voucher-ledger-inline-style")
 		.text(`
+			.china-inline-edit-notice {
+				margin: 0 0 8px;
+				padding: 8px 12px;
+				border: 1px solid var(--border-color, #d1d8dd);
+				border-left: 4px solid var(--blue-500, #2490ef);
+				border-radius: 6px;
+				background: var(--subtle-fg, #f7f9fc);
+			}
+			.china-inline-edit-notice.orange { border-left-color: var(--orange-500, #f39c12); }
+			.china-inline-edit-notice.red { border-left-color: var(--red-500, #e74c3c); }
+			.china-inline-edit-notice.green { border-left-color: var(--green-500, #2f9e44); }
+			.china-inline-account { display: inline-flex; align-items: center; width: 100%; min-height: 24px; }
+			.china-inline-account.is-editable { cursor: pointer; }
+			.china-inline-account.is-editable:hover { color: var(--primary, #2490ef); }
+			.china-inline-account.is-dirty {
+				padding: 0 4px;
+				background: var(--yellow-100, #fff3bf);
+				border-radius: 4px;
+				font-weight: 600;
+			}
+			.china-inline-account__arrow { margin-left: auto; color: var(--text-muted); }
+			.china-inline-actions { display: flex; align-items: center; gap: 4px; }
+			.china-voucher-ledger-report .dt-cell--editing .dt-cell__edit .form-group { margin: 0; }
+			.china-voucher-ledger-report .dt-cell--editing .dt-cell__edit .control-input-wrapper { padding: 0; }
 			.china-voucher-ledger-report .datatable,
 			.china-voucher-ledger-report .dt-header,
 			.china-voucher-ledger-report .dt-scrollable {

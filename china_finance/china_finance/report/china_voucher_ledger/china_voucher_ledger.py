@@ -1,3 +1,8 @@
+"""China voucher ledger report."""
+
+# Chinese user-facing messages intentionally use Chinese punctuation.
+# ruff: noqa: RUF001
+
 import re
 
 import frappe
@@ -12,9 +17,19 @@ from china_finance.services.account_display import (
 def execute(filters=None):
 	filters = frappe._dict(filters or {})
 	from china_finance.services.voucher_preparation import check_company, get_draft_ledger_rows
+
 	check_company(filters.company)
 	draft_rows = get_draft_ledger_rows(filters)
-	allowed = frappe.get_list("China Accounting Voucher", filters={"company": filters.company}, pluck="name", limit_page_length=0) if frappe.has_permission("China Accounting Voucher", "read") else []
+	allowed = (
+		frappe.get_list(
+			"China Accounting Voucher",
+			filters={"company": filters.company},
+			pluck="name",
+			limit_page_length=0,
+		)
+		if frappe.has_permission("China Accounting Voucher", "read")
+		else []
+	)
 	filters.allowed_snapshots = allowed or [""]
 	display_number_filter = filters.get("voucher_word")
 	effective_posting_date = """CASE
@@ -42,7 +57,6 @@ def execute(filters=None):
 	]
 	for fieldname, column in (
 		("accounting_period", effective_accounting_period),
-
 		("account", "e.account"),
 		("party_type", "e.party_type"),
 		("party", "e.party"),
@@ -74,7 +88,9 @@ def execute(filters=None):
 		conditions.append("v.source_name=%(voucher_number)s")
 	if filters.get("search_text"):
 		filters.search_pattern = f"%{filters.search_text}%"
-		conditions.append("(v.statutory_number LIKE %(search_pattern)s OR v.source_name LIKE %(search_pattern)s OR v.remarks LIKE %(search_pattern)s OR pcv.remarks LIKE %(search_pattern)s OR e.account LIKE %(search_pattern)s OR e.remarks LIKE %(search_pattern)s)")
+		conditions.append(
+			"(v.statutory_number LIKE %(search_pattern)s OR v.source_name LIKE %(search_pattern)s OR v.remarks LIKE %(search_pattern)s OR pcv.remarks LIKE %(search_pattern)s OR e.account LIKE %(search_pattern)s OR e.remarks LIKE %(search_pattern)s)"
+		)
 	entries = frappe.db.sql(
 		f"""
 		SELECT v.name AS voucher_snapshot,
@@ -90,7 +106,10 @@ def execute(filters=None):
 			CASE WHEN v.status='Reversed' THEN 2 ELSE 1 END AS voucher_status,
 			COALESCE(e.debit, 0) + COALESCE(e.credit, 0) AS base_total_amount,
 			e.idx AS entry_idx,
+			e.gl_entry,
+			gle.voucher_detail_no,
 			e.account AS account,
+			e.account_currency,
 			e.party_type, e.party, e.cost_center, e.project,
 			CASE
 				WHEN v.source_doctype='Journal Entry' THEN jea.user_remark
@@ -101,6 +120,7 @@ def execute(filters=None):
 		FROM `tabChina Accounting Voucher` v
 		INNER JOIN `tabCompany` company ON company.name=v.company
 		INNER JOIN `tabChina Accounting Voucher Entry` e ON e.parent=v.name
+		LEFT JOIN `tabGL Entry` gle ON gle.name=e.gl_entry
 		LEFT JOIN `tabJournal Entry` je ON v.source_doctype='Journal Entry' AND je.name=v.source_name
 		LEFT JOIN `tabJournal Entry Account` jea
 			ON v.source_doctype='Journal Entry'
@@ -110,7 +130,7 @@ def execute(filters=None):
 		LEFT JOIN `tabPayment Entry` pe ON v.source_doctype='Payment Entry' AND pe.name=v.source_name
 		LEFT JOIN `tabPeriod Closing Voucher` pcv
 			ON v.source_doctype='Period Closing Voucher' AND pcv.name=v.source_name
-		WHERE {' AND '.join(conditions)}
+		WHERE {" AND ".join(conditions)}
 		ORDER BY {effective_accounting_period},
 			CASE WHEN v.source_doctype='Period Closing Voucher' THEN 1 ELSE 0 END,
 			v.voucher_word, {effective_posting_date}, v.sequence_number, v.name, e.idx
@@ -119,16 +139,34 @@ def execute(filters=None):
 		as_dict=True,
 	)
 	# Source permissions also apply when viewing an accounting snapshot.
-	entries = [entry for entry in entries if frappe.has_permission(entry.source_doctype, "read", entry.source_name)]
+	entries = [
+		entry for entry in entries if frappe.has_permission(entry.source_doctype, "read", entry.source_name)
+	]
 	entries.extend(draft_rows)
 	if filters.get("receipt_import"):
 		batch = frappe.get_doc("China Bank Receipt Import", filters.receipt_import)
 		batch.check_permission("read")
 		if batch.company != filters.company:
 			frappe.throw("回单批次与公司不一致")
-		linked = set(frappe.get_all("China Bank Receipt", filters={"name": ["in", [r.receipt for r in batch.rows if r.receipt] or [""]]}, pluck="voucher_name"))
+		linked = set(
+			frappe.get_all(
+				"China Bank Receipt",
+				filters={"name": ["in", [r.receipt for r in batch.rows if r.receipt] or [""]]},
+				pluck="voucher_name",
+			)
+		)
 		entries = [entry for entry in entries if entry.source_name in linked]
-	entries.sort(key=lambda e: (str(e.posting_date), e.source_doctype == "Period Closing Voucher", e.source_name, e.entry_idx))
+	entries.sort(
+		key=lambda e: (
+			str(e.posting_date),
+			e.source_doctype == "Period Closing Voucher",
+			e.source_name,
+			e.entry_idx,
+		)
+	)
+	from china_finance.services.source_voucher_edit import annotate_inline_edit_rows
+
+	annotate_inline_edit_rows(entries)
 	_format_account_labels(entries, filters.company)
 	if display_number_filter and re.search(r"\d+$", str(display_number_filter)):
 		entries = [entry for entry in entries if entry.get("statutory_number") == display_number_filter]
@@ -166,7 +204,7 @@ def _format_account_labels(entries, company):
 
 	for entry in entries:
 		if entry.get("account"):
-			entry["account"] = get_label(entry.account)
+			entry["account_label"] = get_label(entry.account)
 
 
 def build_tree_data(entries):
@@ -178,24 +216,27 @@ def build_tree_data(entries):
 			voucher_order.append(voucher_snapshot)
 			voucher_rows[voucher_snapshot] = []
 		first_line = not voucher_rows[voucher_snapshot]
-		voucher_rows[voucher_snapshot].append({
-			**entry,
-			"posting_date": entry.posting_date if first_line else None,
-			"statutory_number": entry.statutory_number if first_line else None,
-			"voucher_number": None,
-			"print_voucher": None,
-			"accounting_period": entry.accounting_period if first_line else None,
-			"remarks": clean_voucher_summary(entry.remarks),
-			"source_doctype": entry.source_doctype if first_line else None,
-			"source_name": entry.source_name if first_line else None,
-			"source_event": entry.source_event if first_line else None,
-			"voucher_status": entry.voucher_status if first_line else None,
-			"prepared_by": None,
-			"modified_by": None,
-			"row_id": f"{voucher_snapshot}:{entry.entry_idx}",
-			"parent_row_id": None,
-			"indent": 0,
-		})
+		voucher_rows[voucher_snapshot].append(
+			{
+				**entry,
+				"is_voucher_first_row": first_line,
+				"posting_date": entry.posting_date if first_line else None,
+				"statutory_number": entry.statutory_number if first_line else None,
+				"voucher_number": None,
+				"print_voucher": None,
+				"accounting_period": entry.accounting_period if first_line else None,
+				"remarks": clean_voucher_summary(entry.remarks),
+				"source_doctype": entry.source_doctype if first_line else None,
+				"source_name": entry.source_name if first_line else None,
+				"source_event": entry.source_event if first_line else None,
+				"voucher_status": entry.voucher_status if first_line else None,
+				"prepared_by": None,
+				"modified_by": None,
+				"row_id": f"{voucher_snapshot}:{entry.entry_idx}",
+				"parent_row_id": None,
+				"indent": 0,
+			}
+		)
 	return [row for voucher_snapshot in voucher_order for row in voucher_rows[voucher_snapshot]]
 
 
@@ -239,11 +280,48 @@ def get_columns():
 		{"label": _("凭证日期"), "fieldname": "posting_date", "fieldtype": "Date", "width": 130},
 		{"label": _("会计期间"), "fieldname": "accounting_period", "fieldtype": "Data", "width": 110},
 		{"label": _("摘要"), "fieldname": "remarks", "fieldtype": "Data", "width": 270},
-		{"label": _("科目"), "fieldname": "account", "fieldtype": "Data", "width": 330},
-		{"label": _("往来单位"), "fieldname": "party", "fieldtype": "Dynamic Link", "options": "party_type", "width": 150},
-		{"label": _("借方"), "fieldname": "debit", "fieldtype": "Currency", "options": "currency", "width": 150},
-		{"label": _("贷方"), "fieldname": "credit", "fieldtype": "Currency", "options": "currency", "width": 150},
-		{"label": _("本位币金额"), "fieldname": "base_total_amount", "fieldtype": "Currency", "options": "currency", "width": 160},
-		{"label": _("本位币"), "fieldname": "currency", "fieldtype": "Link", "options": "Currency", "hidden": 1},
-		{"label": _("操作"), "fieldname": "source_action", "fieldtype": "Data", "width": 130},
+		{
+			"label": _("科目"),
+			"fieldname": "account",
+			"fieldtype": "Link",
+			"options": "Account",
+			"editable": 1,
+			"width": 330,
+		},
+		{
+			"label": _("往来单位"),
+			"fieldname": "party",
+			"fieldtype": "Dynamic Link",
+			"options": "party_type",
+			"width": 150,
+		},
+		{
+			"label": _("借方"),
+			"fieldname": "debit",
+			"fieldtype": "Currency",
+			"options": "currency",
+			"width": 150,
+		},
+		{
+			"label": _("贷方"),
+			"fieldname": "credit",
+			"fieldtype": "Currency",
+			"options": "currency",
+			"width": 150,
+		},
+		{
+			"label": _("本位币金额"),
+			"fieldname": "base_total_amount",
+			"fieldtype": "Currency",
+			"options": "currency",
+			"width": 160,
+		},
+		{
+			"label": _("本位币"),
+			"fieldname": "currency",
+			"fieldtype": "Link",
+			"options": "Currency",
+			"hidden": 1,
+		},
+		{"label": _("操作"), "fieldname": "source_action", "fieldtype": "Data", "width": 260},
 	]

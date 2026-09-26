@@ -79,34 +79,6 @@ class TestVoucherPreparation(unittest.TestCase):
 				}
 			).insert()
 
-	def test_draft_visible_and_edit_has_no_posting_side_effects(self):
-		from china_finance.china_finance.report.china_voucher_ledger.china_voucher_ledger import execute
-
-		doc = self.manual_voucher()
-		_columns, rows = execute(
-			{
-				"company": self.company,
-				"from_date": "2026-08-01",
-				"to_date": "2026-08-31",
-				"source_name": doc.name,
-				"voucher_status": "未记账",
-			}
-		)
-		self.assertEqual(len(rows), 2)
-		self.assertTrue(all(row["voucher_status"] in (None, 0) for row in rows))
-		old_modified = str(doc.modified)
-		accounts = [
-			{**row.as_dict(), "source_row": row.name, "user_remark": "编辑后摘要"} for row in doc.accounts
-		]
-		prep.save_draft(doc.name, old_modified, accounts)
-		doc.reload()
-		self.assertEqual(doc.accounts[0].user_remark, "编辑后摘要")
-		self.assertEqual(doc.docstatus, 0)
-		self.assertEqual(frappe.db.count("GL Entry", {"voucher_no": doc.name}), 0)
-		self.assertEqual(frappe.db.count("China Accounting Voucher", {"source_name": doc.name}), 0)
-		with self.assertRaises(frappe.TimestampMismatchError):
-			prep.save_draft(doc.name, old_modified, accounts)
-
 	def test_changed_draft_invalidates_review_and_forged_review_is_ignored(self):
 		doc = self.ready(self.manual_voucher())
 		self.assertTrue(prep.is_ready(doc))

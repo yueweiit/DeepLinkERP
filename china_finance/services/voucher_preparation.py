@@ -1,5 +1,8 @@
 """Editable voucher preparation; official ledgers are written only on submission."""
 
+# Chinese user-facing messages intentionally use Chinese punctuation.
+# ruff: noqa: RUF001
+
 import hashlib
 import json
 from collections import defaultdict
@@ -39,17 +42,6 @@ LINE_FIELDS = (
 	"reference_name",
 	"reference_detail_no",
 	"is_advance",
-	"user_remark",
-)
-EDIT_FIELDS = (
-	"account",
-	"exchange_rate",
-	"debit_in_account_currency",
-	"credit_in_account_currency",
-	"party_type",
-	"party",
-	"cost_center",
-	"project",
 	"user_remark",
 )
 
@@ -239,74 +231,6 @@ def review_preview(names):
 	return rows
 
 
-@frappe.whitelist()
-def get_draft(name):
-	doc = frappe.get_doc("Journal Entry", name)
-	doc.check_permission("read")
-	if doc.docstatus != 0:
-		frappe.throw(_("该凭证已记账，请刷新后按受控更正流程处理"))
-	from china_finance.services.source_voucher_edit import _build_status
-
-	status = _build_status(doc)
-	from china_finance.services.bank_receipt_import import get_voucher_receipts
-
-	return {
-		"doc": doc.as_dict(),
-		"can_edit": status["can_edit"],
-		"reason": status["reason"],
-		"cash": cash_plan(doc),
-		"receipts": get_voucher_receipts("Journal Entry", name),
-		"currency": frappe.get_cached_value("Company", doc.company, "default_currency"),
-	}
-
-
-@frappe.whitelist(methods=["POST"])
-def save_draft(
-	name, modified, accounts, posting_date=None, user_remark=None, reason=None, cash_flow_rows=None
-):
-	doc = frappe.get_doc("Journal Entry", name)
-	from china_finance.services.month_end import guard_period_write
-
-	guard_period_write(doc)
-	doc = frappe.get_doc("Journal Entry", name, for_update=True)
-	doc.check_permission("write")
-	if doc.docstatus != 0 or str(doc.modified) != str(modified):
-		frappe.throw(_("凭证已经改变，请刷新后重新修改"), frappe.TimestampMismatchError)
-	ensure_open(doc)
-	accounts = frappe.parse_json(accounts) if isinstance(accounts, str) else accounts
-	if not isinstance(accounts, list) or not 2 <= len(accounts) <= 300:
-		frappe.throw(_("请填写 2 至 300 行有效分录"))
-	old_rows = {r.name: r.as_dict() for r in doc.accounts}
-	seen = set()
-	doc.set("accounts", [])
-	for row in accounts:
-		key = row.get("source_row")
-		if key and (key not in old_rows or key in seen):
-			frappe.throw(_("分录来源已变化，请刷新凭证"))
-		seen.add(key)
-		data = old_rows.get(key, {}).copy()
-		data.pop("idx", None)
-		data.update({k: row.get(k) for k in EDIT_FIELDS if k in row})
-		if data.get("account") != old_rows.get(key, {}).get("account"):
-			data["account_currency"] = frappe.db.get_value("Account", data.get("account"), "account_currency")
-		doc.append("accounts", data)
-	if posting_date and getdate(posting_date) != getdate(doc.posting_date):
-		if not (reason or "").strip():
-			frappe.throw(_("调整凭证日期必须填写原因"))
-		doc.posting_date = posting_date
-	if user_remark is not None:
-		doc.user_remark = user_remark
-	if cash_flow_rows is not None:
-		cash_flow_rows = (
-			frappe.parse_json(cash_flow_rows) if isinstance(cash_flow_rows, str) else cash_flow_rows
-		)
-		doc.custom_china_cash_flow_plan = json.dumps(cash_flow_rows, sort_keys=True, ensure_ascii=False)
-	doc.save(ignore_version=False)
-	if reason:
-		doc.add_comment("Comment", frappe.utils.escape_html(reason))
-	return get_draft(name)
-
-
 def cash_plan(doc):
 	from china_finance.services.cash_equivalent_scope import get_cash_scope_accounts
 	from china_finance.services.cash_flow_assignment import (
@@ -415,8 +339,15 @@ def promote_cash_plan(doc, confirm=True):
 def get_draft_ledger_rows(filters):
 	if filters.get("voucher_status") in ("已记账", "已冲销", "Posted", "Reversed"):
 		return []
-	if filters.get("source_doctype") and filters.source_doctype != "Journal Entry":
-		return []
+	rows = []
+	if not filters.get("source_doctype") or filters.source_doctype == "Journal Entry":
+		rows.extend(_get_draft_journal_ledger_rows(filters))
+	if not filters.get("source_doctype") or filters.source_doctype == "Payment Entry":
+		rows.extend(_get_draft_payment_ledger_rows(filters))
+	return rows
+
+
+def _get_draft_journal_ledger_rows(filters):
 	rows = []
 	for doc in draft_documents(filters.company, filters.from_date, filters.to_date):
 		if filters.get("source_name") and filters.source_name != doc.name:
@@ -453,13 +384,84 @@ def get_draft_ledger_rows(filters):
 					voucher_status=3 if ready else 0,
 					currency=frappe.get_cached_value("Company", doc.company, "default_currency"),
 					entry_idx=row.idx,
+					source_row_name=row.name,
 					account=row.account,
+					account_currency=row.account_currency,
 					party_type=row.party_type,
 					party=row.party,
 					remarks=remarks,
 					debit=row.debit,
 					credit=row.credit,
 					base_total_amount=flt(row.debit) + flt(row.credit),
+				)
+			)
+	return rows
+
+
+def _get_draft_payment_ledger_rows(filters):
+	if filters.get("voucher_status") == "待记账" or filters.get("voucher_word"):
+		return []
+	rows = []
+	documents = frappe.get_list(
+		"Payment Entry",
+		filters={
+			"company": filters.company,
+			"docstatus": 0,
+			"posting_date": ["between", [filters.from_date, filters.to_date]],
+		},
+		pluck="name",
+		order_by="posting_date, creation, name",
+		limit_page_length=0,
+	)
+	for name in documents:
+		doc = frappe.get_doc("Payment Entry", name)
+		doc.check_permission("read")
+		if filters.get("source_name") and filters.source_name != doc.name:
+			continue
+		if filters.get("voucher_number") and filters.voucher_number != doc.name:
+			continue
+		if filters.get("accounting_period") and str(doc.posting_date)[:7] != filters.accounting_period:
+			continue
+		try:
+			gl_rows = doc.build_gl_map()
+		except Exception:
+			# Incomplete Payment Entry drafts cannot yet produce reliable ledger
+			# amounts.  Keep them on the source form instead of inventing rows.
+			continue
+		for index, row in enumerate(gl_rows, start=1):
+			row = frappe._dict(row)
+			if any(
+				filters.get(fieldname) and filters[fieldname] != row.get(fieldname)
+				for fieldname in ("account", "party_type", "party")
+			):
+				continue
+			remarks = row.get("remarks") or doc.remarks or ""
+			if (
+				filters.get("search_text")
+				and filters.search_text.lower() not in f"{doc.name} {remarks} {row.account}".lower()
+			):
+				continue
+			rows.append(
+				frappe._dict(
+					voucher_snapshot=f"draft:Payment Entry:{doc.name}",
+					draft_name=doc.name,
+					posting_date=doc.posting_date,
+					accounting_period=str(doc.posting_date)[:7],
+					statutory_number="草稿 · " + doc.name,
+					source_doctype="Payment Entry",
+					source_name=doc.name,
+					voucher_status=0,
+					currency=frappe.get_cached_value("Company", doc.company, "default_currency"),
+					entry_idx=index,
+					voucher_detail_no=row.get("voucher_detail_no"),
+					account=row.account,
+					account_currency=row.get("account_currency"),
+					party_type=row.get("party_type"),
+					party=row.get("party"),
+					remarks=remarks,
+					debit=flt(row.get("debit")),
+					credit=flt(row.get("credit")),
+					base_total_amount=flt(row.get("debit")) + flt(row.get("credit")),
 				)
 			)
 	return rows
