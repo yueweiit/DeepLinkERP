@@ -53,6 +53,36 @@ def is_housing_fund_item(item):
 	return str(item or "").strip() in HOUSING_FUND_ITEMS
 
 
+def is_housing_fund_receipt(data):
+	"""Identify a housing-fund payment from details or explicit receipt text."""
+	details = data.get("tax_details") or []
+	if details:
+		return all(is_housing_fund_item(detail.get("item")) for detail in details)
+	text = " ".join(
+		str(data.get(field) or "")
+		for field in ("summary", "business_type", "counterparty", "payee")
+	)
+	return data.get("direction") == "支出" and "公积金" in text
+
+
+def housing_fund_period(data):
+	"""Use explicit coverage dates, or the transaction month when none were supplied."""
+	details = data.get("tax_details") or []
+	if details:
+		return coverage_period(details, data.get("posting_date"))
+	if not is_housing_fund_receipt(data):
+		return None
+	try:
+		posting_date = datetime.fromisoformat(str(data.get("posting_date"))).date()
+	except (TypeError, ValueError):
+		return None
+	return {
+		"month": f"{posting_date.year:04d}-{posting_date.month:02d}",
+		"label": f"{posting_date.month}月",
+		"inferred_from_transaction_date": True,
+	}
+
+
 def social_suggestion(rule, data):
 	def blocked(reason):
 		return {"account": None, "rule_type": "社保分摊", "blocked": True, "reason": reason}
@@ -139,13 +169,11 @@ def housing_fund_suggestion(rule, data):
 		return {"account": None, "rule_type": "公积金分摊", "blocked": True, "reason": reason}
 
 	details = data.get("tax_details") or []
-	if data["direction"] != "支出" or not details or any(
-		not is_housing_fund_item(detail.get("item")) for detail in details
-	):
+	if data["direction"] != "支出" or not is_housing_fund_receipt(data):
 		return blocked("公积金分摊只支持明细全部为住房公积金的支出回单，请核对税费项目")
-	if sum(money(detail["amount"]) for detail in details) != money(data["amount"]):
+	if details and sum(money(detail["amount"]) for detail in details) != money(data["amount"]):
 		frappe.throw("公积金明细合计与银行付款不一致")
-	period = coverage_period(details, data["posting_date"])
+	period = housing_fund_period(data)
 	if not period:
 		return blocked("公积金所属时期缺失、无效或涉及多个月份，请按原件分期核对后手工制证并关联")
 	if not rule.get("account") or not rule.get("personal_account") or not rule.get("accrual_account"):
@@ -162,7 +190,16 @@ def housing_fund_suggestion(rule, data):
 
 	breakdown = []
 	company_total = personal_total = Decimal("0.00")
-	for detail in details:
+	allocation_details = details or [
+		{
+			"item": "住房公积金",
+			"amount": str(money(data["amount"])),
+			"period_from": None,
+			"period_to": None,
+			"period_source": "交易日期",
+		}
+	]
+	for detail in allocation_details:
 		amount = money(detail["amount"])
 		company_amount = (amount * percent / 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 		personal_amount = amount - company_amount
@@ -184,7 +221,14 @@ def housing_fund_suggestion(rule, data):
 		"account": rule.account,
 		"rule": rule.name,
 		"rule_type": "公积金分摊",
-		"reason": f"所属时期 {period['month']}，生成计提三行、支付两行；须确认该所属期尚未计提，已计提时应手工冲应付科目后关联。",
+		"reason": (
+			(
+				f"回单未提供所属时期，按交易日期确定为 {period['month']}；"
+				if period.get("inferred_from_transaction_date")
+				else f"所属时期 {period['month']}，"
+			)
+			+ "生成计提三行、支付两行；须确认该所属期尚未计提，已计提时应手工冲应付科目后关联。"
+		),
 		"coverage_period": period["month"],
 		"voucher_summary": f"计提并支付{period['label']}公积金",
 		"bank_summary": payment_summary,

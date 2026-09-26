@@ -128,6 +128,48 @@ class TestReceiptParser(unittest.TestCase):
 		data["summary"] = "报销款"
 		self.assertEqual(service.receipt_summary(data), "报销款-张三")
 
+	def test_explicit_bank_fee_summary_is_consistent(self):
+		for business, summary, detail in (
+			("企业银行收费", "收费", "网银支付手续费"),
+			("代发付费", "工资", "代发手续费"),
+		):
+			with self.subTest(business=business):
+				data = parse_receipt_text(
+					receipt_text(
+						business=business,
+						summary=summary,
+						details=f"收费项目 笔数 金额\n{detail} 1 3.52",
+					)
+				)
+				self.assertEqual(service.receipt_summary(data), "支付银行手续费")
+
+	def test_housing_fund_without_coverage_period_uses_transaction_month(self):
+		data = parse_receipt_text(
+			receipt_text(
+				amount="CNY1,664.00",
+				business="提回定借-付款",
+				summary="网厅汇缴托收",
+				details="",
+			)
+		)
+		data["counterparty"] = "东莞市住房公积金管理中心结算户"
+		data["payee"] = data["counterparty"]
+		self.assertEqual(service.receipt_summary(data), "支付8月公积金")
+		result = housing_fund_suggestion(housing_fund_rule(), data)
+		self.assertEqual(result["coverage_period"], "2026-08")
+		self.assertEqual([row["amount"] for row in result["allocations"]], ["832.00", "832.00"])
+		self.assertEqual(
+			[row["summary"] for row in result["journal_lines"]],
+			["计提8月公积金", "计提8月公积金", "计提8月公积金", "支付8月公积金"],
+		)
+		self.assertEqual(result["bank_summary"], "支付8月公积金")
+		self.assertIn("按交易日期", result["reason"])
+		rule = housing_fund_rule(priority=10, rule_type="公积金分摊")
+		with patch.object(frappe, "get_all", return_value=[rule]):
+			decision = service.suggest_account("Test", data)
+		self.assertEqual(decision["rule"], rule.name)
+		self.assertEqual(decision["coverage_period"], "2026-08")
+
 	def test_personal_income_tax_summary_uses_coverage_period(self):
 		data = parse_receipt_text(
 			receipt_text(
@@ -451,6 +493,7 @@ class TestReceiptIntegration(unittest.TestCase):
 		self.assertEqual(created["created"], 1, created)
 		result = created["results"][0]
 		bank_transaction = result["bank_transaction"]
+		frappe.db.set_value(service.RECEIPT, result["receipt"], "summary", "旧摘要")
 		deleted = service.delete_draft_vouchers([result["voucher_name"]])
 		self.assertEqual(deleted["deleted_count"], 1, deleted)
 
@@ -474,6 +517,15 @@ class TestReceiptIntegration(unittest.TestCase):
 		self.assertEqual(recreated["results"][0]["receipt"], receipt.name)
 		self.assertEqual(recreated["results"][0]["bank_transaction"], bank_transaction)
 		self.assertTrue(frappe.db.exists("Journal Entry", recreated["results"][0]["voucher_name"]))
+		self.assertEqual(
+			frappe.db.get_value(service.RECEIPT, receipt.name, "summary"),
+			service.receipt_summary(self.data),
+		)
+		if frappe.db.has_column("Bank Transaction", "custom_summary"):
+			self.assertEqual(
+				frappe.db.get_value("Bank Transaction", bank_transaction, "custom_summary"),
+				service.receipt_summary(self.data),
+			)
 
 	def test_one_click_batch_books_reimbursement_with_statement_mapping(self):
 		data = {

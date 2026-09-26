@@ -20,8 +20,10 @@ from china_finance.services.bank_receipt_parser import (
 )
 from china_finance.services.bank_receipt_social import (
 	SOCIAL_ITEMS,
+	housing_fund_period,
 	housing_fund_suggestion,
 	is_housing_fund_item,
+	is_housing_fund_receipt,
 	social_period,
 	social_suggestion,
 )
@@ -204,22 +206,28 @@ def receipt_summary(data):
 	counterparty = str(data.get("counterparty") or "").strip()
 	if summary in {"报销", "报销款"} and counterparty:
 		return f"{summary}-{counterparty}"
+	if data.get("direction") == "支出" and data.get("fee_details"):
+		return "支付银行手续费"
 
 	tax_details = data.get("tax_details") or []
 	personal_income_tax = tax_details and all(
 		str(detail.get("item") or "").strip() == "个人所得税" for detail in tax_details
 	)
-	housing_fund = tax_details and all(
-		is_housing_fund_item(detail.get("item")) for detail in tax_details
-	)
+	housing_fund = is_housing_fund_receipt(data)
 	if personal_income_tax or housing_fund:
 		try:
-			period = social_period(tax_details, data.get("posting_date"))
+			period = (
+				social_period(tax_details, data.get("posting_date"))
+				if personal_income_tax
+				else housing_fund_period(data)
+			)
 		except (TypeError, ValueError):
 			period = None
 		if period:
 			item = "个人所得税" if personal_income_tax else "公积金"
 			return f"支付{period['label']}{item}"
+	if housing_fund:
+		return "支付公积金"
 	return summary
 
 
@@ -391,10 +399,7 @@ def suggest_account(company, data):
 		)
 		and (
 			r.get("rule_type") != "公积金分摊"
-			or (
-				data["tax_details"]
-				and all(is_housing_fund_item(t.get("item")) for t in data["tax_details"])
-			)
+			or is_housing_fund_receipt(data)
 		)
 	]
 	if matches:
@@ -433,11 +438,9 @@ def suggest_account(company, data):
 			code, reason = "222112", "税费明细明确为个人所得税，请核对已计提余额"
 		elif "工资" in data["summary"] or data["business_type"] == "自助代发付款":
 			code, reason = "221101", "工资支付建议；请核对已计提及已付款记录"
-		elif data["tax_details"] and all(
-			is_housing_fund_item(r.get("item")) for r in data["tax_details"]
-		):
+		elif data["tax_details"] and all(is_housing_fund_item(r.get("item")) for r in data["tax_details"]):
 			reason = "公积金明细已识别，请先设置该公司的公积金分摊规则"
-		elif "公积金" in text:
+		elif is_housing_fund_receipt(data):
 			code, reason = "221104", "公积金支付建议；个人与公司承担金额需结合业务明细核对"
 		elif data["tax_details"] and all("保险费" in r["item"] for r in data["tax_details"]):
 			reason = "社保明细已识别，个人及公司承担部分需核对，不能自动按单一费用入账"
@@ -1020,8 +1023,11 @@ def _create_voucher(
 		for row, line in zip(je.accounts, [*active_lines, bank_line], strict=True):
 			row.user_remark = line["summary"]
 	je.insert()
+	bank_transaction_updates = {"custom_china_journal_entry": je.name}
+	if frappe.db.has_column("Bank Transaction", "custom_summary"):
+		bank_transaction_updates["custom_summary"] = bank_line["summary"]
 	frappe.db.set_value(
-		"Bank Transaction", bt.name, "custom_china_journal_entry", je.name, update_modified=False
+		"Bank Transaction", bt.name, bank_transaction_updates, update_modified=False
 	)
 	return je
 
@@ -1197,6 +1203,7 @@ def _process_receipt(
 		)
 	if data.get("accounting_decision"):
 		receipt.raw_data = json.dumps(data, ensure_ascii=False)
+	receipt.summary = data["summary"]
 	receipt.bank_transaction = bt.name if bt else None
 	receipt.voucher_type, receipt.voucher_name = voucher.doctype, voucher.name
 	receipt.process_note = notes or (
