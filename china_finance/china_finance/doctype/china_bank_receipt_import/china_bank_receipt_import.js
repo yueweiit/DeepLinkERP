@@ -13,6 +13,7 @@ frappe.ui.form.on("China Bank Receipt Import", {
 	},
 	company(frm) { if (!frm.doc.source_hash) frm.set_value("bank_account", ""); },
 	refresh(frm) {
+		clear_receipt_preview(frm);
 		frm.set_df_property("source_file", "options", { restrictions: { allowed_file_types: [".pdf"], max_file_size: 20 * 1024 * 1024 }, make_attachments_public: false });
 		if (frm.doc.company && frappe.model.can_create("China Bank Receipt Rule")) frm.add_custom_button(__("设置社保分摊规则"), async () => {
 			const lookup = number => frappe.db.get_value("Account", { company: frm.doc.company, account_number: number, is_group: 0, disabled: 0 }, "name");
@@ -29,9 +30,9 @@ frappe.ui.form.on("China Bank Receipt Import", {
 				personal_account: personal.message?.name, accrual_account: accrual.message?.name, housing_fund_company_percent: 50,
 				notes: "按回单所属时期生成计提三行、支付两行。公司承担计入管理费用-公积金，个人承担计入其他应收款-公积金；当前公司和个人各承担 50%，使用前确认该所属期尚未计提。" });
 		});
-		if (frm.is_new()) return;
 		const parsed = !!frm.doc.source_hash;
 		for (const field of ["company", "bank_account", "mode", "source_file"]) frm.set_df_property(field, "read_only", parsed);
+		if (frm.is_new()) return;
 		if (parsed) frm.disable_save();
 		if (!parsed && frm.doc.status !== "已作废") {
 			frm.add_custom_button(__("识别回单"), async () => {
@@ -73,16 +74,36 @@ async function receipt_call(method, args) {
 
 function receipt_escape(value) { return frappe.utils.escape_html(String(value ?? "")); }
 
-async function render_receipt_preview(frm) {
-	const data = await receipt_call("preview_import", { name: frm.doc.name });
+function clear_receipt_preview(frm) {
+	frm.__receipt_preview_request = (frm.__receipt_preview_request || 0) + 1;
+	frm.receipt_preview = null;
+	frm.fields_dict.preview?.$wrapper?.empty();
+}
+
+async function render_receipt_preview(frm, preview_data = null) {
+	const document_name = frm.doc.name;
+	const request_id = (frm.__receipt_preview_request || 0) + 1;
+	frm.__receipt_preview_request = request_id;
+	const data = preview_data || await receipt_call("preview_import", { name: frm.doc.name });
+	if (
+		frm.doc.name !== document_name
+		|| frm.__receipt_preview_request !== request_id
+		|| !frm.doc.source_hash
+	) return;
 	frm.receipt_preview = data;
 	const e = receipt_escape;
 	const amount = value => frappe.format(value, { fieldtype: "Currency", options: "currency" }, { only_value: true }, { currency: "CNY" });
 	const blocked = data.errors.length || ["已作废", "识别失败"].includes(data.status);
 	const is_processable = r => !r.receipt && !r.candidates.some(c => c.blocking !== false) && (r.suggestion.account || r.suggestion.allocations) && !r.suggestion.blocked && r.status !== "冲突";
-	const needs_manual = r => !r.receipt && !is_processable(r);
+	const status_exception = r => ["处理失败", "冲突", "凭证已取消或缺失"].includes(r.status);
+	const needs_manual = r => status_exception(r) || (!r.receipt && !is_processable(r));
 	const processable = data.rows.filter(is_processable);
 	const exceptions = data.rows.filter(needs_manual);
+	const normal_rows = data.rows.filter(r => !needs_manual(r));
+	const active_filter = frm.__receipt_filter || "exception";
+	const visible_rows = data.rows
+		.map((row, index) => ({ row, index }))
+		.filter(({ row }) => active_filter === "exception" ? needs_manual(row) : !needs_manual(row));
 	const $wrapper = frm.fields_dict.preview.$wrapper;
 	$wrapper.html(`
 		<p>${e(data.mode)} · ${data.rows.length} 张回单 / ${data.transaction_count ?? data.rows.length} 笔交易 · 收入 ${amount(data.deposit_total)} · 支出 ${amount(data.withdrawal_total)}（按流水号去重合计）</p>
@@ -90,16 +111,32 @@ async function render_receipt_preview(frm) {
 		${data.errors.length ? `<div class="alert alert-danger">${data.errors.map(x => `第 ${e(x.page)} 页：${e(x.message)}`).join("<br>")}<br>请作废本批次并重新上传完整、正确的回单。</div>` : ""}
 		${exceptions.length && data.mode === "新业务制证" ? `<p class="china-receipt-exception-summary">${exceptions.length} 笔需要人工处理，暂不生成凭证草稿。</p>` : ""}
 		${!blocked && data.mode === "新业务制证" && processable.length ? `<button class="btn btn-primary btn-sm receipt-batch">确认导入并生成草稿（${processable.length}）</button>` : ""}
+		<div class="china-receipt-filter-toolbar">
+			<span class="china-receipt-filter-label">筛选</span>
+			<div class="china-receipt-filter-tabs" role="tablist" aria-label="回单处理状态">
+			<button type="button" class="btn btn-sm china-receipt-filter ${active_filter === "exception" ? "is-active" : ""} is-exception" data-filter="exception" role="tab" aria-selected="${active_filter === "exception"}">
+				<span>有异常</span><span class="china-receipt-filter-count">${exceptions.length}</span>
+			</button>
+			<button type="button" class="btn btn-sm china-receipt-filter ${active_filter === "normal" ? "is-active" : ""} is-normal" data-filter="normal" role="tab" aria-selected="${active_filter === "normal"}">
+				<span>没有异常</span><span class="china-receipt-filter-count">${normal_rows.length}</span>
+			</button>
+			</div>
+		</div>
+		<p class="china-receipt-filter-caption">当前显示：${active_filter === "exception" ? "有异常" : "没有异常"} · ${visible_rows.length} 笔</p>
 		<div style="overflow:auto;margin-top:12px"><table class="table table-bordered"><thead><tr>
 		<th>日期 / 原件</th><th>收支 / 金额</th><th>对方 / 摘要</th><th>建议科目 / 依据</th><th>状态 / 已有凭证</th><th>操作</th>
-		</tr></thead><tbody>${data.rows.map((r, index) => `<tr class="${needs_manual(r) ? "china-receipt-row-danger" : ""}">
+		</tr></thead><tbody>${visible_rows.length ? visible_rows.map(({ row: r, index }) => `<tr class="${needs_manual(r) ? "china-receipt-row-danger" : ""}">
 		<td>${e(r.posting_date)}<br><a href="${e(data.source_file)}#page=${r.page_number}" target="_blank" rel="noopener">第 ${r.page_number} 页第 ${r.position} 张</a><br>${e(r.transaction_id)}</td>
 		<td>${e(r.direction)}<br>${amount(r.amount)}</td><td>${e(r.counterparty)}<br>${e(r.summary)}</td>
 		<td>${r.suggestion.allocations ? r.suggestion.allocations.map(a => `${e(a.account)}：${amount(a.amount)}`).join("<br>") : e(r.suggestion.account || "待人工分类")}<br><small>${e(r.suggestion.reason)}</small></td>
 		<td class="${needs_manual(r) ? "china-receipt-status-danger" : ""}">${e(r.status)}${r.message ? `<br><small>${e(r.message)}</small>` : ""}${r.voucher_name ? `<br>${frappe.utils.get_form_link(r.voucher_type, r.voucher_name, true)}` : ""}
 		${r.candidates.map(c => c.restricted ? '<br>存在需管理员核对的凭证' : `<br>${c.blocking === false ? "仅提示：" : "疑似凭证："}${frappe.utils.get_form_link(c.doctype, c.name, true)} ${e(c.posting_date || "")} ${e(c.match_type || "")}`).join("")}</td>
 		<td>${r.receipt ? `${frappe.utils.get_form_link("China Bank Receipt", r.receipt, true, "查看回单记录")}${r.status === "已关联待核销" ? `<br><button class="btn btn-xs btn-default receipt-reconcile" data-index="${index}">核销</button>` : ""}${r.status === "凭证已取消或缺失" ? `<br><button class="btn btn-xs btn-default receipt-process" data-index="${index}">关联修订凭证</button>` : ""}` : !blocked && needs_manual(r) && r.status !== "冲突" ? `<button class="btn btn-xs btn-danger receipt-process" data-index="${index}">处理异常</button>` : is_processable(r) ? "确认后生成" : ""}</td>
-		</tr>`).join("")}</tbody></table></div>`);
+		</tr>`).join("") : `<tr><td colspan="6" class="china-receipt-filter-empty">当前标签下没有回单</td></tr>`}</tbody></table></div>`);
+	$wrapper.find(".china-receipt-filter").on("click", event => {
+		frm.__receipt_filter = event.currentTarget.dataset.filter;
+		render_receipt_preview(frm, data);
+	});
 	$wrapper.find(".receipt-process").on("click", event => receipt_dialog(frm, data.rows[event.currentTarget.dataset.index]));
 	$wrapper.find(".receipt-reconcile").on("click", event => {
 		const row = data.rows[event.currentTarget.dataset.index];

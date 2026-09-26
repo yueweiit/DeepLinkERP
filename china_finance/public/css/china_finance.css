@@ -213,3 +213,103 @@
 	color: var(--red-700, #b42318);
 	font-weight: 600;
 }
+
+.china-receipt-filter-toolbar {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	width: fit-content;
+	margin: 14px 0 4px;
+	padding: 5px 6px 5px 10px;
+	border: 1px solid var(--gray-300, #d1d5db);
+	border-radius: 8px;
+	background: var(--subtle-fg, #f8f9fa);
+}
+
+.china-receipt-filter-label {
+	color: var(--text-muted, #6b7280);
+	font-size: 12px;
+	font-weight: 600;
+}
+
+.china-receipt-filter-tabs {
+	display: flex;
+	gap: 4px;
+}
+
+.china-receipt-filter {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	min-width: 104px;
+	padding: 6px 10px;
+	border: 1px solid transparent !important;
+	border-radius: 5px !important;
+	background-color: var(--fg-color, #fff) !important;
+	color: var(--text-muted, #6b7280) !important;
+	cursor: pointer;
+	font-weight: 500;
+	transition: border-color 120ms ease, background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
+}
+
+.china-receipt-filter:hover:not(.is-active) {
+	border-color: var(--gray-400, #9ca3af) !important;
+	background: var(--gray-50, #f9fafb);
+	color: var(--text-color, #374151);
+}
+
+.china-receipt-filter:focus-visible {
+	outline: 2px solid var(--blue-400, #60a5fa);
+	outline-offset: 1px;
+}
+
+.china-receipt-filter.is-exception.is-active {
+	border-color: var(--red-700, #b42318) !important;
+	background-color: var(--red-700, #b42318) !important;
+	color: #fff !important;
+	box-shadow: 0 1px 2px rgba(180, 35, 24, 0.25);
+}
+
+.china-receipt-filter.is-normal.is-active {
+	border-color: var(--green-700, #137333) !important;
+	background-color: var(--green-700, #137333) !important;
+	color: #fff !important;
+	box-shadow: 0 1px 2px rgba(19, 115, 51, 0.25);
+}
+
+.china-receipt-filter-count {
+	min-width: 22px;
+	padding: 1px 6px;
+	border-radius: 10px;
+	background: var(--gray-100, #f3f4f6);
+	color: var(--text-color, #374151);
+	font-size: 12px;
+	line-height: 18px;
+	text-align: center;
+}
+
+.china-receipt-filter.is-active .china-receipt-filter-count {
+	background: #fff;
+	color: currentColor;
+}
+
+.china-receipt-filter.is-exception.is-active .china-receipt-filter-count {
+	color: var(--red-700, #b42318);
+}
+
+.china-receipt-filter.is-normal.is-active .china-receipt-filter-count {
+	color: var(--green-700, #137333);
+}
+
+.china-receipt-filter-caption {
+	margin: 0;
+	color: var(--text-muted, #6b7280);
+	font-size: 12px;
+}
+
+.china-receipt-filter-empty {
+	padding: 28px 12px !important;
+	color: var(--text-muted, #6b7280);
+	text-align: center;
+}
