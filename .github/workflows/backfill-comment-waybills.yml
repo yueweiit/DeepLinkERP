@@ -1,0 +1,111 @@
+name: Backfill comment-derived waybills
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Generate an audit, or apply an unchanged audited plan
+        required: true
+        type: choice
+        default: audit
+        options:
+          - audit
+          - apply
+      plan_hash:
+        description: Required for apply; copy the 64-character plan_hash from audit output
+        required: false
+        type: string
+      batch_name:
+        description: Optional single batch name for a focused audit or apply
+        required: false
+        type: string
+      limit:
+        description: Maximum mapped batches to inspect
+        required: true
+        type: number
+        default: 1000
+
+permissions:
+  contents: read
+
+jobs:
+  backfill-comment-waybills:
+    name: ${{ inputs.operation }} comment-derived waybills
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Validate request
+        env:
+          WAYBILL_OPERATION: ${{ inputs.operation }}
+          WAYBILL_PLAN_HASH: ${{ inputs.plan_hash }}
+          WAYBILL_BATCH_NAME: ${{ inputs.batch_name }}
+          WAYBILL_LIMIT: ${{ inputs.limit }}
+        run: |
+          set -euo pipefail
+          [[ "$WAYBILL_LIMIT" =~ ^[1-9][0-9]{0,3}$ ]] || {
+            echo "limit must be between 1 and 9999" >&2
+            exit 1
+          }
+          if [ "$WAYBILL_OPERATION" = "apply" ]; then
+            [[ "$WAYBILL_PLAN_HASH" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "apply requires the exact 64-character audit plan_hash" >&2
+              exit 1
+            }
+          fi
+          if [ -n "$WAYBILL_BATCH_NAME" ]; then
+            [[ "$WAYBILL_BATCH_NAME" =~ ^[A-Za-z0-9._-]{1,140}$ ]] || {
+              echo "batch_name contains unsupported characters" >&2
+              exit 1
+            }
+          fi
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_SSH_PRIVATE_KEY"
+          test -n "$DEPLOY_KNOWN_HOSTS"
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
+
+      - name: Run audited waybill backfill
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          WAYBILL_OPERATION: ${{ inputs.operation }}
+          WAYBILL_PLAN_HASH: ${{ inputs.plan_hash }}
+          WAYBILL_BATCH_NAME: ${{ inputs.batch_name }}
+          WAYBILL_LIMIT: ${{ inputs.limit }}
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_USER"
+          if [ -n "$WAYBILL_BATCH_NAME" ]; then
+            batch_arg=", \"batch_names\": [\"$WAYBILL_BATCH_NAME\"]"
+          else
+            batch_arg=""
+          fi
+          if [ "$WAYBILL_OPERATION" = "audit" ]; then
+            kwargs="{\"dry_run\": True, \"limit\": $WAYBILL_LIMIT$batch_arg}"
+          else
+            actor="github-actions:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+            kwargs="{\"dry_run\": False, \"expected_plan_hash\": \"$WAYBILL_PLAN_HASH\", \"limit\": $WAYBILL_LIMIT, \"actor\": \"$actor\"$batch_arg}"
+          fi
+          ssh -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "cd /home/yuewei/ERPNext-Docker/frappe_docker && docker compose -f compose.custom.yaml exec -T -w /home/frappe/frappe-bench backend bench --site deeplinkerp.com execute overseas_costing.services.logistics_settlement.runtime.backfill_comment_waybills --kwargs '$kwargs'" \
+            2>&1 | tee comment-waybill-backfill-output.txt
+
+      - name: Upload backfill report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: comment-waybill-${{ inputs.operation }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: comment-waybill-backfill-output.txt
+          if-no-files-found: warn
+          retention-days: 30
