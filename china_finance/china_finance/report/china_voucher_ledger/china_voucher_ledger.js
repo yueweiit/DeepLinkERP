@@ -58,6 +58,9 @@ frappe.query_reports["China Voucher Ledger"] = {
 		datatable_options.getEditor = (...args) => create_inline_account_editor(frappe.query_report, ...args);
 		return datatable_options;
 	},
+	after_datatable_render(datatable) {
+		china_finance.datatable_layout.bind_full_width(frappe.query_report, datatable);
+	},
 	formatter(value, row, column, data, default_formatter) {
 		const formatted = default_formatter(value, row, column, data);
 		if (column.fieldname === "voucher_status" && data?.voucher_status !== undefined && data?.voucher_status !== null) {
@@ -111,7 +114,6 @@ frappe.query_reports["China Voucher Ledger"] = {
 			const snapshot_name = decodeURIComponent(event.currentTarget.dataset.snapshotName);
 			frappe.set_route("Form", "China Accounting Voucher", snapshot_name);
 		});
-		start_voucher_ledger_floating_scroll(report);
 		if (!report.get_filter_value("company")) {
 			report.set_filter_value("company", window.china_finance?.company_context?.default_company() || frappe.defaults.get_user_default("Company"));
 		}
@@ -173,6 +175,7 @@ function create_inline_account_editor(report, col_index, row_index, value, paren
 			fieldtype: "Link",
 			options: "Account",
 			label: __("科目"),
+			only_select: 1,
 			get_query: () => ({
 				query: "china_finance.services.source_voucher_edit.get_compatible_accounts",
 				filters: {
@@ -197,6 +200,8 @@ function create_inline_account_editor(report, col_index, row_index, value, paren
 			Promise.resolve(control.set_value(initial_value)).finally(() => {
 				initializing = false;
 				control.set_focus();
+				control.$input?.select();
+				control.on_input({ target: { value: "" } });
 			});
 		},
 		getValue() {
@@ -379,6 +384,15 @@ function bind_inline_account_actions(report) {
 	if (!page_wrapper?.addEventListener) return;
 	report._china_inline_action_handler = (event) => {
 		const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+		const editable_account = target?.closest?.(".china-inline-account.is-editable");
+		if (editable_account && page_wrapper.contains(editable_account)) {
+			const cell = editable_account.closest(".dt-cell");
+			if (!cell || !report.datatable?.cellmanager) return;
+			event.preventDefault();
+			event.stopPropagation();
+			report.datatable.cellmanager.activateEditing(cell);
+			return;
+		}
 		const button = target?.closest?.(
 			".china-inline-open-source, .china-inline-save, .china-inline-confirm, .china-inline-cancel"
 		);
@@ -438,39 +452,6 @@ function ensure_voucher_ledger_styles() {
 			.china-inline-actions { display: flex; align-items: center; gap: 4px; }
 			.china-voucher-ledger-report .dt-cell--editing .dt-cell__edit .form-group { margin: 0; }
 			.china-voucher-ledger-report .dt-cell--editing .dt-cell__edit .control-input-wrapper { padding: 0; }
-			.china-voucher-ledger-report .datatable,
-			.china-voucher-ledger-report .dt-header,
-			.china-voucher-ledger-report .dt-scrollable {
-				width: 100%;
-				min-width: 0;
-			}
-			.china-voucher-ledger-report .dt-header,
-			.china-voucher-ledger-report .dt-scrollable { max-width: none; }
-			.china-voucher-ledger-report .dt-row {
-				min-width: 100%;
-				width: max-content;
-			}
-			.china-voucher-ledger-report .dt-cell { flex: 0 0 auto; }
-			.china-voucher-ledger-report .dt-scrollable { overflow-x: auto; }
-			.china-voucher-ledger-floating-scroll {
-				position: fixed;
-				z-index: 1030;
-				display: block;
-				height: 16px;
-				padding: 2px 0;
-				overflow-x: auto;
-				overflow-y: hidden;
-				background: var(--card-bg, #fff);
-				border: 1px solid var(--border-color, #d1d8dd);
-				border-radius: 8px;
-				box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
-				scrollbar-width: thin;
-			}
-			.china-voucher-ledger-floating-scroll[hidden] { display: none; }
-			.china-voucher-ledger-floating-scroll__content {
-				height: 1px;
-				min-width: 100%;
-			}
 			.china-voucher-ledger-report .dt-cell__content {
 				line-height: 24px;
 				padding-left: 6px;
@@ -482,121 +463,6 @@ function ensure_voucher_ledger_styles() {
 			.china-voucher-ledger-report .dt-row { min-height: 28px; }
 		`)
 		.appendTo(document.head);
-}
-
-function start_voucher_ledger_floating_scroll(report) {
-	if (report._china_voucher_ledger_floating_scroll_watch_started) return;
-	report._china_voucher_ledger_floating_scroll_watch_started = true;
-
-	const page_wrapper = report?.page?.wrapper?.[0] || report?.page?.wrapper;
-	if (!page_wrapper) return;
-
-	let attempts = 0;
-	const attach = () => {
-		if (!document.body.contains(page_wrapper)) return;
-		const datatable = report.datatable;
-		if (datatable?.bodyScrollable) {
-			setup_voucher_ledger_floating_scroll(report, datatable);
-			return;
-		}
-		if (attempts++ < 50) window.setTimeout(attach, 100);
-	};
-	attach();
-}
-
-function setup_voucher_ledger_floating_scroll(report, datatable) {
-	const page_wrapper = report?.page?.wrapper?.[0] || report?.page?.wrapper;
-	const scrollable = datatable?.bodyScrollable;
-	if (!page_wrapper || !scrollable) return;
-
-	let state = report._china_voucher_ledger_floating_scroll;
-	if (!state) {
-		const bar = document.createElement("div");
-		bar.className = "china-voucher-ledger-floating-scroll";
-		bar.setAttribute("aria-label", __("凭证表格横向滚动条"));
-		bar.hidden = true;
-
-		const content = document.createElement("div");
-		content.className = "china-voucher-ledger-floating-scroll__content";
-		bar.appendChild(content);
-		document.body.appendChild(bar);
-
-		state = {
-			bar,
-			content,
-			page_wrapper,
-			scrollable: null,
-			syncing: false,
-			update_scheduled: false,
-		};
-		report._china_voucher_ledger_floating_scroll = state;
-
-		state.update = () => {
-			if (state.update_scheduled) return;
-			state.update_scheduled = true;
-			window.requestAnimationFrame(() => {
-				state.update_scheduled = false;
-				update_voucher_ledger_floating_scroll(state);
-			});
-		};
-		state.on_table_scroll = () => {
-			if (state.syncing) return;
-			state.syncing = true;
-			state.bar.scrollLeft = state.scrollable?.scrollLeft || 0;
-			state.syncing = false;
-		};
-		state.on_bar_scroll = () => {
-			if (state.syncing || !state.scrollable) return;
-			state.syncing = true;
-			state.scrollable.scrollLeft = state.bar.scrollLeft;
-			state.syncing = false;
-		};
-
-		bar.addEventListener("scroll", state.on_bar_scroll, { passive: true });
-		window.addEventListener("scroll", state.update, { passive: true });
-		window.addEventListener("resize", state.update, { passive: true });
-	}
-
-	if (state.scrollable !== scrollable) {
-		state.scrollable?.removeEventListener("scroll", state.on_table_scroll);
-		state.scrollable = scrollable;
-		scrollable.addEventListener("scroll", state.on_table_scroll, { passive: true });
-	}
-
-	state.page_wrapper = page_wrapper;
-	state.update();
-}
-
-function update_voucher_ledger_floating_scroll(state) {
-	const { bar, content, page_wrapper, scrollable } = state;
-	if (!bar || !scrollable || !document.body.contains(page_wrapper)) {
-		if (bar) bar.hidden = true;
-		return;
-	}
-
-	const has_horizontal_overflow = scrollable.scrollWidth > scrollable.clientWidth + 2;
-	const rect = scrollable.getBoundingClientRect();
-	const visible_in_viewport = rect.bottom > 0 && rect.top < window.innerHeight && rect.width > 0;
-	if (!has_horizontal_overflow || !visible_in_viewport) {
-		bar.hidden = true;
-		return;
-	}
-
-	const left = Math.max(0, rect.left);
-	const width = Math.min(rect.width, window.innerWidth - left);
-	if (width <= 0) {
-		bar.hidden = true;
-		return;
-	}
-
-	content.style.width = `${scrollable.scrollWidth}px`;
-	bar.style.left = `${left}px`;
-	bar.style.width = `${width}px`;
-	bar.style.bottom = "10px";
-	state.syncing = true;
-	bar.scrollLeft = scrollable.scrollLeft;
-	state.syncing = false;
-	bar.hidden = false;
 }
 
 function set_quick_period(report, period) {

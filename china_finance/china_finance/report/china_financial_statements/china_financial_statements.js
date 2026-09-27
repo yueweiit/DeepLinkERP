@@ -18,7 +18,7 @@ frappe.query_reports["China Financial Statements"] = {
 		const native_statement_types = ["Profit and Loss", "Cash Flow", "Account Activity and Balance"];
 		if (native_statement_types.includes(statement_type)) {
 			report.$report.addClass("china-financial-statements-native-table");
-			bind_native_statement_table_layout(report, datatable);
+			china_finance.datatable_layout.bind_full_width(report, datatable);
 		}
 		if (statement_type !== "Balance Sheet") return;
 
@@ -293,30 +293,6 @@ function source_account_link(label, accounts) {
 	const source_accounts = JSON.stringify([...new Set(accounts)]);
 	const title = frappe.utils.escape_html(__("查看来源科目总账") + "：\n" + accounts.join("\n"));
 	return `<a href="#" class="china-finance-source-account-link" title="${title}" data-accounts="${frappe.utils.escape_html(source_accounts)}">${label}</a>`;
-}
-
-function bind_native_statement_table_layout(report, datatable) {
-	// DataTable.setBodyStyle() writes an inline width based on the first row.
-	// Reapply the full-width layout after every refresh so switching statement
-	// types cannot move the vertical scrollbar into the empty area.
-	const scrollable = datatable?.bodyScrollable;
-	if (scrollable) {
-		scrollable.style.setProperty("width", "100%", "important");
-		scrollable.style.setProperty("min-width", "0", "important");
-	}
-	if (report.__china_financial_statement_layout_bound) return;
-	report.__china_financial_statement_layout_bound = true;
-	report.$report.on("dblclick.china_financial_statement_layout", ".dt-cell__resize-handle", () => {
-		// frappe-datatable recalculates the resized column on double-click but
-		// does not recalculate the scroll container width afterwards. This leaves
-		// the rightmost amount column underneath the clipping boundary.
-		requestAnimationFrame(() => {
-			const datatable = report.datatable;
-			if (!datatable?.style) return;
-			datatable.style.refreshColumnWidth();
-			datatable.style.setBodyStyle();
-		});
-	});
 }
 
 function bind_source_account_links() {
