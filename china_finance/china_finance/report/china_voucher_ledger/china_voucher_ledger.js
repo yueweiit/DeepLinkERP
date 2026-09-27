@@ -190,6 +190,10 @@ function create_inline_account_editor(report, col_index, row_index, value, paren
 	});
 	control.toggle_label(false);
 	control.toggle_description(false);
+	// The report already constrains the query to the editable source field. Do
+	// not append Frappe's technical "Filtered by" row to the account choices.
+	control.get_filter_description = async () => null;
+	const destroy_dropdown = bind_inline_account_dropdown(control, parent);
 	control.df.change = () => {
 		if (!initializing) window.setTimeout(() => report.datatable?.cellmanager?.deactivateEditing(), 0);
 	};
@@ -205,6 +209,7 @@ function create_inline_account_editor(report, col_index, row_index, value, paren
 			});
 		},
 		getValue() {
+			destroy_dropdown();
 			return control.get_value();
 		},
 		setValue(new_value) {
@@ -212,6 +217,112 @@ function create_inline_account_editor(report, col_index, row_index, value, paren
 			stage_inline_account_change(report, data, new_value);
 		},
 	};
+}
+
+function bind_inline_account_dropdown(control, parent) {
+	const dropdown = control.awesomplete?.ul;
+	const input = control.input;
+	const editing_cell = parent?.closest?.(".dt-cell");
+	if (!dropdown || !input || !editing_cell) return () => {};
+
+	let active = false;
+	let destroyed = false;
+	let position_frame = null;
+	let dropdown_observer = null;
+
+	const reset_style = () => {
+		dropdown.classList.remove("china-inline-account-options");
+		for (const property of ["position", "top", "right", "bottom", "left", "width", "max-height", "z-index"]) {
+			dropdown.style.removeProperty(property);
+		}
+	};
+
+	const position_dropdown = () => {
+		position_frame = null;
+		if (!active || destroyed || !input.isConnected || !dropdown.isConnected) return;
+
+		const input_rect = input.getBoundingClientRect();
+		const viewport_width = document.documentElement.clientWidth;
+		const viewport_height = document.documentElement.clientHeight;
+		const edge = 8;
+		const gap = 2;
+		const width = Math.min(input_rect.width, Math.max(0, viewport_width - edge * 2));
+		const left = Math.min(
+			Math.max(input_rect.left, edge),
+			Math.max(edge, viewport_width - width - edge),
+		);
+		const space_below = Math.max(0, viewport_height - input_rect.bottom - edge - gap);
+		const space_above = Math.max(0, input_rect.top - edge - gap);
+		const desired_height = Math.min(300, dropdown.scrollHeight || 300);
+		const open_above = space_below < Math.min(desired_height, 160) && space_above > space_below;
+		const available_height = open_above ? space_above : space_below;
+
+		dropdown.classList.add("china-inline-account-options");
+		dropdown.style.setProperty("position", "fixed", "important");
+		dropdown.style.setProperty("left", `${left}px`, "important");
+		dropdown.style.setProperty("right", "auto", "important");
+		dropdown.style.setProperty("width", `${width}px`, "important");
+		dropdown.style.setProperty("max-height", `${Math.min(300, available_height)}px`, "important");
+		dropdown.style.setProperty("z-index", "1060", "important");
+		if (open_above) {
+			dropdown.style.setProperty("top", "auto", "important");
+			dropdown.style.setProperty("bottom", `${viewport_height - input_rect.top + gap}px`, "important");
+		} else {
+			dropdown.style.setProperty("top", `${input_rect.bottom + gap}px`, "important");
+			dropdown.style.setProperty("bottom", "auto", "important");
+		}
+	};
+
+	const schedule_position = () => {
+		if (!active || destroyed || position_frame !== null) return;
+		position_frame = window.requestAnimationFrame(position_dropdown);
+	};
+
+	const on_document_scroll = (event) => {
+		const target = event.target;
+		if (target === dropdown || (target instanceof Node && dropdown.contains(target))) return;
+		control.awesomplete.close();
+	};
+
+	const stop_overlay = () => {
+		if (position_frame !== null) {
+			window.cancelAnimationFrame(position_frame);
+			position_frame = null;
+		}
+		active = false;
+		dropdown_observer?.disconnect();
+		dropdown_observer = null;
+		document.removeEventListener("scroll", on_document_scroll, true);
+		window.removeEventListener("resize", schedule_position);
+		reset_style();
+	};
+
+	const start_overlay = () => {
+		stop_overlay();
+		active = true;
+		dropdown_observer = new MutationObserver(schedule_position);
+		dropdown_observer.observe(dropdown, { childList: true, subtree: true });
+		document.addEventListener("scroll", on_document_scroll, true);
+		window.addEventListener("resize", schedule_position, { passive: true });
+		schedule_position();
+	};
+
+	const destroy = () => {
+		if (destroyed) return;
+		destroyed = true;
+		stop_overlay();
+		editing_cell_observer.disconnect();
+		control.$input.off(".china_inline_account_dropdown");
+	};
+
+	const editing_cell_observer = new MutationObserver(() => {
+		if (!editing_cell.classList.contains("dt-cell--editing")) destroy();
+	});
+	editing_cell_observer.observe(editing_cell, { attributes: true, attributeFilter: ["class"] });
+	control.$input.on("awesomplete-open.china_inline_account_dropdown", start_overlay);
+	control.$input.on("awesomplete-close.china_inline_account_dropdown", stop_overlay);
+
+	return destroy;
 }
 
 function account_display_label(account, company) {
