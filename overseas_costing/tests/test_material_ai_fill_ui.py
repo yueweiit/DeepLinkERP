@@ -14,7 +14,8 @@ PARTS = ROOT / "page" / "overseas_cost_workbench" / "parts"
 @pytest.mark.parametrize("button_class", ["ocw-primary-btn", "ocw-outline-btn"])
 @pytest.mark.parametrize("state", ["", ":hover:not(:disabled)", ":disabled"])
 def test_detached_autofill_modal_buttons_have_readable_explicit_colors(button_class, state):
-    # Frappe appends dialogs outside the workbench theme-variable root.
+    # 这个弹窗自己定义 hover / disabled 状态（基础 .ocw-*-btn 只有禁用降透明度），
+    # 因此这里的颜色要与主题变量解耦并各自可读，不能靠继承或变量兜底。
     css = (PARTS / "48-material-fee-workspace.css").read_text(encoding="utf-8")
     selector = f".ocw-mf-ai-progress-modal .{button_class}{state}"
     declarations = {}
@@ -88,6 +89,21 @@ def test_material_toolbar_wraps_and_checkbox_keeps_native_fixed_size() -> None:
         "background-repeat: no-repeat",
     ):
         assert declaration in checkbox_rule
+
+
+def test_local_packing_tab_keeps_upload_right_beside_refresh() -> None:
+    # 空态下唯一能补资料的动作就是工具栏里那个按钮，它必须和「刷新来源」并排出现。
+    rendered = _fee_workspace_result(
+        "const w=new Harness();w.escape=(value)=>String(value??'');"
+        "const d={materialSourceTab:'local',materialAttachmentSources:[],sourceContext:{},"
+        "wikiMaterialBusy:'',wikiMaterialOperationError:''};"
+        "console.log(JSON.stringify({html:w.renderMaterialAttachmentSources(d)}));"
+    )["html"]
+    actions = rendered.split('class="ocw-mf-wiki-toolbar-actions"', 1)[1].split("</div>", 1)[0]
+    assert 'data-action="mf-source-reload"' in actions
+    assert 'data-action="mf-source-upload"' in actions
+    assert actions.index("刷新来源") < actions.index("本地上传装箱单")
+    assert "还没有本地装箱单" in rendered
 
 
 def test_source_tabs_keep_only_packing_plan_and_local_upload() -> None:

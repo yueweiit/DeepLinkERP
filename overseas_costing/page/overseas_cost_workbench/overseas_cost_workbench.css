@@ -320,6 +320,36 @@
   font-size: 12px;
 }
 
+/*
+ * 调色板的对话框作用域。
+ *
+ * Frappe 的 Dialog 是追加到 body 下的，不在 .ocw-page 子树里，所以裸 var(--ocw-brand) 在
+ * 对话框内取不到值 —— 整条声明会在计算期失效（border 变 none、background 变 transparent），
+ * 而 color:#fff 仍然生效 ⇒ 主按钮＝白底白字：占着位置却看不见（「刷新来源」右边那个空白
+ * 按钮、以及它的「本地上传装箱单」邻居，都是这个原因）。
+ *
+ * 以前是给 .ocw-packing-flow-dialog / .ocw-cost-trial-dialog / .ocw-settlement-modal /
+ * .ocw-voucher-modal 各抄一份变量块来顶，全站 20 个对话框 wrapper，漏抄一个就复发；这里
+ * 按 Frappe 对话框统一带的 .modal 兜一次，各弹窗不必再声明。
+ *
+ * accent 取重设计视图的值（蓝）而不是外壳的橙：真正消费 accent 的是承载对话框的
+ * 重设计视图与物料工作区（见 25-workbench-redesign.css、--mf-blue）。
+ */
+.modal {
+  --ocw-ink: #17212b;
+  --ocw-muted: #687787;
+  --ocw-line: #dfe7f0;
+  --ocw-soft: #f6f8fb;
+  --ocw-paper: #f5f8fc;
+  --ocw-panel: #ffffff;
+  --ocw-brand: #0b8cf0;
+  --ocw-brand-dark: #076fbe;
+  --ocw-brand-soft: #eaf5ff;
+  --ocw-accent: #0b8cf0;
+  --ocw-accent-soft: #eaf5ff;
+  --ocw-mono: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+}
+
 .ocw-page *,
 .ocw-page *::before,
 .ocw-page *::after {
@@ -2886,20 +2916,6 @@ body.ocw-has-erp-module-sidebar-fallback .ocw-page {
   font-weight: 800;
   border-radius: 999px;
   background: var(--ocw-brand-soft);
-}
-
-.ocw-voucher-modal {
-  --ocw-ink: #17212b;
-  --ocw-muted: #687787;
-  --ocw-line: #dfe7f0;
-  --ocw-paper: #f5f8fc;
-  --ocw-panel: #ffffff;
-  --ocw-brand: #0b8cf0;
-  --ocw-brand-dark: #076fbe;
-  --ocw-brand-soft: #eaf5ff;
-  --ocw-accent: #ff6b35;
-  --ocw-accent-soft: #fff0ea;
-  --ocw-mono: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
 }
 
 .ocw-voucher-modal .modal-dialog {
@@ -6267,12 +6283,6 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
   .ocw-dingtalk-file-icon { width: 40px; height: 40px; }
 }
 
-.ocw-packing-flow-dialog {
-  --ocw-brand: #0b8cf0;
-  --ocw-brand-dark: #076fbe;
-  --ocw-brand-soft: #eaf5ff;
-}
-
 .ocw-packing-flow-dialog .modal-dialog {
   width: min(1380px, calc(100vw - 32px));
   max-width: min(1380px, calc(100vw - 32px));
@@ -7077,15 +7087,6 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
   }
 }
 
-.ocw-settlement-modal {
-  --ocw-brand: #0b8cf0;
-  --ocw-brand-dark: #076fbe;
-}
-.ocw-primary-btn[data-settlement-action] {
-  color: #fff;
-  background: #0b8cf0;
-  border-color: #0b8cf0;
-}
 .ocw-settlement-table small { display: block; color: #66788a; margin-top: 4px; }
 .ocw-settlement-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
 .ocw-settlement-hint { color: #66788a; line-height: 1.6; margin: 8px 0 12px; }
@@ -7370,12 +7371,21 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
   .ocw-mf-matrix-totals > p { grid-column: 1/-1; }
 }
 
-.ocw-mf-workspace {
+/*
+ * 物料侧的调色板同样要给对话框一份：Frappe 的 Dialog 不在 .ocw-mf-workspace 里，
+ * 而 .ocw-mf-dialog / .ocw-mf-wiki-dialog 这些对话框的 CSS 也在用 --mf-*（焦点框、
+ * 分隔线）。.modal 是 Frappe 对话框统一带的类，按它兜一次，新弹窗不必再抄。
+ */
+.ocw-mf-workspace,
+.modal {
   --mf-blue: var(--ocw-accent, #0b8cf0);
   --mf-blue-soft: #eaf5ff;
   --mf-border: #dce6f2;
   --mf-text: #172033;
   --mf-muted: #667085;
+}
+
+.ocw-mf-workspace {
   display: grid;
   gap: 16px;
   color: var(--mf-text);
@@ -8289,11 +8299,6 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
 .ocw-mf-freight-editor > .ocw-mf-row-actions button { min-height: 36px; padding: 7px 12px; border: 1px solid #b8c9df; border-radius: 6px; background: #fff; font-size: 12px; }
 .ocw-mf-freight-editor > .ocw-mf-row-actions .ocw-primary-btn { border-color: #076fbe; background: #076fbe; color: #fff; }
 
-.ocw-cost-trial-dialog {
-  --ocw-brand: #0b8cf0;
-  --ocw-brand-dark: #076fbe;
-  --ocw-brand-soft: #eaf5ff;
-}
 .ocw-cost-trial-dialog .modal-dialog { max-width: min(1120px, calc(100vw - 32px)); }
 .ocw-cost-trial-dialog .modal-content { display: flex; flex-direction: column; height: min(900px, calc(100vh - 24px)); max-height: calc(100vh - 24px); overflow: hidden; }
 .ocw-cost-trial-dialog .modal-body { flex: 1 1 auto; min-height: 0; padding: 0; overflow: hidden; background: #f7f9fc; }

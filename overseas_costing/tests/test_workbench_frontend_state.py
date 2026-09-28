@@ -347,10 +347,9 @@ def test_packing_flow_static_ui_contract() -> None:
     assert ".ocw-packing-flow" in stylesheet
     assert ".ocw-packing-recommendation" in stylesheet
     assert "position: sticky" in stylesheet
-    dialog_rule = stylesheet.split(".ocw-packing-flow-dialog {", 1)[1].split("}", 1)[0]
-    assert "--ocw-brand: #0b8cf0" in dialog_rule
-    assert "--ocw-brand-dark: #076fbe" in dialog_rule
-    assert "--ocw-brand-soft: #eaf5ff" in dialog_rule
+    # 品牌色不再由本弹窗声明，改由 .modal 上的共享调色板提供（见
+    # test_dialog_theme_palette_is_declared_once_for_every_modal）。
+    assert ".ocw-packing-flow-dialog .modal-dialog" in stylesheet
 
 
 def test_interactive_theme_uses_deeplink_blue_without_legacy_teal() -> None:
@@ -376,6 +375,72 @@ def test_interactive_theme_uses_deeplink_blue_without_legacy_teal() -> None:
     ):
         assert legacy_interactive_color not in all_styles
     assert ".ocw-issue.is-ready { color: #067647; }" in redesign
+
+
+def _css_rules(stylesheet: str) -> list[tuple[list[str], str]]:
+    # 先去掉注释：注释里会写「原来在 .ocw-page 上声明」这类文字，不去掉就会被当成选择器的一部分。
+    source = re.sub(r"/\*.*?\*/", "", stylesheet, flags=re.DOTALL)
+    return [
+        ([name.strip() for name in selectors.split(",")], body)
+        for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", source)
+    ]
+
+
+def test_dialog_theme_palette_is_declared_once_for_every_modal() -> None:
+    """调色板只允许两处声明：页面作用域一处、对话框作用域一处。
+
+    Frappe 的 Dialog 是追加到 body 下的，不在 .ocw-page / .ocw-mf-workspace 子树里；裸
+    var(--ocw-brand) 在那里取不到值，整条声明会在计算期失效（border 变 none、background 变
+    transparent），而 color:#fff 仍然生效 ⇒ 主按钮＝白底白字：占着位置却看不见。
+
+    历史上是给每个弹窗各抄一份变量块来顶（.ocw-packing-flow-dialog / .ocw-cost-trial-dialog /
+    .ocw-settlement-modal / .ocw-voucher-modal），而全站有 20 个对话框 wrapper，漏抄一个就复发
+    ——「刷新来源」旁边那个上传按钮就是这样渲染出来又看不见的。现在统一由 .modal 兜底（Frappe
+    的对话框都带这个类），这条测试守住「不许再退回去逐个弹窗声明」。
+    """
+    stylesheets = {
+        path.name: path.read_text(encoding="utf-8") for path in sorted(PARTS.glob("*.css"))
+    }
+
+    def owners(declaration: str) -> list[str]:
+        found: set[str] = set()
+        for stylesheet in stylesheets.values():
+            for selectors, body in _css_rules(stylesheet):
+                if declaration in body:
+                    found.update(selectors)
+        return sorted(found)
+
+    assert owners("--ocw-brand:") == [".modal", ".ocw-page"]
+    assert owners("--mf-blue:") == [".modal", ".ocw-mf-workspace"]
+
+    shell_palette = next(
+        body for selectors, body in _css_rules(stylesheets["10-shell.css"]) if selectors == [".modal"]
+    )
+    for declaration in (
+        "--ocw-ink:",
+        "--ocw-muted:",
+        "--ocw-line:",
+        "--ocw-paper:",
+        "--ocw-panel:",
+        "--ocw-brand:",
+        "--ocw-brand-dark:",
+        "--ocw-brand-soft:",
+        "--ocw-accent:",
+        "--ocw-accent-soft:",
+        "--ocw-mono:",
+    ):
+        assert declaration in shell_palette, f"对话框作用域缺少 {declaration}"
+
+    material_rules = _css_rules(stylesheets["48-material-fee-workspace.css"])
+    material_palette = next(
+        body for selectors, body in material_rules if selectors == [".ocw-mf-workspace", ".modal"]
+    )
+    for declaration in ("--mf-blue:", "--mf-blue-soft:", "--mf-border:", "--mf-text:", "--mf-muted:"):
+        assert declaration in material_palette, f"物料对话框作用域缺少 {declaration}"
+    # 拆出变量块时不能把工作区自己的布局声明带进对话框。
+    workspace = next(body for selectors, body in material_rules if selectors == [".ocw-mf-workspace"])
+    assert "display: grid" in workspace
+    assert "display: grid" not in material_palette
 
 
 def test_detail_overview_contains_responsive_columns_and_its_own_fee_scroller() -> None:
@@ -1160,13 +1225,11 @@ def test_cost_trial_dialog_defines_visible_brand_buttons_and_narrow_layout() -> 
     stylesheet = (PARTS / "48-material-fee-workspace.css").read_text(encoding="utf-8")
     source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
 
-    dialog_rule = stylesheet.split(".ocw-cost-trial-dialog {", 1)[1].split("}", 1)[0]
-    assert "--ocw-brand:" in dialog_rule
-    assert "--ocw-brand-dark:" in dialog_rule
-    assert ".ocw-cost-trial-dialog .ocw-primary-btn" in stylesheet
-    assert "color: #fff" in stylesheet.split(
-        ".ocw-cost-trial-dialog .ocw-primary-btn", 1
-    )[1].split("}", 1)[0]
+    # 品牌色由 .modal 上的共享调色板提供（见
+    # test_dialog_theme_palette_is_declared_once_for_every_modal），本弹窗只按变量取色。
+    primary_rule = stylesheet.split(".ocw-cost-trial-dialog .ocw-primary-btn", 1)[1].split("}", 1)[0]
+    assert "color: #fff" in primary_rule
+    assert "var(--ocw-brand" in primary_rule
     assert ".ocw-cost-trial-dialog .modal-content" in stylesheet
     assert "max-height: calc(100vh - 24px)" in stylesheet
     assert ".ocw-cost-trial-dialog .modal-body" in stylesheet

@@ -1,9 +1,18 @@
-.ocw-mf-workspace {
+/*
+ * 物料侧的调色板同样要给对话框一份：Frappe 的 Dialog 不在 .ocw-mf-workspace 里，
+ * 而 .ocw-mf-dialog / .ocw-mf-wiki-dialog 这些对话框的 CSS 也在用 --mf-*（焦点框、
+ * 分隔线）。.modal 是 Frappe 对话框统一带的类，按它兜一次，新弹窗不必再抄。
+ */
+.ocw-mf-workspace,
+.modal {
   --mf-blue: var(--ocw-accent, #0b8cf0);
   --mf-blue-soft: #eaf5ff;
   --mf-border: #dce6f2;
   --mf-text: #172033;
   --mf-muted: #667085;
+}
+
+.ocw-mf-workspace {
   display: grid;
   gap: 16px;
   color: var(--mf-text);
@@ -917,11 +926,6 @@
 .ocw-mf-freight-editor > .ocw-mf-row-actions button { min-height: 36px; padding: 7px 12px; border: 1px solid #b8c9df; border-radius: 6px; background: #fff; font-size: 12px; }
 .ocw-mf-freight-editor > .ocw-mf-row-actions .ocw-primary-btn { border-color: #076fbe; background: #076fbe; color: #fff; }
 
-.ocw-cost-trial-dialog {
-  --ocw-brand: #0b8cf0;
-  --ocw-brand-dark: #076fbe;
-  --ocw-brand-soft: #eaf5ff;
-}
 .ocw-cost-trial-dialog .modal-dialog { max-width: min(1120px, calc(100vw - 32px)); }
 .ocw-cost-trial-dialog .modal-content { display: flex; flex-direction: column; height: min(900px, calc(100vh - 24px)); max-height: calc(100vh - 24px); overflow: hidden; }
 .ocw-cost-trial-dialog .modal-body { flex: 1 1 auto; min-height: 0; padding: 0; overflow: hidden; background: #f7f9fc; }

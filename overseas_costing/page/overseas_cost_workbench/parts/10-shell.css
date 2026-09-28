@@ -17,6 +17,36 @@
   font-size: 12px;
 }
 
+/*
+ * 调色板的对话框作用域。
+ *
+ * Frappe 的 Dialog 是追加到 body 下的，不在 .ocw-page 子树里，所以裸 var(--ocw-brand) 在
+ * 对话框内取不到值 —— 整条声明会在计算期失效（border 变 none、background 变 transparent），
+ * 而 color:#fff 仍然生效 ⇒ 主按钮＝白底白字：占着位置却看不见（「刷新来源」右边那个空白
+ * 按钮、以及它的「本地上传装箱单」邻居，都是这个原因）。
+ *
+ * 以前是给 .ocw-packing-flow-dialog / .ocw-cost-trial-dialog / .ocw-settlement-modal /
+ * .ocw-voucher-modal 各抄一份变量块来顶，全站 20 个对话框 wrapper，漏抄一个就复发；这里
+ * 按 Frappe 对话框统一带的 .modal 兜一次，各弹窗不必再声明。
+ *
+ * accent 取重设计视图的值（蓝）而不是外壳的橙：真正消费 accent 的是承载对话框的
+ * 重设计视图与物料工作区（见 25-workbench-redesign.css、--mf-blue）。
+ */
+.modal {
+  --ocw-ink: #17212b;
+  --ocw-muted: #687787;
+  --ocw-line: #dfe7f0;
+  --ocw-soft: #f6f8fb;
+  --ocw-paper: #f5f8fc;
+  --ocw-panel: #ffffff;
+  --ocw-brand: #0b8cf0;
+  --ocw-brand-dark: #076fbe;
+  --ocw-brand-soft: #eaf5ff;
+  --ocw-accent: #0b8cf0;
+  --ocw-accent-soft: #eaf5ff;
+  --ocw-mono: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+}
+
 .ocw-page *,
 .ocw-page *::before,
 .ocw-page *::after {
