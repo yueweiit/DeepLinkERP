@@ -434,7 +434,7 @@
       this.markBatchDirty(batchName);
       this.updateLocalItemValue(batchName, itemName, fieldname, result.value);
       if (this.detailState) {
-        this.detailState.expectedModified = result.batch_modified || this.detailState.expectedModified;
+        this.acceptBatchWriteRevision?.(result.batch_modified);
         if (this.detailState.header && result.batch_modified) this.detailState.header.modified = result.batch_modified;
         this.detailState.dirty = false;
       }

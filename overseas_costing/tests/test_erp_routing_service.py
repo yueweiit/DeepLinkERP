@@ -7,7 +7,6 @@ from overseas_costing.services.erp_routing_service import (
     build_site_payload_preview,
     list_unambiguous_project_routes,
     normalize_erp_uom,
-    preview_bulk_route,
     project_candidate_names,
     resolve_item_routes,
     resolve_item_uom,
@@ -29,6 +28,33 @@ def test_mixed_container_routes_distinct_materials() -> None:
     assert result["ok"] is True
     assert result["by_item"]["P1"]["site_code"] == "ERP_PROD"
     assert result["by_item"]["E1"]["site_code"] == "ERP_ECOM"
+
+
+def test_project_collection_route_wins_over_the_legacy_site_columns() -> None:
+    """路由只认 ``project_collection`` 查到的规则。
+
+    ``Overseas Cost Item`` 上的 ``erp_site_code`` / ``subsidiary_code`` 是历史残留列，
+    全库没有任何写入点。行上的旧值必须被实时解析覆盖，否则「按项目归属推送到哪个站点」
+    会出现第二个真相。
+    """
+
+    result = resolve_item_routes(
+        items=[
+            {
+                "stable_line_key": "P1",
+                "project_collection": "电商项目",
+                "erp_site_code": "STALE_SITE",
+                "subsidiary_code": "STALE_CO",
+            }
+        ],
+        routes=[
+            {"project_collection": "电商项目", "subsidiary_code": "ECOM_CO", "site_code": "ERP_ECOM", "enabled": 1},
+        ],
+    )
+
+    assert result["by_item"]["P1"]["status"] == "RESOLVED"
+    assert result["by_item"]["P1"]["site_code"] == "ERP_ECOM"
+    assert result["by_item"]["P1"]["subsidiary_code"] == "ECOM_CO"
 
 
 def test_route_without_explicit_site_uses_shared_deeplinkerp_connection() -> None:
@@ -166,19 +192,6 @@ def test_ambiguous_project_mapping_never_chooses_first_route() -> None:
 
     assert result["ok"] is False
     assert result["by_item"]["P1"]["status"] == "CONFLICT"
-
-
-def test_bulk_assignment_requires_preview_when_existing_routes_differ() -> None:
-    preview = preview_bulk_route(
-        [
-            {"stable_line_key": "P1", "erp_site_code": "S1", "route_status": "RESOLVED"},
-            {"stable_line_key": "E1", "erp_site_code": "S2", "route_status": "RESOLVED"},
-        ],
-        target_site="S1",
-    )
-
-    assert preview["requires_confirmation"] is True
-    assert preview["changed_item_keys"] == ["E1"]
 
 
 def test_common_fee_is_not_duplicated_across_sites() -> None:

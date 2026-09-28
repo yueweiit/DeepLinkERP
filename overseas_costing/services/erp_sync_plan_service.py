@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 
-from overseas_costing.services import batch_service
+from overseas_costing.services import batch_service, fee_status_service
 from overseas_costing.services.erp_sync_service import build_site_sync_plan
 
 try:
@@ -64,7 +64,28 @@ def preview_site_sync_plan(batch_name: str, version_name: str | None = None, cli
         "batch_name": context["batch_doc_name"],
         "version_name": context["version_name"],
         "readiness": readiness,
+        # 这里才知道当前结果哈希与「本次会推到哪些站点」，所以站点级状态能算全：
+        # 已有成功回执但哈希对不上的站点报 UPDATE_REQUIRED，账本里没有请求的站点报 NOT_PUSHED。
+        "erp_work": _build_erp_work(
+            _batch_ledger_items(context["batch_doc_name"], context["version_name"]),
+            current_hash=plan.get("cost_result_hash") or "",
+            planned_sites=[
+                str(row.get("site_code") or "")
+                for row in (plan.get("request_specs") or {}).get("requests") or []
+            ],
+        ),
     }
+
+
+def _batch_ledger_items(batch_doc_name: str, version_name: str) -> list[dict]:
+    """当前批次的同步请求账本行；读不出来按「没有账本」处理，不让预览失败。"""
+
+    from overseas_costing.services.erp_sync_ledger_service import list_sync_requests
+
+    try:
+        return list_sync_requests(batch_doc_name, version=version_name or "", limit=200).get("items") or []
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def save_site_sync_plan(batch_name: str, version_name: str | None = None, client_intent_id: str = "") -> dict:
@@ -143,12 +164,36 @@ def get_site_sync_requests(batch_name: str, version_name: str | None = None, lim
 
     context = batch_service._load_erp_push_context(batch_name, version_name)
     if not context.get("ok"):
-        return {**context, "items": [], "total": 0}
+        return {**context, "items": [], "total": 0, "erp_work": _empty_erp_work()}
+    requests = list_sync_requests(context["batch_doc_name"], version=context["version_name"] or "", limit=limit)
     return {
-        **list_sync_requests(context["batch_doc_name"], version=context["version_name"] or "", limit=limit),
+        **requests,
         "batch_name": context["batch_doc_name"],
         "version_name": context["version_name"],
+        # 站点级状态与待办由服务端算（见 fee_status_service.build_erp_work_state），
+        # 页面只负责渲染，不再自己从账本行推一遍站点状态。
+        "erp_work": _build_erp_work(requests.get("items") or [], current_hash="", planned_sites=None),
     }
+
+
+def _empty_erp_work() -> dict:
+    return {
+        "overall": "EMPTY",
+        "current_cost_result_hash": "",
+        "sites": [],
+        "counts": {state: 0 for state in fee_status_service.ERP_WORK_SITE_STATES},
+        "todo_count": 0,
+    }
+
+
+def _build_erp_work(items: list[dict], *, current_hash: str = "", planned_sites: list[str] | None = None) -> dict:
+    """账本行 → 站点级状态与待办；只读投影，不写任何状态。"""
+
+    return fee_status_service.build_erp_work_state(
+        current_hash=current_hash,
+        sites=items,
+        planned_sites=planned_sites,
+    )
 
 
 def list_project_route_options(batch_name: str = "") -> dict:

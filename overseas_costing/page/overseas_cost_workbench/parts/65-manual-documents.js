@@ -893,7 +893,7 @@
         expected_modified: inDetail ? this.detailState.expectedModified : acquired.modified,
       }, true);
       if (result?.batch_modified && this.detailState?.batchName === batch.name) {
-        this.detailState.expectedModified = result.batch_modified;
+        this.acceptBatchWriteRevision?.(result.batch_modified);
       }
       return result;
     } finally {

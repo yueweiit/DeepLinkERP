@@ -1,8 +1,8 @@
-"""多站点 ERP 同步界面：站点级预览、状态与只重试失败站点。
+"""多站点 ERP 同步界面：站点级预览、站点状态与只重试失败站点。
 
 服务端那条链（预览/保存/账本/核对/重试）早就就绪，这里守住界面侧的几条硬要求：
-站点与门槛只能来自服务端返回值、`MANUAL_REQUIRED` 不能渲染成成功、部分失败只能
-重试失败的站点、推送前必须先摊开冻结预览、双击不产生第二次业务。
+站点与门槛只能来自服务端返回值、站点状态只能来自服务端 `erp_work` 投影、
+终态不能渲染成成功、推送前必须先摊开冻结预览、双击不产生第二次业务。
 """
 import json
 import subprocess
@@ -11,9 +11,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PARTS = ROOT / "page" / "overseas_cost_workbench" / "parts"
 
-#: 一份形状与 `preview_site_sync_plan` 真实返回一致的两站点计划。
+#: 一份形状与 `preview_site_sync_plan` 真实返回一致的两站点计划（含站点级 `erp_work` 投影）。
 PLAN_JS = """
 const plan={ready:true,complete:true,cost_result_hash:'%s',batch_name:'B-1',version_name:'V-1',
+  erp_work:{overall:'PARTIAL',current_cost_result_hash:'%s',todo_count:2,
+    counts:{SYNCED:0,UPDATE_REQUIRED:1,IN_PROGRESS:0,ATTENTION_REQUIRED:0,NOT_PUSHED:1},
+    sites:[
+      {site_code:'DEEPLINKERP',state:'NOT_PUSHED',cost_result_hash:'',request_id:'',status:'',
+       attempt_count:0,error_code:'',error_message:'',
+       todo:{code:'ERP_SYNC_REQUIRED',severity:'warning',action:'preview_site_sync',label:'该站点还没有推送当前计算结果'}},
+      {site_code:'MXSITE',state:'UPDATE_REQUIRED',cost_result_hash:'b'.repeat(64),request_id:'R-2',status:'SUCCESS',
+       attempt_count:1,error_code:'',error_message:'',
+       todo:{code:'ERP_UPDATE_REQUIRED',severity:'warning',action:'review_erp_document',label:'该站点已同步的不是当前计算结果'}}
+    ]},
   push_state:{blocking:[],preview:{blocking:[],source_total_cost_rmb:'5234.56',preview_total_cost_rmb:'5234.56',
     source_fee_total_rmb:'178.90',preview_allocated_fee_rmb:'178.90',
     sites:[
@@ -28,7 +38,7 @@ const plan={ready:true,complete:true,cost_result_hash:'%s',batch_name:'B-1',vers
          total_cost_rmb:'234.56',allocated_fee_rmb:'28.90'}
       ]}
     ]}}};
-""" % ("a" * 64)
+""" % (("a" * 64), ("a" * 64))
 
 
 def _erp_site_result(script: str) -> dict:
@@ -69,34 +79,38 @@ def _harness(extra: str = "") -> str:
     )
 
 
-def test_manual_required_is_never_rendered_as_a_successful_push():
+def test_terminal_and_unknown_states_are_never_rendered_as_a_successful_push():
     result = _erp_site_result(_harness() + """
-    const statuses=['PENDING','RUNNING','SUCCESS','FAILED','UNCERTAIN','MANUAL_REQUIRED','SUPERSEDED','WHATEVER'];
+    const states=['SYNCED','UPDATE_REQUIRED','IN_PROGRESS','ATTENTION_REQUIRED','NOT_PUSHED','WHATEVER'];
+    const overalls=['EMPTY','NOT_STARTED','IN_PROGRESS','PARTIAL','UPDATE_REQUIRED','ATTENTION_REQUIRED','SYNCED'];
     console.log(JSON.stringify({
-      meta:Object.fromEntries(statuses.map(s=>[s,w.erpSiteStatusMeta(s)])),
-      chips:w.renderErpSiteStatusChips([{status:'SUCCESS'},{status:'SUCCESS'},{status:'MANUAL_REQUIRED'}]),
-      manualRow:w.renderErpSiteLedgerRow({site_code:'MXSITE',status:'MANUAL_REQUIRED',request_id:'R-1',attempt_count:2}),
-      failedRow:w.renderErpSiteLedgerRow({site_code:'MXSITE',status:'FAILED',request_id:'R-2'}),
-      runningRow:w.renderErpSiteLedgerRow({site_code:'MXSITE',status:'RUNNING',request_id:'R-3'}),
-      successRow:w.renderErpSiteLedgerRow({site_code:'MXSITE',status:'SUCCESS',request_id:'R-4'}),
+      meta:Object.fromEntries(states.map(s=>[s,w.erpSiteStateMeta(s)])),
+      overall:Object.fromEntries(overalls.map(s=>[s,w.erpSiteOverallMeta(s)])),
+      manual:w.renderErpSiteTodoRow({site_code:'MXSITE',state:'ATTENTION_REQUIRED',status:'MANUAL_REQUIRED',
+        request_id:'R-1',attempt_count:2,error_message:'稳定业务键命中多张采购单',
+        todo:{code:'ERP_MANUAL_REQUIRED',severity:'error',action:'review_erp_document',label:'该站点的同步请求需要人工处理'}}),
+      uncertain:w.renderErpSiteTodoRow({site_code:'MXSITE',state:'ATTENTION_REQUIRED',status:'UNCERTAIN',request_id:'R-2',
+        todo:{code:'ERP_RECONCILE_REQUIRED',severity:'error',action:'reconcile_erp',label:'该站点的同步结果未确定，请核对远端'}}),
+      synced:w.renderErpSiteStateChip({site_code:'P',state:'SYNCED',todo:null}),
+      unknown:w.renderErpSiteStateChip({site_code:'P',state:'WHATEVER'}),
     }));
     """)
-    assert result["meta"]["MANUAL_REQUIRED"] == {"label": "需人工处理", "tone": "warn"}
-    assert result["meta"]["UNCERTAIN"] == {"label": "结果待核对", "tone": "warn"}
-    assert result["meta"]["FAILED"]["tone"] == "error"
-    assert result["meta"]["SUCCESS"]["tone"] == "done"
-    # 未知取值不猜成功，也不假装认得。
+    assert result["meta"]["SYNCED"] == {"label": "已同步", "tone": "done"}
+    assert result["meta"]["UPDATE_REQUIRED"]["tone"] == "warn"
+    assert result["meta"]["ATTENTION_REQUIRED"]["tone"] == "error"
+    # 未推送 / 认不出的状态都不许出现"已同步"的意思。
+    assert result["meta"]["NOT_PUSHED"]["tone"] == "muted"
     assert result["meta"]["WHATEVER"] == {"label": "WHATEVER", "tone": "muted"}
-    assert "已推送 2" in result["chips"] and "需人工处理 1" in result["chips"]
-    assert "需人工处理" in result["manualRow"] and "已推送" not in result["manualRow"]
-    # 终态不给"点了会被拒"的按钮：MANUAL_REQUIRED 调到服务端只会得到 SKIP。
-    assert "erp-site-reconcile" not in result["manualRow"] and "erp-site-retry" not in result["manualRow"]
-    assert "不会再自动重试" in result["manualRow"]
-    assert "推送队列处理中" in result["runningRow"]
-    # 只有结论未定的请求才给核对/重试入口。
-    assert "data-action=\"erp-site-reconcile\"" in result["failedRow"]
-    assert "data-action=\"erp-site-retry\"" in result["failedRow"]
-    assert "erp-site-reconcile" not in result["successRow"]
+    assert result["overall"]["ATTENTION_REQUIRED"]["tone"] == "error"
+    assert result["overall"]["PARTIAL"]["tone"] == "warn"
+    assert result["overall"]["EMPTY"]["tone"] == "muted" and result["overall"]["NOT_STARTED"]["tone"] == "muted"
+    # 核对/重试入口只给服务端说可核对的那种待办：其余状态调到服务端只会得到 SKIP。
+    assert "erp-site-reconcile" not in result["manual"] and "erp-site-retry" not in result["manual"]
+    assert "需要人工处理" in result["manual"] and "稳定业务键命中多张采购单" in result["manual"]
+    assert "data-action=\"erp-site-reconcile\"" in result["uncertain"]
+    assert "data-action=\"erp-site-retry\"" in result["uncertain"]
+    assert "已同步" in result["synced"] and "is-done" in result["synced"]
+    assert "已同步" not in result["unknown"]
 
 
 def test_site_preview_takes_sites_companies_and_amounts_from_the_server_plan():
@@ -132,25 +146,51 @@ def test_partial_plan_says_which_groups_will_not_be_sent():
     assert "还有 2 个物料组未通过路由、供应商或仓库门槛" in result["panel"]
 
 
-def test_site_panel_merges_the_local_ledger_onto_the_planned_sites():
+def test_site_panel_reads_the_server_projection_instead_of_deriving_states():
+    """站点状态只来自服务端 `erp_work`，页面不再从账本行自己推一遍。"""
+
     result = _erp_site_result(_harness() + PLAN_JS + """
     const st=w.ensureErpSiteState();
     st.plan=plan;
-    st.ledger={ok:true,total:3,items:[
-      {site_code:'DEEPLINKERP',status:'SUCCESS',request_id:'R-1',cost_result_hash:'b'.repeat(64)},
-      {site_code:'MXSITE',status:'FAILED',request_id:'R-2',error_message:'远端返回 500',attempt_count:1},
-      {site_code:'MXSITE',status:'UNCERTAIN',request_id:'R-3'}
-    ]};
     console.log(JSON.stringify({panel:w.renderErpSiteStatusPanel(),visible:w.erpSitePanelVisible({confirm_status:'Confirmed'})}));
     """)
     panel = result["panel"]
     assert "2 个站点" in panel and "2 个单据组" in panel
-    assert "已推送 1" in panel and "推送失败 1" in panel and "结果待核对 1" in panel
-    # 两条没定论的请求各给一组核对/重试，成功的那条不给。
-    assert panel.count("erp-site-reconcile") == 2
-    assert panel.count("erp-site-retry") == 2
-    assert "远端返回 500" in panel
+    # 两个站点一个是「未推送」、一个是「同步的是旧成本」，且整体口径跟着走。
+    assert "未推送" in panel and "同步的是旧成本" in panel
+    assert "部分站点未推送" in panel
+    assert "还欠处理的站点（2 个）" in panel
+    assert "该站点还没有推送当前计算结果" in panel
+    assert "该站点已同步的不是当前计算结果" in panel
+    # 这两条待办都不是「核对远端」那类，所以一个必然被拒的按钮都不该出现。
+    assert panel.count("erp-site-reconcile") == 0
+    assert panel.count("erp-site-retry") == 0
+    assert "结果哈希 bbbbbbbbbbbb" in panel
     assert result["visible"] is True
+
+
+def test_missing_server_projection_is_never_read_as_synced():
+    """服务端没给站点状态时显示「状态未知」，绝不默认成功。"""
+
+    result = _erp_site_result(_harness() + PLAN_JS + """
+    const bare={...plan};delete bare.erp_work;
+    const st=w.ensureErpSiteState();st.plan=bare;
+    console.log(JSON.stringify({panel:w.renderErpSiteStatusPanel(),work:w.erpSiteWork(bare,null)}));
+    """)
+    assert result["work"] is None
+    assert "状态未知" in result["panel"]
+    assert "已同步" not in result["panel"]
+    assert "还欠处理的站点" not in result["panel"]
+
+
+def test_push_preview_lists_the_sites_that_still_owe_a_push():
+    result = _erp_site_result(_harness() + PLAN_JS + """
+    console.log(JSON.stringify({note:w.renderErpSiteOverdueNote(plan),empty:w.renderErpSiteOverdueNote({})}));
+    """)
+    assert "该站点还没有推送当前计算结果（DEEPLINKERP）" in result["note"]
+    assert "该站点已同步的不是当前计算结果（MXSITE）" in result["note"]
+    # 没有欠账的批次不该多一句噪音。
+    assert result["empty"] == ""
 
 
 def test_site_panel_stays_out_of_the_way_until_the_cost_result_is_confirmed():

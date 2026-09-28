@@ -460,7 +460,7 @@
       const result = await this.settlementWrite(state, () => this.settlementApi(action, args));
       if (!result?.ok) throw new Error(result?.message || '操作未保存，请核对后重试');
       if (!this.isBatchSettlementCurrent(state) || version !== state.versionName) return;
-      if (result.batch_modified && this.detailState?.batchName === state.batchName) this.detailState.expectedModified = result.batch_modified;
+      if (this.detailState?.batchName === state.batchName) this.acceptBatchWriteRevision?.(result.batch_modified);
       state.freightView = null; state.freightDraft = {}; state.packingSources = null; state.packingPreview = null; state.packingSelected = null;
       state.freightMessage = result.message || (result.status === 'queued' ? '已保存确认，当前编辑结束后处理。' : '已保存，请核对当前资料并重新试算。');
       try { await this.refreshSettlementBatch(state.batchName, result.version); }

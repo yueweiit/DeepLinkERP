@@ -3635,7 +3635,7 @@
     }, false);
     if (!result?.ok) throw new Error(result?.message || "物料恢复失败，请重新预览。");
     this.detailState.versionName = result.version_name || this.detailState.versionName;
-    this.detailState.expectedModified = result.batch_modified || this.detailState.expectedModified;
+    this.acceptBatchWriteRevision(result.batch_modified);
     await this.loadMaterialFeeWorkspace({ preservePosition: true });
     frappe.show_alert({ message: `已恢复 ${Number(result.restored_count || 0)} 行物料`, indicator: "green" });
     return result;
@@ -4267,6 +4267,8 @@
    * batch_modified；这些值都可能比本页已经拿到的 revision 更旧。一旦把写令牌回退成
    * 旧值，edit_session 的乐观锁会把本页之后的每次写入都判成「批次数据已被更新」，
    * 页面就再也保存不了任何东西。同一约定见 acceptSavedComprehensiveCost 的 hasNewerRevision。
+   *
+   * 全部写入点都必须经这里，不要直接给 detailState.expectedModified 赋值。
    */
   acceptBatchWriteRevision(modified) {
     const next = String(modified || "");
@@ -4275,6 +4277,24 @@
     if (current && next < current) return false;
     this.detailState.expectedModified = next;
     return true;
+  }
+
+  /**
+   * 详情加载/刷新读到的写令牌基准值。
+   *
+   * 换批次时整个换掉：不同批次的 modified 之间没有可比性，沿用上一批的令牌会让新批次的
+   * 每次写入都被乐观锁拒绝（openBatchDetail 只设 batchName，不重置令牌）。同一批次内
+   * 仍走 acceptBatchWriteRevision 的不回退规则 —— 详情刷新拿到的值可能来自缓存快照。
+   */
+  adoptBatchWriteRevision(batchName, modified) {
+    const name = String(batchName || "").trim();
+    const next = String(modified || "");
+    if (name && this.detailState.writeRevisionBatch !== name) {
+      this.detailState.writeRevisionBatch = name;
+      this.detailState.expectedModified = next;
+      return Boolean(next);
+    }
+    return this.acceptBatchWriteRevision(modified);
   }
 
   updateMaterialFeeExpectedModified(result) {
@@ -6422,7 +6442,7 @@
     if (this.detailState.batchName === batchName && (!versionName || this.detailState.versionName === versionName)
       && !hasNewerRevision(this.detailState.expectedModified)) {
       this.detailState.header = { ...(this.detailState.header || {}), ...updates };
-      this.detailState.expectedModified = result.batch_modified || this.detailState.expectedModified;
+      this.acceptBatchWriteRevision(result.batch_modified);
       this.detailState.skuRequestId = (this.detailState.skuRequestId || 0) + 1;
       this.detailState.skuResult = null;
       if (!preserveDirty) this.detailState.dirty = false;

@@ -1,3 +1,5 @@
+import re
+
 from overseas_costing.tests.test_workbench_frontend_state import _fee_workspace_result, PARTS
 
 
@@ -610,6 +612,61 @@ def test_batch_write_revision_is_advanced_through_one_helper_only():
     assert "this.acceptBatchWriteRevision(modified)" in updater_block
     assert "this.detailState.expectedModified = header.modified" not in source
     assert "this.detailState.expectedModified = modified;" not in source
+
+
+def test_switching_batch_swaps_the_write_revision_instead_of_reusing_it():
+    """换批次必须换写令牌：不同批次的 modified 之间没有可比性。
+
+    回归背景：openBatchDetail 只设 detailState.batchName 与 header，从不重置写令牌。
+    令牌若按「只前进」跨批次沿用，先看新批次再看旧批次后，旧批次的每次写入都会被
+    edit_session 的乐观锁判成「批次数据已被更新」，页面一个字段都改不动。
+    """
+
+    result = _fee_workspace_result(r'''
+    const w=Object.create(Harness.prototype);
+    w.detailState={header:{}};
+    w.adoptBatchWriteRevision('B-1','2026-09-24 14:13:56.627458');
+    const firstBatch=w.detailState.expectedModified;
+    w.adoptBatchWriteRevision('B-2','2026-09-10 09:00:00.000001');
+    const secondBatch=w.detailState.expectedModified;
+    w.adoptBatchWriteRevision('B-2','2026-09-10 08:00:00.000000');
+    const olderRefresh=w.detailState.expectedModified;
+    w.adoptBatchWriteRevision('B-2','2026-09-25 09:00:00.000001');
+    const newerRefresh=w.detailState.expectedModified;
+    w.adoptBatchWriteRevision('B-1','2026-09-24 14:13:56.627458');
+    const backToFirst=w.detailState.expectedModified;
+    const reused=w.adoptBatchWriteRevision('B-1','');
+    console.log(JSON.stringify({firstBatch,secondBatch,olderRefresh,newerRefresh,backToFirst,reused}));
+    ''')
+    assert result["firstBatch"] == "2026-09-24 14:13:56.627458"
+    assert result["secondBatch"] == "2026-09-10 09:00:00.000001"
+    # 同一批次内，详情刷新拿到的旧值不能把令牌拉回去。
+    assert result["olderRefresh"] == "2026-09-10 09:00:00.000001"
+    assert result["newerRefresh"] == "2026-09-25 09:00:00.000001"
+    # 切回旧批次时以该批次的现值为准；空值不覆盖已有令牌。
+    assert result["backToFirst"] == "2026-09-24 14:13:56.627458"
+    assert result["reused"] is False
+
+
+def test_write_token_has_no_bypass_outside_its_two_helpers():
+    """写令牌只允许在 acceptBatchWriteRevision / adoptBatchWriteRevision 内部赋值。
+
+    回归背景：12 处页面各自 ``detailState.expectedModified = result.batch_modified``，
+    其中详情页直接拿（可能来自缓存快照的）header.modified 覆盖，线上实测被拉回 4 天，
+    之后每次写入都被乐观锁 417 拒绝。收口后再加写入点必须改这两个 helper。
+    """
+
+    offenders = {}
+    for path in sorted(PARTS.glob("*.js")):
+        source = path.read_text(encoding="utf-8")
+        hits = re.findall(r"detailState\??\.expectedModified\s*=\s*(?!=)", source)
+        if hits:
+            offenders[path.name] = len(hits)
+
+    assert offenders == {"78-material-fee-workspace.js": 2}
+    gate = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    assert "adoptBatchWriteRevision(batchName, modified) {" in gate
+    assert "this.detailState.writeRevisionBatch" in gate
 
 
 def test_older_workspace_snapshot_cannot_rewind_the_write_revision():

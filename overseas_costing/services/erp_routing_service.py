@@ -328,25 +328,6 @@ def resolve_item_uom(item: dict, fallback: str = "") -> str:
     return normalize_erp_uom(raw) or raw
 
 
-def preview_bulk_route(items: list[dict], target_site: str, target_subsidiary: str | None = None) -> dict:
-    """预览整柜统一归属会改变哪些已解析行，不直接写入物料。"""
-
-    site = _text(target_site)
-    subsidiary = _text(target_subsidiary)
-    changed_item_keys = []
-    for index, item in enumerate(items, start=1):
-        item_key = _text(item.get("stable_line_key") or item.get("name") or item.get("row_no") or index)
-        if _text(item.get("erp_site_code")) != site or (subsidiary and _text(item.get("subsidiary_code")) != subsidiary):
-            changed_item_keys.append(item_key)
-
-    return {
-        "target_site": site,
-        "target_subsidiary": subsidiary,
-        "changed_item_keys": changed_item_keys,
-        "requires_confirmation": bool(changed_item_keys),
-    }
-
-
 def list_unambiguous_project_routes(routes: list[dict], *, as_of: date | None = None) -> dict:
     """Return active projects that resolve to exactly one Company/site target."""
 

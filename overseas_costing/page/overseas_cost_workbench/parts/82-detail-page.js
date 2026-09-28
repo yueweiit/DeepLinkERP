@@ -63,7 +63,7 @@
       this.detailState.versionName = result.version_name || merged.current_version || "";
       this.detailState.header = merged;
       this.detailState.detail = result;
-      this.detailState.expectedModified = merged.modified || this.detailState.expectedModified || "";
+      this.adoptBatchWriteRevision?.(merged.name, merged.modified);
       this.detailState.dirty = false;
       this.activeBatchName = merged.name;
       this.drawerBatchName = merged.name;
@@ -130,7 +130,7 @@
     this.detailState.header = merged;
     this.detailState.detail = result;
     this.detailState.versionName = merged.current_version;
-    this.detailState.expectedModified = merged.modified || this.detailState.expectedModified || "";
+    this.adoptBatchWriteRevision?.(merged.name, merged.modified);
     this.renderDetailShell();
     if (this.detailState.editToken) this.updateEditLeaseStatus();
     if (options.refreshCurrentTab === false) return;
@@ -599,7 +599,7 @@
     this.detailState.editToken = result.edit_token;
     this.detailState.editExpiresAt = result.expires_at;
     // 保留详情加载时的 modified，以便首次写入仍能发现“加载后、获取锁前”的并发修改。
-    this.detailState.expectedModified = this.detailState.expectedModified || batch.modified || result.modified || "";
+    this.acceptBatchWriteRevision?.(this.detailState.expectedModified || batch.modified || result.modified);
     this.updateEditLeaseStatus();
     window.clearInterval(this.detailState.renewTimer);
     this.detailState.renewTimer = window.setInterval(() => this.renewEditSession(), 120000);

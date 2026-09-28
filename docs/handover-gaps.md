@@ -9,15 +9,24 @@
 
 ## 0. 一句话结论
 
-主干链路（费用与凭证、资料页、成本核算、ERP 站点化推送的**服务端**)已完工并在线上可用；
-**差的是"多站点 ERP"这条线的前端与三个后续 Task**，以及一批不影响运行但会咬人的技术债。
+主干链路（费用与凭证、资料页、成本核算、ERP 站点化推送的服务端**与界面**）已完工并在线上可用，
+站点级的「哪个站点没同步 / 同步的是不是当前成本」也已可见（Task 10 + Task 8 均已完成）。
+**剩下的都不是代码问题**：Task 7 卡在配置字段与业务决策（见 1.2），Task 11 目前无风险敞口，
+其余是不影响运行但会咬人的技术债与目录文档。
 业务数据侧仍然**一次正式推送都没有发生**（`confirm_status` 全 0），所以上线状态是"能力已通、业务未启用"。
 
 ---
 
 ## 1. 未完成的功能
 
-### 1.1 多站点 ERP 同步界面（计划 Task 10）——完全没做
+### 1.1 多站点 ERP 同步界面（计划 Task 10）——**已完成**
+
+`parts/79-erp-sites.js` + `parts/51-erp-sites.css` 已上线。站点、ERP 公司、仓库、单据组、金额、
+结果哈希全部取自服务端 `preview_site_sync_plan`；`writebackToErp` 从"盲确认框"改为先摊开冻结预览，
+确认后仍走同一个 `queueErpWriteback`；`MANUAL_REQUIRED` 与认不出的状态一律不渲染成成功，
+只有服务端说可核对的待办才给"核对/重试"按钮。
+
+下面这段是当时的缺口记录，留作历史：
 
 - 计划里要新建的 `parts/79-erp-sites.js`、`parts/51-erp-sites.css` **不存在**。
 - 前端只调用 4 个旧入口：`confirm_calculation_result`、`preview_erp_payload`、
@@ -35,32 +44,50 @@ grep -rn "preview_site_sync_plan\|get_site_sync_requests\|reconcile_erp_request"
   --include=*.js overseas_costing/page/overseas_cost_workbench/parts/                # 无输出
 ```
 
-### 1.2 暂估转实际（计划 Task 7）——只有开关，没有实现
+### 1.2 暂估转实际（计划 Task 7）——只有开关，没有实现；**本轮决定不做**
 
 - `cost_update_mode` 字段被读出来展示（`erp_capability_service.py:50`、`erp_sync_plan_service.py:276`），
   默认值 `DISABLED`，但**没有任何代码消费它去更新远端成本**。
 - 计划要求的 `build_draft_purchase_cost_update` / `update_purchase_cost` / `preview_cost_updates`
   在全仓库**零命中**。
-- 后果：只要将来启用"先按暂估推送、之后再改成实际成本"，远端采购单不会跟着改，
-  只能人工处理，且系统不会给出待办。
 
-核实：
-```bash
-grep -rn "update_purchase_cost\|preview_cost_updates\|build_draft_purchase_cost_update" \
-  --include=*.py --include=*.js . | grep -v node_modules    # 无输出
-```
+**为什么这轮不做（先看清启用路径）**：
 
-### 1.3 站点级 ERP 待办与状态摘要（计划 Task 8）——只有批次级投影
+- `cost_update_mode` 只存在于 `Overseas Cost ERP Site`（**0 条**记录），
+  `Overseas Cost ERP Settings`（单例，默认站点 `DEEPLINKERP` 的配置真源）**根本没有这个字段**：
 
-- 现状是批次级 `writeback_status/writeback_time/writeback_message/erp_target_doc` 四个字段（全库仍 'Not Started'）。
-- 计划要求的 `erp_work.overall / erp_work.sites[]`（按站点算 `SYNCED` / `UPDATE_REQUIRED` 与
-  `ERP_UPDATE_REQUIRED` 待办）**不存在**。
-- 后果：多站点时"哪个站点没同步"看不出来；费用待办与 ERP 回执的边界也没在代码里固化。
+  ```bash
+  grep -o '"fieldname": "[a-z_]*"' overseas_costing/doctype/overseas_cost_erp_settings/overseas_cost_erp_settings.json | grep cost_update   # 无输出
+  grep -o '"fieldname": "[a-z_]*"' overseas_costing/doctype/overseas_cost_erp_site/overseas_cost_erp_site.json | grep cost_update       # 有
+  ```
 
-核实：
-```bash
-grep -rn "erp_work\|ERP_UPDATE_REQUIRED" --include=*.py --include=*.js . | grep -v node_modules   # 无输出
-```
+  ⇒ 线上唯一在用的站点**没有任何地方能把模式从 `DISABLED` 改成别的值**。
+  要启用得先给 Settings 加字段（改线上单例 DocType 的结构），再让代码去 PUT 远端采购单。
+- 业务触发条件也不存在：`confirm_status` 全 0 ⇒ 从来没有按暂估推送过，
+  ERP 侧没有"待改成实际成本"的暂估采购单。
+
+结论：现在写 `update_purchase_cost` 等于发一段**改不了开关、也没有数据可改**的远端写代码。
+等业务真的决定启用暂估推送时再做，届时按计划 Task 7 的四步走（先补 Settings 字段与能力校验，
+再做 `preview_cost_updates` 差异与失败关闭的更新适配器）。
+
+**已替代的部分**：站点级「同步的是旧成本」这条待办本轮已由 Task 8 落地
+（`fee_status_service.build_erp_work_state`），不需要等 Task 7 就能被看见。
+
+### 1.3 站点级 ERP 待办与状态摘要（计划 Task 8）——**已完成**
+
+- 服务端：`fee_status_service.build_erp_work_state(current_hash, sites, planned_sites)`（纯函数）
+  输出 `{overall, current_cost_result_hash, sites[], counts, todo_count}`，站点状态词表固定五个：
+  `SYNCED` / `UPDATE_REQUIRED` / `IN_PROGRESS` / `ATTENTION_REQUIRED` / `NOT_PUSHED`。
+- 待办码进同一个 `TODO_DEFINITIONS` 注册表：`ERP_SYNC_REQUIRED` / `ERP_RECONCILE_REQUIRED` /
+  `ERP_MANUAL_REQUIRED` / `ERP_UPDATE_REQUIRED`。
+- 三条读路径共用这一个投影：`batch_service.get_batch_detail`（`header.erp_work`）、
+  `erp_sync_plan_service.get_site_sync_requests`、`preview_site_sync_plan`（这条信息最全，
+  因为它才知道当前结果哈希与本次会推到哪些站点）。
+- 前端 `parts/79-erp-sites.js` 只渲染服务端投影，**不再自己从账本行推站点状态**
+  （原先的 `erpSiteLedgerBySite` / `erpSiteStatusCounts` / `erpSiteNeedsAttention` 已删）。
+- 两条独立的线：费用待办（`build_fee_status`）与 ERP 回执互不关闭对方，测试里守着这条。
+
+核实：`python -m pytest -q overseas_costing/tests/test_erp_work_state.py overseas_costing/tests/test_erp_sync_plan_service.py overseas_costing/tests/test_erp_site_frontend.py`
 
 ### 1.4 历史迁移（计划 Task 11）——未做
 
@@ -115,38 +142,46 @@ grep -rn "erp_work\|ERP_UPDATE_REQUIRED" --include=*.py --include=*.js . | grep 
 
 ## 2. 已知技术债（不影响运行，但会咬人）
 
-### 2.1 写令牌闸口有 10 处旁路（重要）
+### 2.1 写令牌闸口已收口（原先 10 处旁路）
 
 `acceptBatchWriteRevision()` 是 `expectedModified` 的**唯一合法入口**（令牌只前进不回退。
 用快照里落后的 `header.modified` 当令牌会把 revision 拉回过去，之后本页每次写入都被乐观锁拒绝 417）。
-全仓库仍有 **10 处直接赋值**绕过它：
 
-| 文件 | 行 |
-| --- | --- |
-| `parts/100-crud-edit.js` | 437 |
-| `parts/30-calculation-erp.js` | 332 |
-| `parts/50-import-category.js` | 416 |
-| `parts/65-manual-documents.js` | 896 |
-| `parts/78-material-fee-workspace.js` | 3485、6272 |
-| `parts/82-detail-page.js` | 66、133、599 |
-| `parts/87-freight.js` | 463 |
+原先有 10 处直接赋值绕过它（`100-crud-edit:437`、`30-calculation-erp:332`、`50-import-category:416`、
+`65-manual-documents:896`、`78-…:3485/6272`、`82-detail-page:66/133/599`、`87-freight:463`）。
+**已全部收口**：`detailState.expectedModified` 现在只在 `78-material-fee-workspace.js` 的
+`acceptBatchWriteRevision()` / `adoptBatchWriteRevision()` 内部赋值，测试
+`test_material_grid_frontend.py::test_write_token_has_no_bypass_outside_its_two_helpers` 会挡住新旁路。
 
-这几条路径都从 `result.batch_modified` 取值，**当前恰好是前进的**，所以没爆；
-但这是"逻辑正确靠运气"，任何一处改成回落到旧值就会复现"两个选择器点保存没反应"。
+两个 helper 分工（不要合并）：
 
-### 2.2 孤儿函数
+| helper | 用在哪 | 规则 |
+| --- | --- | --- |
+| `acceptBatchWriteRevision(modified)` | 所有「写成功后拿服务端新值」「快照回带」的路径 | 同一批次内只前进，不回退 |
+| `adoptBatchWriteRevision(batch, modified)` | `openBatchDetail` / `refreshDetailSummary` 读到的详情 | 换批次整个换掉；同一批次仍只前进 |
 
-- `erp_routing_service.preview_bulk_route()`（`:331`）：除自己的测试外无调用方。
-  要么接进界面（计划里"整柜快捷归属"会用它），要么删掉。
+换批次必须换令牌，因为不同批次的 `modified` 之间没有可比性，而 `openBatchDetail` 只设
+`batchName`、从不重置令牌 —— 先看新批次再看旧批次，旧批次会一个字段都改不动。
 
-### 2.3 部署链的顺序依赖没根治
+跨部件调用（`82` / `87` / `100` / `30` / `50` / `65`）一律写成 `this.acceptBatchWriteRevision?.(…)`：
+测试夹具常只加载部分 parts，直呼会 `TypeError`。
 
-- `deploy-overseas-costing.yml` 第 7 步 `docker image prune --all --force` 在 preflight **之前**跑。
-  它删掉所有**未被容器引用**的镜像。于是"compose 的 tag 改了、但容器还跑着旧 tag"的窗口里，
-  新 tag 的镜像会被当垃圾删掉，紧接着的 preflight 就失败（2026-09-28 实际踩到）。
-- 已在 preflight 里加了**明确报错**（哪个镜像缺失、哪个文件声明的、怎么恢复），
-  但"prune 不该回收 compose 引用的镜像"这件事**没有根治**。根治的代价是项目镜像会累积占盘，
-  需要运维拍板。
+### 2.2 孤儿函数（已删）
+
+- ~~`erp_routing_service.preview_bulk_route()`（`:331`）~~ **已删除**（连同它唯一的测试）。
+  删它的依据不是"没人调用"，而是它读的 `Overseas Cost Item.erp_site_code` / `subsidiary_code`
+  **全库没有写入点**（真实解析在 `resolve_item_routes()` 里实时覆盖），所以它算出来的
+  `changed_item_keys` 不是业务真相。整柜/批量归属现在走逐行指定那套（见 1.5），不需要它。
+  防回归：`test_erp_routing_service.py::test_project_collection_route_wins_over_the_legacy_site_columns`。
+
+### 2.3 部署链的顺序依赖（已根治）
+
+- 原先 `deploy-overseas-costing.yml` 第 7 步 `docker image prune --all --force` 在 preflight **之前**跑，
+  会删掉所有**未被容器引用**的镜像；"compose 的 tag 改了、但容器还跑着旧 tag"的窗口里，
+  新 tag 的镜像会被当垃圾删掉，紧接着的 preflight 失败（2026-09-28 实际踩到）。
+- 现在改为 `.github/scripts/reclaim_docker_space.sh`：回收前先用
+  `docker create --name ocw-deploy-image-guard <compose 声明的镜像>` 钉住它，回收完立刻删除；
+  compose 解析不出镜像名时才退化成只回收悬空层。
 
 ### 2.4 多站点没有实测
 
@@ -155,19 +190,20 @@ grep -rn "erp_work\|ERP_UPDATE_REQUIRED" --include=*.py --include=*.js . | grep 
   默认站点走 `Overseas Cost ERP Settings` 单例）。
 - 由此，"多公司天然拆单"“分站点部分成功”这些分支**没有生产验证**。
 
-### 2.5 目录索引文档严重滞后
+### 2.5 目录索引文档（已补到当前）
 
-| 文档 | 收录 | 实际 |
-| --- | --- | --- |
-| `overseas_costing/services/README_服务目录说明.md` | 10 行 | 82 个 `.py` |
-| `overseas_costing/api/README_API目录说明.md` | 5 行 | 17 个 `.py` |
-| `overseas_costing/doctype/README_DocType目录说明.md` | 13 行 | 23 个目录 |
-| `overseas_costing/tests/README_测试目录说明.md` | 16 行 | 169 个 `.py` |
+原先四份 README 严重滞后，**已全部重写**：`services/`（82 个 `.py`，含 ERP 同步那 8 个文件）、
+`api/`（17 个）、`doctype/`（21 个目录，标明单例/子表）、`tests/`（172 个，按域分组 + 怎么跑 + 约定）。
 
-尤其是 **ERP 同步 8 个服务文件完全没有文档入口**（`erp_client` / `erp_routing_service` /
-`erp_site_service` / `erp_sync_service` / `erp_sync_ledger_service` / `erp_sync_plan_service` /
-`erp_capability_service` / `erp_sync_*`）。新人只能靠 `docs/superpowers/plans/2026-09-07-multi-site-erp-sync.md`
-反推。本次已补 services 一版（见第 4 节）。
+**这几份是按当前代码生成的快照，仍会过期**：新增服务/接口/DocType/测试目录时请顺手补一行，
+否则下一个人又要靠 `ls` 反推。核实命令：
+
+```bash
+ls overseas_costing/services/*.py | wc -l   # 82
+ls overseas_costing/api/*.py | wc -l        # 17（含 __init__.py）
+ls -d overseas_costing/doctype/*/ | wc -l   # 21
+ls overseas_costing/tests/*.py | wc -l      # 173（含 __init__.py）
+```
 
 ### 2.6 本地测试基线有 62 条红，且与 CI 不一致
 
@@ -360,9 +396,9 @@ OC_HOST=<host> OC_USER=<user> OC_PW=<pw> python tmp/oc_ssh.py   # 以 bash -s �
 | P1 | ~~多站点 ERP 前端（Task 10）~~（已完成，`parts/79-erp-sites.js` + `51-erp-sites.css`） | 服务端 6 个 API 已经就绪，只差界面；否则"多站点"等于没上线 |
 | P1 | ~~批量设置项目归属支持逐行指定~~（已完成 `75d852b5a7`） | 987 行卡在这，是启用推送的实际前置 |
 | P1 | 补供应商（业务动作，采购侧） | 1451 行全空，同样的推送前置 |
-| P2 | Task 8 站点级待办/状态摘要 | 多站点上线后立刻会需要 |
-| P2 | Task 7 暂估转实际 | 只在业务决定"先暂估后改实际"时才需要 |
-| P3 | 10 处 `expectedModified` 旁路收口、`preview_bulk_route` 处理、目录文档补全 | 防止回归与降低接手成本 |
+| P2 | ~~Task 8 站点级待办/状态摘要~~（已完成，`fee_status_service.build_erp_work_state` + `79-erp-sites.js` 改为只渲染服务端投影） | 多站点上线后立刻会需要 |
+| P2 | Task 7 暂估转实际 —— **有前置**：先给 `Overseas Cost ERP Settings` 加 `cost_update_mode`，且业务先决定启用暂估推送（见 1.2） | 现在做出来是一段改不了开关的远端写代码 |
+| P3 | ~~10 处 `expectedModified` 旁路收口、`preview_bulk_route` 处理~~（已完成，见 2.1 / 2.2）；**只剩目录文档补全**（见 2.5） | 防止回归与降低接手成本 |
 | P3 | Task 11 历史迁移 | 当前 ERP 侧无历史幂等键，风险很低；本系统旧批次另论 |
 
 **归档会过期**：`deploy/host/` 是宿主三件套的**副本**，宿主上那份仍是唯一真源。改了宿主文件要按

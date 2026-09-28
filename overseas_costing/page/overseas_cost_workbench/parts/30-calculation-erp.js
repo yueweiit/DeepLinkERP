@@ -329,7 +329,7 @@
     if (Number(result.changed_count || 0) > 0) {
       this.markBatchDirty(batch.name);
     }
-    if (result.batch_modified) this.detailState.expectedModified = result.batch_modified;
+    this.acceptBatchWriteRevision?.(result.batch_modified);
     await this.refreshDetailSummary();
     frappe.show_alert({
       message: result.message || "实际发货数量已确认，请重新试算",

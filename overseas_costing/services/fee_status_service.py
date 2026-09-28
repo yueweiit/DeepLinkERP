@@ -19,6 +19,11 @@ TODO_DEFINITIONS = {
     "FEE_AMOUNT_INVALID": ("error", "enter_amount", "请修正费用金额"),
     "EVIDENCE_REQUIRED": ("warning", "link_evidence", "关联最终凭证"),
     "EVIDENCE_VALIDATION_REQUIRED": ("warning", "validate_evidence", "校验最终凭证"),
+    # ERP 站点回执侧：与上面的费用待办是两条独立的线，只描述「远端单据是否已同步到位」。
+    "ERP_SYNC_REQUIRED": ("warning", "preview_site_sync", "该站点还没有推送当前计算结果"),
+    "ERP_RECONCILE_REQUIRED": ("error", "reconcile_erp", "该站点的同步结果未确定，请核对远端"),
+    "ERP_MANUAL_REQUIRED": ("error", "review_erp_document", "该站点的同步请求需要人工处理"),
+    "ERP_UPDATE_REQUIRED": ("warning", "review_erp_document", "该站点已同步的不是当前计算结果"),
 }
 
 
@@ -216,4 +221,145 @@ def summarize_fee_statuses(statuses: list[dict]) -> dict:
             currency: _decimal_text(amount) for currency, amount in sorted(estimated.items())
         },
         "all_requirements_satisfied": not any(status.get("todos") for status in statuses or []),
+    }
+
+
+ERP_WORK_SITE_STATES = (
+    "SYNCED",
+    "UPDATE_REQUIRED",
+    "IN_PROGRESS",
+    "ATTENTION_REQUIRED",
+    "NOT_PUSHED",
+)
+
+# 站点状态 → 待办码。没有条目的状态表示「不用人管」。
+# ATTENTION_REQUIRED 不在表里：它下面 FAILED/UNCERTAIN 走核对、MANUAL_REQUIRED 走人工，
+# 待办码必须按账本状态分开（见 build_erp_site_state）。
+_ERP_SITE_TODO_CODES = {
+    "NOT_PUSHED": "ERP_SYNC_REQUIRED",
+    "UPDATE_REQUIRED": "ERP_UPDATE_REQUIRED",
+}
+
+
+def _erp_text(value) -> str:
+    return "" if value in (None, "") else str(value).strip()
+
+
+def latest_site_request(rows: list[dict]) -> dict | None:
+    """某站点账本里最新一次同步请求。
+
+    排序用 ``creation`` 而不是 ``modified``：迟到的旧回执（H1 推送失败、很久以后才核对成
+    功）会在 ``modified`` 上排到最前，拿它当「该站点当前状态」会让旧成本的成功回执
+    关闭新版本的待办。``creation`` 才是「这次请求是为哪一份成本结果开的」。
+    """
+
+    candidates = [row for row in (rows or []) if isinstance(row, dict)]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda row: (_erp_text(row.get("creation")), _erp_text(row.get("name"))))
+
+
+def build_erp_site_state(latest: dict | None, *, current_hash: str = "") -> tuple[str, str]:
+    """把某站点最新一次请求折算成（状态, 待办码）；待办码为空表示无需处理。"""
+
+    if latest is None:
+        return "NOT_PUSHED", _ERP_SITE_TODO_CODES["NOT_PUSHED"]
+    status = _erp_text(latest.get("status")).upper()
+    hash_value = _erp_text(latest.get("cost_result_hash"))
+    current = _erp_text(current_hash)
+    if status in {"PENDING", "RUNNING"}:
+        return "IN_PROGRESS", ""
+    if status == "SUCCESS":
+        # 只有「最新一次成功回执的成本结果 hash 就是当前结果」才算真的同步到位。
+        if current and hash_value != current:
+            return "UPDATE_REQUIRED", _ERP_SITE_TODO_CODES["UPDATE_REQUIRED"]
+        return "SYNCED", ""
+    # FAILED / UNCERTAIN 是服务端唯一允许核对的两种状态（RECONCILABLE_STATUSES），
+    # 因此这里给的是「核对远端」；MANUAL_REQUIRED 及认不出的状态只能交给人。
+    if status in {"FAILED", "UNCERTAIN"}:
+        return "ATTENTION_REQUIRED", "ERP_RECONCILE_REQUIRED"
+    if status == "SUPERSEDED":
+        return "NOT_PUSHED", _ERP_SITE_TODO_CODES["NOT_PUSHED"]
+    return "ATTENTION_REQUIRED", "ERP_MANUAL_REQUIRED"
+
+
+def _erp_work_overall(counts: dict) -> str:
+    total = sum(counts.values())
+    if total == 0:
+        return "EMPTY"
+    if counts["ATTENTION_REQUIRED"]:
+        return "ATTENTION_REQUIRED"
+    if counts["NOT_PUSHED"] == total:
+        return "NOT_STARTED"
+    if counts["NOT_PUSHED"]:
+        return "PARTIAL"
+    if counts["IN_PROGRESS"]:
+        return "IN_PROGRESS"
+    if counts["UPDATE_REQUIRED"]:
+        return "UPDATE_REQUIRED"
+    return "SYNCED"
+
+
+def build_erp_work_state(
+    *,
+    current_hash: str = "",
+    sites: list[dict] | None = None,
+    planned_sites: list[str] | None = None,
+) -> dict:
+    """按站点汇总 ERP 回执，输出站点级状态与待办。
+
+    ``sites`` 是同步请求账本行（``site_code`` / ``status`` / ``cost_result_hash`` / ``error_code``
+    / ``error_message`` / ``creation``），只读 ERP 侧事实，**不读任何费用状态**：费用是否齐备由
+    :func:`build_fee_status` 单独判定，两条线不互相关闭对方的待办。
+
+    ``planned_sites`` 是当前计算结果会推到的站点（来自分站点计划）。账本里没有请求的站点
+    只有靠它才能报出来 —— 「哪个站点根本没同步过」本身就是这批信息里最要紧的一条。
+
+    ``current_hash`` 是当前计算结果的结果哈希。它没有落库，只能在真正算过分站点计划的地方
+    （``preview_site_sync_plan``）传进来；拿不到时留空，此时站点状态退化成「有没有推送成功」，
+    不会凭空报 ``UPDATE_REQUIRED``。
+
+    批次级 ``writeback_status`` 只是这套站点状态的历史投影，不在这里读写 —— 它被计算与物流
+    结算多处当作锁定判据，不能从派生函数里回写。
+    """
+
+    grouped: dict[str, list[dict]] = {}
+    for row in sites or []:
+        if not isinstance(row, dict):
+            continue
+        site_code = _erp_text(row.get("site_code"))
+        if site_code:
+            grouped.setdefault(site_code, []).append(dict(row))
+    for site_code in planned_sites or []:
+        code = _erp_text(site_code)
+        if code:
+            grouped.setdefault(code, [])
+
+    counts = {state: 0 for state in ERP_WORK_SITE_STATES}
+    work_sites = []
+    for site_code in sorted(grouped):
+        latest = latest_site_request(grouped[site_code])
+        state, todo_code = build_erp_site_state(latest, current_hash=current_hash)
+        counts[state] += 1
+        work_sites.append(
+            {
+                "site_code": site_code,
+                "state": state,
+                # 该站点当前持有的成本结果哈希（可能是旧的，见 state=UPDATE_REQUIRED）。
+                "cost_result_hash": _erp_text((latest or {}).get("cost_result_hash")),
+                "request_id": _erp_text((latest or {}).get("request_id")),
+                "status": _erp_text((latest or {}).get("status")).upper(),
+                "attempt_count": int((latest or {}).get("attempt_count") or 0),
+                "error_code": _erp_text((latest or {}).get("error_code")),
+                "error_message": _erp_text((latest or {}).get("error_message")),
+                "todo": _todo(todo_code) if todo_code else None,
+            }
+        )
+
+    return {
+        "overall": _erp_work_overall(counts),
+        "current_cost_result_hash": _erp_text(current_hash),
+        "sites": work_sites,
+        "counts": counts,
+        "todo_count": sum(1 for row in work_sites if row.get("todo")),
     }

@@ -1,6 +1,8 @@
 from overseas_costing.services import erp_sync_plan_service as plans
 from types import SimpleNamespace
 
+import pytest
+
 
 def test_preview_site_sync_plan_blocks_before_reading_routes_when_batch_is_not_confirmed(monkeypatch) -> None:
     monkeypatch.setattr(
@@ -114,6 +116,156 @@ def test_get_site_sync_requests_resolves_server_batch_before_listing(monkeypatch
 
     assert result["batch_name"] == "B-REAL"
     assert result["items"] == [{"batch": "B-REAL", "version": "V-REAL"}]
+    # 站点级状态与待办由服务端算，页面不再自己从账本行推一遍（认不出站点就是空投影）。
+    assert result["erp_work"]["overall"] == "EMPTY"
+
+
+def test_get_site_sync_requests_attaches_site_level_todos(monkeypatch) -> None:
+    monkeypatch.setattr(
+        plans.batch_service,
+        "_load_erp_push_context",
+        lambda batch, version: {"ok": True, "batch_doc_name": "B-REAL", "version_name": "V-REAL"},
+    )
+    from overseas_costing.services import erp_sync_ledger_service
+
+    monkeypatch.setattr(
+        erp_sync_ledger_service,
+        "list_sync_requests",
+        lambda batch, version, limit: {
+            "ok": True,
+            "total": 2,
+            "items": [
+                {"site_code": "PROD", "status": "FAILED", "creation": "2026-09-01 09:00:00.000000", "request_id": "R-1"},
+                {"site_code": "ECOM", "status": "RUNNING", "creation": "2026-09-02 09:00:00.000000", "request_id": "R-2"},
+            ],
+        },
+    )
+
+    work = plans.get_site_sync_requests("B1", "V1")["erp_work"]
+
+    assert work["overall"] == "ATTENTION_REQUIRED"
+    by_site = {row["site_code"]: row for row in work["sites"]}
+    assert by_site["PROD"]["todo"]["action"] == "reconcile_erp"
+    assert by_site["ECOM"]["todo"] is None
+    assert work["todo_count"] == 1
+
+
+def test_ledger_failure_is_tolerated_by_the_preview_but_not_hidden_from_the_panel(monkeypatch) -> None:
+    """账本读失败时预览仍要出得来（否则看不到为什么推不了），面板那次读取则照实抛。"""
+
+    monkeypatch.setattr(
+        plans.batch_service,
+        "check_writeback_ready",
+        lambda *args, **kwargs: {"ready": True, "batch_name": "B1", "version_name": "V1"},
+    )
+    monkeypatch.setattr(plans.batch_service, "_build_review_remediation_gate", lambda *args, **kwargs: {"erp_blocked": False})
+    monkeypatch.setattr(
+        plans.batch_service,
+        "_load_erp_push_context",
+        lambda *args: {
+            "ok": True,
+            "batch": {"name": "B1"},
+            "version": {"name": "V1"},
+            "items": [],
+            "batch_doc_name": "B1",
+            "version_name": "V1",
+        },
+    )
+    monkeypatch.setattr(plans, "_active_routes", lambda: [])
+    monkeypatch.setattr(plans, "_enabled_sites", lambda: [])
+    monkeypatch.setattr(plans, "_active_supplier_names", lambda: set())
+    monkeypatch.setattr(
+        plans,
+        "build_site_sync_plan",
+        lambda **kwargs: {
+            "ready": True,
+            "complete": True,
+            "blocking": [],
+            "cost_result_hash": "H2",
+            "request_specs": {"ready": True, "requests": [{"site_code": "PROD"}]},
+        },
+    )
+    from overseas_costing.services import erp_sync_ledger_service
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("ledger down")
+
+    monkeypatch.setattr(erp_sync_ledger_service, "list_sync_requests", boom)
+
+    work = plans.preview_site_sync_plan("B1", "V1")["erp_work"]
+    assert work["current_cost_result_hash"] == "H2"
+    assert [row["site_code"] for row in work["sites"]] == ["PROD"]
+    # 账本读不到不等于「推过了」，也不等于「同步到位」。
+    assert work["sites"][0]["state"] == "NOT_PUSHED"
+
+    with pytest.raises(RuntimeError):
+        plans.get_site_sync_requests("B1", "V1")
+
+
+def test_preview_carries_site_level_erp_work_with_the_current_hash(monkeypatch) -> None:
+    """分站点预览要带上站点级待办：站点推的还是旧成本，只有这里才看得出来。"""
+
+    monkeypatch.setattr(
+        plans.batch_service,
+        "check_writeback_ready",
+        lambda *args, **kwargs: {"ready": True, "batch_name": "B1", "version_name": "V1"},
+    )
+    monkeypatch.setattr(plans.batch_service, "_build_review_remediation_gate", lambda *args, **kwargs: {"erp_blocked": False})
+    monkeypatch.setattr(
+        plans.batch_service,
+        "_load_erp_push_context",
+        lambda *args: {
+            "ok": True,
+            "batch": {"name": "B1", "confirm_status": "CONFIRMED"},
+            "version": {"name": "V1"},
+            "items": [],
+            "batch_doc_name": "B1",
+            "version_name": "V1",
+        },
+    )
+    monkeypatch.setattr(plans, "_active_routes", lambda: [])
+    monkeypatch.setattr(plans, "_enabled_sites", lambda: [])
+    monkeypatch.setattr(plans, "_active_supplier_names", lambda: set())
+    monkeypatch.setattr(
+        plans,
+        "build_site_sync_plan",
+        lambda **kwargs: {
+            "ready": True,
+            "complete": True,
+            "blocking": [],
+            "cost_result_hash": "H2",
+            "request_specs": {"ready": True, "requests": [{"site_code": "PROD"}, {"site_code": "ECOM"}]},
+        },
+    )
+    from overseas_costing.services import erp_sync_ledger_service
+
+    monkeypatch.setattr(
+        erp_sync_ledger_service,
+        "list_sync_requests",
+        lambda batch, version, limit: {
+            "ok": True,
+            "total": 1,
+            "items": [
+                {
+                    "site_code": "PROD",
+                    "status": "SUCCESS",
+                    "cost_result_hash": "H1",
+                    "creation": "2026-09-01 09:00:00.000000",
+                    "request_id": "R-1",
+                }
+            ],
+        },
+    )
+
+    work = plans.preview_site_sync_plan("B1", "V1")["erp_work"]
+
+    assert work["current_cost_result_hash"] == "H2"
+    by_site = {row["site_code"]: row for row in work["sites"]}
+    assert by_site["PROD"]["state"] == "UPDATE_REQUIRED"
+    # 本次会推到的站点里，账本没有请求的那个就是「从没推过」。
+    assert by_site["ECOM"]["state"] == "NOT_PUSHED"
+    assert work["overall"] == "PARTIAL"
+    assert work["todo_count"] == 2
 
 
 def test_project_route_options_use_batch_candidates_and_return_revision_token(monkeypatch) -> None:

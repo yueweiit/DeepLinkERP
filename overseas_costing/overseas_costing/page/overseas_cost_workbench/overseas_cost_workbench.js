@@ -2455,7 +2455,7 @@ class OverseasCostWorkbench {
     if (Number(result.changed_count || 0) > 0) {
       this.markBatchDirty(batch.name);
     }
-    if (result.batch_modified) this.detailState.expectedModified = result.batch_modified;
+    this.acceptBatchWriteRevision?.(result.batch_modified);
     await this.refreshDetailSummary();
     frappe.show_alert({
       message: result.message || "实际发货数量已确认，请重新试算",
@@ -5533,7 +5533,7 @@ class OverseasCostWorkbench {
           this.renderBatchSupplementPreview(dialog, result || { ok: false, message: "补充失败。" });
           return;
         }
-        this.detailState.expectedModified = result.batch_modified || this.detailState.expectedModified;
+        this.acceptBatchWriteRevision?.(result.batch_modified);
         dialog.hide();
         frappe.show_alert({ message: result.message || "当前批次已补充", indicator: "green" });
         await this.openBatchDetail(batch.name, "items", { updateUrl: false });
@@ -7334,7 +7334,7 @@ class OverseasCostWorkbench {
         expected_modified: inDetail ? this.detailState.expectedModified : acquired.modified,
       }, true);
       if (result?.batch_modified && this.detailState?.batchName === batch.name) {
-        this.detailState.expectedModified = result.batch_modified;
+        this.acceptBatchWriteRevision?.(result.batch_modified);
       }
       return result;
     } finally {
@@ -14561,7 +14561,7 @@ class OverseasCostWorkbench {
     }, false);
     if (!result?.ok) throw new Error(result?.message || "物料恢复失败，请重新预览。");
     this.detailState.versionName = result.version_name || this.detailState.versionName;
-    this.detailState.expectedModified = result.batch_modified || this.detailState.expectedModified;
+    this.acceptBatchWriteRevision(result.batch_modified);
     await this.loadMaterialFeeWorkspace({ preservePosition: true });
     frappe.show_alert({ message: `已恢复 ${Number(result.restored_count || 0)} 行物料`, indicator: "green" });
     return result;
@@ -15193,6 +15193,8 @@ class OverseasCostWorkbench {
    * batch_modified；这些值都可能比本页已经拿到的 revision 更旧。一旦把写令牌回退成
    * 旧值，edit_session 的乐观锁会把本页之后的每次写入都判成「批次数据已被更新」，
    * 页面就再也保存不了任何东西。同一约定见 acceptSavedComprehensiveCost 的 hasNewerRevision。
+   *
+   * 全部写入点都必须经这里，不要直接给 detailState.expectedModified 赋值。
    */
   acceptBatchWriteRevision(modified) {
     const next = String(modified || "");
@@ -15201,6 +15203,24 @@ class OverseasCostWorkbench {
     if (current && next < current) return false;
     this.detailState.expectedModified = next;
     return true;
+  }
+
+  /**
+   * 详情加载/刷新读到的写令牌基准值。
+   *
+   * 换批次时整个换掉：不同批次的 modified 之间没有可比性，沿用上一批的令牌会让新批次的
+   * 每次写入都被乐观锁拒绝（openBatchDetail 只设 batchName，不重置令牌）。同一批次内
+   * 仍走 acceptBatchWriteRevision 的不回退规则 —— 详情刷新拿到的值可能来自缓存快照。
+   */
+  adoptBatchWriteRevision(batchName, modified) {
+    const name = String(batchName || "").trim();
+    const next = String(modified || "");
+    if (name && this.detailState.writeRevisionBatch !== name) {
+      this.detailState.writeRevisionBatch = name;
+      this.detailState.expectedModified = next;
+      return Boolean(next);
+    }
+    return this.acceptBatchWriteRevision(modified);
   }
 
   updateMaterialFeeExpectedModified(result) {
@@ -17348,7 +17368,7 @@ class OverseasCostWorkbench {
     if (this.detailState.batchName === batchName && (!versionName || this.detailState.versionName === versionName)
       && !hasNewerRevision(this.detailState.expectedModified)) {
       this.detailState.header = { ...(this.detailState.header || {}), ...updates };
-      this.detailState.expectedModified = result.batch_modified || this.detailState.expectedModified;
+      this.acceptBatchWriteRevision(result.batch_modified);
       this.detailState.skuRequestId = (this.detailState.skuRequestId || 0) + 1;
       this.detailState.skuResult = null;
       if (!preserveDirty) this.detailState.dirty = false;
@@ -18036,6 +18056,7 @@ class OverseasCostWorkbench {
         batchName,
         plan: null,
         ledger: null,
+        work: null,
         failure: "",
         loading: false,
         requestId: 0,
@@ -18046,47 +18067,56 @@ class OverseasCostWorkbench {
   }
 
   /**
-   * 同步状态的中文标签与色调。取值只认服务端给的那几个。
+   * 站点同步状态的中文标签与色调。词表只有服务端 `build_erp_work_state` 那五个。
    *
-   * `MANUAL_REQUIRED` 是"远端单据要人去认领"，必须落在 warn 上 —— 渲染成成功会让
-   * 人以为可以收工，而远端可能压根没建单。
+   * 页面不再从账本行自己推一遍站点状态：`erp_work` 是服务端算好的投影，前端复算一定会和
+   * 「谁是当前结果哈希」「哪些站点本次会推到」这些服务端才知道的事脱节。认不出的取值一律
+   * 落 muted，绝不当成功 —— 远端可能压根没建单。
    */
-  erpSiteStatusMeta(status) {
+  erpSiteStateMeta(state) {
     const table = {
-      PENDING: { label: "待推送", tone: "pending" },
-      RUNNING: { label: "推送中", tone: "pending" },
-      SUCCESS: { label: "已推送", tone: "done" },
-      FAILED: { label: "推送失败", tone: "error" },
-      UNCERTAIN: { label: "结果待核对", tone: "warn" },
-      MANUAL_REQUIRED: { label: "需人工处理", tone: "warn" },
-      SUPERSEDED: { label: "已被新版本取代", tone: "muted" },
+      SYNCED: { label: "已同步", tone: "done" },
+      UPDATE_REQUIRED: { label: "同步的是旧成本", tone: "warn" },
+      IN_PROGRESS: { label: "同步中", tone: "pending" },
+      ATTENTION_REQUIRED: { label: "需处理", tone: "error" },
+      NOT_PUSHED: { label: "未推送", tone: "muted" },
     };
-    const key = String(status || "").trim().toUpperCase();
+    const key = String(state || "").trim().toUpperCase();
     return table[key] || { label: key || "未知状态", tone: "muted" };
   }
 
-  erpSiteIsReconcilable(status) {
-    // 与服务端 RECONCILABLE_STATUSES 对齐：其余状态没有"核对/重试"这回事。
-    return ["FAILED", "UNCERTAIN"].includes(String(status || "").trim().toUpperCase());
+  erpSiteOverallMeta(overall) {
+    const table = {
+      EMPTY: { label: "没有可推送的站点", tone: "muted" },
+      NOT_STARTED: { label: "尚未推送", tone: "muted" },
+      IN_PROGRESS: { label: "推送中", tone: "pending" },
+      PARTIAL: { label: "部分站点未推送", tone: "warn" },
+      UPDATE_REQUIRED: { label: "有站点同步的是旧成本", tone: "warn" },
+      ATTENTION_REQUIRED: { label: "有站点需要处理", tone: "error" },
+      SYNCED: { label: "全部站点已同步", tone: "done" },
+    };
+    const key = String(overall || "").trim().toUpperCase();
+    return table[key] || { label: key || "状态未知", tone: "muted" };
   }
 
-  /** 还欠处理的请求（成功的和被取代的不再占地方，其余都要露出来，含 MANUAL_REQUIRED）。 */
-  erpSiteNeedsAttention(row = {}) {
-    return !["SUCCESS", "SUPERSEDED"].includes(String(row.status || "").trim().toUpperCase());
+  /** 站点级投影：优先用分站点计划里那份（它才知道当前哈希与本次会推到哪些站点）。 */
+  erpSiteWork(plan = null, ledger = null) {
+    return plan?.erp_work || ledger?.erp_work || null;
   }
 
-  /**
-   * 一条请求的"下一步该干什么"。
-   *
-   * 只有 FAILED / UNCERTAIN 能核对重试（服务端 `RECONCILABLE_STATUSES` 只认这两个，其余
-   * 状态调过去会被直接判成 `SKIP`），所以别给必然被拒的按钮 —— `MANUAL_REQUIRED` 是终态，
-   * 写清"不会再自动重试"比放个点了没用的按钮诚实。
-   */
-  erpSiteLedgerHint(row = {}) {
-    if (this.erpSiteIsReconcilable(row.status)) return "";
-    const status = String(row.status || "").trim().toUpperCase();
-    if (status === "PENDING" || status === "RUNNING") return "推送队列处理中，稍后刷新状态即可。";
-    return "该请求已定论，不会再自动重试；请在 ERP 侧处理后再刷新状态。";
+  erpSiteWorkByCode(work = null) {
+    const grouped = {};
+    (Array.isArray(work?.sites) ? work.sites : []).forEach((site) => {
+      const code = String(site.site_code || "");
+      if (code) grouped[code] = site;
+    });
+    return grouped;
+  }
+
+  renderErpSiteStateChip(site = null) {
+    if (!site) return `<span class="ocw-erp-sites-chip is-muted">状态未知</span>`;
+    const meta = this.erpSiteStateMeta(site.state);
+    return `<span class="ocw-erp-sites-chip is-${this.escape(meta.tone)}">${this.escape(meta.label)}</span>`;
   }
 
   /** 把服务端站点预览归一成渲染用的形状，缺失字段一律兜空，别让模板崩。 */
@@ -18114,34 +18144,6 @@ class OverseasCostWorkbench {
       ready: plan?.ready === true,
       hash: String(plan?.cost_result_hash || ""),
     };
-  }
-
-  /** 账本按站点分组，方便和预览里的站点对齐。 */
-  erpSiteLedgerBySite(ledger = {}) {
-    const grouped = {};
-    (Array.isArray(ledger.items) ? ledger.items : []).forEach((row) => {
-      const site = String(row.site_code || "");
-      (grouped[site] ||= []).push(row);
-    });
-    return grouped;
-  }
-
-  erpSiteStatusCounts(rows = []) {
-    const counts = {};
-    rows.forEach((row) => {
-      const key = String(row.status || "").trim().toUpperCase() || "PENDING";
-      counts[key] = (counts[key] || 0) + 1;
-    });
-    return counts;
-  }
-
-  renderErpSiteStatusChips(rows = []) {
-    const counts = this.erpSiteStatusCounts(rows);
-    if (!Object.keys(counts).length) return `<span class="ocw-erp-sites-chip is-muted">尚无推送记录</span>`;
-    return Object.entries(counts).map(([status, count]) => {
-      const meta = this.erpSiteStatusMeta(status);
-      return `<span class="ocw-erp-sites-chip is-${this.escape(meta.tone)}">${this.escape(meta.label)} ${this.escape(String(count))}</span>`;
-    }).join("");
   }
 
   renderErpSiteHash(hash = "") {
@@ -18185,11 +18187,13 @@ class OverseasCostWorkbench {
           state.ledger = null;
         }
       }
+      state.work = this.erpSiteWork(state.plan, state.ledger);
       return state.plan;
     } catch (error) {
       if (requestId !== state.requestId) return null;
       state.plan = null;
       state.ledger = null;
+      state.work = null;
       state.failure = this.normalizeErrorMessage?.(error) || String(error?.message || error || "站点同步状态读取失败");
       return null;
     } finally {
@@ -18250,9 +18254,10 @@ class OverseasCostWorkbench {
         </div>`;
     }
     const preview = this.erpSitePlanPreview(plan);
-    const ledgerBySite = this.erpSiteLedgerBySite(state.ledger || {});
+    const work = this.erpSiteWork(plan, state.ledger);
+    const workBySite = this.erpSiteWorkByCode(work);
     const rows = preview.sites.map((site) => {
-      const ledgerRows = ledgerBySite[site.site_code] || [];
+      const siteWork = workBySite[site.site_code] || null;
       const companyText = site.companies.length ? site.companies.join(" / ") : "--";
       return `
         <tr>
@@ -18260,10 +18265,11 @@ class OverseasCostWorkbench {
           <td>${this.escape(String(site.groups.length))} 组 / ${this.escape(String(site.itemCount))} 行</td>
           <td>${this.escape(this.formatMoney(site.total_cost_rmb))}</td>
           <td>${this.escape(this.formatMoney(site.allocated_fee_rmb))}</td>
-          <td>${this.renderErpSiteStatusChips(ledgerRows)}</td>
+          <td>${this.renderErpSiteStateChip(siteWork)}</td>
         </tr>`;
     }).join("");
-    const pendingRows = (state.ledger?.items || []).filter((row) => this.erpSiteNeedsAttention(row));
+    const overdueSites = (work?.sites || []).filter((site) => site.todo);
+    const overall = work ? this.erpSiteOverallMeta(work.overall) : null;
     const blockingNote = preview.complete
       ? ""
       : `<p class="ocw-erp-sites-note is-warn">还有 ${this.escape(String(preview.blocking.length))} 个物料组未通过路由、供应商或仓库门槛，不会随本次推送发出。</p>`;
@@ -18272,7 +18278,7 @@ class OverseasCostWorkbench {
         <div>
           <span>ERP 站点推送</span>
           <strong>${this.escape(String(preview.sites.length))} 个站点 · ${this.escape(String(preview.sites.reduce((total, site) => total + site.groups.length, 0)))} 个单据组 · ${this.escape(this.formatMoney(preview.previewTotalRmb))} RMB</strong>
-          <small>${preview.ready ? "已通过推送门槛" : "存在阻断项，暂不能推送"}${preview.complete ? "" : " · 仅部分可推送"}</small>
+          <small>${preview.ready ? "已通过推送门槛" : "存在阻断项，暂不能推送"}${preview.complete ? "" : " · 仅部分可推送"}${overall ? ` · ${this.escape(overall.label)}` : ""}</small>
         </div>
         <div class="ocw-erp-sites-actions">
           <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="erp-site-refresh">刷新状态</button>
@@ -18281,37 +18287,44 @@ class OverseasCostWorkbench {
       </div>
       <div class="ocw-erp-sites-scroll">
         <table class="ocw-erp-sites-table">
-          <thead><tr><th>站点 / ERP 公司</th><th>目标单据</th><th>综合成本</th><th>分摊费用</th><th>推送状态</th></tr></thead>
+          <thead><tr><th>站点 / ERP 公司</th><th>目标单据</th><th>综合成本</th><th>分摊费用</th><th>同步状态</th></tr></thead>
           <tbody>${rows || `<tr><td colspan="5" class="ocw-erp-sites-empty">当前没有可推送的站点分组</td></tr>`}</tbody>
         </table>
       </div>
       ${blockingNote}
-      ${pendingRows.length ? `
+      ${overdueSites.length ? `
         <div class="ocw-erp-sites-ledger">
-          <h4>需要处理的推送请求（${this.escape(String(pendingRows.length))} 条）</h4>
-          <ul>${pendingRows.map((row) => this.renderErpSiteLedgerRow(row)).join("")}</ul>
+          <h4>还欠处理的站点（${this.escape(String(overdueSites.length))} 个）</h4>
+          <ul>${overdueSites.map((site) => this.renderErpSiteTodoRow(site)).join("")}</ul>
         </div>` : ""}
     `;
   }
 
-  renderErpSiteLedgerRow(row = {}) {
-    const meta = this.erpSiteStatusMeta(row.status);
-    const requestId = String(row.request_id || "");
-    const reason = String(row.error_message || row.error_code || "").trim();
-    const retries = Number(row.attempt_count || 0);
-    const hint = this.erpSiteLedgerHint(row);
-    const actions = hint
-      ? `<span class="ocw-erp-sites-hint">${this.escape(hint)}</span>`
-      : `
+  /**
+   * 一个"还欠处理站点"的条目。
+   *
+   * 核对/重试入口只按服务端 `todo.action === "reconcile_erp"` 给：服务端
+   * `RECONCILABLE_STATUSES` 只认 FAILED/UNCERTAIN，别的状态调过去会被判成 SKIP。
+   * 给一个必然被拒的按钮，比写清"要人去 ERP 侧处理"更误导。
+   */
+  renderErpSiteTodoRow(site = {}) {
+    const meta = this.erpSiteStateMeta(site.state);
+    const todo = site.todo || {};
+    const requestId = String(site.request_id || "");
+    const reason = String(site.error_message || site.error_code || "").trim();
+    const retries = Number(site.attempt_count || 0);
+    const actions = todo.action === "reconcile_erp"
+      ? `
           <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="erp-site-reconcile" data-request-id="${this.escape(requestId)}">核对远端</button>
-          <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="erp-site-retry" data-request-id="${this.escape(requestId)}">核对后重试</button>`;
+          <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="erp-site-retry" data-request-id="${this.escape(requestId)}">核对后重试</button>`
+      : `<span class="ocw-erp-sites-hint">${this.escape(todo.label || "请在 ERP 侧处理后刷新状态")}</span>`;
     return `
       <li class="ocw-erp-sites-ledger-row">
         <div>
-          <strong>${this.escape(String(row.site_code || "--"))}</strong>
-          <span class="ocw-erp-sites-state is-${this.escape(meta.tone)}">${this.escape(meta.label)}</span>
+          <strong>${this.escape(String(site.site_code || "--"))}</strong>
+          <span class="ocw-erp-sites-state is-${this.escape(meta.tone)}">${this.escape(todo.label || meta.label)}</span>
           ${retries ? `<em>已尝试 ${this.escape(String(retries))} 次</em>` : ""}
-          <small>${this.renderErpSiteHash(row.cost_result_hash)}</small>
+          <small>${this.renderErpSiteHash(site.cost_result_hash)}</small>
           ${reason ? `<p>${this.escape(reason)}</p>` : ""}
         </div>
         <div class="ocw-erp-sites-ledger-actions">${actions}</div>
@@ -18357,10 +18370,22 @@ class OverseasCostWorkbench {
           <div><span>分摊费用</span><strong>${this.escape(this.formatMoney(preview.previewFeeRmb))} RMB</strong></div>
         </div>
         <p class="ocw-erp-sites-note">${this.renderErpSiteHash(preview.hash)} —— 确认后按这个哈希生成幂等请求，重复点击不会在远端多建一张采购单。</p>
+        ${this.renderErpSiteOverdueNote(plan)}
         ${estimated ? `<p class="ocw-erp-sites-note is-warn">本次含 ${this.escape(String(estimated))} 项暂估费用；实际费用出来后需要另行更新远端成本。</p>` : ""}
         ${preview.complete ? "" : `<p class="ocw-erp-sites-note is-warn">另有 ${this.escape(String(preview.blocking.length))} 个物料组未通过路由、供应商或仓库门槛，本次不会发出；补齐后可再次推送。</p>`}
         ${cards || `<p class="ocw-erp-sites-note is-warn">当前没有可推送的站点分组。</p>`}
       </div>`;
+  }
+
+  /** 推送前先说明这次会补上/更新哪些站点，别让人以为点一下就把所有站点都对齐了。 */
+  renderErpSiteOverdueNote(plan = {}) {
+    const work = this.erpSiteWork(plan);
+    const behind = (work?.sites || []).filter((site) => site.todo);
+    if (!behind.length) return "";
+    const text = behind
+      .map((site) => `${site.todo.label}（${String(site.site_code || "--")}）`)
+      .join("；");
+    return `<p class="ocw-erp-sites-note is-warn">本站点推送会处理：${this.escape(text)}。</p>`;
   }
 
   /** 暂估费用计数只读已加载的费用状态，不为它额外发一次请求。 */
@@ -18412,8 +18437,8 @@ class OverseasCostWorkbench {
       busyLabel: "正在核对远端单据",
       method: "overseas_costing.api.writeback.reconcile_erp_request",
       done: (result) => {
-        const meta = this.erpSiteStatusMeta(result?.status);
-        return `远端核对结果：${meta.label}${result?.remote_docname ? `（${result.remote_docname}）` : ""}`;
+        // 核对结论由服务端给（远端到底有没有单、是草稿还是已提交），前端不复述一遍。
+        return `远端核对结果：${String(result?.message || result?.status || "已完成")}`;
       },
     });
   }
@@ -19477,7 +19502,7 @@ class OverseasCostWorkbench {
       this.detailState.versionName = result.version_name || merged.current_version || "";
       this.detailState.header = merged;
       this.detailState.detail = result;
-      this.detailState.expectedModified = merged.modified || this.detailState.expectedModified || "";
+      this.adoptBatchWriteRevision?.(merged.name, merged.modified);
       this.detailState.dirty = false;
       this.activeBatchName = merged.name;
       this.drawerBatchName = merged.name;
@@ -19544,7 +19569,7 @@ class OverseasCostWorkbench {
     this.detailState.header = merged;
     this.detailState.detail = result;
     this.detailState.versionName = merged.current_version;
-    this.detailState.expectedModified = merged.modified || this.detailState.expectedModified || "";
+    this.adoptBatchWriteRevision?.(merged.name, merged.modified);
     this.renderDetailShell();
     if (this.detailState.editToken) this.updateEditLeaseStatus();
     if (options.refreshCurrentTab === false) return;
@@ -20013,7 +20038,7 @@ class OverseasCostWorkbench {
     this.detailState.editToken = result.edit_token;
     this.detailState.editExpiresAt = result.expires_at;
     // 保留详情加载时的 modified，以便首次写入仍能发现“加载后、获取锁前”的并发修改。
-    this.detailState.expectedModified = this.detailState.expectedModified || batch.modified || result.modified || "";
+    this.acceptBatchWriteRevision?.(this.detailState.expectedModified || batch.modified || result.modified);
     this.updateEditLeaseStatus();
     window.clearInterval(this.detailState.renewTimer);
     this.detailState.renewTimer = window.setInterval(() => this.renewEditSession(), 120000);
@@ -22188,7 +22213,7 @@ class OverseasCostWorkbench {
       const result = await this.settlementWrite(state, () => this.settlementApi(action, args));
       if (!result?.ok) throw new Error(result?.message || '操作未保存，请核对后重试');
       if (!this.isBatchSettlementCurrent(state) || version !== state.versionName) return;
-      if (result.batch_modified && this.detailState?.batchName === state.batchName) this.detailState.expectedModified = result.batch_modified;
+      if (this.detailState?.batchName === state.batchName) this.acceptBatchWriteRevision?.(result.batch_modified);
       state.freightView = null; state.freightDraft = {}; state.packingSources = null; state.packingPreview = null; state.packingSelected = null;
       state.freightMessage = result.message || (result.status === 'queued' ? '已保存确认，当前编辑结束后处理。' : '已保存，请核对当前资料并重新试算。');
       try { await this.refreshSettlementBatch(state.batchName, result.version); }
@@ -24465,7 +24490,7 @@ class OverseasCostWorkbench {
       this.markBatchDirty(batchName);
       this.updateLocalItemValue(batchName, itemName, fieldname, result.value);
       if (this.detailState) {
-        this.detailState.expectedModified = result.batch_modified || this.detailState.expectedModified;
+        this.acceptBatchWriteRevision?.(result.batch_modified);
         if (this.detailState.header && result.batch_modified) this.detailState.header.modified = result.batch_modified;
         this.detailState.dirty = false;
       }

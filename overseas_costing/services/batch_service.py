@@ -1547,6 +1547,7 @@ def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
     # as queue rows; otherwise a just-returned batch would keep stale header
     # actions until the user leaves the detail page.
     header.update(_build_review_remediation_gate(batch_doc_name, for_update=False))
+    header["erp_work"] = _batch_erp_work(batch_doc_name, resolved_version_name)
 
     return {
         "ok": True,
@@ -1558,6 +1559,25 @@ def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
         "summary": summary,
         "allocation_rules": rules,
     }
+
+
+def _batch_erp_work(batch_doc_name: str, version_name: str) -> dict:
+    """详情页要的站点级 ERP 待办；只读账本，不重算分站点计划。
+
+    ``build_site_sync_plan`` 要跑路由与供应商校验，详情页每次打开都跑不起，因此这里只按
+    账本能回答的问题作答（哪个站点推过/失败/待核对/需人工），``overall`` 里也不会出现
+    需要当前结果哈希才成立的 ``UPDATE_REQUIRED``。要那份完整视图请看 ``preview_site_sync_plan``。
+    """
+
+    from overseas_costing.services import fee_status_service
+    from overseas_costing.services.erp_sync_ledger_service import list_sync_requests
+
+    try:
+        items = list_sync_requests(batch_doc_name, version=version_name or "", limit=200).get("items") or []
+    except Exception:  # noqa: BLE001
+        # 账本读失败不该让整个详情页打不开：退回「这一块没有信息」，不假装同步过。
+        items = []
+    return fee_status_service.build_erp_work_state(sites=items)
 
 
 def get_batch_items(

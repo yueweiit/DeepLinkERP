@@ -413,7 +413,7 @@
           this.renderBatchSupplementPreview(dialog, result || { ok: false, message: "补充失败。" });
           return;
         }
-        this.detailState.expectedModified = result.batch_modified || this.detailState.expectedModified;
+        this.acceptBatchWriteRevision?.(result.batch_modified);
         dialog.hide();
         frappe.show_alert({ message: result.message || "当前批次已补充", indicator: "green" });
         await this.openBatchDetail(batch.name, "items", { updateUrl: false });
