@@ -668,9 +668,10 @@
   writebackToErp(batchName = "") {
     const batch = this.findBatch(batchName || this.drawerBatchName);
     if (!batch) return;
-    frappe.confirm("确认将已校验的综合单价推送到 DeepLinkERP？失败后可保留日志并重试。", () => {
-      this.queueErpWriteback(batch.name).catch((error) => this.showError(error));
-    });
+    // 原来是一个盲确认框：用户看不到要推到哪些站点/公司、多少钱、哪些行被门槛拦住，
+    // 只能凭"确认推送？"点下去。现在先摊开服务端的冻结预览，在预览里确认。
+    // 执行入口仍是同一个 queueErpWriteback，不另开一条推送路径。
+    this.openErpSiteSyncDialog(batch.name).catch((error) => this.showError(error));
   }
 
   async queueErpWriteback(batchName = "") {

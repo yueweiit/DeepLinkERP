@@ -386,8 +386,11 @@
     this.$root.find("[data-area='detail-content']").html(`
       <div class="ocw-detail-overview">
         ${this.renderDetailOverviewDashboard(batch)}
+        ${this.renderDetailErpSites?.(batch) || ""}
       </div>
     `);
+    // 站点面板先渲染骨架再拉真实状态：预览要走服务端路由解析，不该挡住整页。
+    this.refreshErpSitePanel?.().catch(() => {});
   }
 
   detailDocumentAdapter() {

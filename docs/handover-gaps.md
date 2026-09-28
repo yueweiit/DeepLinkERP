@@ -355,12 +355,15 @@ OC_HOST=<host> OC_USER=<user> OC_PW=<pw> python tmp/oc_ssh.py   # 以 bash -s �
 
 | 优先级 | 事项 | 理由 |
 | --- | --- | --- |
-| P0 | 把 `apps.json` / `compose.custom.yaml` / `upgrade_bench.sh` 纳入版本控制（或至少归档到仓库 `deploy/`） | 唯一能让"绿着发不出去"重演的东西，且现场备份会被自动删 |
-| P0 | 决定是否根治「第 7 步 prune 与 compose tag 的顺序依赖」 | 需要运维拍板，事很小但会反复咬人 |
-| P1 | 多站点 ERP 前端（Task 10） | 服务端 6 个 API 已经就绪，只差界面；否则"多站点"等于没上线 |
+| P0 | ~~把 `apps.json` / `compose.custom.yaml` / `upgrade_bench.sh` 归档到仓库 `deploy/`~~（已完成 `c218824938`） | 唯一能让"绿着发不出去"重演的东西，且现场备份会被自动删 |
+| P0 | ~~根治「第 7 步 prune 与 compose tag 的顺序依赖」~~（已完成 `c218824938`，`reclaim_docker_space.sh`） | 需要运维拍板，事很小但会反复咬人 |
+| P1 | ~~多站点 ERP 前端（Task 10）~~（已完成，`parts/79-erp-sites.js` + `51-erp-sites.css`） | 服务端 6 个 API 已经就绪，只差界面；否则"多站点"等于没上线 |
 | P1 | ~~批量设置项目归属支持逐行指定~~（已完成 `75d852b5a7`） | 987 行卡在这，是启用推送的实际前置 |
 | P1 | 补供应商（业务动作，采购侧） | 1451 行全空，同样的推送前置 |
 | P2 | Task 8 站点级待办/状态摘要 | 多站点上线后立刻会需要 |
 | P2 | Task 7 暂估转实际 | 只在业务决定"先暂估后改实际"时才需要 |
 | P3 | 10 处 `expectedModified` 旁路收口、`preview_bulk_route` 处理、目录文档补全 | 防止回归与降低接手成本 |
 | P3 | Task 11 历史迁移 | 当前 ERP 侧无历史幂等键，风险很低；本系统旧批次另论 |
+
+**归档会过期**：`deploy/host/` 是宿主三件套的**副本**，宿主上那份仍是唯一真源。改了宿主文件要按
+`deploy/host/README.md` 里的命令重新同步，否则归档会静默失真。

@@ -712,7 +712,9 @@ view.call=async()=>{{calls+=1;throw new Error('Network timeout')}};
 view.recordUsage=(action,payload)=>usage.push([action,payload.status,payload.remark]);
 view.showError=error=>errors.push(error.message);
 global.frappe={{confirm:(_message,yes)=>yes(),show_alert:()=>{{}}}};
-view.writebackToErp('B-1');
+// 按钮现在先摊开冻结预览（见 test_erp_site_frontend.py），确认之后才落到这个执行器；
+// 传输失败怎么记账、按钮变成什么状态，是执行器自己的事，与入口无关。
+await view.queueErpWriteback('B-1').catch(error=>view.showError(error));
 await new Promise(resolve=>setImmediate(resolve));
 const state=view.erpPushActionState(view.getDetailBatch());
 console.log(JSON.stringify({{
@@ -751,8 +753,10 @@ const gate=new Promise(resolve=>{release=resolve});
 view.call=async()=>{calls+=1;await gate;return {ok:true,writeback_status:'Pending',message:'queued'}};
 view.refreshBatch=async()=>{};view.recordUsage=()=>{};view.showError=()=>{};
 global.frappe={confirm:(_message,yes)=>yes(),show_alert:()=>{}};
-view.writebackToErp('B-1');
-view.writebackToErp('B-1');
+// 双击的最后一层保护在服务端记账这一层：同一个批次版本并发进来只留一条请求。
+// 预览弹窗自己还有一道连击守卫（test_erp_site_frontend.py）。
+view.queueErpWriteback('B-1').catch(()=>{});
+view.queueErpWriteback('B-1').catch(()=>{});
 await new Promise(resolve=>setImmediate(resolve));
 const callsWhilePending=calls;
 release();

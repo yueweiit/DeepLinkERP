@@ -9755,6 +9755,82 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
   margin: 0;
 }
 
+/* ERP 站点同步：详情概览里的状态面板 + 推送前的冻结预览。
+   站点/公司/金额全部由服务端给出，这里只管排版；色调语义与工作台其余部分一致。 */
+
+.ocw-erp-sites { margin-top: 18px; padding: 16px 18px; border: 1px solid var(--ocw-line); border-radius: 10px; background: var(--ocw-panel); }
+.ocw-erp-sites-loading { margin-top: 18px; padding: 16px 18px; border: 1px dashed var(--ocw-line); border-radius: 10px; color: var(--ocw-muted); }
+
+.ocw-erp-sites-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.ocw-erp-sites-head > div:first-child { display: grid; gap: 2px; }
+.ocw-erp-sites-head span { color: var(--ocw-muted); font-size: 11px; }
+.ocw-erp-sites-head strong { color: var(--ocw-ink); font-size: 13px; }
+.ocw-erp-sites-head small { color: var(--ocw-muted); font-size: 11px; }
+.ocw-erp-sites-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.ocw-erp-sites-scroll { margin-top: 12px; overflow-x: auto; }
+.ocw-erp-sites-table { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 12px; }
+.ocw-erp-sites-table th { padding: 7px 9px; border-bottom: 1px solid var(--ocw-line); background: var(--ocw-soft); color: var(--ocw-muted); text-align: left; white-space: nowrap; }
+.ocw-erp-sites-table td { padding: 8px 9px; border-bottom: 1px solid #eef2f7; vertical-align: top; }
+.ocw-erp-sites-table td > strong,
+.ocw-erp-sites-table td > small { display: block; }
+.ocw-erp-sites-table td > small { color: var(--ocw-muted); font-size: 11px; }
+.ocw-erp-sites-empty { padding: 18px !important; color: var(--ocw-muted); text-align: center; }
+
+.ocw-erp-sites-note { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 10px 0 0; color: var(--ocw-muted); font-size: 11px; line-height: 1.6; }
+.ocw-erp-sites-note.is-warn { color: #9a5b00; }
+.ocw-erp-sites-note.is-error { color: #b42318; }
+
+.ocw-erp-sites-hash { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #475467; font-size: 11px; }
+.ocw-erp-sites-hash.is-muted { color: var(--ocw-muted); font-family: inherit; }
+
+/* 状态色只有一套：chip（概览计数）与 state（单条请求）共用同样的语义。
+   MANUAL_REQUIRED / UNCERTAIN 落 warn，绝不用成功色 —— 远端可能根本没建单。 */
+.ocw-erp-sites-chip,
+.ocw-erp-sites-state { display: inline-block; padding: 2px 7px; border-radius: 999px; font-size: 10px; font-weight: 600; white-space: nowrap; }
+.ocw-erp-sites-chip.is-done,
+.ocw-erp-sites-state.is-done { background: #e7f6ec; color: #067647; }
+.ocw-erp-sites-chip.is-warn,
+.ocw-erp-sites-state.is-warn { background: #fff3d6; color: #9a5b00; }
+.ocw-erp-sites-chip.is-error,
+.ocw-erp-sites-state.is-error { background: #fdecea; color: #b42318; }
+.ocw-erp-sites-chip.is-pending,
+.ocw-erp-sites-state.is-pending { background: var(--ocw-accent-soft); color: #076fbe; }
+.ocw-erp-sites-chip.is-muted,
+.ocw-erp-sites-state.is-muted { background: #f2f4f7; color: var(--ocw-muted); }
+
+.ocw-erp-sites-ledger { margin-top: 14px; }
+.ocw-erp-sites-ledger h4 { margin: 0 0 8px; color: var(--ocw-ink); font-size: 12px; }
+.ocw-erp-sites-ledger ul { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.ocw-erp-sites-ledger-row { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 10px; padding: 10px 12px; border: 1px solid #f3d9a4; border-radius: 8px; background: #fffaf0; }
+.ocw-erp-sites-ledger-row > div:first-child { display: grid; gap: 4px; }
+.ocw-erp-sites-ledger-row strong { color: var(--ocw-ink); font-size: 12px; }
+.ocw-erp-sites-ledger-row p { margin: 0; color: #7a4b00; font-size: 11px; overflow-wrap: anywhere; }
+.ocw-erp-sites-ledger-row em { color: var(--ocw-muted); font-size: 11px; font-style: normal; }
+.ocw-erp-sites-ledger-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+/* 终态请求不给"点了会被拒"的按钮，只给一句下一步说明。 */
+.ocw-erp-sites-hint { color: var(--ocw-muted); font-size: 11px; }
+
+.ocw-erp-sites-preview { display: grid; gap: 12px; }
+.ocw-erp-sites-preview-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+.ocw-erp-sites-preview-summary > div { display: grid; gap: 3px; padding: 10px 12px; border: 1px solid var(--ocw-line); border-radius: 8px; background: var(--ocw-soft); }
+.ocw-erp-sites-preview-summary span { color: var(--ocw-muted); font-size: 11px; }
+.ocw-erp-sites-preview-summary strong { color: var(--ocw-ink); font-size: 14px; }
+
+.ocw-erp-site-card { border: 1px solid var(--ocw-line); border-radius: 9px; overflow: hidden; }
+.ocw-erp-site-card > header { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; padding: 11px 13px; border-bottom: 1px solid var(--ocw-line); background: var(--ocw-soft); }
+.ocw-erp-site-card > header > div { display: grid; gap: 2px; }
+.ocw-erp-site-card > header span { color: var(--ocw-muted); font-size: 10px; }
+.ocw-erp-site-card > header strong { color: var(--ocw-ink); font-size: 12px; }
+.ocw-erp-site-groups { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ocw-erp-site-groups th { padding: 7px 11px; border-bottom: 1px solid var(--ocw-line); background: #fff; color: var(--ocw-muted); text-align: left; white-space: nowrap; }
+.ocw-erp-site-groups td { padding: 8px 11px; border-bottom: 1px solid #eef2f7; }
+.ocw-erp-site-groups tr:last-child td { border-bottom: 0; }
+
+/* Frappe 的 .modal-dialog 自带固定宽度，只写 max-width 撑不开，必须显式给 width。 */
+.ocw-erp-site-dialog .modal-dialog { width: min(1180px, calc(100vw - 28px)); max-width: min(1180px, calc(100vw - 28px)); }
+.ocw-erp-site-dialog .modal-body { max-height: calc(100vh - 190px); overflow: auto; }
+
 .ocw-review-return-btn {
   border: 1px solid #e79824;
   background: #fff8eb;

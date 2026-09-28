@@ -511,6 +511,18 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='preview-erp-payload']", () => this.previewErpPayload(this.drawerBatchName));
     this.$root.on("click", "[data-action='writeback-to-erp']", () => this.writebackToErp(this.drawerBatchName));
     this.$root.on("click", "[data-action='detail-writeback-to-erp']", () => this.writebackToErp(this.detailState.batchName));
+    this.$root.on("click", "[data-action='erp-site-preview']", () =>
+      this.openErpSiteSyncDialog(this.detailState?.batchName || "").catch((error) => this.showError(error))
+    );
+    this.$root.on("click", "[data-action='erp-site-refresh']", () =>
+      this.refreshErpSitePanel().catch((error) => this.showError(error))
+    );
+    this.$root.on("click", "[data-action='erp-site-reconcile']", (event) =>
+      this.reconcileErpSiteRequest($(event.currentTarget).attr("data-request-id"))
+    );
+    this.$root.on("click", "[data-action='erp-site-retry']", (event) =>
+      this.retryErpSiteRequest($(event.currentTarget).attr("data-request-id"))
+    );
     this.$root.on("click", "[data-action='queue-preview-erp']", (event) => {
       const batchName = $(event.currentTarget).attr("data-batch-name");
       const batch = this.findBatch(batchName);
