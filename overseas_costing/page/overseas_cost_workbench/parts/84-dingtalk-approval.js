@@ -402,10 +402,6 @@
     return candidates;
   }
 
-  async openDingtalkPackingSourcePicker() {
-    return this.openPackingFlowDialog({ sourceTab: "approval" });
-  }
-
   async openDingtalkPackingPreview(sourceKind, sourceId, processInstanceId = "", fileId = "") {
     const batch = this.getDetailBatch();
     if (sourceKind === "attachment") sourceId = await this.ensureDingtalkLocalAttachment(sourceId, processInstanceId, fileId);

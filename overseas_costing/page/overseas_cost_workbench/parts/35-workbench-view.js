@@ -197,9 +197,6 @@
     this.$root.on("click", "[data-action='repair-dingtalk-approval']", (event) =>
       this.requestDingtalkApprovalRepair($(event.currentTarget)).catch((error) => this.showError(error))
     );
-    this.$root.on("click", "[data-action='open-dingtalk-packing-picker']", () =>
-      this.openDingtalkPackingSourcePicker().catch((error) => this.showError(error))
-    );
     this.$root.on("click", "[data-action='open-packing-flow']", () =>
       this.openPackingFlowDialog().catch((error) => this.showError(error))
     );

@@ -11,48 +11,6 @@
     this.renderTable();
   }
 
-  confirmDeleteBatch(batchName) {
-    const batch = this.findBatch(batchName);
-    if (!batch) return;
-    const items = this.batchItems[batch.name] || [];
-    const label = `${batch.customs_no || "--"} / ${batch.waybill_no || batch.batch_no || batch.name}`;
-    frappe.confirm(
-      `
-        <div class="ocw-confirm-copy">
-          <h4>确认删除报关/运单块？</h4>
-          <p>将删除 ${this.escape(label)}，同时移除其下 ${items.length || batch.item_count || 0} 条物料明细。</p>
-          <div class="ocw-confirm-note">删除后会同时清理该批次的版本、分摊规则、附件记录和修改记录。请仅删除测试或误导入数据。</div>
-        </div>
-      `,
-      async () => {
-        await this.deleteBatch(batch, label);
-      }
-    );
-  }
-
-  async deleteBatch(batch, label) {
-    try {
-      const result = await this.call(
-        "overseas_costing.api.calculate.delete_batch",
-        {
-          batch_name: batch.name,
-          remark: `前端删除批次：${label}`,
-        },
-        true
-      );
-      if (!result.ok) throw new Error(result.message || "批次删除失败");
-      const counts = result.deleted_counts || {};
-      const message = `批次已删除：物料 ${counts.item_count || 0}，版本 ${counts.version_count || 0}，规则 ${counts.rule_count || 0}`;
-      frappe.show_alert({ message, indicator: "green" });
-      if (this.activeBatchName === batch.name) this.activeBatchName = "";
-      delete this.batchItems[batch.name];
-      this.expandedBatchNames.delete(batch.name);
-      await this.loadBatches();
-    } catch (error) {
-      this.showError(error);
-    }
-  }
-
   openAddBatchDialog() {
     const dialog = new frappe.ui.Dialog({
       title: "添加报关运单",

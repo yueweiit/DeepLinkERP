@@ -1,67 +1,3 @@
-  openOaAttachmentDialog(batchName = "") {
-    const batch = batchName ? this.findBatch(batchName) : this.getActiveBatch();
-    if (!batch) {
-      this.showPendingFeature("当前没有可查看附件的批次。");
-      return;
-    }
-    this.activeBatchName = batch.name;
-    const batchLabel = batch.batch_no || batch.waybill_no || batch.name;
-    const dialog = new frappe.ui.Dialog({
-      title: "钉钉审批附件",
-      size: "large",
-      fields: [
-        {
-          fieldtype: "HTML",
-          fieldname: "oa_attachments",
-          options: `
-            <div class="ocw-purchase-target">
-              <span>当前批次</span>
-              <strong>${this.escape(batchLabel)}</strong>
-              <em>显示钉钉审批的表单附件和评论附件。</em>
-            </div>
-            <div class="ocw-purchase-loading" data-area="oa-attachment-list">正在读取钉钉审批附件</div>
-          `,
-        },
-      ],
-      primary_action_label: "关闭",
-      primary_action: () => dialog.hide(),
-    });
-    dialog.show();
-    dialog.$wrapper.addClass("ocw-purchase-modal ocw-oa-attachment-modal");
-    dialog.$wrapper
-      .off("click.ocwOaAttachments")
-      .on("click.ocwOaAttachments", "[data-action='open-generic-link']", (event) => {
-        this.openDingtalkLink($(event.currentTarget).attr("data-open-url"));
-      })
-      .on("click.ocwOaAttachments", "[data-action='download-oa-attachment']", (event) => {
-        this.downloadOaFormAttachment(
-          batch,
-          dialog,
-          $(event.currentTarget).attr("data-attachment-name"),
-          $(event.currentTarget),
-          $(event.currentTarget).attr("data-open-parse-after-download") === "1"
-        ).catch((error) => this.showError(error));
-      })
-      .on("click.ocwOaAttachments", "[data-action='preview-oa-attachment-file']", (event) => {
-        this.openOaAttachmentFilePreview(
-          batch,
-          dialog,
-          $(event.currentTarget).attr("data-attachment-name"),
-          $(event.currentTarget).attr("data-file-url"),
-          $(event.currentTarget).attr("data-file-name"),
-          $(event.currentTarget)
-        ).catch((error) => this.showError(error));
-      });
-    this.loadOaFormAttachments(batch, dialog).catch((error) => {
-      dialog.$wrapper.find("[data-area='oa-attachment-list']").html(`
-        <div class="ocw-purchase-empty">
-          <strong>钉钉审批附件读取失败</strong>
-          <span>${this.escape(this.normalizeErrorMessage(error))}</span>
-        </div>
-      `);
-    });
-  }
-
   async loadOaFormAttachments(batch, dialog) {
     const result = await this.call(
       "overseas_costing.api.import_api.list_oa_form_attachments",
@@ -1242,9 +1178,6 @@
       this.expandedBatchNames.add(batch.name);
       this.renderTable();
       this.renderDiffPanel();
-      if (this.activeOaAttachmentDialog && this.activeOaAttachmentDialog.$wrapper && this.activeOaAttachmentDialog.$wrapper.is(":visible")) {
-        this.loadOaFormAttachments(batch, this.activeOaAttachmentDialog).catch((error) => this.showError(error));
-      }
       frappe.show_alert({ message: result.message || "装箱单字段已写入", indicator: result.updated_count ? "green" : "blue" });
       dialog.hide();
     } finally {

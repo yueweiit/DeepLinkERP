@@ -484,9 +484,6 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='preview-categories']", () => this.openCategoryPreviewDialog());
     this.$root.on("click", "[data-action='file-parse']", () => this.openFileParseDialog());
     this.$root.on("click", "[data-action='export-current']", () => this.exportCurrentResult().catch((error) => this.showError(error)));
-    this.$root.on("click", "[data-action='open-dingtalk']", (event) => this.openDingtalkOrder($(event.currentTarget).attr("data-batch-name")));
-    this.$root.on("click", "[data-action='preview-purchase']", (event) => this.openPurchasePreviewDialog($(event.currentTarget).attr("data-batch-name")));
-    this.$root.on("click", "[data-action='oa-attachments']", (event) => this.openOaAttachmentDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='manual-logistics-quote']", (event) => this.openLogisticsQuoteDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='source-center']", (event) => this.openSourceCenterDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", ".ocw-parent-row", (event) => {
@@ -509,7 +506,6 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='open-batch-drawer-recalculate']", () => this.recalculate(this.drawerBatchName));
     this.$root.on("click", "[data-action='confirm-calculation-result']", () => this.confirmCalculationResult(this.drawerBatchName));
     this.$root.on("click", "[data-action='preview-erp-payload']", () => this.previewErpPayload(this.drawerBatchName));
-    this.$root.on("click", "[data-action='writeback-to-erp']", () => this.writebackToErp(this.drawerBatchName));
     this.$root.on("click", "[data-action='detail-writeback-to-erp']", () => this.writebackToErp(this.detailState.batchName));
     this.$root.on("click", "[data-action='erp-site-preview']", () =>
       this.openErpSiteSyncDialog(this.detailState?.batchName || "").catch((error) => this.showError(error))
@@ -569,14 +565,10 @@ class OverseasCostWorkbench {
         $(event.currentTarget).attr("data-fieldname")
       ).catch((error) => this.showError(error))
     );
-    this.$root.on("click", "[data-action='gap-recalculate']", (event) => this.recalculate($(event.currentTarget).attr("data-batch-name")));
-    this.$root.on("click", "[data-action='open-generic-link']", (event) => this.openDingtalkLink($(event.currentTarget).attr("data-open-url")));
     this.$root.on("click", "[data-action='add-batch']", () => this.openAddBatchDialog());
     this.$root.on("click", "[data-action='toggle-batch']", (event) => this.toggleBatch($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='expand-current']", () => this.setAllExpanded(true));
     this.$root.on("click", "[data-action='collapse-current']", () => this.setAllExpanded(false));
-    this.$root.on("click", "[data-action='refresh-batch']", (event) => this.refreshBatch($(event.currentTarget).attr("data-batch-name")));
-    this.$root.on("click", "[data-action='delete-batch']", (event) => this.confirmDeleteBatch($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='add-material']", (event) => this.openAddMaterialDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='delete-material']", (event) => {
       this.confirmDeleteMaterial(

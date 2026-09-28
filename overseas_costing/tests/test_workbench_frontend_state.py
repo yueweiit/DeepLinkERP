@@ -219,7 +219,7 @@ def test_generated_workbench_assets_include_dingtalk_parts_and_match_deployed_co
     stylesheet = (page / "overseas_cost_workbench.css").read_text(encoding="utf-8")
 
     assert "renderDingtalkApprovalTab" in javascript
-    assert "openDingtalkPackingSourcePicker" in javascript
+    assert "openDingtalkPackingPreview" in javascript
     assert ".ocw-dingtalk-approval-card" in stylesheet
     assert javascript == (deployed / "overseas_cost_workbench.js").read_text(encoding="utf-8")
     assert stylesheet == (deployed / "overseas_cost_workbench.css").read_text(encoding="utf-8")
@@ -2128,3 +2128,63 @@ console.log(JSON.stringify({calls:workspace.calls,error,total:state.preview.summ
     assert result["error"]
     assert result["total"] == "100.00"
     assert result["draft"] == "9"
+
+
+DEAD_WORKBENCH_ACTIONS = (
+    "refresh-batch",
+    "delete-batch",
+    "writeback-to-erp",
+    "preview-purchase",
+    "oa-attachments",
+    "open-dingtalk",
+    "open-generic-link",
+    "open-purchase-source",
+    "gap-recalculate",
+    "open-dingtalk-packing-picker",
+)
+
+
+def test_dead_action_bindings_stay_removed_from_the_workbench() -> None:
+    """这些动作没有任何渲染来源，绑定与独占 handler 已在同一次变更里清掉。
+
+    它们不是「待接线」的按钮：能渲染它们的入口本身已被改造掉——抽屉推送改走详情页、
+    打开原单改走原生 <a href>、缺口试算统一走页头、附件改走钉钉审批页签。
+    留下绑定只会让后来人误判这些入口还在业务手里，故补此守卫。
+    """
+    for path in sorted(PARTS.glob("*.js")):
+        source = path.read_text(encoding="utf-8")
+        for action in DEAD_WORKBENCH_ACTIONS:
+            assert f"data-action='{action}'" not in source, f"{path.name} 重新绑定了死动作 {action}"
+            assert f'data-action="{action}"' not in source, f"{path.name} 重新渲染了死动作 {action}"
+
+
+def test_orphan_handlers_of_dead_actions_stay_removed() -> None:
+    """入口丢失后整链不可达的 handler 不应再出现；被其它入口复用的方法必须留下。"""
+    source = "\n".join(path.read_text(encoding="utf-8") for path in sorted(PARTS.glob("*.js")))
+    for name in (
+        "confirmDeleteBatch",
+        "deleteBatch",
+        "openPurchasePreviewDialog",
+        "previewPurchaseExpense",
+        "renderPurchasePreview",
+        "renderPurchaseSourceList",
+        "renderPurchaseApplyAction",
+        "applyPurchaseFillableFields",
+        "openOaAttachmentDialog",
+        "openDingtalkPackingSourcePicker",
+        "isWordFileRef",
+    ):
+        assert f"{name}(" not in source, f"{name} 仍然存在（应为已删除的孤儿 handler）"
+    for name in (
+        "refreshBatch",
+        "openDingtalkOrder",
+        "openDingtalkLink",
+        "writebackToErp",
+        "recalculate",
+        "loadOaFormAttachments",
+        "renderOaAttachmentList",
+        "openSourceCenterDialog",
+        "isTextFileRef",
+    ):
+        assert f"{name}(" in source, f"{name} 仍被其它入口复用，不该被删"
+

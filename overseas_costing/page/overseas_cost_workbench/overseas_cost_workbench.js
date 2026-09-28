@@ -1058,9 +1058,6 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='preview-categories']", () => this.openCategoryPreviewDialog());
     this.$root.on("click", "[data-action='file-parse']", () => this.openFileParseDialog());
     this.$root.on("click", "[data-action='export-current']", () => this.exportCurrentResult().catch((error) => this.showError(error)));
-    this.$root.on("click", "[data-action='open-dingtalk']", (event) => this.openDingtalkOrder($(event.currentTarget).attr("data-batch-name")));
-    this.$root.on("click", "[data-action='preview-purchase']", (event) => this.openPurchasePreviewDialog($(event.currentTarget).attr("data-batch-name")));
-    this.$root.on("click", "[data-action='oa-attachments']", (event) => this.openOaAttachmentDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='manual-logistics-quote']", (event) => this.openLogisticsQuoteDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='source-center']", (event) => this.openSourceCenterDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", ".ocw-parent-row", (event) => {
@@ -1083,7 +1080,6 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='open-batch-drawer-recalculate']", () => this.recalculate(this.drawerBatchName));
     this.$root.on("click", "[data-action='confirm-calculation-result']", () => this.confirmCalculationResult(this.drawerBatchName));
     this.$root.on("click", "[data-action='preview-erp-payload']", () => this.previewErpPayload(this.drawerBatchName));
-    this.$root.on("click", "[data-action='writeback-to-erp']", () => this.writebackToErp(this.drawerBatchName));
     this.$root.on("click", "[data-action='detail-writeback-to-erp']", () => this.writebackToErp(this.detailState.batchName));
     this.$root.on("click", "[data-action='erp-site-preview']", () =>
       this.openErpSiteSyncDialog(this.detailState?.batchName || "").catch((error) => this.showError(error))
@@ -1143,14 +1139,10 @@ class OverseasCostWorkbench {
         $(event.currentTarget).attr("data-fieldname")
       ).catch((error) => this.showError(error))
     );
-    this.$root.on("click", "[data-action='gap-recalculate']", (event) => this.recalculate($(event.currentTarget).attr("data-batch-name")));
-    this.$root.on("click", "[data-action='open-generic-link']", (event) => this.openDingtalkLink($(event.currentTarget).attr("data-open-url")));
     this.$root.on("click", "[data-action='add-batch']", () => this.openAddBatchDialog());
     this.$root.on("click", "[data-action='toggle-batch']", (event) => this.toggleBatch($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='expand-current']", () => this.setAllExpanded(true));
     this.$root.on("click", "[data-action='collapse-current']", () => this.setAllExpanded(false));
-    this.$root.on("click", "[data-action='refresh-batch']", (event) => this.refreshBatch($(event.currentTarget).attr("data-batch-name")));
-    this.$root.on("click", "[data-action='delete-batch']", (event) => this.confirmDeleteBatch($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='add-material']", (event) => this.openAddMaterialDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='delete-material']", (event) => {
       this.confirmDeleteMaterial(
@@ -4322,9 +4314,6 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='repair-dingtalk-approval']", (event) =>
       this.requestDingtalkApprovalRepair($(event.currentTarget)).catch((error) => this.showError(error))
     );
-    this.$root.on("click", "[data-action='open-dingtalk-packing-picker']", () =>
-      this.openDingtalkPackingSourcePicker().catch((error) => this.showError(error))
-    );
     this.$root.on("click", "[data-action='open-packing-flow']", () =>
       this.openPackingFlowDialog().catch((error) => this.showError(error))
     );
@@ -6104,204 +6093,8 @@ class OverseasCostWorkbench {
   }
 
 
-  isWordFileRef(value) {
-    const text = String(value || "").split("?")[0].toLowerCase();
-    return text.endsWith(".doc") || text.endsWith(".docx");
-  }
-
   isTextFileRef(value) {
     return String(value || "").split("?")[0].toLowerCase().endsWith(".txt");
-  }
-
-  openPurchasePreviewDialog(batchName = "") {
-    const batch = batchName ? this.findBatch(batchName) : this.getActiveBatch();
-    if (!batch) {
-      this.showPendingFeature("当前没有可预览的批次。");
-      return;
-    }
-    this.activeBatchName = batch.name;
-    const batchLabel = batch.waybill_no || batch.batch_no || batch.name;
-    const dialog = new frappe.ui.Dialog({
-      title: "采购支出 OA 预览",
-      fields: [
-        {
-          fieldtype: "HTML",
-          fieldname: "purchase_preview",
-          options: `
-            <div class="ocw-purchase-preview" data-area="purchase-preview">
-              <div class="ocw-purchase-loading">正在读取关联采购审批</div>
-            </div>
-          `,
-        },
-      ],
-      primary_action_label: "关闭",
-      primary_action: () => dialog.hide(),
-    });
-    dialog.show();
-    this.activeOaAttachmentDialog = dialog;
-    dialog.$wrapper.addClass("ocw-purchase-modal");
-    dialog.$wrapper.find("[data-area='purchase-preview']").html(`
-      <div class="ocw-purchase-target">
-        <span>当前批次</span>
-        <strong>${this.escape(batchLabel)}</strong>
-        <em>正在读取关联采购支出单，用于跳转原单并同步 OA 采购字段。</em>
-      </div>
-      <div class="ocw-purchase-loading">正在读取关联采购审批</div>
-    `);
-    this.previewPurchaseExpense(batch, dialog).catch((error) => {
-      dialog.$wrapper.find("[data-area='purchase-preview']").html(`
-        <div class="ocw-purchase-empty">
-          <strong>采购支出单读取失败</strong>
-          <span>${this.escape(this.normalizeErrorMessage(error))}</span>
-        </div>
-      `);
-    });
-  }
-
-  async previewPurchaseExpense(batch, dialog) {
-    const result = await this.call(
-      "overseas_costing.api.import_api.preview_linked_purchase_expense_oa",
-      {
-        batch_name: batch.name,
-        version_name: batch.current_version || null,
-      },
-      true
-    );
-    this.renderPurchasePreview(dialog, result, batch);
-  }
-
-  renderPurchasePreview(dialog, result, batch) {
-    const $target = dialog.$wrapper.find("[data-area='purchase-preview']");
-    if (!result || !result.ok) {
-      $target.html(`
-        <div class="ocw-purchase-empty">
-          <strong>暂时无法读取采购支出单</strong>
-          <span>${this.escape((result && result.message) || "请确认当前批次已经从国际物流 OA 关联采购支出审批。")}</span>
-        </div>
-      `);
-      return;
-    }
-
-    const preview = result.writeback_preview || {};
-    const matchedRows = preview.matched_rows || [];
-    const writableRows = matchedRows.filter((row) =>
-      (row.business_changes || []).some((change) => ["fillable", "conflict"].includes(change.status))
-    );
-    const batchLabel = result.batch_no || batch.waybill_no || batch.batch_no || batch.name;
-    const linkedHtml = this.renderPurchaseSourceList(result.purchase_summaries || []);
-
-    $target.html(`
-      <div class="ocw-purchase-target">
-        <span>当前批次</span>
-        <strong>${this.escape(batchLabel)}</strong>
-        <em>这里只显示关联采购支出单；采购字段按 OA 明细同步写入系统。</em>
-      </div>
-      <div class="ocw-purchase-note">
-        ${linkedHtml || "当前没有读取到关联采购支出审批。"}
-      </div>
-      ${this.renderPurchaseApplyAction(preview, writableRows, result)}
-    `);
-    dialog.$wrapper
-      .off("click.ocwPurchase")
-      .on("click.ocwPurchase", "[data-action='apply-purchase-fillable']", () => {
-        this.applyPurchaseFillableFields(batch, dialog, preview).catch((error) => this.showError(error));
-      })
-      .on("click.ocwPurchase", "[data-action='open-purchase-source']", (event) => {
-        this.openDingtalkLink($(event.currentTarget).attr("data-open-url"));
-      });
-  }
-
-  renderPurchaseSourceList(rows) {
-    if (!rows.length) return "";
-    return `
-      <div class="ocw-purchase-source-list">
-        ${rows
-          .map((row) => {
-            const title = row.approval_title || "采购支出审批";
-            const approvalNo = row.source_approval_no || "--";
-            const approvalStatus = String(row.approval_status || "").trim();
-            const approvalInvalid =
-              this.isInvalidApprovalStatusText(approvalStatus) ||
-              this.isInvalidApprovalStatusText(row.message);
-            const statusHtml = approvalInvalid
-              ? `<span class="ocw-purchase-source-status is-invalid">采购审批无效${approvalStatus ? `：${this.escape(approvalStatus)}` : ""}</span>`
-              : approvalStatus
-                ? `<span class="ocw-purchase-source-status">${this.escape(approvalStatus)}</span>`
-                : "";
-            const meta = `${row.purchase_currency || "--"} · ${row.detail_row_count || 0} 行`;
-            const button = row.can_open
-              ? `<a class="ocw-link-btn" href="${this.escape(row.open_url || "")}" target="_blank" rel="noopener noreferrer">打开原单</a>`
-              : `<span class="ocw-purchase-source-disabled">无链接</span>`;
-            return `
-              <div class="ocw-purchase-source-row">
-                <div>
-                  <strong>${this.escape(approvalNo)}</strong>
-                  <span title="${this.escape(title)}">${this.escape(title)}</span>
-                  ${statusHtml}
-                  <em>${this.escape(meta)}</em>
-                </div>
-                ${button}
-              </div>
-            `;
-          })
-          .join("")}
-      </div>
-    `;
-  }
-
-  renderPurchaseApplyAction(preview, writableRows = [], result = {}) {
-    const writableCount = Number((preview && preview.writable_row_count) || writableRows.length || 0);
-    if (!writableCount) return "";
-    const linkedCount = Number(result.linked_purchase_count || result.purchase_summary_count || 0);
-    const detailCount = Number(result.mapped_purchase_row_count || 0);
-    return `
-      <div class="ocw-purchase-apply">
-        <div>
-          <strong>同步采购字段到系统</strong>
-          <span>已读取 ${this.escape(String(linkedCount))} 个采购支出单、${this.escape(String(detailCount))} 行明细；按物料编码写入单价Precio、币种Moneda、总金额Monto Total。</span>
-        </div>
-        <button class="ocw-primary-btn ocw-mini-btn" data-action="apply-purchase-fillable">同步采购字段</button>
-      </div>
-    `;
-  }
-
-  async applyPurchaseFillableFields(batch, dialog, preview) {
-    if (!batch || this.isApplyingPurchaseFill) return;
-    const writableCount = Number((preview && preview.writable_row_count) || 0);
-    if (!writableCount) {
-      frappe.show_alert({ message: "当前没有可写入的采购字段", indicator: "blue" });
-      return;
-    }
-
-    this.isApplyingPurchaseFill = true;
-    const $button = dialog.$wrapper.find("[data-action='apply-purchase-fillable']");
-    $button.prop("disabled", true).text("同步中");
-    try {
-      const result = await this.call(
-        "overseas_costing.api.import_api.apply_linked_purchase_expense_fillable_fields",
-        {
-          batch_name: batch.name,
-          version_name: batch.current_version || null,
-        },
-        true
-      );
-      if (!result.ok) {
-        throw new Error(result.message || "采购字段同步失败");
-      }
-      if (Number(result.updated_count || 0) > 0) {
-        this.markBatchDirty(batch.name);
-      }
-      await this.loadBatchItems(batch.name, batch.current_version, true);
-      await this.loadAuditLogs(batch.name, batch.current_version);
-      this.expandedBatchNames.add(batch.name);
-      this.renderTable();
-      this.renderDiffPanel();
-      frappe.show_alert({ message: result.message || "采购字段已同步", indicator: result.updated_count ? "green" : "blue" });
-      dialog.hide();
-    } finally {
-      this.isApplyingPurchaseFill = false;
-      $button.prop("disabled", false).text("同步采购字段");
-    }
   }
 
   openApprovalSourceDialog(batchName = "") {
@@ -7445,70 +7238,6 @@ class OverseasCostWorkbench {
     } finally {
       this.isConfirmingLogisticsQuote = false;
     }
-  }
-
-  openOaAttachmentDialog(batchName = "") {
-    const batch = batchName ? this.findBatch(batchName) : this.getActiveBatch();
-    if (!batch) {
-      this.showPendingFeature("当前没有可查看附件的批次。");
-      return;
-    }
-    this.activeBatchName = batch.name;
-    const batchLabel = batch.batch_no || batch.waybill_no || batch.name;
-    const dialog = new frappe.ui.Dialog({
-      title: "钉钉审批附件",
-      size: "large",
-      fields: [
-        {
-          fieldtype: "HTML",
-          fieldname: "oa_attachments",
-          options: `
-            <div class="ocw-purchase-target">
-              <span>当前批次</span>
-              <strong>${this.escape(batchLabel)}</strong>
-              <em>显示钉钉审批的表单附件和评论附件。</em>
-            </div>
-            <div class="ocw-purchase-loading" data-area="oa-attachment-list">正在读取钉钉审批附件</div>
-          `,
-        },
-      ],
-      primary_action_label: "关闭",
-      primary_action: () => dialog.hide(),
-    });
-    dialog.show();
-    dialog.$wrapper.addClass("ocw-purchase-modal ocw-oa-attachment-modal");
-    dialog.$wrapper
-      .off("click.ocwOaAttachments")
-      .on("click.ocwOaAttachments", "[data-action='open-generic-link']", (event) => {
-        this.openDingtalkLink($(event.currentTarget).attr("data-open-url"));
-      })
-      .on("click.ocwOaAttachments", "[data-action='download-oa-attachment']", (event) => {
-        this.downloadOaFormAttachment(
-          batch,
-          dialog,
-          $(event.currentTarget).attr("data-attachment-name"),
-          $(event.currentTarget),
-          $(event.currentTarget).attr("data-open-parse-after-download") === "1"
-        ).catch((error) => this.showError(error));
-      })
-      .on("click.ocwOaAttachments", "[data-action='preview-oa-attachment-file']", (event) => {
-        this.openOaAttachmentFilePreview(
-          batch,
-          dialog,
-          $(event.currentTarget).attr("data-attachment-name"),
-          $(event.currentTarget).attr("data-file-url"),
-          $(event.currentTarget).attr("data-file-name"),
-          $(event.currentTarget)
-        ).catch((error) => this.showError(error));
-      });
-    this.loadOaFormAttachments(batch, dialog).catch((error) => {
-      dialog.$wrapper.find("[data-area='oa-attachment-list']").html(`
-        <div class="ocw-purchase-empty">
-          <strong>钉钉审批附件读取失败</strong>
-          <span>${this.escape(this.normalizeErrorMessage(error))}</span>
-        </div>
-      `);
-    });
   }
 
   async loadOaFormAttachments(batch, dialog) {
@@ -8691,9 +8420,6 @@ class OverseasCostWorkbench {
       this.expandedBatchNames.add(batch.name);
       this.renderTable();
       this.renderDiffPanel();
-      if (this.activeOaAttachmentDialog && this.activeOaAttachmentDialog.$wrapper && this.activeOaAttachmentDialog.$wrapper.is(":visible")) {
-        this.loadOaFormAttachments(batch, this.activeOaAttachmentDialog).catch((error) => this.showError(error));
-      }
       frappe.show_alert({ message: result.message || "装箱单字段已写入", indicator: result.updated_count ? "green" : "blue" });
       dialog.hide();
     } finally {
@@ -20507,10 +20233,6 @@ class OverseasCostWorkbench {
     return candidates;
   }
 
-  async openDingtalkPackingSourcePicker() {
-    return this.openPackingFlowDialog({ sourceTab: "approval" });
-  }
-
   async openDingtalkPackingPreview(sourceKind, sourceId, processInstanceId = "", fileId = "") {
     const batch = this.getDetailBatch();
     if (sourceKind === "attachment") sourceId = await this.ensureDingtalkLocalAttachment(sourceId, processInstanceId, fileId);
@@ -24065,48 +23787,6 @@ class OverseasCostWorkbench {
       this.addAudit("系统", "system", "全部收起");
     }
     this.renderTable();
-  }
-
-  confirmDeleteBatch(batchName) {
-    const batch = this.findBatch(batchName);
-    if (!batch) return;
-    const items = this.batchItems[batch.name] || [];
-    const label = `${batch.customs_no || "--"} / ${batch.waybill_no || batch.batch_no || batch.name}`;
-    frappe.confirm(
-      `
-        <div class="ocw-confirm-copy">
-          <h4>确认删除报关/运单块？</h4>
-          <p>将删除 ${this.escape(label)}，同时移除其下 ${items.length || batch.item_count || 0} 条物料明细。</p>
-          <div class="ocw-confirm-note">删除后会同时清理该批次的版本、分摊规则、附件记录和修改记录。请仅删除测试或误导入数据。</div>
-        </div>
-      `,
-      async () => {
-        await this.deleteBatch(batch, label);
-      }
-    );
-  }
-
-  async deleteBatch(batch, label) {
-    try {
-      const result = await this.call(
-        "overseas_costing.api.calculate.delete_batch",
-        {
-          batch_name: batch.name,
-          remark: `前端删除批次：${label}`,
-        },
-        true
-      );
-      if (!result.ok) throw new Error(result.message || "批次删除失败");
-      const counts = result.deleted_counts || {};
-      const message = `批次已删除：物料 ${counts.item_count || 0}，版本 ${counts.version_count || 0}，规则 ${counts.rule_count || 0}`;
-      frappe.show_alert({ message, indicator: "green" });
-      if (this.activeBatchName === batch.name) this.activeBatchName = "";
-      delete this.batchItems[batch.name];
-      this.expandedBatchNames.delete(batch.name);
-      await this.loadBatches();
-    } catch (error) {
-      this.showError(error);
-    }
   }
 
   openAddBatchDialog() {
