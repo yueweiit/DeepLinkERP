@@ -24,6 +24,22 @@ PARTIALLY_DELIVERED = "Partially Delivered"
 DRAFT_ALLOWED_STATUSES = (PENDING_PRODUCTION, PENDING_FINAL_PAYMENT, DELIVERABLE, PARTIALLY_DELIVERED)
 CRM_SHIPMENT_FIELD = "custom_crm_shipment_no"
 CRM_SHIPMENT_LOCK_TIMEOUT = 15
+SALES_ORDER_ITEM_PRICING_FIELDS = (
+	"price_list_rate",
+	"base_price_list_rate",
+	"margin_type",
+	"margin_rate_or_amount",
+	"rate_with_margin",
+	"base_rate_with_margin",
+	"discount_percentage",
+	"discount_amount",
+	"pricing_rules",
+	"is_free_item",
+	"rate",
+	"base_rate",
+	"item_tax_template",
+	"item_tax_rate",
+)
 
 
 class CRMShipmentIdentityConflict(frappe.ValidationError):
@@ -405,12 +421,14 @@ def make_crm_delivery_note(sales_order, payload, allocations):
 	)
 	delivery_note.set("items", [])
 	delivery_note.set(CRM_SHIPMENT_FIELD, payload[CRM_SHIPMENT_FIELD])
+	delivery_note.ignore_pricing_rule = 1
 
 	for allocation in allocations:
 		append_crm_delivery_note_item(delivery_note, sales_order, allocation)
 
 	apply_crm_shipment_header_fields(delivery_note, payload)
 	delivery_note.run_method("set_missing_values")
+	apply_sales_order_pricing_to_delivery_note(delivery_note, sales_order)
 	delivery_note.run_method("set_po_nos")
 	delivery_note.run_method("calculate_taxes_and_totals")
 	delivery_note.run_method("set_use_serial_batch_fields")
@@ -448,6 +466,7 @@ def append_crm_delivery_note_item(delivery_note, sales_order, allocation):
 			"custom_version": source.get("custom_version"),
 		},
 	)
+	apply_sales_order_item_pricing(row, source)
 
 	for fieldname in ("batch_no", "serial_no", "serial_and_batch_bundle"):
 		if request_row.get(fieldname):
@@ -457,13 +476,34 @@ def append_crm_delivery_note_item(delivery_note, sales_order, allocation):
 def prepare_crm_delivery_note_for_submit(delivery_note, sales_order, payload):
 	set_crm_shipment_no(delivery_note, payload[CRM_SHIPMENT_FIELD])
 	apply_crm_shipment_header_fields(delivery_note, payload)
+	delivery_note.ignore_pricing_rule = 1
 	versions = {row.name: row.get("custom_version") for row in sales_order.get("items", [])}
 	for row in delivery_note.get("items", []):
 		if row.get("so_detail") in versions:
 			row.set("custom_version", versions[row.so_detail])
 
+	apply_sales_order_pricing_to_delivery_note(delivery_note, sales_order)
 	delivery_note.flags.ignore_permissions = True
 	delivery_note.save(ignore_permissions=True)
+
+
+def apply_sales_order_pricing_to_delivery_note(delivery_note, sales_order):
+	"""Keep shipment pricing identical to the submitted Sales Order."""
+	delivery_note.ignore_pricing_rule = 1
+	items_by_name = {row.name: row for row in sales_order.get("items", [])}
+	for row in delivery_note.get("items", []):
+		source = items_by_name.get(row.get("so_detail"))
+		if source:
+			apply_sales_order_item_pricing(row, source)
+
+
+def apply_sales_order_item_pricing(target, source):
+	for fieldname in SALES_ORDER_ITEM_PRICING_FIELDS:
+		target.set(fieldname, source.get(fieldname))
+
+	qty = flt(target.get("qty"))
+	target.amount = qty * flt(source.get("rate"))
+	target.base_amount = qty * flt(source.get("base_rate"))
 
 
 def apply_crm_shipment_header_fields(delivery_note, payload):
@@ -574,6 +614,8 @@ def validate_sales_order_deliverable_before_submit(doc, method=None):
 	if not is_crm_integration_enabled(doc.get("company")):
 		return
 
+	preserve_crm_delivery_note_sales_order_pricing(doc)
+
 	if is_delivery_note_marked_ready_to_deliver(doc):
 		return
 
@@ -582,6 +624,22 @@ def validate_sales_order_deliverable_before_submit(doc, method=None):
 		(DELIVERABLE, PARTIALLY_DELIVERED),
 		_("以下销售订单未放行发货，不能提交销售出库：<br>{0}"),
 	)
+
+
+def preserve_crm_delivery_note_sales_order_pricing(delivery_note):
+	"""Reapply order pricing after ERP validation and before CRM shipment submission."""
+	if not delivery_note.get(CRM_SHIPMENT_FIELD):
+		return
+
+	sales_orders = get_linked_sales_orders(delivery_note)
+	if len(sales_orders) != 1:
+		frappe.throw(_("CRM 销售出库必须且只能关联一张销售订单。"))
+
+	apply_sales_order_pricing_to_delivery_note(
+		delivery_note,
+		frappe.get_doc("Sales Order", sales_orders[0]),
+	)
+	delivery_note.calculate_taxes_and_totals()
 
 
 def set_pending_final_payment_before_insert(doc, method=None):

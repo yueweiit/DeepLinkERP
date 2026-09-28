@@ -6,6 +6,7 @@ from frappe.tests import UnitTestCase
 
 from crm_integration.crm_integration.delivery_note import (
 	allocate_crm_shipment_items,
+	apply_sales_order_item_pricing,
 	delivery_note_dimensions_match,
 	enqueue_crm_delivery_note_cancellation_event,
 	enqueue_mes_delivery_note_status_callback,
@@ -17,6 +18,44 @@ from crm_integration.crm_integration.sales_order import CRM_STATUS_SHIPMENT_CANC
 
 
 class TestCRMShipmentAllocation(UnitTestCase):
+	def test_zero_sales_order_rate_is_not_replaced_by_item_price(self):
+		source = frappe._dict(
+			price_list_rate=0,
+			base_price_list_rate=0,
+			discount_percentage=0,
+			discount_amount=0,
+			rate=0,
+			base_rate=0,
+		)
+		target = frappe._dict(qty=50, price_list_rate=23.5, rate=23.5, amount=1175)
+		target.set = lambda fieldname, value: target.__setitem__(fieldname, value)
+
+		apply_sales_order_item_pricing(target, source)
+
+		self.assertEqual(target.price_list_rate, 0)
+		self.assertEqual(target.rate, 0)
+		self.assertEqual(target.amount, 0)
+		self.assertEqual(target.base_amount, 0)
+
+	def test_nonzero_sales_order_rate_is_scaled_by_shipment_quantity(self):
+		source = frappe._dict(
+			price_list_rate=20,
+			base_price_list_rate=7.6,
+			discount_percentage=12.5,
+			discount_amount=2.5,
+			rate=17.5,
+			base_rate=6.65,
+		)
+		target = frappe._dict(qty=4)
+		target.set = lambda fieldname, value: target.__setitem__(fieldname, value)
+
+		apply_sales_order_item_pricing(target, source)
+
+		self.assertEqual(target.price_list_rate, 20)
+		self.assertEqual(target.rate, 17.5)
+		self.assertEqual(target.amount, 70)
+		self.assertEqual(target.base_amount, 26.6)
+
 	def test_crm_shipment_requires_stable_shipment_number(self):
 		with self.assertRaisesRegex(frappe.ValidationError, "custom_crm_shipment_no"):
 			validate_crm_shipment_payload(
