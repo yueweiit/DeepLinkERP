@@ -9,7 +9,6 @@ release_id="${4:?release id is required}"
 [[ "$site_name" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "Invalid site name" >&2; exit 2; }
 
 compose_file="$compose_root/compose.custom.yaml"
-base_image="deeplinkerp-custom:v16.23.0-latest"
 backup_image="deeplinkerp-custom:pre-material-ai-release-$release_id"
 backup_archive="$compose_root/backups/material-ai-release-$release_id.tar.gz"
 release_marker_backup="$compose_root/backups/workbench-release-$release_id.json"
@@ -18,6 +17,17 @@ asset_sync_script="${ASSET_SYNC_SCRIPT:-}"
 if [ -z "$asset_sync_script" ] && [ -f "$script_dir/sync_and_verify_assets.sh" ]; then
   asset_sync_script="$script_dir/sync_and_verify_assets.sh"
 fi
+base_image_script="${BASE_IMAGE_SCRIPT:-}"
+if [ -z "$base_image_script" ] && [ -f "$script_dir/resolve_base_image.sh" ]; then
+  base_image_script="$script_dir/resolve_base_image.sh"
+fi
+if [ -z "$base_image_script" ]; then
+  echo "Cannot locate resolve_base_image.sh (set BASE_IMAGE_SCRIPT)" >&2
+  exit 2
+fi
+# shellcheck source=resolve_base_image.sh
+. "$base_image_script"
+base_image="$(resolve_base_image "$compose_file")"
 
 cd "$compose_root"
 

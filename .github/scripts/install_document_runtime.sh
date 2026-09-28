@@ -7,7 +7,6 @@ dockerfile_path="${3:?material AI runtime Containerfile is required}"
 release_id="${4:-manual}"
 mode="${5:-install}"
 compose_file="$compose_root/compose.custom.yaml"
-base_image="deeplinkerp-custom:v16.23.0-latest"
 runtime_image="deeplinkerp-custom:material-ai-$release_id"
 backup_image="deeplinkerp-custom:pre-material-ai-runtime-$release_id"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,6 +14,17 @@ asset_sync_script="${ASSET_SYNC_SCRIPT:-}"
 if [ -z "$asset_sync_script" ] && [ -f "$script_dir/sync_and_verify_assets.sh" ]; then
   asset_sync_script="$script_dir/sync_and_verify_assets.sh"
 fi
+base_image_script="${BASE_IMAGE_SCRIPT:-}"
+if [ -z "$base_image_script" ] && [ -f "$script_dir/resolve_base_image.sh" ]; then
+  base_image_script="$script_dir/resolve_base_image.sh"
+fi
+if [ -z "$base_image_script" ]; then
+  echo "Cannot locate resolve_base_image.sh (set BASE_IMAGE_SCRIPT)" >&2
+  exit 2
+fi
+# shellcheck source=resolve_base_image.sh
+. "$base_image_script"
+base_image="$(resolve_base_image "$compose_file")"
 
 cd "$compose_root"
 docker image inspect "$base_image" >/dev/null
