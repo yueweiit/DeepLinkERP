@@ -385,6 +385,52 @@ def test_bulk_project_dialog_uses_per_row_selects_and_keeps_the_shared_picker():
     assert "renderReferenceChangePreview(items, \"project_collection\", model.selectedValue" in picker
 
 
+def test_project_assignment_rows_lead_with_the_material_name_and_keep_the_code():
+    result = _fee_workspace_result(r'''
+    const w=Object.create(Harness.prototype);
+    w.escape=v=>String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;');
+    const optionsResult={ok:true,route_revision:'R-1',conflicts:[],options:[
+      {project_collection:'LatinGo拉丁购',subsidiary_code:'C1',is_approval_candidate:true}
+    ]};
+    const items=[
+      {name:'A',material_code:'FL-1',product_name:'平板保护壳',project_collection:''},
+      {name:'B',material_code:'FL-2',product_name:'',project_collection:''}
+    ];
+    const model=w.buildProjectPickerModel(items,optionsResult,'');
+    console.log(JSON.stringify({
+      rows:w.renderProjectAssignRows(model),
+      preview:w.renderReferenceChangePreview(items,'project_collection','LatinGo拉丁购','项目归属变更预览'),
+      table:w.renderProjectAssignTable(model)
+    }));
+    ''')
+    # 一屏要扫几十行，主显物料名、编码退成副标题；没有名字的行回落成编码，不留空单元格。
+    assert '<span>平板保护壳</span><small>FL-1</small>' in result["rows"]
+    assert '<span>FL-2</span>' in result["rows"]
+    assert '<small>FL-2</small>' not in result["rows"]
+    assert "物料名称</th>" in result["table"]
+    assert "搜索物料（名称 / 编码 / 当前归属）" in result["table"]
+    assert '<span>平板保护壳</span><small>FL-1</small>' in result["preview"]
+
+
+def test_material_reference_dialogs_reuse_the_shared_wide_modal():
+    source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    css = (PARTS / "48-material-fee-workspace.css").read_text(encoding="utf-8")
+
+    # 窄弹窗会把逐行下拉表和候选列表挤成一条，所以这些弹窗统一挂到共用的宽弹窗类上，
+    # 而不是各写一套宽度。
+    for anchor in (
+        "title:bulk ? `批量设置项目归属（${items.length} 行）` : `选择项目归属`",
+        'title:source === "bulk" ? `批量设置供应商（${items.length} 行）` : "选择 ERP 供应商"',
+        'title: "已排除物料"',
+    ):
+        added = source.split(anchor, 1)[1].split("addClass(", 1)[1].split(")", 1)[0]
+        assert added.strip() == '"ocw-mf-dialog"', anchor
+
+    # Frappe 的 .modal-dialog 自带固定宽度，只写 max-width 撑不开，必须显式给 width。
+    assert ".ocw-mf-dialog .modal-dialog { width: min(1100px" in css
+    assert ".ocw-mf-assign-table { width: 100%; min-width: 640px;" in css
+
+
 def test_supplier_picker_offers_existing_and_create_without_reason_and_targets_exact_rows():
     result = _fee_workspace_result(r'''
     const w=Object.create(Harness.prototype);w.escape=value=>String(value??'');w.detailState={batchName:'B-1',versionName:'V',editToken:'T',expectedModified:'M'};

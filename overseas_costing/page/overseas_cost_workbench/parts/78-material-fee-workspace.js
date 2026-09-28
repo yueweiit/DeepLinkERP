@@ -856,6 +856,7 @@
       fields: [{ fieldtype: "HTML", fieldname: "rows", options: html }],
     });
     dialog.show();
+    dialog.$wrapper.addClass("ocw-mf-dialog");
     dialog.$wrapper.on("click", "[data-action='mf-restore-excluded']", async (event) => {
       const $button = $(event.currentTarget);
       $button.prop("disabled", true);
@@ -1365,11 +1366,25 @@
     return assignments;
   }
 
+  /**
+   * 弹窗内的物料行标签：主显物料名，物料编码退成副标题。
+   *
+   * 逐行归属/供应商弹窗要一屏扫几十行，只给「FL-1」这类编码认不出是哪个东西；
+   * 主次顺序沿用物料表的口径（`product_name` 优先，见 76-allocation.js），
+   * 编码仍保留在下方，方便与 Excel、ERP 里按编码核对。
+   */
+  materialDialogRowHtml(row = {}, fallback = "") {
+    const name = String(row?.product_name || "").trim();
+    const code = String(row?.material_code || "").trim();
+    const primary = name || code || String(row?.stable_line_key || "").trim() || String(row?.name || "") || String(fallback || "");
+    return `<span>${this.escape(primary)}</span>${name && code ? `<small>${this.escape(code)}</small>` : ""}`;
+  }
+
   renderProjectAssignTable(model = {}) {
     const rows = model.items || [];
-    return `<label class="ocw-mf-reference-search"><span>搜索物料（编码 / 当前归属）</span><input type="search" data-mf-project-search autocomplete="off" value="${this.escape(model.search || "")}"></label>`
+    return `<label class="ocw-mf-reference-search"><span>搜索物料（名称 / 编码 / 当前归属）</span><input type="search" data-mf-project-search autocomplete="off" value="${this.escape(model.search || "")}"></label>`
       + `<div class="ocw-mf-assign-head"><label><span>统一设置</span><select data-mf-assign-all>${this.renderProjectAssignOptions(model, "", "统一设置为…")}</select></label><small data-mf-assign-count>${this.renderProjectAssignCount(model)}</small></div>`
-      + `<div class="ocw-mf-assign-scroll"><table class="ocw-mf-assign-table"><thead><tr><th>物料</th><th>当前归属</th><th>设为</th></tr></thead><tbody data-mf-assign-rows>${this.renderProjectAssignRows(model)}</tbody></table></div>`
+      + `<div class="ocw-mf-assign-scroll"><table class="ocw-mf-assign-table"><thead><tr><th>物料名称</th><th>当前归属</th><th>设为</th></tr></thead><tbody data-mf-assign-rows>${this.renderProjectAssignRows(model)}</tbody></table></div>`
       + `<p class="ocw-mf-assign-hint">逐行指定后一次提交；只修改明确勾选的 ${rows.length} 行，不会扩展到装箱组。</p>`;
   }
 
@@ -1386,7 +1401,7 @@
       const rowClass = chosen ? ` class="is-chosen"` : "";
       const cellClass = blocked ? "ocw-mf-assign-current is-invalid" : "ocw-mf-assign-current";
       const note = blocked ? `<small>无有效 ERP 路由</small>` : "";
-      return `<tr${rowClass}><td class="ocw-mf-assign-item">${this.escape(row.material_code || row.stable_line_key || itemName)}</td><td class="${cellClass}">${this.escape(current || "未设置")}${note}</td><td><select data-mf-assign-row="${this.escape(itemName)}">${this.renderProjectAssignOptions(model, chosen)}</select></td></tr>`;
+      return `<tr${rowClass}><td class="ocw-mf-assign-item">${this.materialDialogRowHtml(row, itemName)}</td><td class="${cellClass}">${this.escape(current || "未设置")}${note}</td><td><select data-mf-assign-row="${this.escape(itemName)}">${this.renderProjectAssignOptions(model, chosen)}</select></td></tr>`;
     }).join("");
   }
 
@@ -1441,8 +1456,8 @@
   }
 
   renderReferenceChangePreview(items, fieldname, target, label) {
-    const rows = (items || []).map((row) => `<tr><td>${this.escape(row.material_code || row.stable_line_key || row.name)}</td><td>${this.escape(row[fieldname] || "未设置")}</td><td>${this.escape(target || "未选择")}</td></tr>`).join("");
-    return `<div class="ocw-mf-reference-preview"><strong>${this.escape(label)}</strong><span>只修改明确勾选的 ${items.length} 行，不会扩展到装箱组。</span><table><thead><tr><th>物料</th><th>原值</th><th>新值</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    const rows = (items || []).map((row) => `<tr><td class="ocw-mf-assign-item">${this.materialDialogRowHtml(row)}</td><td>${this.escape(row[fieldname] || "未设置")}</td><td>${this.escape(target || "未选择")}</td></tr>`).join("");
+    return `<div class="ocw-mf-reference-preview"><strong>${this.escape(label)}</strong><span>只修改明确勾选的 ${items.length} 行，不会扩展到装箱组。</span><table><thead><tr><th>物料名称</th><th>原值</th><th>新值</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
   /**
@@ -1616,6 +1631,8 @@
       },
     });
     dialog.show();
+    // 逐行归属表 + 候选列表在默认弹窗里会被挤成一条，沿用材料费用域共用的宽弹窗宽度。
+    dialog.$wrapper.addClass("ocw-mf-dialog");
     const $picker = dialog.fields_dict.picker.$wrapper;
     if (bulk) {
       const rerenderRows = () => {
@@ -1774,6 +1791,7 @@
       },
     });
     dialog.show();
+    dialog.$wrapper.addClass("ocw-mf-dialog");
     const $picker = dialog.fields_dict.picker.$wrapper;
     const render = () => {
       $picker.find("[data-mf-supplier-options]").html(this.renderSupplierPickerOptions(model, selection));
