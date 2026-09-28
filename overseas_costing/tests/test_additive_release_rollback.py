@@ -9,6 +9,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / ".github/scripts/manage_material_ai_release.sh"
 INSTALL_SCRIPT = ROOT / ".github/scripts/install_document_runtime.sh"
+RECLAIM_SCRIPT = ROOT / ".github/scripts/reclaim_docker_space.sh"
 RESOLVER = ROOT / ".github/scripts/resolve_base_image.sh"
 # A tag the scripts cannot have hardcoded, so the assertions prove the image comes
 # from the compose file rather than from a literal in the script.
@@ -134,13 +135,13 @@ def test_resolver_reports_a_missing_compose_file(tmp_path):
 
 
 def test_deploy_scripts_take_the_base_image_from_compose_not_a_literal():
-    for script in (SCRIPT, INSTALL_SCRIPT):
+    for script in (SCRIPT, INSTALL_SCRIPT, RECLAIM_SCRIPT):
         body = script.read_text()
         assert 'base_image="deeplinkerp-custom:' not in body
-        assert 'base_image="$(resolve_base_image "$compose_file")"' in body
+        assert 'base_image="$(resolve_base_image "$compose_file"' in body
     workflow = (ROOT / ".github/workflows/deploy-overseas-costing.yml").read_text()
     assert ".github/scripts/resolve_base_image.sh" in workflow
-    assert workflow.count("BASE_IMAGE_SCRIPT=") == 4
+    assert workflow.count("BASE_IMAGE_SCRIPT=") == 5
 
 
 def test_install_script_explains_a_base_image_that_was_reclaimed():

@@ -35,5 +35,16 @@ def test_github_deploy_scripts_do_not_force_the_full_suite():
     assert scripts==[],f'部署脚本不应选中任何测试，实际选中 {len(scripts)} 个：{reason}'
     workflow,_=select_tests(root,['.github/workflows/deploy-overseas-costing.yml'])
     assert 'overseas_costing/tests/test_affected_tests.py' in workflow
+    # 工作流自己的断言就在这两个文件里，改工作流必须连带跑它们，否则测了等于没测。
+    assert 'overseas_costing/tests/test_deploy_workflow.py' in workflow
+    assert 'overseas_costing/tests/test_additive_release_rollback.py' in workflow
     full,_=select_tests(root,['requirements.txt'])
     assert len(full)>len(scripts)
+
+
+def test_host_infra_archive_selects_only_its_own_guard_test():
+    """deploy/ 是宿主工件的归档副本，不该像未映射文件那样拉全量。"""
+    root=Path(__file__).resolve().parents[2]
+    selected,reason=select_tests(root,['deploy/host/compose.custom.yaml'])
+    assert selected==['overseas_costing/tests/test_host_infra_archive.py'],reason
+    assert len(select_tests(root,['requirements.txt'])[0])>len(selected)

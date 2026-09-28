@@ -34,7 +34,15 @@ def select_tests(root, changed):
         # 被当成“未映射的运行时改动”而触发全量测试 —— 全量里既有的红会把 CI 判失败，
         # 后续的 Deploy 步骤随之整体跳过。
         if path.startswith('.github/'):
-            if path=='.github/workflows/deploy-overseas-costing.yml':selected.update(p for p in tests if p.endswith('/test_affected_tests.py'))
+            # 工作流本身的断言也在 test_deploy_workflow / test_additive_release_rollback 里，
+            # 只挑 test_affected_tests 会让改动过的工作流不被任何测试校验。
+            if path=='.github/workflows/deploy-overseas-costing.yml':
+                selected.update(p for p in tests if p.endswith(('/test_affected_tests.py','/test_deploy_workflow.py','/test_additive_release_rollback.py')))
+            continue
+        # deploy/ 是宿主基础设施工件的归档副本（见 deploy/host/README.md），不参与运行时，
+        # 只有守护它内部一致性的测试关心；不加这条会落进末尾 else 而触发全量。
+        if path.startswith('deploy/'):
+            selected.update(p for p in tests if p.endswith('/test_host_infra_archive.py'))
             continue
         if path=='overseas_costing/scripts/run_affected_tests.py':
             selected.update(p for p in tests if p.endswith('/test_affected_tests.py'));continue

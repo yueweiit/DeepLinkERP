@@ -1,0 +1,51 @@
+[
+  {
+    "url": "https://github.com/yueweiit/DeepLinkERP.git",
+    "branch": "erpnext"
+  },
+  {
+    "url": "https://github.com/yueweiit/DeepLinkERP.git",
+    "branch": "mes_integration"
+  },
+  {
+    "url": "https://github.com/yueweiit/DeepLinkERP.git",
+    "branch": "ai_assistant"
+  },
+  {
+    "url": "https://github.com/yueweiit/DeepLinkERP.git",
+    "branch": "deeplinkerp_branding"
+  },
+  {
+    "url": "https://github.com/yueweiit/DeepLinkERP.git",
+    "branch": "crm_integration"
+  },
+  {
+    "url": "https://github.com/yueweiit/DeepLinkERP.git",
+    "branch": "custom_filters"
+  },
+  {
+    "url": "https://github.com/yueweiit/DeepLinkERP.git",
+    "branch":"draft_notifications"
+  },
+  {
+    "url": "https://github.com/yueweiit/DeepLinkERP.git",
+    "branch": "oa_purchase_request"
+  },
+  {
+    "url": "https://github.com/yueweiit/DeepLinkERP.git",
+    "branch": "client_akivision"
+  },
+  {
+    "url": "https://github.com/yueweiit/DeepLinkERP.git",
+    "branch": "china_finance"
+  },
+  {
+    "url": "https://github.com/yueweiit/DeepLinkERP.git",
+    "branch": "overseas_costing"
+  },
+  {
+    "url": "https://github.com/yueweiit/DeepLinkERP.git",
+    "branch": "mobile_operations"
+  }
+]
+

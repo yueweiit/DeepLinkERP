@@ -212,3 +212,31 @@ def test_release_marker_switches_only_after_asset_verification() -> None:
     assert assets < marker < health
     assert "overseas_costing_release_id" in deploy
     assert "${GITHUB_SHA}" in deploy
+
+
+def test_image_reclaim_keeps_the_image_compose_declares() -> None:
+    """回收镜像不能删掉 compose 声明、而容器还没引用的那一个。
+
+    2026-09-28 的现场：compose 刚被改成新 tag、容器还没重建，那条内联的
+    `docker image prune --all` 就把新 tag 的镜像当垃圾删了，紧接着的 preflight
+    报 docker 的 "No such image"，整条流水线什么都没发出去。
+    """
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    deploy = workflow.split("\n  deploy:\n", maxsplit=1)[1]
+    script = (WORKFLOW_PATH.parents[1] / "scripts" / "reclaim_docker_space.sh").read_text(encoding="utf-8")
+
+    assert "docker builder prune --all --force && docker image prune --all --force" not in deploy
+    assert 'remote_reclaim_script="/tmp/reclaim_docker_space-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh"' in deploy
+    assert "BASE_IMAGE_SCRIPT='$remote_resolve_script' bash '$remote_reclaim_script'" in deploy
+    assert "'/tmp/reclaim_docker_space-" in deploy
+    # preflight 要用这个镜像起容器，回收必须排在它前面。
+    assert deploy.index("Reclaim unused Docker build cache") < deploy.index("Preflight document parsing runtime")
+
+    assert "ocw-deploy-image-guard" in script
+    assert 'docker create --name "$guard_container" "$base_image"' in script
+    assert "trap remove_guard EXIT" in script
+    # 唯一真源仍是 compose：脚本自己解析，不许硬编码 tag。
+    assert 'base_image="$(resolve_base_image "$compose_file"' in script
+    # 解析不出 compose 声明的镜像时只回收悬空层，绝不赌 `--all`。
+    assert "docker image prune --all --force" in script
+    assert "docker image prune --force" in script
