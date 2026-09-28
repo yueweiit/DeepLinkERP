@@ -141,3 +141,14 @@ def test_deploy_scripts_take_the_base_image_from_compose_not_a_literal():
     workflow = (ROOT / ".github/workflows/deploy-overseas-costing.yml").read_text()
     assert ".github/scripts/resolve_base_image.sh" in workflow
     assert workflow.count("BASE_IMAGE_SCRIPT=") == 4
+
+
+def test_install_script_explains_a_base_image_that_was_reclaimed():
+    # A bare `docker image inspect` failed with "No such image" and nothing else,
+    # which is how a repinned compose file and the build-cache reclaim step in
+    # front of it turned into an unexplained deploy failure.
+    body = INSTALL_SCRIPT.read_text()
+    assert 'if ! docker image inspect "$base_image" >/dev/null 2>&1; then' in body
+    assert "declared by $compose_file) is missing on this host" in body
+    assert "recreate the containers first" in body
+    assert '\ndocker image inspect "$base_image" >/dev/null\n' not in body

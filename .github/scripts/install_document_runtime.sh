@@ -27,7 +27,17 @@ fi
 base_image="$(resolve_base_image "$compose_file")"
 
 cd "$compose_root"
-docker image inspect "$base_image" >/dev/null
+if ! docker image inspect "$base_image" >/dev/null 2>&1; then
+  # Diagnosed the hard way on 2026-09-28: compose had just been repinned to a tag
+  # the running containers did not use yet, so the "Reclaim unused Docker build
+  # cache" step that runs right before this one deleted it as an unused image and
+  # the deploy died here with docker's opaque "No such image".
+  echo "Base image $base_image (declared by $compose_file) is missing on this host." >&2
+  echo "It must exist before the runtime can be layered on top of it." >&2
+  echo "If compose was repinned recently, recreate the containers first so the image" >&2
+  echo "is referenced, or rebuild it, and then rerun the deployment." >&2
+  exit 2
+fi
 
 sync_and_verify_assets() {
   if [ -n "$asset_sync_script" ]; then
