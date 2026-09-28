@@ -264,6 +264,127 @@ def test_project_single_bulk_and_correction_entries_share_one_picker():
     ]
 
 
+def test_bulk_project_dialog_lists_every_selected_row_for_per_row_assignment():
+    """批量归属必须能逐行指定：每行正确归属都不一样，一个共用值套不住。"""
+
+    result = _fee_workspace_result(r'''
+    const w=Object.create(Harness.prototype);w.escape=value=>String(value??'');
+    const optionsResult={ok:true,route_revision:'R-1',conflicts:[],options:[
+      {project_collection:'LatinGo拉丁购',subsidiary_code:'拉丁购国际电子商务（东莞）有限公司',is_approval_candidate:true},
+      {project_collection:'YW MOLDES MX模具',subsidiary_code:'YW MOLDES MX模具',is_approval_candidate:false}
+    ]};
+    const items=[
+      {name:'A',material_code:'FL-1',project_collection:'LatinGo拉丁购'},
+      {name:'B',material_code:'FL-2',project_collection:'YW ODM'},
+      {name:'C',material_code:'FL-3',project_collection:''}
+    ];
+    const model=w.buildProjectPickerModel(items,optionsResult,'');
+    console.log(JSON.stringify({assignments:model.assignments,rows:w.renderProjectAssignRows(model),table:w.renderProjectAssignTable(model),count:w.renderProjectAssignCount(model)}));
+    ''')
+    # 当前值本身有效就沿用，无效/为空留空等人工指定（不能把产品线当成合法起点）。
+    assert result["assignments"] == {"A": "LatinGo拉丁购", "B": "", "C": ""}
+    assert result["rows"].count('data-mf-assign-row="') == 3
+    assert '<select data-mf-assign-row="B">' in result["rows"]
+    assert '<option value="LatinGo拉丁购" selected>' in result["rows"]
+    assert '<optgroup label="本审批候选">' in result["rows"] and '<optgroup label="其他可选项目">' in result["rows"]
+    assert '拉丁购国际电子商务（东莞）有限公司' in result["rows"]
+    assert result["rows"].count("无有效 ERP 路由") == 1
+    assert 'class="ocw-mf-assign-current is-invalid"' in result["rows"]
+    assert result["count"] == "显示 3 / 共 3 行 · 已指定 1 行 · 当前值无有效路由 1 行"
+    assert 'data-mf-assign-all' in result["table"] and 'data-mf-assign-rows' in result["table"]
+    assert "逐行指定后一次提交" in result["table"]
+
+
+def test_bulk_project_assignment_search_narrows_rows_and_keeps_chosen_values():
+    result = _fee_workspace_result(r'''
+    const w=Object.create(Harness.prototype);w.escape=value=>String(value??'');
+    const optionsResult={ok:true,route_revision:'R-1',conflicts:[],options:[
+      {project_collection:'LatinGo拉丁购',subsidiary_code:'C1',is_approval_candidate:true},
+      {project_collection:'YW MOLDES MX模具',subsidiary_code:'C2',is_approval_candidate:false}
+    ]};
+    const items=[
+      {name:'A',material_code:'FL-100',product_name:'平板壳',project_collection:'YW ODM'},
+      {name:'B',material_code:'FL-200',product_name:'模具',project_collection:'YW ODM'}
+    ];
+    const model={...w.buildProjectPickerModel(items,optionsResult,''),assignments:{A:'LatinGo拉丁购',B:''}};
+    console.log(JSON.stringify({
+      all:w.renderProjectAssignRows(model),
+      byCode:w.renderProjectAssignRows({...model,search:'fl-200'}),
+      byCurrent:w.renderProjectAssignRows({...model,search:'yw odm'}),
+      empty:w.renderProjectAssignRows({...model,search:'nope'}),
+      count:w.renderProjectAssignCount({...model,search:'fl-200'})
+    }));
+    ''')
+    assert result["all"].count('data-mf-assign-row="') == 2
+    assert result["byCode"].count('data-mf-assign-row="') == 1
+    assert 'data-mf-assign-row="B"' in result["byCode"]
+    assert '<option value="" selected>— 未选择 —</option>' in result["byCode"]
+    assert result["byCurrent"].count('data-mf-assign-row="') == 2
+    assert "没有匹配的物料" in result["empty"]
+    assert result["count"].startswith("显示 1 / 共 2 行")
+
+
+def test_bulk_project_assignment_writes_each_row_value_in_one_call():
+    result = _fee_workspace_result(r'''
+    const w=Object.create(Harness.prototype);w.detailState={batchName:'B-1',versionName:'V-1',editToken:'T',expectedModified:'M'};
+    w.ensureMaterialFeeState().materials={items:[]};
+    w.ensureEditSession=async()=>true;w.updateMaterialFeeExpectedModified=()=>{};w.loadMaterialFeeWorkspace=async()=>true;
+    w.invalidateProjectRouteOptions=()=>{};w.loadProjectRouteOptions=async()=>({ok:true});
+    let calls=0,payload=null;w.call=async(endpoint,args)=>{calls++;payload={endpoint,args};return {ok:true,changed_count:2}};
+    const items=[{name:'A',material_code:'FL-1'},{name:'B',material_code:'FL-2'}];
+    const applied=await w.applyProjectCollectionSelection(items,'',{
+      allowedValues:new Set(['LatinGo拉丁购','YW MOLDES MX模具']),
+      perItemValues:{A:'LatinGo拉丁购',B:'YW MOLDES MX模具'}
+    });
+    console.log(JSON.stringify({calls,ok:applied.ok,endpoint:payload.endpoint,updates:JSON.parse(payload.args.updates)}));
+    ''')
+    assert result["calls"] == 1
+    assert result["ok"] is True
+    assert result["endpoint"] == "overseas_costing.api.calculate.batch_update_items"
+    assert result["updates"] == [
+        {"item_name": "A", "fieldname": "project_collection", "value": "LatinGo拉丁购", "remark": "设置 ERP 项目归属"},
+        {"item_name": "B", "fieldname": "project_collection", "value": "YW MOLDES MX模具", "remark": "设置 ERP 项目归属"},
+    ]
+
+
+def test_bulk_project_assignment_refuses_unset_or_outside_values_without_writing():
+    result = _fee_workspace_result(r'''
+    const w=Object.create(Harness.prototype);
+    w.ensureMaterialFeeState().materials={items:[]};
+    let writes=0;w.call=async()=>{writes++;return {ok:true}};
+    const items=[{name:'A',material_code:'FL-1'},{name:'B',material_code:'FL-2'}];
+    const allowedValues=new Set(['LatinGo拉丁购']);
+    const issues={};
+    for(const [label,values] of [['unset',{A:'LatinGo拉丁购',B:''}],['outside',{A:'产品线A',B:'LatinGo拉丁购'}]]){
+      try{
+        await w.applyProjectCollectionSelection(items,'',{allowedValues,perItemValues:values});
+        issues[label]=null;
+      }catch(error){
+        issues[label]={message:error.message,invalid:Boolean(error.materialReferenceInputInvalid)};
+      }
+    }
+    console.log(JSON.stringify({writes,issues}));
+    ''')
+    # 半批提交会让人以为全批都写了，所以整批拒掉；列表外的值同样拒绝。
+    assert result["writes"] == 0
+    assert result["issues"]["unset"]["invalid"] is True
+    assert "还有 1 行未指定项目归属（如 FL-2）" in result["issues"]["unset"]["message"]
+    assert result["issues"]["outside"]["invalid"] is True
+    assert "请从有效列表中选择，不能录入列表外的值。" == result["issues"]["outside"]["message"]
+
+
+def test_bulk_project_dialog_uses_per_row_selects_and_keeps_the_shared_picker():
+    source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    picker = source.split("async openProjectCollectionPicker", 1)[1].split("async loadSupplierResolution", 1)[0]
+    assert "perItemValues:bulk ? model.assignments : null" in picker
+    assert "data-mf-assign-rows" in picker and "data-mf-assign-row]" in picker
+    assert "data-mf-assign-all" in picker
+    # 单行入口仍走“一个共用值 + 预览”的既有交互，没有被批量路径顶掉。
+    assert "data-mf-project-options" in picker
+    assert "ocw-project-route" in picker
+    assert "renderReferenceChangePreview(items, \"project_collection\", model.selectedValue" in picker
+
+
 def test_supplier_picker_offers_existing_and_create_without_reason_and_targets_exact_rows():
     result = _fee_workspace_result(r'''
     const w=Object.create(Harness.prototype);w.escape=value=>String(value??'');w.detailState={batchName:'B-1',versionName:'V',editToken:'T',expectedModified:'M'};

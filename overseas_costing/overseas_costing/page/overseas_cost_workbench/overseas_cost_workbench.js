@@ -12256,9 +12256,85 @@ class OverseasCostWorkbench {
       conflicts: optionsResult?.conflicts || [],
       routeRevision: String(optionsResult?.route_revision || ""),
       invalidCurrent,
+      items:(items || []).slice(),
+      assignments:this.buildProjectAssignments(items, validProjects),
       selectedValue:String(selectedValue || ""),
       search:String(search || ""),
     };
+  }
+
+  /**
+   * 批量归属的逐行初值：当前值本身是有效路由就沿用，否则留空等人工指定。
+   *
+   * 987 行的正确项目归属各不相同（旧口径填的是产品线/客户），一个共用值套不住，
+   * 所以批量弹窗以「行名 → 项目」的映射为准；这里只负责给一个不会误导人的起点。
+   */
+  buildProjectAssignments(items = [], validProjects = new Set()) {
+    const assignments = {};
+    (items || []).forEach((item) => {
+      const current = String(item?.project_collection || "").trim();
+      assignments[String(item?.name || "")] = validProjects.has(current) ? current : "";
+    });
+    return assignments;
+  }
+
+  renderProjectAssignTable(model = {}) {
+    const rows = model.items || [];
+    return `<label class="ocw-mf-reference-search"><span>搜索物料（编码 / 当前归属）</span><input type="search" data-mf-project-search autocomplete="off" value="${this.escape(model.search || "")}"></label>`
+      + `<div class="ocw-mf-assign-head"><label><span>统一设置</span><select data-mf-assign-all>${this.renderProjectAssignOptions(model, "", "统一设置为…")}</select></label><small data-mf-assign-count>${this.renderProjectAssignCount(model)}</small></div>`
+      + `<div class="ocw-mf-assign-scroll"><table class="ocw-mf-assign-table"><thead><tr><th>物料</th><th>当前归属</th><th>设为</th></tr></thead><tbody data-mf-assign-rows>${this.renderProjectAssignRows(model)}</tbody></table></div>`
+      + `<p class="ocw-mf-assign-hint">逐行指定后一次提交；只修改明确勾选的 ${rows.length} 行，不会扩展到装箱组。</p>`;
+  }
+
+  renderProjectAssignRows(model = {}) {
+    const rows = this.filterProjectAssignRows(model);
+    if (!rows.length) return `<tr><td class="ocw-mf-assign-empty" colspan="3">没有匹配的物料</td></tr>`;
+    const invalid = new Set(model.invalidCurrent || []);
+    const assignments = model.assignments || {};
+    return rows.map((row) => {
+      const itemName = String(row.name || "");
+      const current = String(row.project_collection || "").trim();
+      const chosen = String(assignments[itemName] || "");
+      const blocked = invalid.has(current);
+      const rowClass = chosen ? ` class="is-chosen"` : "";
+      const cellClass = blocked ? "ocw-mf-assign-current is-invalid" : "ocw-mf-assign-current";
+      const note = blocked ? `<small>无有效 ERP 路由</small>` : "";
+      return `<tr${rowClass}><td class="ocw-mf-assign-item">${this.escape(row.material_code || row.stable_line_key || itemName)}</td><td class="${cellClass}">${this.escape(current || "未设置")}${note}</td><td><select data-mf-assign-row="${this.escape(itemName)}">${this.renderProjectAssignOptions(model, chosen)}</select></td></tr>`;
+    }).join("");
+  }
+
+  renderProjectAssignOptions(model = {}, chosen = "", placeholder = "— 未选择 —") {
+    const options = model.options || [];
+    const selected = (value) => (value === String(chosen || "") ? ` selected` : "");
+    const option = (row) => {
+      const value = String(row.project_collection || "");
+      const company = row.subsidiary_code ? ` · ${this.escape(row.subsidiary_code)}` : "";
+      return `<option value="${this.escape(value)}"${selected(value)}>${this.escape(value)}${company}</option>`;
+    };
+    const group = (label, rows) => rows.length ? `<optgroup label="${this.escape(label)}">${rows.map(option).join("")}</optgroup>` : "";
+    return `<option value=""${selected("")}>${this.escape(placeholder)}</option>`
+      + group("本审批候选", options.filter((row) => row.is_approval_candidate))
+      + group("其他可选项目", options.filter((row) => !row.is_approval_candidate));
+  }
+
+  renderProjectAssignCount(model = {}) {
+    const rows = model.items || [];
+    const invalid = new Set(model.invalidCurrent || []);
+    const assignments = model.assignments || {};
+    const assigned = rows.filter((row) => String(assignments[String(row.name || "")] || "")).length;
+    const noRoute = rows.filter((row) => {
+      const value = String(row.project_collection || "").trim();
+      return Boolean(value) && invalid.has(value);
+    }).length;
+    return `显示 ${this.filterProjectAssignRows(model).length} / 共 ${rows.length} 行 · 已指定 ${assigned} 行 · 当前值无有效路由 ${noRoute} 行`;
+  }
+
+  filterProjectAssignRows(model = {}) {
+    const rows = model.items || [];
+    const needle = String(model.search || "").trim().toLocaleLowerCase();
+    if (!needle) return rows;
+    return rows.filter((row) => [row.material_code, row.stable_line_key, row.product_name, row.project_collection]
+      .some((value) => String(value || "").toLocaleLowerCase().includes(needle)));
   }
 
   renderProjectPickerOptions(model = {}) {
@@ -12282,17 +12358,47 @@ class OverseasCostWorkbench {
     return `<div class="ocw-mf-reference-preview"><strong>${this.escape(label)}</strong><span>只修改明确勾选的 ${items.length} 行，不会扩展到装箱组。</span><table><thead><tr><th>物料</th><th>原值</th><th>新值</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
-  async applyMaterialReferenceSelection(items, fieldname, value, options = {}) {
-    const target = String(value || "").trim();
-    const allowedValues = options.allowedValues instanceof Set ? options.allowedValues : new Set(options.allowedValues || []);
-    if (!target || !allowedValues.has(target)) {
+  /**
+   * 把「一个共用值」与「逐行不同值」收敛成同一个 行名 → 目标值 映射。
+   *
+   * 单行/整组入口传一个 `value`，批量入口传 `options.perItemValues`（弹窗里逐行选的）。
+   * 校验只留这一处，两条入口的错误文案与 `materialReferenceInputInvalid` 标记保持一致。
+   */
+  resolveMaterialReferenceTargets(items = [], value, options = {}, allowedValues = new Set()) {
+    const perItem = options.perItemValues || null;
+    const targets = new Map();
+    if (perItem) {
+      const unset = [];
+      (items || []).forEach((item) => {
+        const chosen = String(perItem[String(item?.name || "")] || "").trim();
+        if (!chosen) { unset.push(String(item?.material_code || item?.stable_line_key || item?.name || "")); return; }
+        targets.set(String(item?.name || ""), chosen);
+      });
+      if (unset.length) {
+        const error = new Error(`还有 ${unset.length} 行未指定项目归属（如 ${unset.slice(0, 3).join("、")}），整批都不会保存。`);
+        error.materialReferenceInputInvalid = true;
+        throw error;
+      }
+    } else {
+      const shared = String(value || "").trim();
+      (items || []).forEach((item) => targets.set(String(item?.name || ""), shared));
+    }
+    const outside = [...new Set([...targets.values()].filter((target) => !allowedValues.has(target)))];
+    if (outside.length) {
       const error = new Error("请从有效列表中选择，不能录入列表外的值。");
       error.materialReferenceInputInvalid = true;
       throw error;
     }
+    return targets;
+  }
+
+  async applyMaterialReferenceSelection(items, fieldname, value, options = {}) {
+    const allowedValues = options.allowedValues instanceof Set ? options.allowedValues : new Set(options.allowedValues || []);
+    const targets = this.resolveMaterialReferenceTargets(items, value, options, allowedValues);
     const state = this.ensureMaterialFeeState();
     if (options.aiDraft && fieldname === "project_collection") {
       (items || []).forEach((item) => {
+        const target = targets.get(String(item.name || ""));
         const meta = item.__aiReplacement;
         if (meta) {
           const proposal = (state.aiFill?.proposals || []).find((row) => String(row.proposal_id || "") === String(meta.proposalId || ""));
@@ -12316,7 +12422,7 @@ class OverseasCostWorkbench {
     const fallbackRemark = fieldname === "project_collection" ? "设置 ERP 项目归属" : "设置 ERP 供应商";
     const auditRemark = String(options.auditRemark || fallbackRemark).trim() || fallbackRemark;
     const updates = (items || []).map((item) => ({
-      item_name:item.name, fieldname, value:target, remark:auditRemark,
+      item_name:item.name, fieldname, value:targets.get(String(item.name || "")), remark:auditRemark,
     }));
     const result = await this.call("overseas_costing.api.calculate.batch_update_items", {
       batch_name:this.detailState.batchName,
@@ -12389,23 +12495,29 @@ class OverseasCostWorkbench {
     const optionsResult = await this.loadProjectRouteOptions({ expectedRevision:this.projectRouteRevisionHint() });
     if (!(optionsResult.options || []).length) throw new Error("当前没有可用的项目路由。");
     const valid = new Set(optionsResult.options.map((row) => String(row.project_collection || "")));
+    // 批量入口改成逐行指定：每行归属都不一样，一个共用值套所有选中行不解决问题。
+    const bulk = source === "bulk";
     const sharedCurrent = [...new Set(items.map((row) => String(row.project_collection || "").trim()).filter(Boolean))];
     const initial = valid.has(String(suggestedValue || "")) ? String(suggestedValue) : sharedCurrent.length === 1 && valid.has(sharedCurrent[0]) ? sharedCurrent[0] : "";
     let model = this.buildProjectPickerModel(items, optionsResult, "", initial);
     const dialog = new frappe.ui.Dialog({
-      title:source === "bulk" ? `批量设置项目归属（${items.length} 行）` : `选择项目归属`,
-      fields:[
-        {fieldtype:"HTML", fieldname:"picker", options:`<div class="ocw-mf-reference-picker-dialog"><label class="ocw-mf-reference-search"><span>搜索项目或 ERP 公司</span><input type="search" data-mf-project-search autocomplete="off"></label><div data-mf-project-options>${this.renderProjectPickerOptions(model)}</div></div>`},
-        {fieldtype:"HTML", fieldname:"preview", options:this.renderReferenceChangePreview(items, "project_collection", initial, "项目归属变更预览")},
-      ],
-      primary_action_label:source === "bulk" ? "确认批量设置" : "保存",
+      title:bulk ? `批量设置项目归属（${items.length} 行）` : `选择项目归属`,
+      fields: bulk
+        ? [
+            {fieldtype:"HTML", fieldname:"picker", options:`<div class="ocw-mf-reference-picker-dialog ocw-mf-project-assign">${this.renderProjectAssignTable(model)}</div>`},
+          ]
+        : [
+            {fieldtype:"HTML", fieldname:"picker", options:`<div class="ocw-mf-reference-picker-dialog"><label class="ocw-mf-reference-search"><span>搜索项目或 ERP 公司</span><input type="search" data-mf-project-search autocomplete="off"></label><div data-mf-project-options>${this.renderProjectPickerOptions(model)}</div></div>`},
+            {fieldtype:"HTML", fieldname:"preview", options:this.renderReferenceChangePreview(items, "project_collection", initial, "项目归属变更预览")},
+          ],
+      primary_action_label:bulk ? "确认批量设置" : "保存",
       primary_action:async () => {
         try {
-          const target = String(model.selectedValue || "");
           const aiDraft = Boolean(this.isMaterialAIReadyStatus(state.aiFill?.status) && state.aiFill?.draftVisible);
-          const result = await this.applyProjectCollectionSelection(items, target, {
+          const result = await this.applyProjectCollectionSelection(items, String(model.selectedValue || ""), {
             aiDraft,
             allowedValues:valid,
+            perItemValues:bulk ? model.assignments : null,
           });
           // 编辑权没拿到时内部返回 ok:false（入口已给出提示），不能当成保存成功。
           if (!result?.ok) return;
@@ -12418,6 +12530,29 @@ class OverseasCostWorkbench {
     });
     dialog.show();
     const $picker = dialog.fields_dict.picker.$wrapper;
+    if (bulk) {
+      const rerenderRows = () => {
+        $picker.find("[data-mf-assign-rows]").html(this.renderProjectAssignRows(model));
+        $picker.find("[data-mf-assign-count]").html(this.renderProjectAssignCount(model));
+      };
+      $picker.on("input", "[data-mf-project-search]", (event) => { model = { ...model, search:String($(event.currentTarget).val() || "") }; rerenderRows(); });
+      $picker.on("change", "[data-mf-assign-row]", (event) => {
+        const itemName = String($(event.currentTarget).attr("data-mf-assign-row") || "");
+        model = { ...model, assignments:{ ...model.assignments, [itemName]:String($(event.currentTarget).val() || "") } };
+        rerenderRows();
+      });
+      // 「统一设置」等价于旧行为，但改成作用于当前筛选出的行，且不再是唯一入口。
+      $picker.on("change", "[data-mf-assign-all]", (event) => {
+        const chosen = String($(event.currentTarget).val() || "");
+        if (!chosen) return;
+        const assignments = { ...model.assignments };
+        this.filterProjectAssignRows(model).forEach((row) => { assignments[String(row.name || "")] = chosen; });
+        model = { ...model, assignments };
+        $(event.currentTarget).val("");
+        rerenderRows();
+      });
+      return dialog;
+    }
     const render = () => {
       $picker.find("[data-mf-project-options]").html(this.renderProjectPickerOptions(model));
       dialog.fields_dict.preview.$wrapper.html(this.renderReferenceChangePreview(items, "project_collection", model.selectedValue, "项目归属变更预览"));

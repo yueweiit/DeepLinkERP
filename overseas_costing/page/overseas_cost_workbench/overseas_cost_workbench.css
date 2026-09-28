@@ -7746,6 +7746,24 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
 .ocw-mf-reference-preview th,
 .ocw-mf-reference-preview td { padding: 6px; border: 1px solid #e5ebf2; text-align: left; vertical-align: top; }
 .ocw-mf-reference-preview th { background: #f7f9fc; color: #667085; }
+/* 批量归属逐行指定：一个共用值套不住成百行各不相同的归属，所以批量弹窗按行给下拉。 */
+.ocw-mf-assign-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.ocw-mf-assign-head label { display: inline-flex; align-items: center; gap: 7px; color: #475467; font-size: 12px; font-weight: 600; }
+.ocw-mf-assign-head select { min-height: 32px; max-width: 280px; border: 1px solid #cfd9e6; border-radius: 7px; padding: 4px 8px; background: #fff; color: #172033; font: inherit; }
+.ocw-mf-assign-head select:focus { border-color: var(--mf-blue); outline: 0; box-shadow: 0 0 0 2px rgba(11, 140, 240, 0.14); }
+.ocw-mf-assign-head small { color: #667085; font-size: 11px; }
+.ocw-mf-assign-scroll { max-height: 46vh; overflow: auto; border: 1px solid #e5ebf2; border-radius: 8px; }
+.ocw-mf-assign-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ocw-mf-assign-table th { position: sticky; top: 0; z-index: 1; padding: 7px 9px; border-bottom: 1px solid #dce6f2; background: #f7f9fc; color: #667085; text-align: left; white-space: nowrap; }
+.ocw-mf-assign-table td { padding: 5px 9px; border-bottom: 1px solid #eef2f7; vertical-align: middle; }
+.ocw-mf-assign-table tr.is-chosen td { background: #f7fbff; }
+.ocw-mf-assign-item { color: #172033; font-weight: 600; overflow-wrap: anywhere; }
+.ocw-mf-assign-current { color: #475467; overflow-wrap: anywhere; }
+.ocw-mf-assign-current.is-invalid { color: #b42318; }
+.ocw-mf-assign-current small { display: block; color: #b42318; font-size: 10px; }
+.ocw-mf-assign-table select { width: 100%; min-height: 30px; border: 1px solid #cfd9e6; border-radius: 6px; padding: 3px 7px; background: #fff; color: #172033; font: inherit; font-size: 12px; }
+.ocw-mf-assign-empty { color: #667085; text-align: center; }
+.ocw-mf-assign-hint { margin: 0; color: #667085; font-size: 11px; }
 .ocw-mf-grid-table tr.is-ai-replacement td { background: #f3f9ff; }
 .ocw-mf-grid-table tr.is-ai-replacement td:first-child { box-shadow: inset 3px 0 0 #2496ed; }
 .ocw-mf-cell.is-ai-replacement small { display: block; color: #1478bd; font-size: 10px; white-space: nowrap; }
