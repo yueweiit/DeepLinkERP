@@ -281,6 +281,7 @@ function create_inline_account_editor(report, value, parent, data) {
 	// not append Frappe's technical "Filtered by" row to the account choices.
 	control.get_filter_description = async () => null;
 	const destroy_dropdown = bind_inline_account_dropdown(control, parent);
+	keep_inline_editor_space_local(control);
 	control.df.change = () => {
 		if (!initializing)
 			window.setTimeout(() => report.datatable?.cellmanager?.deactivateEditing(), 0);
@@ -289,12 +290,10 @@ function create_inline_account_editor(report, value, parent, data) {
 	return {
 		initValue(initial_value) {
 			initializing = true;
-			Promise.resolve(control.set_value(initial_value)).finally(() => {
-				initializing = false;
-				control.set_focus();
-				control.$input?.select();
-				control.on_input({ target: { value: "" } });
-			});
+			initialize_inline_control(control, initial_value);
+			initializing = false;
+			control.$input?.select();
+			control.on_input({ target: { value: "" } });
 		},
 		getValue() {
 			destroy_dropdown();
@@ -324,7 +323,6 @@ function create_inline_summary_editor(report, value, parent, data) {
 		return false;
 	}
 
-	let initializing = true;
 	const control = frappe.ui.form.make_control({
 		df: {
 			fieldname: "inline_summary",
@@ -338,19 +336,15 @@ function create_inline_summary_editor(report, value, parent, data) {
 	control.toggle_label(false);
 	control.toggle_description(false);
 	control.$input?.attr("maxlength", 500);
-	control.df.change = () => {
-		if (!initializing)
-			window.setTimeout(() => report.datatable?.cellmanager?.deactivateEditing(), 0);
-	};
+	// Data controls normally write their value back after 500 ms of idle input.
+	// DataTable owns this temporary value, so commit only when editing ends.
+	control.change = () => {};
+	keep_inline_editor_space_local(control);
 
 	return {
 		initValue(initial_value) {
-			initializing = true;
-			Promise.resolve(control.set_value(initial_value || "")).finally(() => {
-				initializing = false;
-				control.set_focus();
-				control.$input?.select();
-			});
+			initialize_inline_control(control, initial_value || "");
+			control.$input?.select();
 		},
 		getValue() {
 			return control.get_value();
@@ -360,6 +354,27 @@ function create_inline_summary_editor(report, value, parent, data) {
 			stage_inline_summary_change(report, data, new_value);
 		},
 	};
+}
+
+function initialize_inline_control(control, value) {
+	// These controls are temporary DataTable editors, not document fields. Seed
+	// them directly so opening an Account cell never waits for link validation.
+	control.value = value;
+	control.last_value = value;
+	control.label = value;
+	if (control.set_input_value) control.set_input_value(value);
+	else control.$input?.val(value);
+	control.set_focus();
+}
+
+function keep_inline_editor_space_local(control) {
+	control.$input?.on("keydown.china_inline_voucher_editor", (event) => {
+		const key_event = event.originalEvent || event;
+		if (key_event.key === " " || key_event.code === "Space" || key_event.keyCode === 32) {
+			// Let the input insert the space, but do not let page shortcuts scroll.
+			event.stopPropagation();
+		}
+	});
 }
 
 function bind_inline_account_dropdown(control, parent) {
