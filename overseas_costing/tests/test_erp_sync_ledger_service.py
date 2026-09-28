@@ -706,3 +706,31 @@ def test_record_success_links_skips_when_the_response_carries_no_document_name(m
 
     assert saved == 0
     assert fake.links == []
+
+
+def test_site_config_dispatches_the_default_site_to_settings_and_named_sites_to_their_record(
+    monkeypatch,
+) -> None:
+    """配置真源是分裂的，而且不能合并成一个。
+
+    `Overseas Cost ERP Settings` 是单例（issingle=1），只描述默认站点；非默认站点必须去读
+    `Overseas Cost ERP Site` 表。线上那张表 0 条 ⇒ 只有默认站点这一路真的跑过，把两者"顺手"
+    归一（比如统一走 Settings）不会有任何别的测试变红，但命名站点的 base_url / 鉴权 / 公司
+    会一起错掉，而错误现场只在远端表现为 403。把分派关系钉在这里。
+    """
+    from overseas_costing.services import erp_client, erp_site_service
+    from overseas_costing.services.erp_routing_service import DEFAULT_SITE_CODE
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        erp_client, "get_erp_push_config", lambda: calls.append("settings") or {"site": "settings"}
+    )
+    monkeypatch.setattr(
+        erp_site_service,
+        "get_site_push_config",
+        lambda site_code: calls.append(str(site_code)) or {"site": str(site_code)},
+    )
+
+    assert ledger._load_site_config(DEFAULT_SITE_CODE) == {"site": "settings"}
+    assert ledger._load_site_config("MXSITE") == {"site": "MXSITE"}
+    assert calls == ["settings", "MXSITE"]

@@ -868,7 +868,7 @@
   border: 1px solid #e5e7eb;
   background: #f8fafc;
   color: #334155;
-  font-family: var(--font-stack);
+  font-family: var(--ocw-mono);
   font-size: 12px;
   line-height: 1.6;
   white-space: pre-wrap;

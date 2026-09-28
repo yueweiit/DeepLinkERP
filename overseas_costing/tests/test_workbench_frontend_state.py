@@ -443,6 +443,33 @@ def test_dialog_theme_palette_is_declared_once_for_every_modal() -> None:
     assert "display: grid" not in material_palette
 
 
+def test_every_var_reference_in_the_workbench_resolves_to_a_declaration() -> None:
+    """CSS 里每个 var(--x) 都必须取得到值，否则整条声明在计算期静默失效。
+
+    这是同一个缺陷类里的第二种死法：上一条管的是「声明了但作用域够不着」（对话框里裸
+    var(--ocw-brand) ⇒ 主按钮白底白字），这条管的是「名字压根没人声明过」—— 此时 var()
+    退化成保证无效值，`font-family` / `color` 整条被丢掉，元素安静地继承父级，看起来"就是
+    没生效"而不像坏了。历史上 `--font-stack`（OCR 文本框）与 `--ocw-ink-muted`（错误行标签）
+    就是这样从上线起一直没起作用。
+
+    声明只允许来自两处，都算在册：parts CSS 里的自定义属性，以及 parts JS 里内联注入的
+    那几个表格宽度（`style="--ocw-…: …"`，见 78-material-fee-workspace.js 的 grid shell）。
+    """
+
+    declared: set[str] = set()
+    used: set[str] = set()
+    for path in sorted(PARTS.glob("*.css")):
+        # 注释里会写「原来是 --ocw-brand」这类文字，去掉再扫，免得把说明当成声明。
+        source = re.sub(r"/\*.*?\*/", "", path.read_text(encoding="utf-8"), flags=re.DOTALL)
+        declared.update(re.findall(r"(--[\w-]+)\s*:", source))
+        used.update(re.findall(r"var\(\s*(--[\w-]+)", source))
+    for path in sorted(PARTS.glob("*.js")):
+        # JS 侧只当声明来源：`--x` 不是合法 JS 标识符，出现即说明是在拼内联样式。
+        declared.update(re.findall(r"(--[\w-]+)\s*:", path.read_text(encoding="utf-8")))
+
+    assert sorted(used - declared) == [], "这些变量没有声明处，引用它们的声明会整条失效"
+
+
 def test_detail_overview_contains_responsive_columns_and_its_own_fee_scroller() -> None:
     detail = (PARTS / "45-detail-page.css").read_text(encoding="utf-8").lower()
     dashboard = detail.split(".ocw-detail-overview-dashboard {", 1)[1].split("}", 1)[0]
