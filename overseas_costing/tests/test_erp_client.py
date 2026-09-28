@@ -1131,3 +1131,100 @@ def test_legacy_direct_push_also_stops_when_an_item_has_no_usable_unit(monkeypat
     assert result["status"] == "ITEM_PREPARE_FAILED"
     assert result["config_ready"] is True
     assert not [row for row in captured if row["url"].endswith("/Purchase%20Order")]
+
+
+_INSPECT_CONFIG = {
+    "base_url": "https://erp.example.com/api/resource",
+    "authorization": "token a:b",
+    "timeout": 5,
+}
+
+
+def test_inspect_remote_purchase_returns_remote_line_names_by_stable_line_key(monkeypatch) -> None:
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append(request.full_url)
+        if "filters=" in request.full_url:
+            return _JsonResponse({"data": [{"name": "PO-1"}]})
+        return _JsonResponse(
+            {
+                "data": {
+                    "name": "PO-1",
+                    "docstatus": 1,
+                    "items": [
+                        {"name": "POI-1", "custom_overseas_stable_line_key": "L1"},
+                        {"name": "POI-2", "custom_overseas_stable_line_key": "L2"},
+                        {"name": "POI-3"},
+                    ],
+                }
+            }
+        )
+
+    monkeypatch.setattr(erp_client, "urlopen", fake_urlopen)
+
+    result = erp_client.inspect_remote_purchase({"business_key": "BK1"}, _INSPECT_CONFIG)
+
+    assert result["found"] is True
+    assert result["ambiguous"] is False
+    assert result["name"] == "PO-1"
+    assert result["docstatus"] == 1
+    assert result["lines"] == {"L1": "POI-1", "L2": "POI-2"}
+    assert calls[-1].endswith("/PO-1")
+
+
+def test_inspect_remote_purchase_stops_at_the_business_key_lookup_when_absent(monkeypatch) -> None:
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append(request.full_url)
+        return _JsonResponse({"data": []})
+
+    monkeypatch.setattr(erp_client, "urlopen", fake_urlopen)
+
+    result = erp_client.inspect_remote_purchase({"business_key": "BK1"}, _INSPECT_CONFIG)
+
+    assert result["found"] is False
+    assert result["docstatus"] is None
+    assert result["lines"] == {}
+    assert len(calls) == 1
+
+
+def test_inspect_remote_purchase_flags_ambiguous_business_key_instead_of_picking_one(monkeypatch) -> None:
+    monkeypatch.setattr(
+        erp_client,
+        "urlopen",
+        lambda request, timeout: _JsonResponse({"data": [{"name": "PO-1"}, {"name": "PO-2"}]}),
+    )
+
+    result = erp_client.inspect_remote_purchase({"business_key": "BK1"}, _INSPECT_CONFIG)
+
+    assert result["found"] is True
+    assert result["ambiguous"] is True
+    assert result["name"] == ""
+    assert result["lines"] == {}
+
+
+def test_inspect_remote_purchase_without_business_key_never_calls_the_remote(monkeypatch) -> None:
+    def fake_urlopen(request, timeout):
+        raise AssertionError("没有稳定业务键时不得发起远端查询")
+
+    monkeypatch.setattr(erp_client, "urlopen", fake_urlopen)
+
+    result = erp_client.inspect_remote_purchase({}, _INSPECT_CONFIG)
+
+    assert result == {"ok": True, "found": False, "ambiguous": False, "name": "", "docstatus": None, "lines": {}}
+
+
+def test_read_remote_purchase_state_returns_docstatus_and_line_keys(monkeypatch) -> None:
+    monkeypatch.setattr(
+        erp_client,
+        "urlopen",
+        lambda request, timeout: _JsonResponse(
+            {"data": {"docstatus": 0, "items": [{"name": "POI-1", "custom_overseas_stable_line_key": "L1"}]}}
+        ),
+    )
+
+    state = erp_client.read_remote_purchase_state("PO-1", _INSPECT_CONFIG)
+
+    assert state == {"docstatus": 0, "lines": {"L1": "POI-1"}}

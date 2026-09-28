@@ -13,7 +13,10 @@ from collections.abc import Iterable
 ALLOWED_TRANSITIONS = {
     "PENDING": {"RUNNING", "SUPERSEDED"},
     "RUNNING": {"SUCCESS", "FAILED", "UNCERTAIN", "MANUAL_REQUIRED"},
-    "FAILED": {"RUNNING", "SUPERSEDED"},
+    # FAILED 也能确定化为 SUCCESS/MANUAL_REQUIRED：推送失败可能是「远端已建单但响应丢失」
+    # 或「单据已建、提交失败」，回读核对（reconcile_sync_request）要把这种请求拨回真实结果，
+    # 否则账本会长期把已有的采购单记成失败。
+    "FAILED": {"RUNNING", "SUCCESS", "MANUAL_REQUIRED", "SUPERSEDED"},
     "UNCERTAIN": {"SUCCESS", "FAILED", "MANUAL_REQUIRED"},
     "SUCCESS": set(),
     "MANUAL_REQUIRED": set(),

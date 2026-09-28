@@ -80,6 +80,41 @@ def get_site_sync_requests(batch_name: str, version_name: str | None = None, lim
 
 
 @frappe.whitelist()
+def reconcile_erp_request(batch_name: str, request_id: str) -> dict:
+    """核对待确认/失败的同步请求：按稳定业务键只读回读远端，不发起任何写入。"""
+
+    from overseas_costing.services.erp_sync_ledger_service import reconcile_sync_request
+
+    batch_name = require_batch_permission(batch_name, "write")
+    return _with_batch_request(batch_name, request_id, reconcile_sync_request)
+
+
+@frappe.whitelist()
+def retry_erp_request(batch_name: str, request_id: str) -> dict:
+    """先核对再重试单条同步请求；只有确认远端还没有单据时才会重发。"""
+
+    from overseas_costing.services.erp_sync_ledger_service import retry_sync_request
+
+    batch_name = require_batch_permission(batch_name, "write")
+    return _with_batch_request(batch_name, request_id, retry_sync_request)
+
+
+def _with_batch_request(batch_name: str, request_id: str, action) -> dict:
+    """把页面持有的 request_id 解析回本批次内的请求文档名，避免操作其他批次的请求。"""
+
+    from overseas_costing.services.erp_sync_ledger_service import find_batch_request_name
+
+    name = find_batch_request_name(batch_name, request_id)
+    if not name:
+        return {
+            "ok": False,
+            "action": "MISSING",
+            "message": f"批次 {batch_name} 下找不到同步请求 {request_id}。",
+        }
+    return action(name)
+
+
+@frappe.whitelist()
 def verify_erp_site_capability(site_code: str) -> dict:
     """管理员手动核验指定 ERP 站点的字段合同；仅执行远端只读请求。"""
 

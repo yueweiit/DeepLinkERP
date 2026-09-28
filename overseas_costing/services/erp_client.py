@@ -420,6 +420,48 @@ def lookup_purchase_by_business_key(payload: dict, config: dict) -> dict:
     return {"found": bool(name), "name": name}
 
 
+def inspect_remote_purchase(payload: dict, config: dict) -> dict:
+    """按稳定业务键只读回读远端采购单，供未知结果核对使用。
+
+    只查询、不写入；命中多张单据时不猜，标记 ``ambiguous`` 交给调用方判人工核对。
+    """
+
+    if not _clean((payload or {}).get("business_key")):
+        return {"ok": True, "found": False, "ambiguous": False, "name": "", "docstatus": None, "lines": {}}
+    try:
+        name = _find_existing_purchase_order_by_business_key(payload, config)
+    except AmbiguousRemoteBusinessKey:
+        return {"ok": True, "found": True, "ambiguous": True, "name": "", "docstatus": None, "lines": {}}
+    if not name:
+        return {"ok": True, "found": False, "ambiguous": False, "name": "", "docstatus": None, "lines": {}}
+    return {
+        "ok": True,
+        "found": True,
+        "ambiguous": False,
+        "name": name,
+        **read_remote_purchase_state(name, config),
+    }
+
+
+def read_remote_purchase_state(docname: str, config: dict) -> dict:
+    """按单号只读远端采购单的提交状态与行键映射。
+
+    行关联按 ``custom_overseas_stable_line_key`` 取远端行名，返回
+    ``lines = {stable_line_key: remote_row_name}``；远端单据照旧由调用方自行处理。
+    """
+
+    document = _read_remote_document(config, "Purchase Order", docname) or {}
+    lines = {}
+    for row in document.get("items") or []:
+        if not isinstance(row, dict):
+            continue
+        line_key = _clean(row.get("custom_overseas_stable_line_key"))
+        row_name = _clean(row.get("name"))
+        if line_key and row_name:
+            lines[line_key] = row_name
+    return {"docstatus": int(document.get("docstatus") or 0), "lines": lines}
+
+
 def read_erpnext_doctype_metadata(config: dict, doctypes: list[str] | tuple[str, ...]) -> dict:
     """只读读取目标 ERPNext 站点的 DocType 元数据，用于字段能力核验。"""
 
