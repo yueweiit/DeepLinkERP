@@ -279,7 +279,13 @@ def get_columns():
 		{"label": _("状态"), "fieldname": "voucher_status", "fieldtype": "Data", "width": 85},
 		{"label": _("凭证日期"), "fieldname": "posting_date", "fieldtype": "Date", "width": 130},
 		{"label": _("会计期间"), "fieldname": "accounting_period", "fieldtype": "Data", "width": 110},
-		{"label": _("摘要"), "fieldname": "remarks", "fieldtype": "Data", "width": 270},
+		{
+			"label": _("摘要"),
+			"fieldname": "remarks",
+			"fieldtype": "Data",
+			"editable": 1,
+			"width": 270,
+		},
 		{
 			"label": _("科目"),
 			"fieldname": "account",

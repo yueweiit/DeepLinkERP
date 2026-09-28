@@ -14,7 +14,8 @@ from china_finance.services.voucher import _complete_voucher_workflow, get_compa
 
 EDITABLE_SOURCE_DOCTYPES = ("Journal Entry", "Payment Entry")
 EDIT_TOLERANCE = 0.005
-MAX_INLINE_ACCOUNT_CHANGES = 50
+MAX_INLINE_CHANGES = 100
+MAX_INLINE_SUMMARY_LENGTH = 500
 
 
 def _get_source_document(source_doctype, source_name):
@@ -457,6 +458,82 @@ def _resolve_inline_edit_target(doc, edit_key):
 	return target
 
 
+def _inline_summary_targets(doc):
+	"""Return the source summary fields that may be edited from the ledger."""
+	targets = {}
+	if doc.doctype == "Journal Entry":
+		for row in doc.get("accounts") or []:
+			key = f"je-summary:{row.name}"
+			targets[key] = frappe._dict(
+				key=key,
+				fieldname="user_remark",
+				value=row.user_remark or "",
+				row_name=row.name,
+				row_idx=row.idx,
+				parentfield="accounts",
+				scope="line",
+			)
+		return targets
+
+	if doc.doctype == "Payment Entry":
+		key = "pe-summary:remarks"
+		targets[key] = frappe._dict(
+			key=key,
+			fieldname="remarks",
+			value=doc.remarks or "",
+			row_name=None,
+			row_idx=None,
+			parentfield=None,
+			scope="voucher",
+		)
+	return targets
+
+
+def _resolve_inline_summary_target(doc, edit_key):
+	target = _inline_summary_targets(doc).get(str(edit_key or ""))
+	if not target:
+		frappe.throw(_("该摘要已变化或不支持表内修改，请刷新报表"))
+	return target
+
+
+def get_inline_summary_edit_metadata(doc, ledger_row):
+	"""Map a rendered summary back to one source row or one voucher field."""
+	targets = _inline_summary_targets(doc)
+	if doc.doctype == "Payment Entry":
+		target = targets.get("pe-summary:remarks")
+		return {
+			"editable": bool(target),
+			"edit_key": target.key if target else None,
+			"edit_group": target.key if target else None,
+			"scope": target.scope if target else None,
+			"hint": _("修改后会更新整张收付款凭证的摘要") if target else None,
+		}
+
+	voucher_detail_no = ledger_row.get("voucher_detail_no") or ledger_row.get("source_row_name")
+	candidates = []
+	if voucher_detail_no:
+		candidate = targets.get(f"je-summary:{voucher_detail_no}")
+		if candidate:
+			candidates.append(candidate)
+	else:
+		entry_idx = cint(ledger_row.get("entry_idx"))
+		candidates.extend(target for target in targets.values() if target.row_idx == entry_idx)
+
+	unique = {candidate.key: candidate for candidate in candidates}
+	if len(unique) != 1:
+		return {
+			"editable": False,
+			"reason": _("无法把该摘要唯一对应到来源凭证分录"),
+		}
+	target = next(iter(unique.values()))
+	return {
+		"editable": True,
+		"edit_key": target.key,
+		"edit_group": target.key,
+		"scope": target.scope,
+	}
+
+
 def get_inline_row_edit_metadata(doc, ledger_row):
 	"""Map a rendered ledger row back to exactly one editable source field."""
 	targets = _inline_edit_targets(doc)
@@ -535,6 +612,7 @@ def annotate_inline_edit_rows(rows):
 			continue
 		row["edit_source_modified"] = str(doc.modified)
 		mapping = get_inline_row_edit_metadata(doc, row)
+		summary_mapping = get_inline_summary_edit_metadata(doc, row)
 		can_edit = bool(status.get("can_edit") or status.get("quick_unreconcile"))
 		row["inline_bank_transaction"] = next(iter(status.get("bank_transactions") or []), None)
 		row["editable_account"] = bool(mapping.get("editable") and can_edit)
@@ -542,6 +620,14 @@ def annotate_inline_edit_rows(rows):
 		row["edit_group"] = mapping.get("edit_group")
 		row["account_currency"] = mapping.get("account_currency") or row.get("account_currency")
 		row["inline_edit_reason"] = mapping.get("reason") or (None if can_edit else status.get("reason"))
+		row["editable_summary"] = bool(summary_mapping.get("editable") and can_edit)
+		row["summary_edit_key"] = summary_mapping.get("edit_key")
+		row["summary_edit_group"] = summary_mapping.get("edit_group")
+		row["summary_edit_scope"] = summary_mapping.get("scope")
+		row["inline_summary_edit_hint"] = summary_mapping.get("hint")
+		row["inline_summary_edit_reason"] = (
+			summary_mapping.get("reason") or (None if can_edit else status.get("reason"))
+		)
 	return rows
 
 
@@ -616,38 +702,80 @@ def get_compatible_accounts(doctype, txt, searchfield, start, page_len, filters)
 
 def _parse_inline_changes(changes):
 	changes = frappe.parse_json(changes) if isinstance(changes, str) else changes
-	if not isinstance(changes, list) or not 1 <= len(changes) <= MAX_INLINE_ACCOUNT_CHANGES:
-		frappe.throw(_("一次只能修改 1 至 {0} 个科目").format(MAX_INLINE_ACCOUNT_CHANGES))
+	if not isinstance(changes, list) or not 1 <= len(changes) <= MAX_INLINE_CHANGES:
+		frappe.throw(_("一次只能修改 1 至 {0} 项凭证内容").format(MAX_INLINE_CHANGES))
 	parsed = {}
 	for change in changes:
-		if not isinstance(change, dict) or not change.get("edit_key") or not change.get("account"):
-			frappe.throw(_("科目修改数据不完整，请刷新后重试"))
-		parsed[str(change["edit_key"])] = str(change["account"])
+		if not isinstance(change, dict) or not change.get("edit_key"):
+			frappe.throw(_("凭证修改数据不完整，请刷新后重试"))
+
+		fieldname = change.get("field") or ("account" if change.get("account") else None)
+		if fieldname == "account":
+			value = change.get("value", change.get("account"))
+			if not value:
+				frappe.throw(_("科目不能为空"))
+			value = str(value)
+		elif fieldname == "summary":
+			value = str(change.get("value") or "").strip()
+			if not value:
+				frappe.throw(_("摘要不能为空"))
+			if "\n" in value or "\r" in value:
+				frappe.throw(_("摘要只能填写一行内容"))
+			if len(value) > MAX_INLINE_SUMMARY_LENGTH:
+				frappe.throw(_("摘要不能超过 {0} 个字符").format(MAX_INLINE_SUMMARY_LENGTH))
+		else:
+			frappe.throw(_("不支持修改该凭证字段"))
+
+		key = (fieldname, str(change["edit_key"]))
+		if key in parsed:
+			frappe.throw(_("同一凭证字段不能重复提交"))
+		parsed[key] = value
 	return parsed
 
 
 def _resolve_inline_changes(doc, changes):
 	diffs = []
-	for edit_key, account in _parse_inline_changes(changes).items():
-		target = _resolve_inline_edit_target(doc, edit_key)
-		if target.account == account:
+	for (change_field, edit_key), value in _parse_inline_changes(changes).items():
+		if change_field == "account":
+			target = _resolve_inline_edit_target(doc, edit_key)
+			if target.account == value:
+				continue
+			new_account = _validate_compatible_account(doc, target, value)
+			diffs.append(
+				frappe._dict(
+					change_field="account",
+					edit_key=edit_key,
+					old_value=target.account,
+					new_value=value,
+					old_account=target.account,
+					new_account=value,
+					new_account_currency=new_account.account_currency,
+					new_account_type=new_account.account_type,
+					fieldname=target.fieldname,
+					parentfield=target.parentfield,
+					row_idx=target.row_idx,
+					role=target.role,
+				)
+			)
 			continue
-		new_account = _validate_compatible_account(doc, target, account)
+
+		target = _resolve_inline_summary_target(doc, edit_key)
+		if target.value == value:
+			continue
 		diffs.append(
 			frappe._dict(
+				change_field="summary",
 				edit_key=edit_key,
-				old_account=target.account,
-				new_account=account,
-				new_account_currency=new_account.account_currency,
-				new_account_type=new_account.account_type,
+				old_value=target.value,
+				new_value=value,
 				fieldname=target.fieldname,
 				parentfield=target.parentfield,
 				row_idx=target.row_idx,
-				role=target.role,
+				role="summary",
 			)
 		)
 	if not diffs:
-		frappe.throw(_("没有检测到需要保存的科目变化"))
+		frappe.throw(_("没有检测到需要保存的凭证变化"))
 	return diffs
 
 
@@ -666,13 +794,13 @@ def _inline_preflight(doc, modified, changes):
 	quick_info = status.get("quick_unreconcile")
 	if quick_info and quick_info.get("bank_account"):
 		for diff in diffs:
-			if diff.old_account == quick_info.get("bank_account"):
+			if diff.change_field == "account" and diff.old_account == quick_info.get("bank_account"):
 				frappe.throw(_("已核销凭证不能从查凭证修改银行流水对应的银行科目"))
 	return status, diffs
 
 
 @frappe.whitelist()
-def preview_inline_account_changes(source_doctype, source_name, modified, changes):
+def preview_inline_voucher_changes(source_doctype, source_name, modified, changes):
 	"""Validate staged changes without mutating the source voucher."""
 	doc = _get_source_document(source_doctype, source_name)
 	status, diffs = _inline_preflight(doc, modified, changes)
@@ -682,14 +810,23 @@ def preview_inline_account_changes(source_doctype, source_name, modified, change
 		"changes": [
 			{
 				"edit_key": diff.edit_key,
-				"old_account": diff.old_account,
-				"new_account": diff.new_account,
+				"field": diff.change_field,
+				"old_value": diff.old_value,
+				"new_value": diff.new_value,
+				"old_account": diff.get("old_account"),
+				"new_account": diff.get("new_account"),
 			}
 			for diff in diffs
 		],
 		"bank_action": "unreconcile_and_restore" if status.get("quick_unreconcile") else "none",
 		"bank_transaction": (status.get("quick_unreconcile") or {}).get("bank_transaction"),
 	}
+
+
+@frappe.whitelist()
+def preview_inline_account_changes(source_doctype, source_name, modified, changes):
+	"""Backward-compatible endpoint for clients that only submit account changes."""
+	return preview_inline_voucher_changes(source_doctype, source_name, modified, changes)
 
 
 def _lock_source_row(source_doctype, source_name):
@@ -889,30 +1026,46 @@ def _apply_inline_diffs(doc, diffs):
 	for diff in diffs:
 		if diff.parentfield:
 			target = _find_child_by_idx(doc, diff.parentfield, diff.row_idx)
-			target.set(diff.fieldname, diff.new_account)
-			if doc.doctype == "Journal Entry":
+			target.set(diff.fieldname, diff.new_value)
+			if diff.change_field == "account" and doc.doctype == "Journal Entry":
 				target.account_currency = diff.new_account_currency
 			continue
 
-		doc.set(diff.fieldname, diff.new_account)
-		if doc.doctype == "Payment Entry" and diff.fieldname in ("paid_from", "paid_to"):
+		doc.set(diff.fieldname, diff.new_value)
+		if diff.change_field == "summary" and doc.doctype == "Payment Entry":
+			doc.custom_remarks = 1
+		if diff.change_field == "account" and doc.doctype == "Payment Entry" and diff.fieldname in (
+			"paid_from",
+			"paid_to",
+		):
 			doc.set(f"{diff.fieldname}_account_currency", diff.new_account_currency)
 			account_type_field = f"{diff.fieldname}_account_type"
 			if doc.meta.has_field(account_type_field):
 				doc.set(account_type_field, diff.new_account_type)
 
 
+def _inline_change_label(diffs):
+	fields = {diff.change_field for diff in diffs}
+	if fields == {"account"}:
+		return _("科目")
+	if fields == {"summary"}:
+		return _("摘要")
+	return _("科目和摘要")
+
+
 def _audit_inline_changes(doc, diffs, *, amended_from=None):
-	lines = [
-		_("查凭证表内科目更正"),
-		*[
-			"{0} → {1}".format(
-				frappe.utils.escape_html(diff.old_account),
-				frappe.utils.escape_html(diff.new_account),
+	label = _inline_change_label(diffs)
+	heading = _("查凭证表内科目更正") if label == _("科目") else _("查凭证表内{0}修改").format(label)
+	lines = [heading]
+	for diff in diffs:
+		field_label = _("科目") if diff.change_field == "account" else _("摘要")
+		lines.append(
+			"{0}：{1} → {2}".format(
+				field_label,
+				frappe.utils.escape_html(diff.old_value or _("（空）")),
+				frappe.utils.escape_html(diff.new_value),
 			)
-			for diff in diffs
-		],
-	]
+		)
 	if amended_from:
 		lines.append(_("原凭证：{0}").format(frappe.utils.escape_html(amended_from)))
 	doc.add_comment("Comment", "<br>".join(lines))
@@ -972,22 +1125,29 @@ def _restore_quick_reconciliation(doc, quick_info):
 
 
 @frappe.whitelist(methods=["POST"])
-def apply_inline_account_changes(source_doctype, source_name, modified, changes):
+def apply_inline_voucher_changes(source_doctype, source_name, modified, changes):
 	"""Apply one voucher's changes atomically, including cancellation and re-posting."""
-	savepoint = "inline_account_edit_" + frappe.generate_hash(length=8)
+	savepoint = "inline_voucher_edit_" + frappe.generate_hash(length=8)
 	frappe.db.savepoint(savepoint)
 	try:
-		return _apply_inline_account_changes(source_doctype, source_name, modified, changes)
+		return _apply_inline_voucher_changes(source_doctype, source_name, modified, changes)
 	except Exception:
 		frappe.db.rollback(save_point=savepoint)
 		raise
 
 
-def _apply_inline_account_changes(source_doctype, source_name, modified, changes):
+@frappe.whitelist(methods=["POST"])
+def apply_inline_account_changes(source_doctype, source_name, modified, changes):
+	"""Backward-compatible endpoint for clients that only submit account changes."""
+	return apply_inline_voucher_changes(source_doctype, source_name, modified, changes)
+
+
+def _apply_inline_voucher_changes(source_doctype, source_name, modified, changes):
 	doc = _get_source_document(source_doctype, source_name)
 	_lock_source_row(source_doctype, source_name)
 	doc = _get_source_document(source_doctype, source_name)
 	status, diffs = _inline_preflight(doc, modified, changes)
+	change_label = _inline_change_label(diffs)
 
 	if doc.docstatus == 0:
 		_apply_inline_diffs(doc, diffs)
@@ -999,7 +1159,7 @@ def _apply_inline_account_changes(source_doctype, source_name, modified, changes
 			"source_doctype": doc.doctype,
 			"source_name": doc.name,
 			"modified": str(doc.modified),
-			"message": _("科目已保存；如该凭证原已核对，请重新核对后记账"),
+			"message": _("{0}已保存；如该凭证原已核对，请重新核对后记账").format(change_label),
 		}
 
 	quick_info = status.get("quick_unreconcile")
@@ -1035,5 +1195,7 @@ def _apply_inline_account_changes(source_doctype, source_name, modified, changes
 		"amended_from": source_name,
 		"modified": str(amended.modified),
 		"bank_reconciliation": reconciliation,
-		"message": _("科目更正已完成，修订凭证 {0} 已重新记账").format(amended.name),
+		"message": _("{0}更正已完成，修订凭证 {1} 已重新记账").format(
+			change_label, amended.name
+		),
 	}

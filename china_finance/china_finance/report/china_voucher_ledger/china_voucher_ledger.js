@@ -2,7 +2,12 @@
 
 frappe.query_reports["China Voucher Ledger"] = {
 	filters: [
-		{fieldname: "receipt_import", label: __("回单批次"), fieldtype: "Link", options: "China Bank Receipt Import"},
+		{
+			fieldname: "receipt_import",
+			label: __("回单批次"),
+			fieldtype: "Link",
+			options: "China Bank Receipt Import",
+		},
 		{
 			fieldname: "company",
 			label: __("公司"),
@@ -55,7 +60,8 @@ frappe.query_reports["China Voucher Ledger"] = {
 		// Keep one fixed width for each column so every row stays aligned.
 		datatable_options.layout = "fixed";
 		datatable_options.checkboxColumn = true;
-		datatable_options.getEditor = (...args) => create_inline_account_editor(frappe.query_report, ...args);
+		datatable_options.getEditor = (...args) =>
+			create_inline_voucher_editor(frappe.query_report, ...args);
 		return datatable_options;
 	},
 	after_datatable_render(datatable) {
@@ -63,7 +69,11 @@ frappe.query_reports["China Voucher Ledger"] = {
 	},
 	formatter(value, row, column, data, default_formatter) {
 		const formatted = default_formatter(value, row, column, data);
-		if (column.fieldname === "voucher_status" && data?.voucher_status !== undefined && data?.voucher_status !== null) {
+		if (
+			column.fieldname === "voucher_status" &&
+			data?.voucher_status !== undefined &&
+			data?.voucher_status !== null
+		) {
 			const status = {
 				0: [__("未记账"), "orange"],
 				3: [__("待记账"), "blue"],
@@ -75,30 +85,69 @@ frappe.query_reports["China Voucher Ledger"] = {
 		}
 		if (column.fieldname === "statutory_number" && data?.source_doctype && data?.source_name) {
 			const route = frappe.utils.get_form_link(data.source_doctype, data.source_name);
-			return `<a href="${route}" class="china-voucher-link" data-source-doctype="${encodeURIComponent(data.source_doctype)}" data-source-name="${encodeURIComponent(data.source_name)}">${formatted}</a>`;
+			return `<a href="${route}" class="china-voucher-link" data-source-doctype="${encodeURIComponent(
+				data.source_doctype
+			)}" data-source-name="${encodeURIComponent(data.source_name)}">${formatted}</a>`;
 		}
 		if (column.fieldname === "account") {
 			const label = frappe.utils.escape_html(data?.account_label || value || "");
 			const title = frappe.utils.escape_html(
-				data?.editable_account ? __("点击选择兼容科目") : (data?.inline_edit_reason || __("该行不能直接修改"))
+				data?.editable_account
+					? __("点击选择兼容科目")
+					: data?.inline_edit_reason || __("该行不能直接修改")
 			);
 			const dirty = data?._inline_account_dirty ? " is-dirty" : "";
 			const editable = data?.editable_account ? " is-editable" : " is-read-only";
-			return `<span class="china-inline-account${editable}${dirty}" title="${title}">${label}${data?.editable_account ? '<span class="china-inline-account__arrow">▾</span>' : ""}</span>`;
+			return `<span class="china-inline-account${editable}${dirty}" title="${title}">${label}${
+				data?.editable_account ? '<span class="china-inline-account__arrow">▾</span>' : ""
+			}</span>`;
 		}
-		if (column.fieldname === "source_action" && data?.is_voucher_first_row && data?.edit_source_name) {
+		if (column.fieldname === "remarks") {
+			const label = frappe.utils.escape_html(value || "");
+			const empty_label = data?.editable_summary
+				? `<span class="text-muted">${__("点击填写摘要")}</span>`
+				: "";
+			const title = frappe.utils.escape_html(
+				data?.editable_summary
+					? data?.inline_summary_edit_hint || __("点击修改摘要")
+					: data?.inline_summary_edit_reason || __("该行不能直接修改摘要")
+			);
+			const dirty = data?._inline_summary_dirty ? " is-dirty" : "";
+			const editable = data?.editable_summary ? " is-editable" : " is-read-only";
+			const edit_icon = data?.editable_summary
+				? `<span class="china-inline-summary__edit">${frappe.utils.icon(
+						"edit",
+						"xs"
+				  )}</span>`
+				: "";
+			return `<span class="china-inline-summary${editable}${dirty}" title="${title}">${
+				label || empty_label
+			}${edit_icon}</span>`;
+		}
+		if (
+			column.fieldname === "source_action" &&
+			data?.is_voucher_first_row &&
+			data?.edit_source_name
+		) {
 			return render_inline_voucher_actions(frappe.query_report, data);
 		}
-		if (!data || !["posting_date", "statutory_number", "accounting_period"].includes(column.fieldname)) {
+		if (
+			!data ||
+			!["posting_date", "statutory_number", "accounting_period"].includes(column.fieldname)
+		) {
 			return formatted;
 		}
-		const index = Number.isInteger(row?._index) ? row._index : frappe.query_report.data?.indexOf(data);
+		const index = Number.isInteger(row?._index)
+			? row._index
+			: frappe.query_report.data?.indexOf(data);
 		const previous = index > 0 ? frappe.query_report.data?.[index - 1] : null;
 		if (previous && previous.voucher_snapshot === data.voucher_snapshot) return "";
 		return formatted;
 	},
 	onload(report) {
-		frappe.require("/assets/china_finance/js/voucher_preparation.js", () => china_finance.preparation.bind_report(report));
+		frappe.require("/assets/china_finance/js/voucher_preparation.js", () =>
+			china_finance.preparation.bind_report(report)
+		);
 		report.page.wrapper.addClass("china-voucher-ledger-report");
 		ensure_voucher_ledger_styles();
 		report.page.wrapper.on("click", ".china-voucher-link", (event) => {
@@ -107,7 +156,7 @@ frappe.query_reports["China Voucher Ledger"] = {
 			const source_name = decodeURIComponent(event.currentTarget.dataset.sourceName);
 			frappe.set_route("Form", source_doctype, source_name);
 		});
-		bind_inline_account_actions(report);
+		bind_inline_voucher_actions(report);
 		wrap_report_refresh_for_inline_edits(report);
 		report.page.wrapper.on("click", ".china-voucher-snapshot-link", (event) => {
 			event.preventDefault();
@@ -115,7 +164,11 @@ frappe.query_reports["China Voucher Ledger"] = {
 			frappe.set_route("Form", "China Accounting Voucher", snapshot_name);
 		});
 		if (!report.get_filter_value("company")) {
-			report.set_filter_value("company", window.china_finance?.company_context?.default_company() || frappe.defaults.get_user_default("Company"));
+			report.set_filter_value(
+				"company",
+				window.china_finance?.company_context?.default_company() ||
+					frappe.defaults.get_user_default("Company")
+			);
 		}
 		if (!report.get_filter_value("from_date") || !report.get_filter_value("to_date")) {
 			const today = frappe.datetime.get_today();
@@ -129,7 +182,7 @@ frappe.query_reports["China Voucher Ledger"] = {
 };
 
 function get_inline_edit_state(report) {
-	return report?._china_inline_account_state || null;
+	return report?._china_inline_edit_state || null;
 }
 
 function render_inline_voucher_actions(report, data) {
@@ -138,26 +191,60 @@ function render_inline_voucher_actions(report, data) {
 	const disabled = active && state.pending ? " disabled" : "";
 	const source_doctype = encodeURIComponent(data.edit_source_doctype);
 	const source_name = encodeURIComponent(data.edit_source_name);
-	const common = `data-source-doctype="${source_doctype}" data-source-name="${source_name}" data-voucher-key="${frappe.utils.escape_html(data.edit_voucher_key)}"`;
+	const common = `data-source-doctype="${source_doctype}" data-source-name="${source_name}" data-voucher-key="${frappe.utils.escape_html(
+		data.edit_voucher_key
+	)}"`;
 	const buttons = [
-		`<button type="button" class="btn btn-xs btn-default china-inline-open-source" ${common}>${__("打开原单")}</button>`,
+		`<button type="button" class="btn btn-xs btn-default china-inline-open-source" ${common}>${__(
+			"打开原单"
+		)}</button>`,
 	];
 	if (active && state.changes.size) {
-		buttons.push(`<button type="button" class="btn btn-xs btn-primary china-inline-save" ${common}${state.confirming ? " hidden" : ""}${disabled}>${__("保存修改")}</button>`);
-		buttons.push(`<button type="button" class="btn btn-xs btn-danger china-inline-confirm" ${common}${state.confirming ? "" : " hidden"}${disabled}>${__("确认更正")}</button>`);
-		buttons.push(`<button type="button" class="btn btn-xs btn-default china-inline-cancel" ${common}${disabled}>${__("取消")}</button>`);
+		buttons.push(
+			`<button type="button" class="btn btn-xs btn-primary china-inline-save" ${common}${
+				state.confirming ? " hidden" : ""
+			}${disabled}>${__("保存修改")}</button>`
+		);
+		buttons.push(
+			`<button type="button" class="btn btn-xs btn-danger china-inline-confirm" ${common}${
+				state.confirming ? "" : " hidden"
+			}${disabled}>${__("确认更正")}</button>`
+		);
+		buttons.push(
+			`<button type="button" class="btn btn-xs btn-default china-inline-cancel" ${common}${disabled}>${__(
+				"取消"
+			)}</button>`
+		);
 	}
 	return `<div class="china-inline-actions">${buttons.join("")}</div>`;
 }
 
-function create_inline_account_editor(report, col_index, row_index, value, parent, column, row, data) {
-	if (column?.id !== "account") return false;
+function create_inline_voucher_editor(
+	report,
+	col_index,
+	row_index,
+	value,
+	parent,
+	column,
+	row,
+	data
+) {
+	if (column?.id === "account") {
+		return create_inline_account_editor(report, value, parent, data);
+	}
+	if (column?.id === "remarks") {
+		return create_inline_summary_editor(report, value, parent, data);
+	}
+	return false;
+}
+
+function create_inline_account_editor(report, value, parent, data) {
 	if (!data?.editable_account) {
 		show_inline_notice(
 			report,
 			data?.inline_edit_reason || __("该行不能直接修改科目"),
 			"orange",
-			data?.inline_bank_transaction,
+			data?.inline_bank_transaction
 		);
 		return false;
 	}
@@ -195,7 +282,8 @@ function create_inline_account_editor(report, col_index, row_index, value, paren
 	control.get_filter_description = async () => null;
 	const destroy_dropdown = bind_inline_account_dropdown(control, parent);
 	control.df.change = () => {
-		if (!initializing) window.setTimeout(() => report.datatable?.cellmanager?.deactivateEditing(), 0);
+		if (!initializing)
+			window.setTimeout(() => report.datatable?.cellmanager?.deactivateEditing(), 0);
 	};
 
 	return {
@@ -219,6 +307,61 @@ function create_inline_account_editor(report, col_index, row_index, value, paren
 	};
 }
 
+function create_inline_summary_editor(report, value, parent, data) {
+	if (!data?.editable_summary) {
+		show_inline_notice(
+			report,
+			data?.inline_summary_edit_reason || __("该行不能直接修改摘要"),
+			"orange",
+			data?.inline_bank_transaction
+		);
+		return false;
+	}
+
+	const state = get_inline_edit_state(report);
+	if (state?.voucher_key && state.voucher_key !== data.edit_voucher_key) {
+		show_inline_notice(report, __("请先保存或取消当前凭证的修改，再编辑另一张凭证"), "orange");
+		return false;
+	}
+
+	let initializing = true;
+	const control = frappe.ui.form.make_control({
+		df: {
+			fieldname: "inline_summary",
+			fieldtype: "Data",
+			label: __("摘要"),
+			length: 500,
+		},
+		parent,
+		render_input: true,
+	});
+	control.toggle_label(false);
+	control.toggle_description(false);
+	control.$input?.attr("maxlength", 500);
+	control.df.change = () => {
+		if (!initializing)
+			window.setTimeout(() => report.datatable?.cellmanager?.deactivateEditing(), 0);
+	};
+
+	return {
+		initValue(initial_value) {
+			initializing = true;
+			Promise.resolve(control.set_value(initial_value || "")).finally(() => {
+				initializing = false;
+				control.set_focus();
+				control.$input?.select();
+			});
+		},
+		getValue() {
+			return control.get_value();
+		},
+		setValue(new_value) {
+			control.set_value(new_value);
+			stage_inline_summary_change(report, data, new_value);
+		},
+	};
+}
+
 function bind_inline_account_dropdown(control, parent) {
 	const dropdown = control.awesomplete?.ul;
 	const input = control.input;
@@ -232,7 +375,16 @@ function bind_inline_account_dropdown(control, parent) {
 
 	const reset_style = () => {
 		dropdown.classList.remove("china-inline-account-options");
-		for (const property of ["position", "top", "right", "bottom", "left", "width", "max-height", "z-index"]) {
+		for (const property of [
+			"position",
+			"top",
+			"right",
+			"bottom",
+			"left",
+			"width",
+			"max-height",
+			"z-index",
+		]) {
 			dropdown.style.removeProperty(property);
 		}
 	};
@@ -249,12 +401,13 @@ function bind_inline_account_dropdown(control, parent) {
 		const width = Math.min(input_rect.width, Math.max(0, viewport_width - edge * 2));
 		const left = Math.min(
 			Math.max(input_rect.left, edge),
-			Math.max(edge, viewport_width - width - edge),
+			Math.max(edge, viewport_width - width - edge)
 		);
 		const space_below = Math.max(0, viewport_height - input_rect.bottom - edge - gap);
 		const space_above = Math.max(0, input_rect.top - edge - gap);
 		const desired_height = Math.min(300, dropdown.scrollHeight || 300);
-		const open_above = space_below < Math.min(desired_height, 160) && space_above > space_below;
+		const open_above =
+			space_below < Math.min(desired_height, 160) && space_above > space_below;
 		const available_height = open_above ? space_above : space_below;
 
 		dropdown.classList.add("china-inline-account-options");
@@ -262,11 +415,19 @@ function bind_inline_account_dropdown(control, parent) {
 		dropdown.style.setProperty("left", `${left}px`, "important");
 		dropdown.style.setProperty("right", "auto", "important");
 		dropdown.style.setProperty("width", `${width}px`, "important");
-		dropdown.style.setProperty("max-height", `${Math.min(300, available_height)}px`, "important");
+		dropdown.style.setProperty(
+			"max-height",
+			`${Math.min(300, available_height)}px`,
+			"important"
+		);
 		dropdown.style.setProperty("z-index", "1060", "important");
 		if (open_above) {
 			dropdown.style.setProperty("top", "auto", "important");
-			dropdown.style.setProperty("bottom", `${viewport_height - input_rect.top + gap}px`, "important");
+			dropdown.style.setProperty(
+				"bottom",
+				`${viewport_height - input_rect.top + gap}px`,
+				"important"
+			);
 		} else {
 			dropdown.style.setProperty("top", `${input_rect.bottom + gap}px`, "important");
 			dropdown.style.setProperty("bottom", "auto", "important");
@@ -330,40 +491,94 @@ function account_display_label(account, company) {
 	return suffix && account.endsWith(suffix) ? account.slice(0, -suffix.length) : account;
 }
 
+function inline_change_key(field, edit_key) {
+	return `${field}:${edit_key}`;
+}
+
+function ensure_inline_edit_state(report, data) {
+	let state = get_inline_edit_state(report);
+	if (state) return state;
+	state = {
+		voucher_key: data.edit_voucher_key,
+		source_doctype: data.edit_source_doctype,
+		source_name: data.edit_source_name,
+		modified: data.edit_source_modified,
+		changes: new Map(),
+		originals: new Map(),
+		confirming: false,
+		pending: false,
+	};
+	report._china_inline_edit_state = state;
+	return state;
+}
+
 function stage_inline_account_change(report, data, account) {
 	if (!account) return;
-	let state = get_inline_edit_state(report);
-	if (!state) {
-		state = {
-			voucher_key: data.edit_voucher_key,
-			source_doctype: data.edit_source_doctype,
-			source_name: data.edit_source_name,
-			modified: data.edit_source_modified,
-			changes: new Map(),
-			originals: new Map(),
-			confirming: false,
-			pending: false,
-		};
-		report._china_inline_account_state = state;
+	const state = ensure_inline_edit_state(report, data);
+	const state_key = inline_change_key("account", data.edit_key);
+	if (!state.originals.has(state_key)) {
+		state.originals.set(state_key, {
+			field: "account",
+			edit_key: data.edit_key,
+			value: data.account,
+			label: data.account_label,
+		});
 	}
-	if (!state.originals.has(data.edit_key)) {
-		state.originals.set(data.edit_key, { account: data.account, label: data.account_label });
-	}
-	const original = state.originals.get(data.edit_key);
-	if (account === original.account) state.changes.delete(data.edit_key);
-	else state.changes.set(data.edit_key, account);
+	const original = state.originals.get(state_key);
+	if (account === original.value) state.changes.delete(state_key);
+	else
+		state.changes.set(state_key, {
+			field: "account",
+			edit_key: data.edit_key,
+			value: account,
+		});
 	state.confirming = false;
 
 	const label = account_display_label(account, report.get_filter_value("company"));
 	for (const report_row of report.data || []) {
-		if (report_row.edit_voucher_key !== state.voucher_key || report_row.edit_key !== data.edit_key) continue;
+		if (
+			report_row.edit_voucher_key !== state.voucher_key ||
+			report_row.edit_key !== data.edit_key
+		)
+			continue;
 		report_row.account = account;
 		report_row.account_label = label;
-		report_row._inline_account_dirty = state.changes.has(data.edit_key);
+		report_row._inline_account_dirty = state.changes.has(state_key);
 	}
-	if (!state.changes.size) report._china_inline_account_state = null;
+	if (!state.changes.size) report._china_inline_edit_state = null;
 	refresh_inline_voucher_rows(report, data.edit_voucher_key);
-	show_inline_notice(report, state.changes.size ? __("科目已修改但尚未保存") : "", "blue");
+	show_inline_notice(report, state.changes.size ? __("凭证内容已修改但尚未保存") : "", "blue");
+}
+
+function stage_inline_summary_change(report, data, summary) {
+	const state = ensure_inline_edit_state(report, data);
+	const edit_key = data.summary_edit_key;
+	const state_key = inline_change_key("summary", edit_key);
+	const value = String(summary || "").trim();
+	if (!state.originals.has(state_key)) {
+		state.originals.set(state_key, {
+			field: "summary",
+			edit_key,
+			value: data.remarks || "",
+		});
+	}
+	const original = state.originals.get(state_key);
+	if (value === original.value) state.changes.delete(state_key);
+	else state.changes.set(state_key, { field: "summary", edit_key, value });
+	state.confirming = false;
+
+	for (const report_row of report.data || []) {
+		if (
+			report_row.edit_voucher_key !== state.voucher_key ||
+			report_row.summary_edit_group !== data.summary_edit_group
+		)
+			continue;
+		report_row.remarks = value;
+		report_row._inline_summary_dirty = state.changes.has(state_key);
+	}
+	if (!state.changes.size) report._china_inline_edit_state = null;
+	refresh_inline_voucher_rows(report, data.edit_voucher_key);
+	show_inline_notice(report, state.changes.size ? __("凭证内容已修改但尚未保存") : "", "blue");
 }
 
 function refresh_inline_voucher_rows(report, voucher_key) {
@@ -376,32 +591,42 @@ function refresh_inline_voucher_rows(report, voucher_key) {
 	});
 }
 
-function cancel_inline_account_changes(report, show_message = true) {
+function cancel_inline_voucher_changes(report, show_message = true) {
 	const state = get_inline_edit_state(report);
 	if (!state) return;
-	for (const [edit_key, original] of state.originals.entries()) {
+	for (const original of state.originals.values()) {
 		for (const row of report.data || []) {
-			if (row.edit_voucher_key !== state.voucher_key || row.edit_key !== edit_key) continue;
-			row.account = original.account;
-			row.account_label = original.label;
-			delete row._inline_account_dirty;
+			if (row.edit_voucher_key !== state.voucher_key) continue;
+			if (original.field === "account" && row.edit_key === original.edit_key) {
+				row.account = original.value;
+				row.account_label = original.label;
+				delete row._inline_account_dirty;
+			}
+			if (original.field === "summary" && row.summary_edit_group === original.edit_key) {
+				row.remarks = original.value;
+				delete row._inline_summary_dirty;
+			}
 		}
 	}
-	report._china_inline_account_state = null;
+	report._china_inline_edit_state = null;
 	refresh_inline_voucher_rows(report, state.voucher_key);
-	show_inline_notice(report, show_message ? __("未保存的科目修改已取消") : "", "blue");
+	show_inline_notice(report, show_message ? __("未保存的凭证修改已取消") : "", "blue");
 }
 
 function inline_changes_payload(state) {
-	return [...state.changes.entries()].map(([edit_key, account]) => ({ edit_key, account }));
+	return [...state.changes.values()];
 }
 
-async function save_inline_account_changes(report, confirmed = false) {
+async function save_inline_voucher_changes(report, confirmed = false) {
 	const state = get_inline_edit_state(report);
 	if (!state || !state.changes.size || state.pending) return;
 	state.pending = true;
 	refresh_inline_voucher_rows(report, state.voucher_key);
-	show_inline_notice(report, confirmed ? __("正在执行受控更正并重新记账…") : __("正在检查科目修改…"), "blue");
+	show_inline_notice(
+		report,
+		confirmed ? __("正在执行受控更正并重新记账…") : __("正在检查凭证修改…"),
+		"blue"
+	);
 	const args = {
 		source_doctype: state.source_doctype,
 		source_name: state.source_name,
@@ -410,34 +635,41 @@ async function save_inline_account_changes(report, confirmed = false) {
 	};
 	try {
 		if (!confirmed) {
-			const preview = (await frappe.call({
-				method: "china_finance.services.source_voucher_edit.preview_inline_account_changes",
-				args,
-			})).message || {};
+			const preview =
+				(
+					await frappe.call({
+						method: "china_finance.services.source_voucher_edit.preview_inline_voucher_changes",
+						args,
+					})
+				).message || {};
 			if (preview.requires_confirmation) {
 				state.pending = false;
 				state.confirming = true;
 				state.preview = preview;
 				refresh_inline_voucher_rows(report, state.voucher_key);
-				const bank_note = preview.bank_action === "unreconcile_and_restore"
-					? __("；系统将安全撤销并恢复银行核销")
-					: "";
+				const bank_note =
+					preview.bank_action === "unreconcile_and_restore"
+						? __("；系统将安全撤销并恢复银行核销")
+						: "";
 				show_inline_notice(
 					report,
 					__("该凭证已记账。确认后将取消原凭证、生成修订并重新记账{0}。", [bank_note]),
 					"orange",
-					preview.bank_transaction,
+					preview.bank_transaction
 				);
 				return;
 			}
 		}
-		const result = (await frappe.call({
-			method: "china_finance.services.source_voucher_edit.apply_inline_account_changes",
-			type: "POST",
-			args,
-		})).message || {};
-		const message = result.message || __("科目修改已保存");
-		report._china_inline_account_state = null;
+		const result =
+			(
+				await frappe.call({
+					method: "china_finance.services.source_voucher_edit.apply_inline_voucher_changes",
+					type: "POST",
+					args,
+				})
+			).message || {};
+		const message = result.message || __("凭证修改已保存");
+		report._china_inline_edit_state = null;
 		show_inline_notice(report, message, "green");
 		frappe.show_alert({ message, indicator: "green" });
 		await report.refresh();
@@ -490,14 +722,17 @@ function show_inline_notice(report, message, indicator = "blue", bank_transactio
 	notice.hidden = false;
 }
 
-function bind_inline_account_actions(report) {
+function bind_inline_voucher_actions(report) {
 	const page_wrapper = report?.page?.wrapper?.[0] || report?.page?.wrapper;
 	if (!page_wrapper?.addEventListener) return;
 	report._china_inline_action_handler = (event) => {
-		const target = event.target instanceof Element ? event.target : event.target?.parentElement;
-		const editable_account = target?.closest?.(".china-inline-account.is-editable");
-		if (editable_account && page_wrapper.contains(editable_account)) {
-			const cell = editable_account.closest(".dt-cell");
+		const target =
+			event.target instanceof Element ? event.target : event.target?.parentElement;
+		const editable_value = target?.closest?.(
+			".china-inline-account.is-editable, .china-inline-summary.is-editable"
+		);
+		if (editable_value && page_wrapper.contains(editable_value)) {
+			const cell = editable_value.closest(".dt-cell");
 			if (!cell || !report.datatable?.cellmanager) return;
 			event.preventDefault();
 			event.stopPropagation();
@@ -511,13 +746,17 @@ function bind_inline_account_actions(report) {
 		event.preventDefault();
 		event.stopPropagation();
 		if (button.classList.contains("china-inline-open-source")) {
-			frappe.set_route("Form", decodeURIComponent(button.dataset.sourceDoctype), decodeURIComponent(button.dataset.sourceName));
+			frappe.set_route(
+				"Form",
+				decodeURIComponent(button.dataset.sourceDoctype),
+				decodeURIComponent(button.dataset.sourceName)
+			);
 		} else if (button.classList.contains("china-inline-save")) {
-			save_inline_account_changes(report, false);
+			save_inline_voucher_changes(report, false);
 		} else if (button.classList.contains("china-inline-confirm")) {
-			save_inline_account_changes(report, true);
+			save_inline_voucher_changes(report, true);
 		} else {
-			cancel_inline_account_changes(report);
+			cancel_inline_voucher_changes(report);
 		}
 	};
 	page_wrapper.addEventListener("click", report._china_inline_action_handler, true);
@@ -528,8 +767,12 @@ function wrap_report_refresh_for_inline_edits(report) {
 	report._china_inline_native_refresh = report.refresh.bind(report);
 	report.refresh = (...args) => {
 		const dirty = Boolean(get_inline_edit_state(report)?.changes?.size);
-		if (dirty) cancel_inline_account_changes(report, false);
-		if (dirty) frappe.show_alert({ message: __("报表刷新，未保存的科目修改已取消"), indicator: "orange" });
+		if (dirty) cancel_inline_voucher_changes(report, false);
+		if (dirty)
+			frappe.show_alert({
+				message: __("报表刷新，未保存的凭证修改已取消"),
+				indicator: "orange",
+			});
 		return report._china_inline_native_refresh(...args);
 	};
 }
@@ -538,7 +781,8 @@ function ensure_voucher_ledger_styles() {
 	if (document.getElementById("china-voucher-ledger-inline-style")) return;
 	$("<style>")
 		.attr("id", "china-voucher-ledger-inline-style")
-		.text(`
+		.text(
+			`
 			.china-inline-edit-notice {
 				margin: 0 0 8px;
 				padding: 8px 12px;
@@ -560,6 +804,16 @@ function ensure_voucher_ledger_styles() {
 				font-weight: 600;
 			}
 			.china-inline-account__arrow { margin-left: auto; color: var(--text-muted); }
+			.china-inline-summary { display: inline-flex; align-items: center; width: 100%; min-height: 24px; }
+			.china-inline-summary.is-editable { cursor: text; }
+			.china-inline-summary.is-editable:hover { color: var(--primary, #2490ef); }
+			.china-inline-summary.is-dirty {
+				padding: 0 4px;
+				background: var(--yellow-100, #fff3bf);
+				border-radius: 4px;
+				font-weight: 600;
+			}
+			.china-inline-summary__edit { margin-left: auto; color: var(--text-muted); }
 			.china-inline-actions { display: flex; align-items: center; gap: 4px; }
 			.china-voucher-ledger-report .dt-cell--editing .dt-cell__edit .form-group { margin: 0; }
 			.china-voucher-ledger-report .dt-cell--editing .dt-cell__edit .control-input-wrapper { padding: 0; }
@@ -572,7 +826,8 @@ function ensure_voucher_ledger_styles() {
 				text-overflow: ellipsis;
 			}
 			.china-voucher-ledger-report .dt-row { min-height: 28px; }
-		`)
+		`
+		)
 		.appendTo(document.head);
 }
 
@@ -584,9 +839,10 @@ function set_quick_period(report, period) {
 	const selected_index = Number(period_control.$input?.prop("selectedIndex"));
 	const raw_options = period_control.df.options || [];
 	const options = Array.isArray(raw_options) ? raw_options : raw_options.split("\n");
-	const period_index = Number.isInteger(selected_index) && selected_index >= 0
-		? selected_index
-		: options.indexOf(period);
+	const period_index =
+		Number.isInteger(selected_index) && selected_index >= 0
+			? selected_index
+			: options.indexOf(period);
 	const period_text = String(period || "");
 	let from_date;
 	let to_date;

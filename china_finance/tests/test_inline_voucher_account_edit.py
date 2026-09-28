@@ -218,6 +218,64 @@ class TestInlineVoucherAccountEdit(unittest.TestCase):
 				[{"edit_key": row["edit_key"], "account": self.expense_account}],
 			)
 
+	def test_draft_summary_change_updates_exact_journal_row_and_clears_review(self):
+		doc = self._journal_entry()
+		doc.accounts[0].user_remark = "支付测试费用"
+		doc.accounts[1].user_remark = "原费用摘要"
+		doc.save()
+		self._mark_ready(doc)
+		rows = self._ledger_rows(doc.name, "待记账")
+		expense_row = next(row for row in rows if row["account"] == self.expense_account)
+		bank_row = next(row for row in rows if row["account"] == self.bank)
+		self.assertTrue(expense_row["editable_summary"])
+		self.assertNotEqual(expense_row["summary_edit_key"], bank_row["summary_edit_key"])
+
+		preview = source_edit.preview_inline_voucher_changes(
+			"Journal Entry",
+			doc.name,
+			str(doc.modified),
+			[
+				{
+					"field": "summary",
+					"edit_key": expense_row["summary_edit_key"],
+					"value": "修改后的费用摘要",
+				}
+			],
+		)
+		self.assertEqual(preview["changes"][0]["field"], "summary")
+		result = source_edit.apply_inline_voucher_changes(
+			"Journal Entry",
+			doc.name,
+			str(doc.modified),
+			[
+				{
+					"field": "summary",
+					"edit_key": expense_row["summary_edit_key"],
+					"value": "修改后的费用摘要",
+				}
+			],
+		)
+		self.assertEqual(result["mode"], "draft")
+		doc.reload()
+		self.assertEqual(doc.accounts[0].user_remark, "支付测试费用")
+		self.assertEqual(doc.accounts[1].user_remark, "修改后的费用摘要")
+		self.assertFalse(doc.custom_china_ready_hash)
+		self.assertFalse(frappe.db.exists("GL Entry", {"voucher_no": doc.name}))
+
+		with self.assertRaisesRegex(frappe.ValidationError, "摘要不能为空"):
+			source_edit.preview_inline_voucher_changes(
+				"Journal Entry",
+				doc.name,
+				str(doc.modified),
+				[
+					{
+						"field": "summary",
+						"edit_key": expense_row["summary_edit_key"],
+						"value": " ",
+					}
+				],
+			)
+
 	def test_posted_change_reuses_controlled_amendment_and_statutory_number(self):
 		doc = self._mark_ready(self._journal_entry())
 		doc.submit()
@@ -276,6 +334,47 @@ class TestInlineVoucherAccountEdit(unittest.TestCase):
 		reversed_rows = self._ledger_rows(doc.name, "已冲销")
 		self.assertTrue(reversed_rows)
 		self.assertTrue(all(not row["editable_account"] for row in reversed_rows))
+
+	def test_posted_account_and_summary_changes_share_one_amendment(self):
+		doc = self._journal_entry()
+		doc.accounts[1].user_remark = "原费用摘要"
+		doc.save()
+		self._mark_ready(doc).submit()
+		doc.reload()
+		row = next(
+			row for row in self._ledger_rows(doc.name, "已记账") if row["account"] == self.expense_account
+		)
+		result = source_edit.apply_inline_voucher_changes(
+			"Journal Entry",
+			doc.name,
+			str(doc.modified),
+			[
+				{"field": "account", "edit_key": row["edit_key"], "value": self.replacement_expense},
+				{
+					"field": "summary",
+					"edit_key": row["summary_edit_key"],
+					"value": "修改科目后的费用摘要",
+				},
+			],
+		)
+		amended = frappe.get_doc("Journal Entry", result["source_name"])
+		changed_row = next(item for item in amended.accounts if item.account == self.replacement_expense)
+		self.assertEqual(changed_row.user_remark, "修改科目后的费用摘要")
+		self.assertEqual(
+			frappe.db.count("Journal Entry", {"amended_from": doc.name}),
+			1,
+		)
+		comments = frappe.get_all(
+			"Comment",
+			filters={
+				"reference_doctype": "Journal Entry",
+				"reference_name": amended.name,
+				"comment_type": "Comment",
+			},
+			pluck="content",
+		)
+		self.assertTrue(any("查凭证表内科目和摘要修改" in content for content in comments))
+		self.assertTrue(any("修改科目后的费用摘要" in content for content in comments))
 
 	def test_user_without_source_read_permission_cannot_preview_changes(self):
 		doc = self._journal_entry()
@@ -336,6 +435,30 @@ class TestInlineVoucherAccountEdit(unittest.TestCase):
 		doc.reload()
 		self.assertEqual(doc.paid_to, self.third_bank)
 		self.assertEqual(doc.paid_to_account_currency, "CNY")
+
+	def test_payment_entry_summary_is_shared_and_saved_as_custom_remarks(self):
+		doc = self._payment_entry()
+		rows = self._ledger_rows(doc.name, "未记账")
+		self.assertGreaterEqual(len(rows), 2)
+		self.assertTrue(all(row["editable_summary"] for row in rows))
+		self.assertEqual({row["summary_edit_key"] for row in rows}, {"pe-summary:remarks"})
+
+		result = source_edit.apply_inline_voucher_changes(
+			"Payment Entry",
+			doc.name,
+			str(doc.modified),
+			[
+				{
+					"field": "summary",
+					"edit_key": "pe-summary:remarks",
+					"value": "银行账户内部转账",
+				}
+			],
+		)
+		self.assertEqual(result["mode"], "draft")
+		doc.reload()
+		self.assertEqual(doc.remarks, "银行账户内部转账")
+		self.assertEqual(doc.custom_remarks, 1)
 
 	def test_posted_payment_entry_main_account_is_cancelled_amended_and_reposted(self):
 		doc = self._payment_entry()
