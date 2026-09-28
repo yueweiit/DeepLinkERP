@@ -8,6 +8,7 @@ from crm_integration.crm_integration.sales_order import (
 	CRM_STATUS_CONFIRMED_DEPOSIT_PUSH_PRODUCTION,
 	CRM_STATUS_IN_PRODUCTION,
 	CRM_STATUS_PRODUCTION_PROGRESS_REPORTED,
+	DEPOSIT_CONFIRMATION_PROCESSING,
 	PENDING_PRODUCTION,
 	build_mes_sales_order_payload,
 	confirm_deposit_and_push_to_mes,
@@ -15,10 +16,12 @@ from crm_integration.crm_integration.sales_order import (
 	enqueue_confirm_deposit_and_push_to_mes,
 	get_mes_integration_services,
 	make_crm_trace_id,
+	prevent_deposit_confirmation_processing_cancel,
 	prevent_duplicate_crm_order_no,
 	push_sales_order_status_payload_to_crm,
 	reconcile_final_payment,
 	reject_sales_order,
+	restore_deposit_confirmation_after_failure,
 	run_confirm_deposit_sync,
 )
 
@@ -147,6 +150,18 @@ class TestSalesOrderPermissions(UnitTestCase):
 		doc.check_permission.assert_called_once_with("write")
 		push_status.assert_not_called()
 
+	def test_order_cannot_be_cancelled_while_deposit_confirmation_is_processing(self):
+		doc = self.make_sales_order(DEPOSIT_CONFIRMATION_PROCESSING)
+
+		with (
+			patch(
+				"crm_integration.crm_integration.sales_order.is_crm_integration_enabled",
+				return_value=True,
+			),
+			self.assertRaisesRegex(frappe.ValidationError, "暂时不能取消销售订单"),
+		):
+			prevent_deposit_confirmation_processing_cancel(doc)
+
 	def test_confirm_deposit_queues_external_sync_after_commit(self):
 		doc = self.make_sales_order()
 
@@ -160,6 +175,7 @@ class TestSalesOrderPermissions(UnitTestCase):
 				"crm_integration.crm_integration.sales_order.enqueue_confirm_deposit_and_push_to_mes"
 			) as enqueue_sync,
 			patch("crm_integration.crm_integration.sales_order.validate_mes_sync_available"),
+			patch("crm_integration.crm_integration.sales_order.set_process_status") as set_status,
 			patch(
 				"crm_integration.crm_integration.sales_order.push_sales_order_status_to_crm"
 			) as push_status,
@@ -168,9 +184,31 @@ class TestSalesOrderPermissions(UnitTestCase):
 			result = confirm_deposit_and_push_to_mes("SO-001")
 
 		enqueue_sync.assert_called_once_with("SO-001")
+		set_status.assert_called_once_with(doc, DEPOSIT_CONFIRMATION_PROCESSING)
 		push_status.assert_not_called()
 		push_mes.assert_not_called()
 		self.assertTrue(result["queued"])
+		self.assertEqual(result["process_status"], DEPOSIT_CONFIRMATION_PROCESSING)
+
+	def test_confirm_deposit_does_not_enqueue_again_while_processing(self):
+		doc = self.make_sales_order(DEPOSIT_CONFIRMATION_PROCESSING)
+
+		with (
+			patch.object(frappe, "get_doc", return_value=doc),
+			patch(
+				"crm_integration.crm_integration.sales_order.is_crm_integration_enabled",
+				return_value=True,
+			),
+			patch(
+				"crm_integration.crm_integration.sales_order.enqueue_confirm_deposit_and_push_to_mes"
+			) as enqueue_sync,
+		):
+			result = confirm_deposit_and_push_to_mes("SO-001")
+
+		enqueue_sync.assert_not_called()
+		self.assertTrue(result["queued"])
+		self.assertTrue(result["idempotent_replay"])
+		self.assertEqual(result["process_status"], DEPOSIT_CONFIRMATION_PROCESSING)
 
 	def test_missing_mes_app_returns_clear_validation_error(self):
 		original_import = builtins.__import__
@@ -202,7 +240,7 @@ class TestSalesOrderPermissions(UnitTestCase):
 		)
 
 	def test_confirm_deposit_job_advances_status_only_after_external_sync(self):
-		doc = self.make_sales_order()
+		doc = self.make_sales_order(DEPOSIT_CONFIRMATION_PROCESSING)
 		operations = MagicMock()
 
 		with (
@@ -242,14 +280,31 @@ class TestSalesOrderPermissions(UnitTestCase):
 			),
 			patch.object(frappe.db, "rollback") as rollback,
 			patch.object(frappe.db, "commit") as commit,
+			patch(
+				"crm_integration.crm_integration.sales_order.restore_deposit_confirmation_after_failure"
+			) as restore_status,
 			patch("crm_integration.crm_integration.sales_order.create_crm_log") as create_log,
 			self.assertRaisesRegex(RuntimeError, "MES unavailable"),
 		):
 			confirm_deposit_and_push_to_mes_job("SO-001")
 
 		rollback.assert_called_once_with()
+		restore_status.assert_called_once_with("SO-001")
 		create_log.assert_called_once()
 		commit.assert_called_once_with()
+
+	def test_failed_confirm_deposit_restores_retryable_status(self):
+		doc = self.make_sales_order(DEPOSIT_CONFIRMATION_PROCESSING)
+
+		with patch.object(frappe, "get_doc", return_value=doc):
+			restore_deposit_confirmation_after_failure("SO-001")
+
+		doc.db_set.assert_called_once_with(
+			"custom_process_status",
+			"Pending Deposit Confirmation",
+			update_modified=True,
+		)
+		doc.notify_update.assert_called_once_with()
 
 	def test_crm_status_trace_id_is_stable_for_retries(self):
 		first = make_crm_trace_id("SO-001", CRM_STATUS_IN_PRODUCTION)
@@ -275,13 +330,13 @@ class TestSalesOrderPermissions(UnitTestCase):
 		doc.check_permission.assert_called_once_with("write")
 		set_status.assert_not_called()
 
-	def make_sales_order(self):
+	def make_sales_order(self, process_status="Pending Deposit Confirmation"):
 		doc = MagicMock()
 		doc.name = "SO-001"
 		doc.docstatus = 1
 		doc.get.side_effect = lambda field: {
 			"company": "Test Company",
-			"custom_process_status": "Pending Deposit Confirmation",
+			"custom_process_status": process_status,
 			"status": "To Deliver and Bill",
 		}.get(field)
 		return doc

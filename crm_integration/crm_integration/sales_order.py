@@ -15,6 +15,7 @@ from crm_integration.crm_integration.settings import is_crm_integration_enabled,
 PENDING_CONFIRMATION = "Pending Confirmation"
 REJECTED = "Rejected"
 PENDING_DEPOSIT_CONFIRMATION = "Pending Deposit Confirmation"
+DEPOSIT_CONFIRMATION_PROCESSING = "Deposit Confirmation Processing"
 PENDING_PRODUCTION = "Pending Production"
 PENDING_FINAL_PAYMENT = "Pending Final Payment"
 DELIVERABLE = "Deliverable"
@@ -795,6 +796,15 @@ def prevent_rejected_sales_order_submit(doc, method=None):
 		frappe.throw(_("已驳回的销售订单不能提交。"))
 
 
+def prevent_deposit_confirmation_processing_cancel(doc, method=None):
+	"""Do not cancel an order while its external confirmation is in flight."""
+	if not is_crm_integration_enabled(doc.get("company")):
+		return
+
+	if doc.get("custom_process_status") == DEPOSIT_CONFIRMATION_PROCESSING:
+		frappe.throw(_("定金确认正在后台同步 CRM 和 MES，暂时不能取消销售订单。"))
+
+
 @frappe.whitelist(methods=["POST"])
 def confirm_deposit_and_push_to_mes(sales_order_name):
 	"""Validate the action and queue external synchronization after commit."""
@@ -807,16 +817,28 @@ def confirm_deposit_and_push_to_mes(sales_order_name):
 	if sales_order.docstatus != 1:
 		frappe.throw(_("销售订单必须提交后才能确认定金。"))
 
-	if sales_order.get("custom_process_status") != PENDING_DEPOSIT_CONFIRMATION:
+	process_status = sales_order.get("custom_process_status")
+	if process_status == DEPOSIT_CONFIRMATION_PROCESSING:
+		return {
+			"status": "success",
+			"message": _("定金确认任务正在后台处理，请勿重复提交。"),
+			"process_status": DEPOSIT_CONFIRMATION_PROCESSING,
+			"queued": True,
+			"idempotent_replay": True,
+			"timestamp": now(),
+		}
+
+	if process_status != PENDING_DEPOSIT_CONFIRMATION:
 		frappe.throw(_("只有待确认定金的销售订单可以推送至MES。"))
 
 	validate_mes_sync_available(sales_order)
+	set_process_status(sales_order, DEPOSIT_CONFIRMATION_PROCESSING)
 	enqueue_confirm_deposit_and_push_to_mes(sales_order.name)
 
 	return {
 		"status": "success",
 		"message": _("定金确认任务已提交，系统将在后台同步 CRM 和 MES。"),
-		"process_status": sales_order.get("custom_process_status"),
+		"process_status": DEPOSIT_CONFIRMATION_PROCESSING,
 		"queued": True,
 		"timestamp": now(),
 	}
@@ -844,6 +866,7 @@ def confirm_deposit_and_push_to_mes_job(sales_order_name):
 	except Exception:
 		error_message = frappe.get_traceback()
 		frappe.db.rollback()
+		restore_deposit_confirmation_after_failure(sales_order_name)
 		create_crm_log(
 			direction="Outbound",
 			event="Confirm Deposit External Sync",
@@ -856,6 +879,21 @@ def confirm_deposit_and_push_to_mes_job(sales_order_name):
 		)
 		frappe.db.commit()
 		raise
+
+
+def restore_deposit_confirmation_after_failure(sales_order_name):
+	"""Allow an operator to retry after the queued external sync fails."""
+	sales_order = frappe.get_doc("Sales Order", sales_order_name)
+	if sales_order.get("custom_process_status") != DEPOSIT_CONFIRMATION_PROCESSING:
+		return
+
+	sales_order.db_set(
+		"custom_process_status",
+		PENDING_DEPOSIT_CONFIRMATION,
+		update_modified=True,
+	)
+	sales_order.custom_process_status = PENDING_DEPOSIT_CONFIRMATION
+	sales_order.notify_update()
 
 
 def run_confirm_deposit_sync(sales_order):
@@ -871,7 +909,10 @@ def run_confirm_deposit_sync(sales_order):
 			"process_status": PENDING_PRODUCTION,
 			"idempotent_replay": True,
 		}
-	if process_status != PENDING_DEPOSIT_CONFIRMATION:
+	if process_status not in {
+		PENDING_DEPOSIT_CONFIRMATION,
+		DEPOSIT_CONFIRMATION_PROCESSING,
+	}:
 		frappe.throw(_("只有待确认定金的销售订单可以推送至MES。"))
 
 	push_sales_order_status_to_crm(sales_order, CRM_STATUS_CONFIRMED_DEPOSIT_PUSH_PRODUCTION)

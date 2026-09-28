@@ -47,6 +47,7 @@ sales_order_list_settings.formatters = {
 			"Pending Confirmation": "orange",
 			"Rejected": "red",
 			"Pending Deposit Confirmation": "yellow",
+			"Deposit Confirmation Processing": "blue",
 			"Pending Production": "blue",
 			"Pending Final Payment": "yellow",
 			"Deliverable": "blue",

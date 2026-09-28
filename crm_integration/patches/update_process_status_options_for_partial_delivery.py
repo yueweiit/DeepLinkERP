@@ -5,6 +5,7 @@ PROCESS_STATUS_OPTIONS = "\n".join(
 	[
 		"Pending Confirmation",
 		"Pending Deposit Confirmation",
+		"Deposit Confirmation Processing",
 		"Pending Production",
 		"Pending Final Payment",
 		"Deliverable",

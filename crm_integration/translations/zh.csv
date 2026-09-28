@@ -1,6 +1,7 @@
 Process Status,生产流程状态
 Pending Confirmation,待确认
 Pending Deposit Confirmation,待确认定金
+Deposit Confirmation Processing,定金确认处理中
 Pending Production,生产中
 Pending Final Payment,待核销尾款
 Deliverable,可发货

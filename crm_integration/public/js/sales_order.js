@@ -249,6 +249,10 @@ function apply_primary_action_style(label) {
 }
 
 function cleanup_reject_cancel_button(frm) {
+	$(".page-actions .crm-processing-cancel-hidden")
+		.removeClass("crm-processing-cancel-hidden")
+		.removeClass("hidden hide");
+
 	if (can_replace_cancel_with_reject(frm)) {
 		return;
 	}
@@ -257,6 +261,22 @@ function cleanup_reject_cancel_button(frm) {
 	$(".page-actions .crm-native-cancel-hidden")
 		.removeClass("crm-native-cancel-hidden")
 		.removeClass("hidden hide");
+
+	if (frm && frm.doc && frm.doc.custom_process_status === "Deposit Confirmation Processing") {
+		const hide_cancel = function() {
+			const cancel_labels = [...new Set(["Cancel", __("Cancel"), "取消", __("取消")])];
+			const selector = cancel_labels
+				.map((label) => `.page-actions button[data-label="${encodeURIComponent(label)}"]`)
+				.join(", ");
+			$(selector)
+				.not(".crm-reject-cancel-button")
+				.addClass("crm-processing-cancel-hidden hidden");
+		};
+
+		hide_cancel();
+		requestAnimationFrame(hide_cancel);
+		setTimeout(hide_cancel, 300);
+	}
 }
 
 function can_replace_cancel_with_reject(frm) {
@@ -349,6 +369,7 @@ function get_process_status_color(process_status) {
 		"Pending Confirmation": "orange",
 		"Rejected": "red",
 		"Pending Deposit Confirmation": "yellow",
+		"Deposit Confirmation Processing": "blue",
 		"Pending Production": "blue",
 		"Pending Final Payment": "yellow",
 		"Deliverable": "blue",
@@ -475,6 +496,9 @@ function push_confirm_deposit_to_mes(frm) {
 		freeze_message: __("正在确认定金并推送至MES..."),
 		callback: function(r) {
 			if (r.message && r.message.status === "success") {
+				frm.doc.custom_process_status = r.message.process_status;
+				frm.remove_custom_button(__("确认定金并推送至MES"));
+				refresh_crm_integration_ui(frm);
 				frappe.show_alert({ message: r.message.message, indicator: "green" });
 				frm.reload_doc();
 			}
