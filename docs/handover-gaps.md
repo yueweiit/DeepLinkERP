@@ -69,15 +69,18 @@ grep -rn "erp_work\|ERP_UPDATE_REQUIRED" --include=*.py --include=*.js . | grep 
   （571 张全是 2026-05-25 批量导入的历史单，没有幂等键），所以**暂时没有"历史单被误关联"的风险**。
   真正需要迁移的是**本系统自己的旧批次**（见 2.6）。
 
-### 1.5 批量设置项目归属：只能"一个值套所有选中行"
+### 1.5 批量设置项目归属：只能"一个值套所有选中行" —— 已修复（`75d852b5a7`）
 
 - 用户口径（2026-09-24）：987 行的正确归属**每行都不一样**，需要的是"弹窗内逐行指定、一次提交"。
-- 现状：`openProjectCollectionPicker` 只维护**一个** `model.selectedValue`，
-  确认后 `applyProjectCollectionSelection(items, target, ...)` 把所有选中行都写成同一个值。
-- 后果：982+ 行只能一行行点，或先全选套一个错值再逐行改。
+- 现已改成：批量弹窗列出**每个选中行各带一个下拉**（按「本审批候选 / 其他可选项目」用 `optgroup` 分组），
+  初值取"当前值本身就是有效路由"的行、其余留空等人工指定；带"物料编码 / 当前归属"搜索，
+  以及一个「统一设置为…」控件保留旧的单值用法。未指定完的行**整批拒绝**（绝不写半批），列表外的值照旧拒绝。
+- 逐行值随 `batch_update_items` 的 `updates` 一次性提交 —— 该接口本就支持逐行不同值，**服务端未改**。
+- 单行/修正入口的交互（共用值 + 变更预览）未变。
 
-核实：`parts/78-material-fee-workspace.js:1474-1515`（单选 `selectedValue`）、
-`applyProjectCollectionSelection(items, target, ...)`。
+核实：`parts/78-material-fee-workspace.js` 的 `renderProjectAssignTable` / `renderProjectAssignRows` /
+`renderProjectAssignOptions` / `resolveMaterialReferenceTargets`；测试见
+`tests/test_material_grid_frontend.py::test_bulk_project_*`（5 条）。
 
 ### 1.6 业务数据：能力通了但业务没启用
 
@@ -355,7 +358,7 @@ OC_HOST=<host> OC_USER=<user> OC_PW=<pw> python tmp/oc_ssh.py   # 以 bash -s �
 | P0 | 把 `apps.json` / `compose.custom.yaml` / `upgrade_bench.sh` 纳入版本控制（或至少归档到仓库 `deploy/`） | 唯一能让"绿着发不出去"重演的东西，且现场备份会被自动删 |
 | P0 | 决定是否根治「第 7 步 prune 与 compose tag 的顺序依赖」 | 需要运维拍板，事很小但会反复咬人 |
 | P1 | 多站点 ERP 前端（Task 10） | 服务端 6 个 API 已经就绪，只差界面；否则"多站点"等于没上线 |
-| P1 | 批量设置项目归属支持逐行指定 | 987 行卡在这，是启用推送的实际前置 |
+| P1 | ~~批量设置项目归属支持逐行指定~~（已完成 `75d852b5a7`） | 987 行卡在这，是启用推送的实际前置 |
 | P1 | 补供应商（业务动作，采购侧） | 1451 行全空，同样的推送前置 |
 | P2 | Task 8 站点级待办/状态摘要 | 多站点上线后立刻会需要 |
 | P2 | Task 7 暂估转实际 | 只在业务决定"先暂估后改实际"时才需要 |
