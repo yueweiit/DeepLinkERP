@@ -127,7 +127,6 @@ def execute_request_documents(
     push_payload,
     config_loader,
     now_text: str,
-    before_push=None,
     already_claimed: bool = False,
     record_links=None,
 ) -> dict:
@@ -145,8 +144,6 @@ def execute_request_documents(
         if not already_claimed:
             attempt_count += 1
             _set_values(doc, {"status": "RUNNING", "attempt_count": attempt_count, "started_at": now_text})
-            if before_push:
-                before_push()
         payload = _load_payload(_get(doc, "safe_payload_json"))
         try:
             response = push_payload(payload, config_loader(_text(_get(doc, "site_code")))) or {}
