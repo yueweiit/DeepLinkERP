@@ -585,6 +585,8 @@
 			return navigation;
 		});
 		updateNativeLeafAccessibility(nativeItems);
+		window.DeepLinkERPInterfaceMode?.finishDLPreparation(document);
+		return true;
 	}
 
 	function enhanceDesktopIcons() {
@@ -627,6 +629,7 @@
 		document
 			.querySelectorAll(".desktop-icon.dlp-desktop-icon-enhanced")
 			.forEach((entry) => entry.classList.remove("dlp-desktop-icon-enhanced"));
+		window.DeepLinkERPInterfaceMode?.finishDLPreparation(document);
 	}
 
 	function refreshDeskEnhancements() {

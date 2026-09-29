@@ -404,7 +404,36 @@ test("gates DL navigation and desktop enhancement behind the effective mode", ()
 	assert.match(lifecycle, /DeepLinkERPInterfaceMode\.ensureUserMenu/);
 	assert.match(lifecycle, /DeepLinkERPInterfaceMode\.isDLMode\(frappe\.boot\)/);
 	assert.match(lifecycle, /disableDLEnhancements\(\)/);
+	assert.match(
+		lifecycle,
+		/function disableDLEnhancements\([\s\S]*finishDLPreparation\(document\)/
+	);
 	assert.doesNotMatch(lifecycle, /disableDLEnhancements[\s\S]*custom-filters-right-sidebar/);
+});
+
+test("finishes first-paint preparation only after the real navigation is synchronized", () => {
+	const lifecycle = fs.readFileSync(
+		path.join(
+			__dirname,
+			"..",
+			"deeplinkerp_branding",
+			"public",
+			"js",
+			"deeplinkerp_branding.js"
+		),
+		"utf8"
+	);
+	const start = lifecycle.indexOf("function renderPersistentNavigation()");
+	const end = lifecycle.indexOf("function enhanceDesktopIcons()", start);
+	const source = lifecycle.slice(start, end);
+
+	assert.ok(start >= 0 && end > start);
+	assert.match(source, /updateNativeLeafAccessibility\(nativeItems\)/);
+	assert.match(source, /DeepLinkERPInterfaceMode\?\.finishDLPreparation\(document\)/);
+	assert.ok(
+		source.indexOf("updateNativeLeafAccessibility(nativeItems)") <
+			source.indexOf("finishDLPreparation(document)")
+	);
 });
 
 test("keeps the user mode menu available outside the DL-only style scope", () => {
