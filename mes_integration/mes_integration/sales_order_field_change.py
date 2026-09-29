@@ -480,7 +480,7 @@ def apply_field_change(sales_order, field_key, value):
 		value,
 		update_modified=True,
 	)
-	sales_order[FIELD_SETTINGS[field_key]["erp_field"]] = value
+	sales_order.set(FIELD_SETTINGS[field_key]["erp_field"], value)
 	sales_order.notify_update()
 
 

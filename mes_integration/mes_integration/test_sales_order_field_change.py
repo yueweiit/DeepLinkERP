@@ -199,6 +199,9 @@ class TestMESSalesOrderFieldChange(UnitTestCase):
 
 	def test_delivery_date_updates_header_and_all_existing_items(self):
 		sales_order = self.make_sales_order()
+		sales_order.set = MagicMock(
+			side_effect=lambda fieldname, value: setattr(sales_order, fieldname, value)
+		)
 		sales_order.notify_update = MagicMock()
 
 		with patch.object(frappe.db, "set_value") as set_value:
@@ -230,6 +233,7 @@ class TestMESSalesOrderFieldChange(UnitTestCase):
 				),
 			],
 		)
+		sales_order.set.assert_called_once_with("delivery_date", "2026-10-15")
 		self.assertEqual(sales_order.delivery_date, "2026-10-15")
 		self.assertEqual(sales_order.custom_process_status, "Pending Production")
 
