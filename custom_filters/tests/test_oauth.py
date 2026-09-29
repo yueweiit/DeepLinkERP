@@ -198,6 +198,34 @@ class TestEIMSOAuth(TestCase):
 		local.cookie_manager.delete_cookie.assert_called_once_with(oauth.EIMS_BROWSER_NONCE_COOKIE)
 
 	@patch.object(oauth.frappe, "cache")
+	@patch.object(oauth, "sanitize_redirect", side_effect=lambda value: value)
+	def test_state_allows_guest_session_rotation_in_same_browser(self, _sanitize_redirect, cache):
+		state = "one-time-state"
+		browser_nonce = "browser-nonce"
+		cache.make_key.return_value = b"cache-key"
+		local = SimpleNamespace(
+			session=SimpleNamespace(sid="callback-guest-session"),
+			request=SimpleNamespace(cookies={oauth.EIMS_BROWSER_NONCE_COOKIE: browser_nonce}),
+			cookie_manager=Mock(),
+		)
+		with patch.object(oauth.frappe, "local", local), patch.object(
+			oauth.frappe, "conf", {"encryption_key": "test-key"}
+		):
+			state_digest = oauth._state_digest(state)
+			cache.getdel.return_value = pickle.dumps(
+				{
+					"state_digest": state_digest,
+					"browser_nonce_digest": oauth._state_digest(browser_nonce),
+					"code_verifier": "pkce-verifier",
+					"session_id": "start-guest-session",
+				}
+			)
+
+			self.assertEqual(oauth._consume_state(state)["code_verifier"], "pkce-verifier")
+
+		local.cookie_manager.delete_cookie.assert_called_once_with(oauth.EIMS_BROWSER_NONCE_COOKIE)
+
+	@patch.object(oauth.frappe, "cache")
 	def test_state_rejects_a_different_guest_browser(self, cache):
 		state = "one-time-state"
 		cache.make_key.return_value = b"cache-key"
