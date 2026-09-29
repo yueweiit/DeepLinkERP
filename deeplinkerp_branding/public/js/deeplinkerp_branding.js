@@ -417,6 +417,19 @@
 		});
 	}
 
+	function updateRenderedSidebarActive(container) {
+		container.querySelectorAll(".standard-sidebar-item").forEach((sidebarItem) => {
+			const anchor = sidebarItem.querySelector(".item-anchor");
+			const isCurrent = DeepLinkERPNavigation.routesMatch(
+				anchor?.getAttribute("href") || "",
+				window.location.href
+			);
+			sidebarItem.classList.toggle("active-sidebar", isCurrent);
+			if (isCurrent) anchor?.setAttribute("aria-current", "page");
+			else anchor?.removeAttribute("aria-current");
+		});
+	}
+
 	function renderWorkspaceSidebarBranch(item, branch) {
 		const container = document.createElement("div");
 		container.className = "sidebar-items dlp-mes-navigation__workspace-items";
@@ -426,6 +439,7 @@
 				item: sidebarItem,
 			});
 		});
+		updateRenderedSidebarActive(container);
 		bindRenderedSidebarLinks(container);
 		branch.appendChild(container);
 	}

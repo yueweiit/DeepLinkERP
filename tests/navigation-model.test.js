@@ -336,6 +336,7 @@ test("projects unsaved edit-state order, visibility, and folder placement withou
 
 test("normalizes direct, refreshed, and sidebar-qualified Desk routes", () => {
 	const normalizeRoute = productionFunction("normalizeRoute");
+	const routesMatch = productionFunction("routesMatch");
 
 	assert.deepEqual(normalizeRoute("https://erp.test/desk/stock/?sidebar=Stock#view"), {
 		path: "/desk/stock",
@@ -346,6 +347,8 @@ test("normalizes direct, refreshed, and sidebar-qualified Desk routes", () => {
 		path: "/desk/item",
 		sidebar: "China Finance",
 	});
+	assert.equal(routesMatch("/desk/ai-chat", "https://erp.test/desk/ai-chat?tab=1"), true);
+	assert.equal(routesMatch("/desk/assignment-rule", "/desk/ai-chat"), false);
 });
 
 test("resolves query, exact route, and native sidebar active states in authority order", () => {
@@ -524,6 +527,81 @@ test("opens the full folder path and hosts live third-level items on the transla
 	assert.equal(model.nativeHostKey, model.activeItem.key);
 });
 
+test("does not attach a stale native workspace to a newly routed module", () => {
+	const buildNavigationModel = productionFunction("buildNavigationModel");
+	const desktopIcons = [
+		{ label: "DLP Framework", icon_type: "Folder" },
+		{
+			label: "Automation",
+			parent_icon: "DLP Framework",
+			navigation_route: "/desk/assignment-rule",
+		},
+		{ label: "AI Assistant", navigation_route: "/desk/ai-chat" },
+	];
+	const workspaceSidebars = {
+		automation: {
+			label: "Automation",
+			items: [{ type: "Link", label: "分派规则", link_to: "Assignment Rule" }],
+		},
+		"ai assistant": {
+			label: "AI Assistant",
+			items: [{ type: "Link", label: "企业智能业务助手", route: "/desk/ai-chat" }],
+		},
+	};
+
+	const model = buildNavigationModel({
+		desktopIcons,
+		workspaceSidebars,
+		route: "/desk/ai-chat",
+		currentSidebar: "DLP Framework",
+		nativeWorkspaceLabel: "Automation",
+		nativeActiveItem: { label: "分派规则", href: "/desk/assignment-rule" },
+		nativeLeafSelected: true,
+	});
+
+	assert.equal(model.activeItem.label, "AI Assistant");
+	assert.equal(model.activeItem.hasNativeChildren, true);
+	assert.equal(
+		model.nativeHostKey,
+		"",
+		"the stale Automation node must be parked while AI renders its authorized snapshot"
+	);
+});
+
+test("selects an authorized snapshot leaf when the stale native node has no active row", () => {
+	const buildNavigationModel = productionFunction("buildNavigationModel");
+	const model = buildNavigationModel({
+		desktopIcons: [
+			{ label: "DLP Framework", icon_type: "Folder" },
+			{
+				label: "Automation",
+				parent_icon: "DLP Framework",
+				navigation_route: "/desk/assignment-rule",
+			},
+			{ label: "AI Assistant", navigation_route: "/desk/ai-chat" },
+		],
+		workspaceSidebars: {
+			automation: {
+				label: "Automation",
+				items: [{ type: "Link", label: "分派规则", link_to: "Assignment Rule" }],
+			},
+			"ai assistant": {
+				label: "AI Assistant",
+				items: [
+					{ type: "Link", label: "企业智能业务助手", route: "/desk/ai-chat" },
+				],
+			},
+		},
+		route: "/desk/ai-chat",
+		nativeWorkspaceLabel: "Automation",
+		nativeLeafSelected: false,
+	});
+
+	assert.equal(model.activeItem.label, "AI Assistant");
+	assert.equal(model.activeItem.isSelfActive, false);
+	assert.equal(model.nativeHostKey, "");
+});
+
 test("observes only the live native items and hidden native header for late Frappe updates", () => {
 	const observeNativeSidebarChanges = productionFunction("observeNativeSidebarChanges");
 	const nativeItems = { name: "items" };
@@ -622,9 +700,9 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 	);
 	assert.ok(hooks.indexOf(modelAsset) < hooks.indexOf(interfaceModeAsset));
 	assert.ok(hooks.indexOf(interfaceModeAsset) < hooks.indexOf(lifecycleAsset));
-	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.15/);
+	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.16/);
 	assert.match(hooks, /deeplinkerp_interface_mode\.js\?v=0\.0\.2/);
-	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.22/);
+	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.23/);
 	assert.match(hooks, /web_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_branding\.css"/);
 });
 
@@ -952,6 +1030,9 @@ test("integrates the executable lifecycle helpers through the existing single ro
 	assert.match(lifecycle, /observeNativeSidebarChanges\(/);
 	assert.match(lifecycle, /bindNativeSidebarObserver\(sidebar, nativeItems\)/);
 	assert.match(lifecycle, /disconnectNativeSidebarObserver\(\)/);
+	assert.match(lifecycle, /function updateRenderedSidebarActive\(container\)/);
+	assert.match(lifecycle, /DeepLinkERPNavigation\.routesMatch\(/);
+	assert.match(lifecycle, /classList\.toggle\("active-sidebar", isCurrent\)/);
 	assert.doesNotMatch(lifecycle, /cloneNode\(/);
 });
 

@@ -260,6 +260,11 @@
 		};
 	}
 
+	function routesMatch(candidate, current) {
+		if (!candidate) return false;
+		return normalizeRoute(candidate).path === normalizeRoute(current).path;
+	}
+
 	function nodeAliases(node) {
 		return [node.label, node.translated_label, node.name, node.link_to]
 			.map(normalizeIdentity)
@@ -446,18 +451,23 @@
 	} = {}) {
 		const items = buildNavigationTree(desktopIcons);
 		const normalizedRoute = normalizeRoute(route);
+		const nativeActivePath = findByNativeActiveItem(
+			items,
+			workspaceSidebars,
+			nativeActiveItem,
+			normalizedRoute
+		);
+		const nativeWorkspacePath = findBySidebar(items, nativeWorkspaceLabel);
+		const currentSidebarPath = findBySidebar(items, currentSidebar);
+		const nativeOwnerPath = nativeActivePath.length
+			? nativeActivePath
+			: nativeWorkspacePath;
+		const nativeOwnerKey = nativeOwnerPath.at(-1)?.key || "";
 		let activePath = findBySidebar(items, normalizedRoute.sidebar);
 		if (!activePath.length) activePath = findByExactRoute(items, normalizedRoute);
-		if (!activePath.length) {
-			activePath = findByNativeActiveItem(
-				items,
-				workspaceSidebars,
-				nativeActiveItem,
-				normalizedRoute
-			);
-		}
-		if (!activePath.length) activePath = findBySidebar(items, nativeWorkspaceLabel);
-		if (!activePath.length) activePath = findBySidebar(items, currentSidebar);
+		if (!activePath.length) activePath = nativeActivePath;
+		if (!activePath.length) activePath = nativeWorkspacePath;
+		if (!activePath.length) activePath = currentSidebarPath;
 
 		const activeKeys = new Set(activePath.map((item) => item.key));
 		const activeLeaf = activePath.at(-1) || null;
@@ -474,6 +484,17 @@
 				decorate(node.children);
 				const nativeSidebar = getWorkspaceSidebar(node, workspaceSidebars);
 				const isActive = Boolean(activeLeaf && node.key === activeLeaf.key);
+				const hasRoutedNativeLeaf = Boolean(
+					nativeSidebar &&
+						flattenSidebarItems(nativeSidebar.items).some(
+							(item) =>
+								sidebarItemMatchScore(
+									item,
+									{ href: normalizedRoute.path },
+									normalizedRoute
+								) >= 80
+						)
+				);
 				const hasNativeChildren = Boolean(
 					(nativeSidebar && nativeSidebar.items?.length) || (isActive && nativeLeafSelected)
 				);
@@ -481,7 +502,10 @@
 				node.hasNativeChildren = hasNativeChildren;
 				node.isOpen = activeKeys.has(node.key) && (node.children.length > 0 || hasNativeChildren);
 				const hasSelectedNativeLeaf = Boolean(
-					hasNativeChildren && (normalizedRoute.sidebar || nativeLeafSelected)
+					hasNativeChildren &&
+						(normalizedRoute.sidebar ||
+							hasRoutedNativeLeaf ||
+							(nativeLeafSelected && nativeOwnerKey === node.key))
 				);
 				node.isSelfActive =
 					isActive &&
@@ -489,7 +513,9 @@
 					(exactRoute || (!node.children.length && !hasNativeChildren));
 				if (isActive) {
 					activeItem = node;
-					if (hasNativeChildren) nativeHostKey = node.key;
+					if (hasNativeChildren && (!nativeOwnerKey || nativeOwnerKey === node.key)) {
+						nativeHostKey = node.key;
+					}
 				}
 			});
 		}
@@ -524,5 +550,6 @@
 		replaceNavigationRoot,
 		resolveItemOpen,
 		restoreDesktopSidebarExpansion,
+		routesMatch,
 	});
 });
