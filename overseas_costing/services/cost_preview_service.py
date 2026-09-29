@@ -57,6 +57,41 @@ FEE_COMPONENT_INPUT_FIELDS = (
     "status", "is_active",
 )
 
+# The fee projection that decides whether a saved snapshot is still current.
+#
+# This is the single owner of "which fee fields are calculation inputs".  It
+# reuses the contract already declared by ``fee_service.COST_INPUT_FIELDS``
+# (the field set ``merge_logical_fee`` compares to decide whether a fee's
+# *cost* content changed, and therefore which fields may bump
+# ``amount_revision``/``scope_revision``), and adds only the fields that the
+# allocation itself reads (identity, final-vs-trial split, freight claim
+# binding) plus the two revision markers.
+#
+# Audit labels and history text must stay OUT of this set: ``remark``,
+# ``status_change_reason`` and ``status_changed_*`` are display/audit data, not
+# valuation inputs.  They are written by flows that do not necessarily bump a
+# revision (for example the AI cost-trial save, which rewrites the rule
+# ``remark`` right after it stores the snapshot).  Hashing them made the stored
+# ``input_hash`` permanently disagree with the hash recomputed from the live
+# rule and pinned every such batch on ``RESULT_STALE``.
+COST_HASH_FEE_FIELDS = (
+    "name",
+    *fee_service.COST_INPUT_FIELDS,
+    "is_final",
+    "source_binding_id",
+    "source_snapshot",
+    "covered_scopes",
+    "amount_revision",
+    "scope_revision",
+)
+
+
+def cost_hash_fee_projection(row) -> dict:
+    """Return only the calculation inputs of one fee row, in a fixed key order."""
+
+    fee = row if isinstance(row, dict) else {}
+    return {field: fee.get(field) for field in COST_HASH_FEE_FIELDS}
+
 
 def _decimal(value) -> Decimal | None:
     if value in (None, ""):
@@ -724,6 +759,8 @@ def cost_input_hash(items, fees, fx_context, transport_mode, fee_components=None
         if isinstance(row, dict) else row
         for row in (items or [])
     ]
+    # Only calculation inputs, never audit labels: see COST_HASH_FEE_FIELDS.
+    hash_fees = [cost_hash_fee_projection(row) for row in (fees or [])]
     components = sorted(
         ({field: (row or {}).get(field) for field in FEE_COMPONENT_INPUT_FIELDS}
          for row in (fee_components or [])),
@@ -736,7 +773,7 @@ def cost_input_hash(items, fees, fx_context, transport_mode, fee_components=None
         ),
     )
     return hashlib.sha256(
-        _json(_without_private_trial_fields([hash_items, fees, fx_context, transport_mode, components])).encode()
+        _json(_without_private_trial_fields([hash_items, hash_fees, fx_context, transport_mode, components])).encode()
     ).hexdigest()
 
 

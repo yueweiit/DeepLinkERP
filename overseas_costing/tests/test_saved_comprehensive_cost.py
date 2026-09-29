@@ -55,6 +55,119 @@ def test_cost_input_hash_ignores_private_trial_projection_fields():
     )
 
 
+# Audit labels are not valuation inputs.  The AI cost-trial save rewrites a rule's
+# ``remark`` (and the human fee-status flow rewrites ``status_change_reason`` /
+# ``status_changed_*``) without bumping ``amount_revision``/``scope_revision``,
+# sometimes *after* it has already stored the snapshot.  When those labels entered
+# the hash, the stored ``input_hash`` could never equal the hash recomputed from
+# the live rule, so the batch stayed pinned on ``RESULT_STALE`` and the review
+# button never became clickable even after repeated recalculation.
+AUDIT_ONLY_FEE_MUTATIONS = (
+    {"remark": "试算沿用上次：gross_weight"},
+    {"status_change_reason": "本票为测试单，没有海运费"},
+    {"status_changed_by": "someone@else.com"},
+    {"status_changed_at": "2099-01-01 00:00:00.000001"},
+    {"priority_no": 99},
+    {"expense_category": "改过的类别"},
+    {"basis_field": "改过的字段"},
+    {"required_evidence_role": "changed_role"},
+)
+
+COST_RELEVANT_FEE_MUTATIONS = (
+    {"amount": 4321},
+    {"amount_status": "ESTIMATED"},
+    {"allocation_basis": "volume"},
+    {"currency": "USD"},
+    {"scope_type": "ITEMS"},
+    {"scope_value_json": '["L1"]'},
+    {"included_in_fee_key": "included_into_other"},
+    {"is_enabled": 0},
+)
+
+
+@pytest.mark.parametrize("mutation", AUDIT_ONLY_FEE_MUTATIONS)
+def test_cost_input_hash_ignores_audit_and_label_fields(mutation):
+    items, fees, fx = inputs()
+    mutated = deepcopy(fees)
+    mutated[0].update(mutation)
+
+    assert service.cost_input_hash(items, mutated, fx, "AIR") == service.cost_input_hash(
+        items, fees, fx, "AIR"
+    ), f"{sorted(mutation)} must not participate in the saved-result fingerprint"
+
+
+@pytest.mark.parametrize("mutation", COST_RELEVANT_FEE_MUTATIONS)
+def test_cost_input_hash_tracks_every_cost_relevant_fee_field(mutation):
+    items, fees, fx = inputs()
+    mutated = deepcopy(fees)
+    mutated[0].update(mutation)
+
+    assert service.cost_input_hash(items, mutated, fx, "AIR") != service.cost_input_hash(
+        items, fees, fx, "AIR"
+    ), f"{sorted(mutation)} changes the valuation and must stale the saved result"
+
+
+def test_cost_hash_fee_projection_covers_the_declared_fee_input_contract():
+    """The projection must stay a superset of ``fee_service.COST_INPUT_FIELDS``."""
+
+    assert set(fee_service.COST_INPUT_FIELDS) <= set(service.COST_HASH_FEE_FIELDS)
+    assert {"remark", "status_change_reason", "status_changed_by", "status_changed_at"}.isdisjoint(
+        service.COST_HASH_FEE_FIELDS
+    )
+
+
+def test_deactivated_fee_is_caught_by_selection_not_by_the_per_row_fingerprint():
+    """Enabling is a *selection* concern; the composition layer drops the row.
+
+    ``is_active`` is deliberately outside both ``fee_service.COST_INPUT_FIELDS``
+    and the fingerprint, so flipping it on a raw rule dict does not move the
+    hash.  That is safe because ``compose_fee_worklist_rows`` removes inactive
+    rules first, so the *composed* fee set — which is what the hash actually
+    sees — does change.  Guard both halves of that layering so nobody "fixes"
+    it by pushing ``is_active`` back into the per-row projection.
+    """
+
+    items, fees, fx = inputs()
+    deactivated = deepcopy(fees)
+    deactivated[0]["is_active"] = 0
+
+    assert "is_active" not in service.COST_HASH_FEE_FIELDS
+    assert "is_active" not in fee_service.COST_INPUT_FIELDS
+
+    def fingerprint(rows):
+        return service.cost_input_hash(*service.normalize_saved_cost_inputs(items, rows, fx, "AIR"), fx, "AIR")
+
+    # Raw rows: not a per-row input, so unchanged.
+    assert fingerprint(fees) == fingerprint(deactivated)
+
+    # After composition the row is gone, so the valued fee set did change.
+    active_keys = [row["logical_fee_key"] for row in fee_service.compose_fee_worklist_rows(fees, "AIR")]
+    dropped_keys = [row["logical_fee_key"] for row in fee_service.compose_fee_worklist_rows(deactivated, "AIR")]
+    assert fees[0]["logical_fee_key"] in active_keys
+    assert fees[0]["logical_fee_key"] not in dropped_keys
+    assert fingerprint(fee_service.compose_fee_worklist_rows(deactivated, "AIR")) != fingerprint(
+        fee_service.compose_fee_worklist_rows(fees, "AIR")
+    )
+
+
+def test_saved_snapshot_hash_matches_a_rerun_after_an_audit_only_fee_edit():
+    """A label-only rule edit must not stale the snapshot it was stored with."""
+
+    items, fees, fx = inputs()
+    saved = service.build_saved_cost_data(items, fees, fx, "AIR")
+    stored_hash = saved["summary_snapshot"]["input_hash"]
+
+    relabelled = deepcopy(fees)
+    relabelled[0].update(remark="试算沿用上次：chargeable_weight",
+                         status_change_reason="人工备注",
+                         status_changed_by="someone@else.com")
+
+    rerun_hash = service.cost_input_hash(
+        *service.normalize_saved_cost_inputs(items, relabelled, fx, "AIR"), fx, "AIR"
+    )
+    assert rerun_hash == stored_hash
+
+
 def test_sku_presentation_uses_saved_units_and_batch_transport():
     from overseas_costing.services import workbench_service
     items, fees, fx = inputs()
