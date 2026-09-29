@@ -90,10 +90,66 @@
 		return navigation;
 	}
 
-	function bindNativeSidebarClose(link, { isMobile, closeSidebar }) {
-		link.addEventListener("click", () => {
-			if (isMobile()) closeSidebar();
+	function bindNativeSidebarClose(
+		link,
+		{ isNarrowViewport, closeSidebar, preserveDesktopExpansion = () => {} }
+	) {
+		link.addEventListener("click", (event) => {
+			if (event.defaultPrevented) return;
+			if (isNarrowViewport()) closeSidebar();
+			else preserveDesktopExpansion();
 		});
+	}
+
+	function bindNavigationRowInteractions(
+		row,
+		{
+			group,
+			branch,
+			route = "",
+			itemIsOpen = false,
+			updateChevron,
+			isNarrowViewport,
+			closeSidebar,
+			preserveDesktopExpansion,
+		}
+	) {
+		if (branch) {
+			bindNavigationBranchToggle(row, {
+				group,
+				branch,
+				route,
+				itemIsOpen,
+				updateChevron,
+			});
+		}
+		if (route) {
+			bindNativeSidebarClose(row, {
+				isNarrowViewport,
+				closeSidebar,
+				preserveDesktopExpansion,
+			});
+		}
+	}
+
+	function rememberDesktopSidebarExpansion(navigation, sidebarContainer) {
+		if (!navigation || !sidebarContainer?.classList.contains("expanded")) return false;
+		navigation.dataset.restoreSidebarExpanded = "true";
+		return true;
+	}
+
+	function restoreDesktopSidebarExpansion(
+		navigation,
+		sidebarContainer,
+		isNarrowViewport
+	) {
+		const shouldRestore = Boolean(
+			navigation?.dataset.restoreSidebarExpanded === "true" &&
+				sidebarContainer &&
+				!isNarrowViewport
+		);
+		if (shouldRestore) sidebarContainer.classList.add("expanded");
+		return shouldRestore;
 	}
 
 	function collectUserCollapsedKeys(navigation) {
@@ -298,6 +354,7 @@
 	return Object.freeze({
 		applyUserCollapsedState,
 		bindNavigationBranchToggle,
+		bindNavigationRowInteractions,
 		bindNativeSidebarClose,
 		buildNavigationModel,
 		buildNavigationTree,
@@ -305,6 +362,8 @@
 		getNavigationIcon,
 		normalizeRoute,
 		projectAuthorizedDesktopIcons,
+		rememberDesktopSidebarExpansion,
 		replaceNavigationRoot,
+		restoreDesktopSidebarExpansion,
 	});
 });

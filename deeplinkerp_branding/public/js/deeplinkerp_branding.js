@@ -14,6 +14,10 @@
 	const getFrameworkName = () => translate(DLPFrameworkName);
 	const FaviconURL = "/assets/deeplinkerp_branding/logo/tab_logo.svg?v=0.0.6";
 	const BrandLogoURL = "/assets/deeplinkerp_branding/logo/deeplinkerp_logo_radius.png?v=0.0.6";
+	const isNarrowNavigationViewport = () =>
+		typeof window.matchMedia === "function"
+			? window.matchMedia("(max-width: 767.98px)").matches
+			: window.innerWidth < 768;
 	let eventsBound = false;
 
 	function setFavicon() {
@@ -256,8 +260,13 @@
 			fallback.href = "/desk";
 			fallback.setAttribute("aria-label", "DeepLinkERP Desktop");
 			DeepLinkERPNavigation.bindNativeSidebarClose(fallback, {
-				isMobile: () => frappe.is_mobile(),
+				isNarrowViewport: isNarrowNavigationViewport,
 				closeSidebar: () => frappe.app.sidebar.close(),
+				preserveDesktopExpansion: () =>
+					DeepLinkERPNavigation.rememberDesktopSidebarExpansion(
+						sidebar.querySelector(".dlp-mes-navigation"),
+						sidebar.closest(".body-sidebar-container")
+					),
 			});
 
 			const image = document.createElement("img");
@@ -297,10 +306,6 @@
 		row.className = "dlp-mes-navigation__row";
 		if (route) {
 			row.href = route;
-			DeepLinkERPNavigation.bindNativeSidebarClose(row, {
-				isMobile: () => frappe.is_mobile(),
-				closeSidebar: () => frappe.app.sidebar.close(),
-			});
 		} else {
 			row.type = "button";
 		}
@@ -342,7 +347,21 @@
 		const row = makeNavigationRow(item, isOpen);
 		group.appendChild(row);
 		const needsBranch = item.children.length > 0 || item.key === nativeHostKey;
-		if (!needsBranch) return group;
+		const route = item.navigation_route || item.route || item.link || item.url || "";
+		const interactionOptions = {
+			route,
+			isNarrowViewport: isNarrowNavigationViewport,
+			closeSidebar: () => frappe.app.sidebar.close(),
+			preserveDesktopExpansion: () =>
+				DeepLinkERPNavigation.rememberDesktopSidebarExpansion(
+					row.closest(".dlp-mes-navigation"),
+					row.closest(".body-sidebar-container")
+				),
+		};
+		if (!needsBranch) {
+			DeepLinkERPNavigation.bindNavigationRowInteractions(row, interactionOptions);
+			return group;
+		}
 
 		const branch = document.createElement("div");
 		branch.className = "dlp-mes-navigation__children";
@@ -363,11 +382,10 @@
 		}
 		group.appendChild(branch);
 
-		const route = item.navigation_route || item.route || item.link || item.url || "";
-		DeepLinkERPNavigation.bindNavigationBranchToggle(row, {
+		DeepLinkERPNavigation.bindNavigationRowInteractions(row, {
+			...interactionOptions,
 			group,
 			branch,
-			route,
 			itemIsOpen: item.isOpen,
 			updateChevron: (open) => {
 				const chevron = row.querySelector(".dlp-mes-navigation__chevron");
@@ -398,8 +416,14 @@
 		sidebar.classList.add("dlp-mes-navigation-sidebar");
 		sidebarContainer.style.removeProperty("display");
 		ensureBrandHeader(sidebar);
+		const previousNavigation = top.querySelector(":scope > .dlp-mes-navigation");
+		DeepLinkERPNavigation.restoreDesktopSidebarExpansion(
+			previousNavigation,
+			sidebarContainer,
+			isNarrowNavigationViewport()
+		);
 		const userCollapsedKeys = DeepLinkERPNavigation.collectUserCollapsedKeys(
-			top.querySelector(":scope > .dlp-mes-navigation")
+			previousNavigation
 		);
 
 		const model = DeepLinkERPNavigation.buildNavigationModel({

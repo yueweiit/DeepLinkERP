@@ -75,7 +75,8 @@ class FakeElement {
 	}
 
 	addEventListener(type, listener) {
-		this.listeners[type] = listener;
+		this.listeners[type] ||= [];
+		this.listeners[type].push(listener);
 	}
 
 	setAttribute(name, value) {
@@ -110,7 +111,7 @@ class FakeElement {
 				this.defaultPrevented = true;
 			},
 		};
-		this.listeners[type]?.(event);
+		(this.listeners[type] || []).forEach((listener) => listener(event));
 		return event;
 	}
 }
@@ -382,8 +383,8 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 		/app_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_navigation\.css\?v=0\.0\.5"/
 	);
 	assert.ok(hooks.indexOf(modelAsset) < hooks.indexOf(lifecycleAsset));
-	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.5/);
-	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.11/);
+	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.6/);
+	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.12/);
 	assert.match(hooks, /web_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_branding\.css"/);
 });
 
@@ -418,7 +419,7 @@ test("custom mobile navigation links close through the native sidebar contract",
 	const link = new FakeElement();
 	let closeCalls = 0;
 	bindNativeSidebarClose(link, {
-		isMobile: () => true,
+		isNarrowViewport: () => true,
 		closeSidebar: () => {
 			closeCalls += 1;
 		},
@@ -429,7 +430,7 @@ test("custom mobile navigation links close through the native sidebar contract",
 
 	const desktopLink = new FakeElement();
 	bindNativeSidebarClose(desktopLink, {
-		isMobile: () => false,
+		isNarrowViewport: () => false,
 		closeSidebar: () => {
 			closeCalls += 1;
 		},
@@ -471,24 +472,112 @@ test("current routed parent toggles without navigation and updates its collapsed
 });
 
 test("inactive routed parent retains normal navigation", () => {
-	const bindNavigationBranchToggle = productionFunction("bindNavigationBranchToggle");
+	const bindNavigationRowInteractions = productionFunction("bindNavigationRowInteractions");
 	const row = new FakeElement();
 	row.setAttribute("aria-expanded", "false");
 	const group = new FakeElement(["dlp-mes-navigation__group"]);
 	const branch = new FakeElement();
 	branch.hidden = true;
-	bindNavigationBranchToggle(row, {
+	let closeCalls = 0;
+	bindNavigationRowInteractions(row, {
 		group,
 		branch,
 		route: "/desk/projects",
 		itemIsOpen: false,
 		updateChevron: () => assert.fail("inactive route must not toggle"),
+		isNarrowViewport: () => true,
+		closeSidebar: () => {
+			closeCalls += 1;
+		},
 	});
 
 	const event = row.dispatch("click");
 	assert.equal(event.defaultPrevented, false);
 	assert.equal(row.getAttribute("aria-expanded"), "false");
 	assert.equal(branch.hidden, true);
+	assert.equal(closeCalls, 1);
+});
+
+test("current mobile routed parent toggles before close and keeps the sidebar expanded", () => {
+	const bindNavigationRowInteractions = productionFunction("bindNavigationRowInteractions");
+	const row = new FakeElement();
+	row.setAttribute("aria-expanded", "true");
+	const group = new FakeElement([
+		"dlp-mes-navigation__group",
+		"dlp-mes-navigation__group--open",
+	]);
+	const branch = new FakeElement();
+	let closeCalls = 0;
+	bindNavigationRowInteractions(row, {
+		group,
+		branch,
+		route: "/desk/projects",
+		itemIsOpen: true,
+		updateChevron: () => {},
+		isNarrowViewport: () => true,
+		closeSidebar: () => {
+			closeCalls += 1;
+		},
+	});
+
+	const event = row.dispatch("click");
+	assert.equal(event.defaultPrevented, true);
+	assert.equal(branch.hidden, true);
+	assert.equal(closeCalls, 0);
+});
+
+test("mobile routed leaf still closes through the native sidebar contract", () => {
+	const bindNavigationRowInteractions = productionFunction("bindNavigationRowInteractions");
+	const row = new FakeElement();
+	let closeCalls = 0;
+	bindNavigationRowInteractions(row, {
+		route: "/desk/todo",
+		isNarrowViewport: () => true,
+		closeSidebar: () => {
+			closeCalls += 1;
+		},
+	});
+
+	const event = row.dispatch("click");
+	assert.equal(event.defaultPrevented, false);
+	assert.equal(closeCalls, 1);
+});
+
+test("desktop routed navigation neither closes the sidebar nor loses expanded on rerender", () => {
+	const bindNavigationRowInteractions = productionFunction("bindNavigationRowInteractions");
+	const rememberDesktopSidebarExpansion = productionFunction("rememberDesktopSidebarExpansion");
+	const restoreDesktopSidebarExpansion = productionFunction("restoreDesktopSidebarExpansion");
+	const oldNavigation = new FakeElement(["dlp-mes-navigation"]);
+	const sidebarContainer = new FakeElement(["body-sidebar-container", "expanded"]);
+	const row = new FakeElement();
+	let closeCalls = 0;
+	bindNavigationRowInteractions(row, {
+		route: "/desk/buying",
+		itemIsOpen: false,
+		isNarrowViewport: () => false,
+		closeSidebar: () => {
+			closeCalls += 1;
+		},
+		preserveDesktopExpansion: () =>
+			rememberDesktopSidebarExpansion(oldNavigation, sidebarContainer),
+	});
+
+	const event = row.dispatch("click");
+	assert.equal(event.defaultPrevented, false);
+	assert.equal(closeCalls, 0);
+	assert.equal(oldNavigation.dataset.restoreSidebarExpanded, "true");
+
+	sidebarContainer.classList.remove("expanded");
+	assert.equal(
+		restoreDesktopSidebarExpansion(oldNavigation, sidebarContainer, false),
+		true
+	);
+	assert.equal(sidebarContainer.classList.contains("expanded"), true);
+	assert.equal(
+		restoreDesktopSidebarExpansion(oldNavigation, sidebarContainer, true),
+		false,
+		"narrow viewport must retain Frappe's mobile collapsed state"
+	);
 });
 
 test("same-route rerender preserves DOM-only collapse and switching modules discards it", () => {
@@ -551,7 +640,9 @@ test("integrates the executable lifecycle helpers through the existing single ro
 	assert.match(lifecycle, /bindNativeSidebarClose\(/);
 	assert.match(lifecycle, /collectUserCollapsedKeys\(/);
 	assert.match(lifecycle, /applyUserCollapsedState\(/);
-	assert.match(lifecycle, /bindNavigationBranchToggle\(/);
+	assert.match(lifecycle, /bindNavigationRowInteractions\(/);
+	assert.match(lifecycle, /restoreDesktopSidebarExpansion\(/);
+	assert.match(lifecycle, /matchMedia\("\(max-width: 767\.98px\)"\)\.matches/);
 	assert.match(
 		lifecycle,
 		/nativeLeafSelected:\s*Boolean\(nativeItems\.querySelector\("\.active-sidebar"\)\)/
