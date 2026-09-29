@@ -297,6 +297,54 @@ def _attachment_source_v2(batch_name: str, source_id: str) -> dict:
     ) or {}
 
 
+def _live_approval_attachment_state(source: dict, bundle: dict | None) -> bool | None:
+    """当前可验证的审批归档是否接受这一行附件。
+
+    返回 True＝接受，False＝明确不接受，None＝无法判定（缺上下文/无审批）。
+    解析器在非采购支出根批次里，必须用审批自己的 source_context（带 source_lineage）
+    重新判定；只有在那里 attachment_allowed 才会校验归档描述、corp_id 与 document_id。
+    直接在批次 bundle 上调用会因 root_kind != 'expense' 一律返回 True，等于没判。
+    """
+    batch_name = str(source.get('batch') or '')
+    if not batch_name or not (bundle or {}).get('context'):
+        return None
+    try:
+        detail = related_approval_detail(batch_name, bundle=bundle)
+    except Exception:
+        return None
+    if not (detail or {}).get('ok'):
+        return None
+    from .logistics_settlement.store import Store
+    try:
+        store = Store.frappe()
+    except (ImportError, AttributeError):
+        return None
+    judged = False
+    for candidate in [detail.get('main_approval') or {},
+                      *(detail.get('linked_purchase_approvals') or [])]:
+        if candidate.get('excluded'):
+            continue
+        selected_context = candidate.get('source_context') or {}
+        if not selected_context.get('source_lineage'):
+            continue
+        judged = True
+        selected = {**bundle, 'binding': None, 'context': selected_context,
+                    'source': store.get('source', selected_context.get('root_source_id') or '') or {}}
+        if effective_source.attachment_allowed(source, selected, for_analysis=True):
+            return True
+    return False if judged else None
+
+
+def _superseded_by_live_approval(source: dict, snapshot: dict, bundle: dict | None) -> bool:
+    """当前可验证的审批归档是否已经推翻快照里那条陈旧的 audit_only 标记。"""
+    return _live_approval_attachment_state(source, bundle) is True
+
+
+def _live_approval_rejects_attachment(source: dict, *, bundle: dict | None = None) -> bool:
+    """当前审批明确不接受这一行（半成品/重复登记行），且不是因为无法判定。"""
+    return _live_approval_attachment_state(source, bundle) is False
+
+
 def _attachment_is_audit_only(source: dict, *, bundle: dict | None = None) -> bool:
     try:
         snapshot = json.loads(source.get("parse_result_json") or "{}")
@@ -322,7 +370,10 @@ def _attachment_is_audit_only(source: dict, *, bundle: dict | None = None) -> bo
     if descriptor.get('audit_only'):
         # ``descriptor.audit_only`` 由 document_writer 写入，只对真排除为真。
         # 旧的 ``source/snapshot.audit_only`` 在审批进行中也会为真，不能复用。
-        return True
+        # 但这是随归档一起落库的**快照值**：审批由进行中转为通过后，旧值可能未重算。
+        # 因此当 live 解析器（带 source_lineage 的审批上下文）已经接受这一行时，
+        # 以当前可验证的归档为准，不把这条陈旧标记当审计件剔除。
+        return not _superseded_by_live_approval(source, snapshot, bundle)
     context = (bundle or {}).get('context') or {}
     lineage = context.get('source_lineage') or {}
     if (snapshot.get('approval_excluded') and lineage

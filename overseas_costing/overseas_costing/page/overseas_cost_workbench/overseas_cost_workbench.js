@@ -17468,11 +17468,19 @@ class OverseasCostWorkbench {
     const cards = rows.map((row) => {
       const sheets = row.sheets?.length ? row.sheets : [""];
       const semanticOnly = row.supported_for_material_import === false;
-      const status = semanticOnly ? (row.available ? "可供 AI 识别" : "选择 AI 填充后自动获取并识别") : row.available ? "可预览" : ({ archived: "已归档，选择后自动获取", pending: "等待归档，可重试", manual_required: "需从钉钉下载后手动上传" }[row.archive_status] || "选择后获取附件");
+      // 服务端标 excluded 的行（身份不完整/审批已否定的重复登记行）不可选：给出原因而不是
+      // 渲染出一个点下去必然报「来源校验失败」的按钮。
+      const blocked = Boolean(row.excluded);
+      const status = blocked ? (row.exclude_reason || "该来源当前不可用。")
+        : semanticOnly ? (row.available ? "可供 AI 识别" : "选择 AI 填充后自动获取并识别")
+        : row.available ? "可预览"
+        : ({ archived: "已归档，选择后自动获取", pending: "等待归档，可重试", manual_required: "需从钉钉下载后手动上传" }[row.archive_status] || "选择后获取附件");
       // 国际物流附件来自钉钉审批，标注来源便于与本地手工上传件区分。
       const fromApproval = row.source_kind === "approval_attachment";
       const badge = semanticOnly ? `<span>AI 资料</span>` : fromApproval ? `<span>国际物流 OA 附件</span>` : `<span>本地文件</span>`;
-      return `<article class="ocw-mf-wiki-card"><strong>${this.escape(row.source_label || row.source_id)}</strong><small>${this.escape(status)}</small><div class="ocw-mf-wiki-card-meta">${badge}${semanticOnly ? "" : sheets.map((sheet) => `<button class="ocw-outline-btn" type="button" data-mf-attachment-source="${this.escape(row.source_id)}" data-sheet-name="${this.escape(sheet)}" ${dialog.wikiMaterialBusy ? "disabled" : ""}>${dialog.wikiMaterialBusy === `attachment:${row.source_id}` ? "正在获取…" : sheet ? `预览 ${this.escape(sheet)}` : row.available ? "预览" : "获取并预览"}</button>`).join("")}</div></article>`;
+      const actions = blocked ? ""
+        : sheets.map((sheet) => `<button class="ocw-outline-btn" type="button" data-mf-attachment-source="${this.escape(row.source_id)}" data-sheet-name="${this.escape(sheet)}" ${dialog.wikiMaterialBusy ? "disabled" : ""}>${dialog.wikiMaterialBusy === `attachment:${row.source_id}` ? "正在获取…" : sheet ? `预览 ${this.escape(sheet)}` : row.available ? "预览" : "获取并预览"}</button>`).join("");
+      return `<article class="ocw-mf-wiki-card${blocked ? " ocw-mf-wiki-card-blocked" : ""}"><strong>${this.escape(row.source_label || row.source_id)}</strong><small>${this.escape(status)}</small><div class="ocw-mf-wiki-card-meta">${badge}${actions}</div></article>`;
     }).join("");
     const emptyHint = hasManual || hasApproval
       ? "还没有可导入的装箱单，可用上方「本地上传装箱单」补充。"

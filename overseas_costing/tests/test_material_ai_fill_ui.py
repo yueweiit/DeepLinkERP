@@ -974,6 +974,38 @@ console.log(JSON.stringify({
     assert result["html"].count("data-mf-attachment-source=") == 2
 
 
+def test_local_tab_renders_excluded_sources_as_unselectable_with_reason() -> None:
+    """服务端标 excluded 的来源必须渲染成不可选并给出原因。
+
+    真实事故：同一 file_id 在批次里既有正牌归档行、又有一条身份不完整的重复登记行。
+    重复行以前显示为「已归档，选择后自动获取」，点下去抛来源校验失败
+    （「所选资料不属于当前批次的有效关联来源，或归档身份、版本已变化」）。
+    """
+    result = _fee_workspace_result(r"""
+const workspace=Object.create(Harness.prototype);
+workspace.escape=(value)=>String(value??'');
+const dialog={materialSourceTab:'local',wikiMaterialBusy:'',wikiMaterialOperationError:'',sourceContext:{root_kind:'logistics'},
+  materialAttachmentSources:[
+    {source_kind:'approval_attachment',source_id:'vnpmtb33mu',source_label:'通用装箱单模板（核算系统）.xlsx',available:true,sheets:['装箱单'],supported_for_material_import:true},
+    {source_kind:'approval_attachment',source_id:'aat0n82ved',source_label:'通用装箱单模板（核算系统）.xlsx',available:false,archive_status:'archived',can_download:true,sheets:['装箱单'],supported_for_material_import:true,excluded:true,exclude_reason:'这条与同一审批的其他附件重复，且缺少归档信息，服务端无法核对来源；请改用同一文件在审批里的另一条来源。'}]};
+const html=workspace.renderMaterialAttachmentSources(dialog);
+console.log(JSON.stringify({
+  html,
+  goodCard:html.includes('data-mf-attachment-source="vnpmtb33mu"'),
+  blockedCard:html.includes('data-mf-attachment-source="aat0n82ved"'),
+  blockedClass:html.includes('ocw-mf-wiki-card-blocked'),
+  reasonShown:html.includes('服务端无法核对来源'),
+  staleStatusGone:html.includes('已归档，选择后自动获取')}));
+""")
+    assert result["goodCard"] is True, result["html"]
+    assert result["blockedCard"] is False, result["html"]
+    assert result["blockedClass"] is True
+    assert result["reasonShown"] is True
+    # 不可选的行不能再显示「已归档，选择后自动获取」这种误导状态。
+    assert result["staleStatusGone"] is False
+    assert result["html"].count("data-mf-attachment-source=") == 1
+
+
 def test_local_tab_source_loader_keeps_both_kinds_and_drops_non_excel() -> None:
     """加载器要合并两类来源，并排除审批正文/评论等非表格项。"""
     source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")

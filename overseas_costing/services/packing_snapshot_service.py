@@ -591,8 +591,14 @@ def list_packing_sources(batch_name: str, *, approval_detail: dict | None = None
             continue
         if not _is_material_ai_attachment(row.get("file_name")):
             continue
-        if str(row.get("source_type") or "").upper() == "OA" and packing_source_service._attachment_is_audit_only(row):
+        if str(row.get("source_type") or "").upper() == "OA" and packing_source_service._attachment_is_audit_only(row, bundle=bundle):
+            # 归档里已撤销/被替代、且当前审批也验证不了的附件只能留档，不再作为候选。
             continue
+        # 身份不完整的重复/半成品登记行（缺归档描述、corp_id 或 file_url）服务端解析不出来。
+        # 不静默丢弃：标成 excluded 并给出原因，前端渲染为不可选，避免出现
+        # 「显示已归档可获取、点下去必报来源校验失败」的假可点卡片。
+        stale_registration = (str(row.get("source_type") or "").upper() == "OA"
+                              and packing_source_service._live_approval_rejects_attachment(row, bundle=bundle))
         snapshot = packing_source_service.import_service._json_loads_dict(row.get("parse_result_json"))
         archive = snapshot.get("archive") if isinstance(snapshot.get("archive"), dict) else {}
         download = snapshot.get("download") if isinstance(snapshot.get("download"), dict) else {}
@@ -620,8 +626,14 @@ def list_packing_sources(batch_name: str, *, approval_detail: dict | None = None
                 "origin": row.get("oa_attachment_origin") or snapshot.get("attachment_origin") or "Form",
                 "process_instance_id": str(snapshot.get("process_instance_id") or snapshot.get("instance_id") or ""),
                 "file_id": str(snapshot.get("file_id") or ""),
-                "archive_status": archive.get("status") or ("archived" if item["available"] else "pending"),
-                "can_download": not item["available"] and (archive.get("status") == "archived" or bool(snapshot.get("file_id"))),
+                # 身份不完整的重复登记行：当前审批解析不出它，标为不可选并说明原因，
+                # 而不是渲染成"已归档，选择后自动获取"那种点下去必失败的假可点卡片。
+                "excluded": stale_registration,
+                "exclude_reason": _STALE_REGISTRATION_REASON if stale_registration else "",
+                "archive_status": "pending" if stale_registration
+                else (archive.get("status") or ("archived" if item["available"] else "pending")),
+                "can_download": False if stale_registration
+                else (not item["available"] and (archive.get("status") == "archived" or bool(snapshot.get("file_id")))),
                 "actor_name": str(snapshot.get("comment_user_name") or ""),
                 "occurred_at": str(snapshot.get("comment_time") or row.get("modified") or ""),
             })
@@ -879,6 +891,12 @@ def list_cached_packing_sheet_catalog(batch_name: str) -> dict[str, Any]:
         "wiki_workbooks": _pin_recommended_workbook(workbooks),
         "source_context": context,
     }
+
+
+_STALE_REGISTRATION_REASON = (
+    "这条与同一审批的其他附件重复，且缺少归档信息，服务端无法核对来源；"
+    "请改用同一文件在审批里的另一条来源。"
+)
 
 
 MATERIAL_AI_DOCUMENT_SUFFIXES = (

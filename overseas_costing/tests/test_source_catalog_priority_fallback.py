@@ -596,3 +596,74 @@ def test_stale_approval_flag_never_bypasses_current_source_validation(monkeypatc
     with pytest.raises(ValueError):
         resolver.resolve_trusted_packing_source(batch_name=batch['name'],
             source_kind='approval_attachment', source_id='ATT-L', sheet_name='Packing')
+
+
+def test_stale_descriptor_audit_only_is_superseded_by_current_live_approval(monkeypatch, setup):
+    """落库快照里的 descriptor.audit_only 是历史值；当前审批仍接受时必须当作可用。
+
+    真实事故：审批进行中时 document_writer 把 audit_only 落进 settlement_document，
+    审批通过后旧值没重算，「本地上传装箱单」页签据此把这份**能解析**的附件当审计件剔除，
+    只剩一条解析不出来的半成品登记行可点 —— 点下去必报来源校验失败。
+    """
+
+    store, ledger, batch, version, bundle = _local_catalog(monkeypatch, setup)
+    logistics = store.get('source', bundle['binding']['logistics_id'])
+    manifest = {'file_id': 'F-L', 'sha256': 'a' * 64, 'corp_id': 'C', 'process_instance_id': 'L'}
+    document = {'id': 'D-L', 'source_id': logistics['id'], 'file_name': 'packing.xlsx',
+                'file_url': '/private/files/packing.xlsx', 'status': 'review', 'fingerprint': 'doc-fp',
+                'manifest': manifest, 'audit_only': True, 'retired': False, 'issues': ['未识别出可核对的明细表']}
+    logistics['documents'] = [document]
+    store.put('source', {'id': logistics['id'], 'data': dumps(logistics)})
+    # 归档变化后重新取 bundle，让 live 解析链看到这份文档。
+    bundle = effective.load_source_bundle(batch['name'], store=store, ledger=ledger)
+    row = {'name': 'ATT-L', 'batch': batch['name'], 'version': version['name'], 'source_type': 'OA',
+           'file_name': document['file_name'], 'file_url': document['file_url'],
+           'parse_result_json': dumps({'process_instance_id': 'L', 'corp_id': 'C', 'file_id': 'F-L',
+                                       'settlement_document': document})}
+
+    assert resolver._live_approval_attachment_state(row, bundle) is True
+    # 不带 bundle 的旧调用点（同一批次根）仍按快照值判，不改变既有语义。
+    assert resolver._attachment_is_audit_only(row) is True
+    # 带上当前批次 bundle 后，live 审批接受这一行 ⇒ 不再当审计件剔除。
+    assert resolver._attachment_is_audit_only(row, bundle=bundle) is False
+
+
+def test_half_registered_duplicate_row_is_rejected_by_live_approval(monkeypatch, setup):
+    """缺归档描述、corp_id 或 file_url 的重复登记行必须判为「当前审批不接受」。
+
+    真实事故：同一 file_id 存在一条身份不完整的旧记录，列表把它显示成
+    「已归档，选择后自动获取」，点下去抛 EffectiveSourceIntegrityError。
+    """
+
+    store, ledger, batch, version, bundle = _local_catalog(monkeypatch, setup)
+    logistics = store.get('source', bundle['binding']['logistics_id'])
+    manifest = {'file_id': 'F-L', 'sha256': 'a' * 64, 'corp_id': 'C', 'process_instance_id': 'L'}
+    document = {'id': 'D-L', 'source_id': logistics['id'], 'file_name': 'packing.xlsx',
+                'file_url': '/private/files/packing.xlsx', 'status': 'review', 'fingerprint': 'doc-fp',
+                'manifest': manifest}
+    logistics['documents'] = [document]
+    store.put('source', {'id': logistics['id'], 'data': dumps(logistics)})
+    # 半成品行：没有 settlement_document、没有 corp_id、file_url 为空。
+    half = {'name': 'ATT-HALF', 'batch': batch['name'], 'version': version['name'], 'source_type': 'OA',
+            'file_name': document['file_name'], 'file_url': '',
+            'parse_result_json': dumps({'instance_id': 'L', 'file_id': 'F-L'})}
+
+    assert resolver._live_approval_rejects_attachment(half, bundle=bundle) is True
+    # 正牌行则被接受，不会被这条兜底剔除。
+    good = {**half, 'name': 'ATT-L', 'file_url': document['file_url'],
+            'parse_result_json': dumps({'process_instance_id': 'L', 'corp_id': 'C', 'file_id': 'F-L',
+                                        'settlement_document': document})}
+    assert resolver._live_approval_rejects_attachment(good, bundle=bundle) is False
+
+
+def test_live_approval_state_stays_unknown_without_bundle_or_detail(monkeypatch, setup):
+    """拿不到 bundle 或审批明细时返回 None，不能当成「明确接受/明确拒绝」误判。"""
+
+    store, ledger, batch, version, bundle = _local_catalog(monkeypatch, setup)
+    row = {'name': 'ATT-L', 'batch': batch['name'], 'source_type': 'OA',
+           'parse_result_json': dumps({'instance_id': 'L', 'file_id': 'F-L'})}
+
+    assert resolver._live_approval_attachment_state(row, None) is None
+    assert resolver._live_approval_rejects_attachment(row, bundle=None) is False
+    assert resolver._superseded_by_live_approval(row, {}, None) is False
+

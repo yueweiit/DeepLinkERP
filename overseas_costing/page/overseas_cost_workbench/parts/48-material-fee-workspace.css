@@ -789,6 +789,9 @@
 .ocw-mf-wiki-reasons b { color: #076fbe; font-size: 11px; }
 .ocw-mf-wiki-card-meta { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid #e9eef5; padding-top: 8px; }
 .ocw-mf-wiki-error { padding: 9px 11px; border-radius: 7px; background: #fff0ee; color: #b42318; }
+.ocw-mf-wiki-card-blocked { background: #fbfbfc; border-style: dashed; }
+.ocw-mf-wiki-card-blocked > strong { color: #667085; }
+.ocw-mf-wiki-card-blocked > small { color: #b42318; }
 
 @media (max-width: 700px) {
   .ocw-mf-wiki-toolbar { grid-template-columns: minmax(0, 1fr); align-items: stretch; }

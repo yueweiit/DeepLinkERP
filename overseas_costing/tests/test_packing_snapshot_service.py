@@ -530,6 +530,70 @@ def test_list_sources_includes_unsaved_approval_excel_files_and_safe_download_id
     assert "secret" not in repr(result)
 
 
+def test_list_sources_marks_rows_the_live_approval_cannot_resolve_as_unselectable(monkeypatch):
+    """身份不完整的重复登记行要**列出来但标为不可选**，而不是静默丢弃。
+
+    真实事故：同一 file_id 既有正牌归档行，又有一条缺归档描述/corp_id/file_url 的旧记录。
+    旧记录在列表里显示为「已归档，选择后自动获取」，点击抛来源校验失败。
+    正确表现是它仍然可见（用户能看懂为什么同一文件有两条），但不可选并给出原因。
+    """
+
+    import json
+    from types import SimpleNamespace
+
+    local = [{"name": "ATT-HALF", "batch": "B1", "version": "V1", "source_type": "OA",
+              "attachment_type": "Packing List", "file_name": "packing.xlsx", "file_url": "",
+              "parse_result_json": json.dumps({"instance_id": "MAIN", "file_id": "F1"})}]
+    monkeypatch.setattr(service, "frappe", SimpleNamespace(get_list=lambda *args, **kwargs: local))
+    monkeypatch.setattr(service, "_attachment_sheet_names", lambda row: [])
+    detail = {"local_only": False, "ok": False, "main_approval": {}, "linked_purchase_approvals": []}
+    monkeypatch.setattr(service.packing_source_service, "related_approval_detail", lambda *_a, **_k: detail)
+    monkeypatch.setattr(service.packing_source_service, "_live_approval_rejects_attachment",
+                        lambda row, *, bundle=None: True)
+
+    result = service.list_packing_sources("B1")
+
+    row = next(item for item in result["approval_sources"] if item["source_id"] == "ATT-HALF")
+    assert row["excluded"] is True
+    assert row["exclude_reason"]
+    assert row["can_download"] is False
+    assert row["archive_status"] == "pending"
+    assert result["manual_attachments"] == []
+
+
+def test_list_sources_keeps_rows_the_live_approval_accepts(monkeypatch):
+    """live 审批接受的附件必须保留，不能被陈旧的 audit_only 快照值剔除。"""
+
+    import json
+    from types import SimpleNamespace
+
+    local = [{"name": "ATT-L", "batch": "B1", "version": "V1", "source_type": "OA",
+              "attachment_type": "Packing List", "file_name": "packing.xlsx",
+              "file_url": "/private/files/packing.xlsx",
+              "parse_result_json": json.dumps({"instance_id": "MAIN", "file_id": "F1",
+                                               "settlement_document": {"id": "D-L", "audit_only": True}})}]
+    monkeypatch.setattr(service, "frappe", SimpleNamespace(get_list=lambda *args, **kwargs: local))
+    monkeypatch.setattr(service, "_attachment_sheet_names", lambda row: [])
+    bundle = {"context": {"root_kind": "logistics", "instance_id": "MAIN", "batch": "B1",
+                          "cost_version": "V1", "corp_id": "C", "root_source_id": "L"}}
+    monkeypatch.setattr(service.effective_source, "current_source_bundle", lambda *_a, **_k: bundle)
+    detail = {"local_only": False, "ok": True, "main_approval": {}, "linked_purchase_approvals": []}
+    monkeypatch.setattr(service.packing_source_service, "related_approval_detail", lambda *_a, **_k: detail)
+    # live 审批接受这一行 ⇒ 陈旧的 descriptor.audit_only 不该再剔除它。
+    monkeypatch.setattr(service.packing_source_service, "_live_approval_attachment_state",
+                        lambda row, bundle=None: True)
+    monkeypatch.setattr(service.packing_source_service, "_live_approval_rejects_attachment",
+                        lambda row, *, bundle=None: False)
+
+    result = service.list_packing_sources("B1")
+
+    row = next(item for item in result["approval_sources"] if item["source_id"] == "ATT-L")
+    assert row["available"] is True
+    assert row["excluded"] is False
+    assert row["source_kind"] == "approval_attachment"
+    assert result["manual_attachments"] == []
+
+
 def test_list_sources_includes_free_comments_even_without_packing_keyword_classification(monkeypatch):
     from types import SimpleNamespace
 
