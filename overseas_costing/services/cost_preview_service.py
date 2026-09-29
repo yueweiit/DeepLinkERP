@@ -93,6 +93,66 @@ def cost_hash_fee_projection(row) -> dict:
     return {field: fee.get(field) for field in COST_HASH_FEE_FIELDS}
 
 
+# ``spec_model`` was added to the formal query in schema 2 so purchase-value
+# evidence can validate row identity.  Keep legacy snapshots compatible: a
+# genuine identity mismatch changes the effective valuation and is caught by
+# saved-result verification without staling every legacy snapshot merely because
+# this previously omitted query field now exists.
+COST_HASH_ITEM_SKIP_FIELDS = ("spec_model",)
+
+# Value-level counterpart of ``COST_HASH_ITEM_SKIP_FIELDS``.  The two item loaders
+# differ in *how* they hand over the same fact, not only in *which* keys they
+# carry: ``extra_json`` reaches the fingerprint as a JSON string from
+# ``batch_service._load_erp_push_context`` (the DB column) but as an already
+# parsed mapping from ``cost_trial_ai_service.load_trial_inputs``.  The column is
+# canonically a string -- ``logistics_settlement.item_metadata.persist_item_meta``
+# returns ``json.dumps(...)`` -- so re-serialising dict/list payloads with the same
+# sort-keys/compact settings restores the declared representation and stops the
+# save path and the read path disagreeing over a mere type difference.
+COST_HASH_JSON_ITEM_FIELDS = ("extra_json",)
+
+
+def _canonical_item_value(field, value):
+    """Normalise one item value so every loader fingerprints the same bytes."""
+
+    if field not in COST_HASH_JSON_ITEM_FIELDS:
+        return value
+    if isinstance(value, str):
+        # Already persisted form; keep it byte-for-byte so existing snapshots and
+        # the read path stay comparable.
+        return value
+    if value is None:
+        return None
+    return _json(value)
+
+
+def cost_hash_item_projection(row) -> dict:
+    """Return only the declared calculation inputs of one item row.
+
+    Mirrors :func:`cost_hash_fee_projection`, and exists for the same reason:
+    the different call paths into the fingerprint hand in dicts built by
+    different loaders.  ``cost_trial_ai_service.load_trial_inputs`` merges the
+    decision columns (``category``, ``transport_mode``) into every item, while
+    the read side (``batch_service._load_erp_push_context``) does not.  Those
+    keys are not calculation inputs and are not in ``COST_INPUT_FIELDS``, but
+    the raw dict was hashed verbatim, so the save path and the read path could
+    never agree -- the batch stayed pinned on ``RESULT_STALE`` even though both
+    sides computed from the same business data.
+
+    Projecting to ``COST_INPUT_FIELDS`` makes the fingerprint depend only on the
+    declared item contract, no matter which loader produced the row, and
+    :func:`_canonical_item_value` removes the remaining representation differences
+    for fields the loaders hand over in different types.
+    """
+
+    item = row if isinstance(row, dict) else {}
+    return {
+        field: _canonical_item_value(field, item.get(field))
+        for field in COST_INPUT_FIELDS
+        if field not in COST_HASH_ITEM_SKIP_FIELDS
+    }
+
+
 def _decimal(value) -> Decimal | None:
     if value in (None, ""):
         return None
@@ -749,17 +809,9 @@ def _without_private_trial_fields(value):
 
 
 def cost_input_hash(items, fees, fx_context, transport_mode, fee_components=None) -> str:
-    # `spec_model` was added to the formal query in schema 2 so purchase-value
-    # evidence can validate row identity.  Keep the existing snapshot hash
-    # compatible: a genuine identity mismatch changes the effective valuation
-    # and is caught by saved-result verification without staling every legacy
-    # snapshot merely because this previously omitted query field now exists.
-    hash_items = [
-        {key: value for key, value in row.items() if key != "spec_model"}
-        if isinstance(row, dict) else row
-        for row in (items or [])
-    ]
-    # Only calculation inputs, never audit labels: see COST_HASH_FEE_FIELDS.
+    # Only declared calculation inputs, never audit labels or loader-specific
+    # columns: see COST_HASH_ITEM_SKIP_FIELDS and COST_HASH_FEE_FIELDS.
+    hash_items = [cost_hash_item_projection(row) for row in (items or [])]
     hash_fees = [cost_hash_fee_projection(row) for row in (fees or [])]
     components = sorted(
         ({field: (row or {}).get(field) for field in FEE_COMPONENT_INPUT_FIELDS}

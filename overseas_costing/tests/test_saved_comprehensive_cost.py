@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from decimal import Decimal
+import json
 
 import pytest
 
@@ -53,6 +54,122 @@ def test_cost_input_hash_ignores_private_trial_projection_fields():
     assert service.cost_input_hash(items, projected, fx, "AIR") == service.cost_input_hash(
         items, fees, fx, "AIR"
     )
+
+
+# The two call paths into the fingerprint build item dicts with different loaders.
+# ``cost_trial_ai_service.load_trial_inputs`` merges the batch decision columns
+# (``category`` / ``transport_mode``) into every item, while the read side
+# (``batch_service._load_erp_push_context``) does not.  None of those keys are
+# calculation inputs, but hashing the raw dict meant the save path and the read
+# path could never agree, so a batch that had ever been through the AI trial flow
+# stayed pinned on ``RESULT_STALE`` no matter how often it was recalculated.
+LOADER_ONLY_ITEM_COLUMNS = (
+    {"category": "Material物料"},
+    {"transport_mode": "SEA"},
+    {"category": "Material物料", "transport_mode": "SEA", "source_context": {"fingerprint": "abc"}},
+    {"subsidiary_code": "S1"},
+    {"route_status": "RESOLVED", "route_revision": "r7"},
+    {"excel_row_no": 12},
+    {"erp_site_code": "MEX01"},
+    # Calculation *outputs* the read side happens to carry around; they are not
+    # inputs either.  They must not be able to stale a saved result.
+    {"total_cost_rmb": "999.99", "freight_alloc_rmb": "1", "alloc_price_mxn": "2"},
+    {"derived_json": '{"anything":1}', "goods_value_ratio": "50"},
+)
+
+
+@pytest.mark.parametrize("extra", LOADER_ONLY_ITEM_COLUMNS)
+def test_cost_input_hash_ignores_loader_only_item_columns(extra):
+    items, fees, fx = inputs()
+    decorated = deepcopy(items)
+    decorated[0].update(extra)
+
+    assert service.cost_input_hash(decorated, fees, fx, "AIR") == service.cost_input_hash(
+        items, fees, fx, "AIR"
+    ), f"loader-only columns {sorted(extra)} must not participate in the fingerprint"
+
+
+def test_cost_input_hash_tracks_every_cost_relevant_item_field():
+    """The item projection must stay a faithful superset of the real inputs."""
+
+    items, fees, fx = inputs()
+    for field, value in (
+        ("goods_value", 1),
+        ("quantity", 1),
+        ("actual_shipped_qty", 1),
+        ("gross_weight_kg", 1),
+        ("chargeable_weight_kg", 1),
+        ("volume_m3", 1),
+        ("net_weight_kg", 1),
+        ("project_collection", "P-1"),
+        ("supplier", "S-1"),
+        ("extra_json", '{"row_meta":{"x":1}}'),
+    ):
+        mutated = deepcopy(items)
+        mutated[0][field] = value
+        assert service.cost_input_hash(mutated, fees, fx, "AIR") != service.cost_input_hash(
+            items, fees, fx, "AIR"
+        ), f"{field} changes the valuation and must stale the saved result"
+
+
+def test_item_projection_is_the_declared_contract_minus_legacy_exclusions():
+    projected = service.cost_hash_item_projection(
+        {"name": "I1", "goods_value": 5, "category": "Material物料", "spec_model": "X"}
+    )
+    assert set(projected) == set(service.COST_INPUT_FIELDS) - set(service.COST_HASH_ITEM_SKIP_FIELDS)
+    assert "category" not in projected
+    assert "spec_model" not in projected
+    assert "goods_value" in projected
+
+
+def test_trial_loader_and_read_side_produce_the_same_fingerprint():
+    """The regression this whole projection exists for, end to end."""
+
+    items, fees, fx = inputs()
+    # Read side hands in plain rows.
+    read_side = deepcopy(items)
+    # The AI trial loader hands in the same rows plus the decision columns.
+    trial_side = [dict(row, category="Material物料", transport_mode="AIR") for row in items]
+
+    assert service.cost_input_hash(trial_side, fees, fx, "AIR") == service.cost_input_hash(
+        read_side, fees, fx, "AIR"
+    )
+
+
+# The same fact reaches the fingerprint in different *types* depending on the
+# loader: ``extra_json`` is the DB column (a JSON string) on the read side, but an
+# already-parsed mapping on the AI trial side.  Hashed verbatim that is a type
+# difference dressed up as a data change, so the two sides could never agree.
+# ``item_metadata.persist_item_meta`` defines the persisted form as
+# ``json.dumps(..., sort_keys=True, separators=(",", ":"), default=str)``; the
+# canonicaliser must land on exactly that byte string.
+TRIAL_JSON_ITEM_ROWS = (
+    {"anything": 1},
+    {"nested": {"b": [1, 2], "a": None}},
+    [{"list": True}],
+    "already-a-string",
+)
+
+
+@pytest.mark.parametrize("payload", TRIAL_JSON_ITEM_ROWS)
+def test_item_projection_canonicalises_json_payloads_the_way_they_are_persisted(payload):
+    projected = service.cost_hash_item_projection({"name": "I1", "extra_json": payload})
+    value = projected["extra_json"]
+    assert isinstance(value, str), "extra_json must always fingerprint as its persisted string form"
+    if isinstance(payload, str):
+        assert value == payload, "an already-persisted string must not be rewritten"
+    else:
+        assert json.loads(value) == payload, "canonicalisation must preserve the payload"
+
+
+def test_item_projection_agrees_across_loader_representations_of_the_same_fact():
+    persisted = service.cost_hash_item_projection(
+        {"name": "I1", "goods_value": 5, "extra_json": '{"a":1,"b":[2]}'}
+    )
+    parsed = service.cost_hash_item_projection(
+        {"name": "I1", "goods_value": 5, "extra_json": {"b": [2], "a": 1}}
+    )
+    assert persisted == parsed
 
 
 # Audit labels are not valuation inputs.  The AI cost-trial save rewrites a rule's
