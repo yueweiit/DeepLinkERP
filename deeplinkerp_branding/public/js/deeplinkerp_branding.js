@@ -269,14 +269,10 @@
 	}
 
 	function ensureBrandHeader(sidebar) {
-		const nativeHeader = sidebar.querySelector(".sidebar-header");
-		const fallbackHeader = sidebar.querySelector(".dlp-mes-navigation__brand-fallback");
-		if (!nativeHeader) {
-			if (fallbackHeader) return;
-			const fallback = document.createElement("a");
+		let fallback = sidebar.querySelector(".dlp-mes-navigation__brand-fallback");
+		if (!fallback) {
+			fallback = document.createElement("a");
 			fallback.className = "dlp-mes-navigation__brand-fallback";
-			fallback.href = "/desk";
-			fallback.setAttribute("aria-label", "DeepLinkERP Desktop");
 			DeepLinkERPNavigation.bindNativeSidebarClose(fallback, {
 				isNarrowViewport: isNarrowNavigationViewport,
 				closeSidebar: () => frappe.app.sidebar.close(),
@@ -287,34 +283,36 @@
 					),
 			});
 
-			const image = document.createElement("img");
-			image.src = BrandLogoURL;
-			image.alt = "";
-			fallback.appendChild(image);
-
-			const label = document.createElement("span");
-			label.textContent = "DeepLinkERP";
-			fallback.appendChild(label);
 			sidebar.prepend(fallback);
-			return;
 		}
+		fallback.href = "/desk";
+		fallback.setAttribute("aria-label", "DeepLinkERP Desktop");
+		let image = fallback.querySelector("img");
+		if (!image) {
+			image = document.createElement("img");
+			fallback.appendChild(image);
+		}
+		image.src = BrandLogoURL;
+		image.alt = "";
+		let label = fallback.querySelector("span");
+		if (!label) {
+			label = document.createElement("span");
+			fallback.appendChild(label);
+		}
+		label.textContent = "DeepLinkERP";
+	}
 
-		fallbackHeader?.remove();
-		nativeHeader.classList.add("dlp-mes-navigation__brand");
-		nativeHeader.setAttribute("aria-label", "DeepLinkERP menu");
-		const title = nativeHeader.querySelector(".header-title");
-		if (title) title.textContent = "DeepLinkERP";
-		const subtitle = nativeHeader.querySelector(".header-subtitle");
-		if (subtitle) subtitle.textContent = "";
-		const logo = nativeHeader.querySelector(".header-logo");
-		if (logo && logo.dataset.dlpBrandLogo !== BrandLogoURL) {
-			logo.replaceChildren();
-			const image = document.createElement("img");
-			image.src = BrandLogoURL;
-			image.alt = "";
-			logo.appendChild(image);
-			logo.dataset.dlpBrandLogo = BrandLogoURL;
-		}
+	function getNativeActiveItem(nativeItems) {
+		const activeItem = nativeItems.querySelector(".active-sidebar");
+		if (!activeItem) return null;
+		const anchor = activeItem.matches?.(".item-anchor")
+			? activeItem
+			: activeItem.querySelector(".item-anchor");
+		const label = activeItem.querySelector(".sidebar-item-label")?.textContent?.trim() || "";
+		return {
+			label,
+			href: anchor?.getAttribute("href") || "",
+		};
 	}
 
 	function makeNavigationRow(item, isOpen = item.isOpen) {
@@ -486,6 +484,7 @@
 			workspaceSidebars: getAuthorizedWorkspaceSidebars(),
 			route: window.location.href,
 			currentSidebar: frappe.app.sidebar.sidebar_title || "",
+			nativeActiveItem: getNativeActiveItem(nativeItems),
 			nativeLeafSelected: Boolean(nativeItems.querySelector(".active-sidebar")),
 		});
 
@@ -545,6 +544,8 @@
 			: null;
 		if (top && nativeItems) top.prepend(nativeItems);
 		navigation?.remove();
+		const fallbackHeader = document.querySelector(".dlp-mes-navigation__brand-fallback");
+		fallbackHeader?.remove();
 		document.body.classList.remove("dlp-mes-navigation-enabled");
 		document
 			.querySelector(".body-sidebar.dlp-mes-navigation-sidebar")

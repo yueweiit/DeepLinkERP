@@ -334,6 +334,68 @@
 		}, []);
 	}
 
+	function sidebarItemAliases(item) {
+		return [item?.label, item?.name, item?.link_to]
+			.map(normalizeIdentity)
+			.filter(Boolean);
+	}
+
+	function flattenSidebarItems(items) {
+		const flattened = [];
+		const visit = (entries) => {
+			(Array.isArray(entries) ? entries : []).forEach((item) => {
+				if (!item) return;
+				flattened.push(item);
+				visit(item.nested_items);
+			});
+		};
+		visit(items);
+		return flattened;
+	}
+
+	function sidebarItemMatchScore(item, nativeActiveItem, normalizedRoute) {
+		const activeLabel = normalizeIdentity(nativeActiveItem?.label);
+		const aliases = sidebarItemAliases(item);
+		const labelMatch = Boolean(activeLabel && aliases.includes(activeLabel));
+		const activeRoute = normalizeRoute(nativeActiveItem?.href || normalizedRoute.path);
+		const explicitRoutes = [item?.route, item?.href, item?.link, item?.url]
+			.filter(Boolean)
+			.map((candidate) => normalizeRoute(candidate).path);
+		const explicitRouteMatch = explicitRoutes.includes(activeRoute.path);
+		const routeTail = normalizeIdentity(activeRoute.path.split("/").filter(Boolean).at(-1));
+		const linkTargetMatch = Boolean(
+			item?.link_to && routeTail && normalizeIdentity(item.link_to) === routeTail
+		);
+
+		if (explicitRouteMatch) return 100 + (labelMatch ? 5 : 0);
+		if (linkTargetMatch) return 80 + (labelMatch ? 5 : 0);
+		return labelMatch ? 10 : 0;
+	}
+
+	function findByNativeActiveItem(items, workspaceSidebars, nativeActiveItem, normalizedRoute) {
+		if (!nativeActiveItem?.label && !nativeActiveItem?.href) return [];
+		const candidates = [];
+		const visit = (nodes) => {
+			nodes.forEach((node) => {
+				const sidebar = getWorkspaceSidebar(node, workspaceSidebars);
+				const score = Math.max(
+					0,
+					...flattenSidebarItems(sidebar?.items).map((item) =>
+						sidebarItemMatchScore(item, nativeActiveItem, normalizedRoute)
+					)
+				);
+				if (score > 0) candidates.push({ node, score });
+				visit(node.children);
+			});
+		};
+		visit(items);
+
+		const bestScore = Math.max(0, ...candidates.map((candidate) => candidate.score));
+		const best = candidates.filter((candidate) => candidate.score === bestScore);
+		if (best.length !== 1) return [];
+		return findPath(items, (item) => item.key === best[0].node.key, []);
+	}
+
 	function getWorkspaceSidebar(node, workspaceSidebars) {
 		const entries = Object.entries(workspaceSidebars || {});
 		const aliases = nodeAliases(node);
@@ -353,12 +415,21 @@
 		workspaceSidebars = {},
 		route = "/desk",
 		currentSidebar = "",
+		nativeActiveItem = null,
 		nativeLeafSelected = false,
 	} = {}) {
 		const items = buildNavigationTree(desktopIcons);
 		const normalizedRoute = normalizeRoute(route);
 		let activePath = findBySidebar(items, normalizedRoute.sidebar);
 		if (!activePath.length) activePath = findByExactRoute(items, normalizedRoute);
+		if (!activePath.length) {
+			activePath = findByNativeActiveItem(
+				items,
+				workspaceSidebars,
+				nativeActiveItem,
+				normalizedRoute
+			);
+		}
 		if (!activePath.length) activePath = findBySidebar(items, currentSidebar);
 
 		const activeKeys = new Set(activePath.map((item) => item.key));

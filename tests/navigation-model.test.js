@@ -401,6 +401,68 @@ test("resolves query, exact route, and native sidebar active states in authority
 	);
 });
 
+test("uses the authorized active leaf owner before a stale Frappe sidebar title", () => {
+	const buildNavigationModel = productionFunction("buildNavigationModel");
+	const desktopIcons = [
+		{ label: "Buying", navigation_route: "/desk/buying" },
+		{ label: "Manufacturing", navigation_route: "/desk/manufacturing" },
+	];
+	const workspaceSidebars = {
+		buying: {
+			label: "Buying",
+			items: [{ type: "Link", label: "采购订单", link_to: "Purchase Order" }],
+		},
+		manufacturing: {
+			label: "Manufacturing",
+			items: [{ type: "Link", label: "物料清单", link_to: "BOM" }],
+		},
+	};
+
+	const model = buildNavigationModel({
+		desktopIcons,
+		workspaceSidebars,
+		route: "/desk/bom",
+		currentSidebar: "Buying",
+		nativeActiveItem: { label: "物料清单", href: "/desk/bom" },
+		nativeLeafSelected: true,
+	});
+
+	assert.equal(model.activeItem.label, "Manufacturing");
+	assert.equal(model.nativeHostKey, model.activeItem.key);
+	assert.equal(model.activeItem.isOpen, true);
+	assert.deepEqual(model.activePathLabels, ["Manufacturing"]);
+});
+
+test("uses the active leaf href to disambiguate repeated child labels", () => {
+	const buildNavigationModel = productionFunction("buildNavigationModel");
+	const desktopIcons = [
+		{ label: "Buying", navigation_route: "/desk/buying" },
+		{ label: "Manufacturing", navigation_route: "/desk/manufacturing" },
+	];
+	const workspaceSidebars = {
+		buying: {
+			label: "Buying",
+			items: [{ type: "Link", label: "设置", link_to: "Buying Settings" }],
+		},
+		manufacturing: {
+			label: "Manufacturing",
+			items: [{ type: "Link", label: "设置", link_to: "Manufacturing Settings" }],
+		},
+	};
+
+	const model = buildNavigationModel({
+		desktopIcons,
+		workspaceSidebars,
+		route: "/desk/manufacturing-settings",
+		currentSidebar: "Buying",
+		nativeActiveItem: { label: "设置", href: "/desk/manufacturing-settings" },
+		nativeLeafSelected: true,
+	});
+
+	assert.equal(model.activeItem.label, "Manufacturing");
+	assert.equal(model.nativeHostKey, model.activeItem.key);
+});
+
 test("keeps an exact workspace parent open without blue when the native leaf is selected", () => {
 	const buildNavigationModel = productionFunction("buildNavigationModel");
 	const desktopIcons = [
@@ -465,13 +527,13 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 
 	assert.match(
 		hooks,
-		/app_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_navigation\.css\?v=0\.0\.7"/
+		/app_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_navigation\.css\?v=0\.0\.8"/
 	);
 	assert.ok(hooks.indexOf(modelAsset) < hooks.indexOf(interfaceModeAsset));
 	assert.ok(hooks.indexOf(interfaceModeAsset) < hooks.indexOf(lifecycleAsset));
-	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.11/);
+	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.12/);
 	assert.match(hooks, /deeplinkerp_interface_mode\.js\?v=0\.0\.2/);
-	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.19/);
+	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.20/);
 	assert.match(hooks, /web_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_branding\.css"/);
 });
 
@@ -775,7 +837,29 @@ test("integrates the executable lifecycle helpers through the existing single ro
 		lifecycle,
 		/nativeLeafSelected:\s*Boolean\(nativeItems\.querySelector\("\.active-sidebar"\)\)/
 	);
+	assert.match(lifecycle, /function getNativeActiveItem\(nativeItems\)/);
+	assert.match(lifecycle, /nativeActiveItem:\s*getNativeActiveItem\(nativeItems\)/);
 	assert.doesNotMatch(lifecycle, /cloneNode\(/);
+});
+
+test("keeps a dedicated DL brand entry instead of mutating Frappe's route header", () => {
+	const lifecycle = fs.readFileSync(
+		path.join(
+			__dirname,
+			"..",
+			"deeplinkerp_branding",
+			"public",
+			"js",
+			"deeplinkerp_branding.js"
+		),
+		"utf8"
+	);
+
+	assert.match(lifecycle, /function ensureBrandHeader\(sidebar\)/);
+	assert.match(lifecycle, /sidebar\.prepend\(fallback\)/);
+	assert.match(lifecycle, /fallbackHeader\?\.remove\(\)/);
+	assert.doesNotMatch(lifecycle, /nativeHeader\.querySelector\("\.header-title"\)/);
+	assert.doesNotMatch(lifecycle, /nativeHeader\.querySelector\("\.header-logo"\)/);
 });
 
 test("renders every authorized workspace branch through Frappe's native sidebar renderer", () => {
@@ -823,10 +907,18 @@ test("scopes the dark shell, full-row active state, focus ring, and mobile overf
 	const openParent = stylesheet.match(
 		/\.dlp-mes-navigation__group--open\s*>\s*\.dlp-mes-navigation__row\s*\{([^}]*)\}/
 	)?.[1];
+	const levelOne = stylesheet.match(
+		/\.dlp-mes-navigation\s*>\s*\.dlp-mes-navigation__group\s*>\s*\.dlp-mes-navigation__row\s*\{([^}]*)\}/
+	)?.[1];
+	const levelTwo = stylesheet.match(
+		/\.dlp-mes-navigation\s*>\s*\.dlp-mes-navigation__group\s*>\s*\.dlp-mes-navigation__children\s*\{([^}]*)\}/
+	)?.[1];
 	const activeItem = stylesheet.match(
 		/\.dlp-mes-navigation__group--self-active\s*>\s*\.dlp-mes-navigation__row\s*\{([^}]*)\}/
 	)?.[1];
-	assert.match(openParent || "", /background:\s*transparent/);
+	assert.match(levelOne || "", /background:\s*#001b33/i);
+	assert.match(levelTwo || "", /background:\s*#000f1c/i);
+	assert.match(openParent || "", /background:\s*#001b33/i);
 	assert.match(openParent || "", /color:\s*#fff/i);
 	assert.match(activeItem || "", /background:\s*#1677ff/i);
 	assert.match(activeItem || "", /color:\s*#fff/i);
