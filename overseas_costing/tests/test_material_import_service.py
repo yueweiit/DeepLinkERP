@@ -2220,3 +2220,47 @@ def test_real_xlsx_ambiguous_same_sku_rows_remain_separate_until_target_choices(
     assert result["ok"] is True
     assert [(name, changes["actual_shipped_qty"], changes["gross_weight_kg"]) for name, changes, _ in repository.writes] == (
         [("I1", "30", "36")] if same_target else [("I1", "10", "12"), ("I2", "20", "24")])
+
+
+def test_frappe_repository_selects_only_persistent_item_columns(monkeypatch) -> None:
+    """package_count/packaging_type 是 extra_json 投影出来的虚拟字段，不是物理列。
+
+    裸塞进 SELECT 会抛 MySQLdb 1054 Unknown column 'package_count'（线上真实事故）。
+    get_items 必须复用 batch_service._persistent_item_fieldnames 过滤，不要在本地抄清单。
+    """
+
+    import types
+
+    from overseas_costing.services import batch_service, material_import_service
+
+    captured = {}
+
+    def _fake_get_all(doctype, **kwargs):
+        captured["doctype"] = doctype
+        captured["fields"] = list(kwargs.get("fields") or [])
+        return []
+
+    # 本机没有 frappe 时模块级 frappe 为 None，需要塞一个最小替身。
+    fake_frappe = types.SimpleNamespace(get_all=_fake_get_all)
+    monkeypatch.setattr(material_import_service, "frappe", fake_frappe)
+    monkeypatch.setattr(
+        material_import_service.effective_source, "current_source_bundle",
+        lambda batch_name, version_name=None, **kwargs: {},
+    )
+    monkeypatch.setattr(
+        material_import_service.effective_source, "project_ai_items",
+        lambda rows, bundle: list(rows),
+    )
+
+    material_import_service.FrappeMaterialImportRepository().get_items("B1", "V1")
+
+    assert captured["doctype"] == "Overseas Cost Item"
+    # 虚拟字段一个都不许进 SELECT。
+    assert batch_service.VIRTUAL_ITEM_FIELDNAMES.isdisjoint(captured["fields"])
+    # 但物理字段仍在（消费方靠它们比对/写回）。
+    assert {"material_code", "gross_weight_kg", "net_weight_kg", "extra_json"} <= set(captured["fields"])
+    # 声明的字段清单与守卫保持同一口径：凡是 MATERIAL_SOURCE_FIELDS 里的物理字段都必须被带上。
+    expected = set(batch_service._persistent_item_fieldnames(
+        material_import_service.MATERIAL_SOURCE_FIELDS
+    ))
+    assert expected <= set(captured["fields"])

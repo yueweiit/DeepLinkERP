@@ -1202,10 +1202,16 @@ class FrappeMaterialImportRepository:
         }
 
     def get_items(self, batch_name: str, version_name: str) -> list:
+        # package_count/packaging_type 不是 Overseas Cost Item 的物理列（存在 extra_json 的
+        # ai_row_packing_values / settlement_physical 里，由 project_ai_items 读时投影）。
+        # 直接塞进 SELECT 会抛 MySQLdb 1054 Unknown column 'package_count'。
+        # 复用 batch_service 既有的持久化字段守卫，不要在本地再抄一份清单。
+        from overseas_costing.services import batch_service
+
         fields = list(
             dict.fromkeys(
                 ["name", "row_no", "excel_row_no", "stable_line_key", "source_doc_no", "dingtalk_instance_id"]
-                + list(MATERIAL_SOURCE_FIELDS)
+                + batch_service._persistent_item_fieldnames(MATERIAL_SOURCE_FIELDS)
                 + ["actual_shipped_qty_mode", "actual_shipped_qty_source_revision", "extra_json", "unit"]
             )
         )
