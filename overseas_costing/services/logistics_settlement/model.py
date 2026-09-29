@@ -8,7 +8,7 @@ import unicodedata
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 
-PARSER_VERSION = 'logistics-settlement-2'
+PARSER_VERSION = 'logistics-settlement-3'
 
 
 def dumps(value):

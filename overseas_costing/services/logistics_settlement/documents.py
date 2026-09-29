@@ -11,6 +11,11 @@ from .model import PARSER_VERSION, digest, dumps, norm, number, pick
 COMPLETE_GOODS = {'完整货物明细', '全部货物明细', '完整货物清单', 'listacompletademercancias'}
 COMPLETE_FEES = {'完整费用明细', '费用结算明细', 'desglosetotaldegastos'}
 PACKING_LABELS = ('装箱', 'packing', 'empaque')
+# 表头锚点：归一化后精确相等的列名。'总个数'/'总价人民币' 来自通用装箱单模板（核算系统）.xlsx
+# 的「总个数」「总价(人民币)」列——旧集合只认 数量/cantidad/金额/importe/monto，
+# 导致该模板 tables=[] 被判「未识别出可核对的明细表」而打入仅审计。
+HEADER_ANCHOR_LABELS = {'数量', 'cantidad', '数量cantidad', '金额', 'importe', 'monto', '金额importe',
+                        '总个数', '总价', '总价人民币'}
 
 
 def _xlsx_display_value(cell):
@@ -61,7 +66,7 @@ def parse_document(content, file_name):
     tables = []
     for title, rows in sheets:
         nonempty = [(i, list(r)) for i, r in enumerate(rows, 1) if any(v is not None and str(v).strip() for v in r)]
-        header_pos = next((i for i, (_, values) in enumerate(nonempty[:30]) if any(norm(v) in {'数量','cantidad','数量cantidad','金额','importe','monto','金额importe'} for v in values)), None)
+        header_pos = next((i for i, (_, values) in enumerate(nonempty[:30]) if any(norm(v) in HEADER_ANCHOR_LABELS for v in values)), None)
         if header_pos is None:
             continue
         header = [str(v or '').strip() for v in nonempty[header_pos][1]]

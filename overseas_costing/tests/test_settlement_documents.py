@@ -18,6 +18,28 @@ def test_full_original_sheet_has_complete_rows_but_partial_sheet_does_not():
     assert not parse_document(workbook('货物片段',rows),'cargo.xlsx')['tables'][0]['complete']
 
 
+def test_generic_packing_template_is_recognized_as_packing_table():
+    """通用装箱单模板（核算系统）.xlsx 的数量/金额列是「总个数」「总价(人民币)」，
+    旧锚点集合只认 数量/cantidad/金额/importe，导致该模板 tables=[] 被判
+    「未识别出可核对的明细表」而打入仅审计 + Other。必须能识别为 packing 表。"""
+
+    from overseas_costing.services.logistics_settlement.documents import parse_document
+    rows=[
+        ['对应钉钉采购订单号','品目编码Item code','中文品名','单价(人民币)','总个数','总净重(kg)','总价(人民币)'],
+        ['202609221705000543719','FL004116','笔式万用表',25,50,12.35,1250],
+        ['202607090338000050291','FL000817','文件夹',0.62,210,6.5,130.2],
+    ]
+    result=parse_document(workbook('装箱单主表',rows),'通用装箱单模板（核算系统）.xlsx')
+
+    assert result['tables'], result['issues']
+    assert result['issues']==[]
+    first=result['tables'][0]
+    assert first['kind']=='packing'
+    assert len(first['rows'])==2
+    labels={cell['name'] for cell in first['rows'][0]['rowValue']}
+    assert '总个数' in labels and '总价(人民币)' in labels
+
+
 def test_cached_attachment_is_not_redownloaded_or_reparsed(store):
     from overseas_costing.services.logistics_settlement.documents import enrich_raw
     data=workbook('完整货物明细',[['物料编码','数量','单位'],['A',2,'件']])
