@@ -790,7 +790,7 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 
 	assert.match(
 		hooks,
-		/app_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_navigation\.css\?v=0\.0\.9"/
+		/app_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_navigation\.css\?v=0\.0\.10"/
 	);
 	assert.ok(hooks.indexOf(modelAsset) < hooks.indexOf(interfaceModeAsset));
 	assert.ok(hooks.indexOf(interfaceModeAsset) < hooks.indexOf(lifecycleAsset));
@@ -1295,6 +1295,10 @@ test("uses the approved readable palette, pending shell, and thin transparent sc
 	assert.match(
 		stylesheet,
 		/html\.dlp-interface-mode-dl-pending[\s\S]*\.desktop-container[\s\S]*visibility:\s*hidden\s*!important/
+	);
+	assert.match(
+		stylesheet,
+		/html\.dlp-interface-mode-dl-pending\s+body\s+\.centered\.splash\s*\{[^}]*display:\s*none\s*!important/i
 	);
 	assert.match(navigationRow || "", /color:\s*#c1d0df/i);
 	assert.match(nativeAnchor || "", /color:\s*#afbfce/i);
