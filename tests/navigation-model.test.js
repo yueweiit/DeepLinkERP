@@ -1254,7 +1254,7 @@ test("scopes the dark shell, full-row active state, focus ring, and mobile overf
 	const activeChevron = stylesheet.match(
 		/\.dlp-mes-navigation__group--open\s*>\s*\.dlp-mes-navigation__row\s+\.dlp-mes-navigation__chevron\s*,\s*body\.dlp-mes-navigation-enabled[^{}]*\.dlp-mes-navigation__group--self-active\s*>\s*\.dlp-mes-navigation__row\s+\.dlp-mes-navigation__chevron\s*\{([^}]*)\}/
 	)?.[1];
-	assert.match(chevron || "", /color:\s*#c7d4e3/i);
+	assert.match(chevron || "", /color:\s*#d0dbe6/i);
 	assert.match(chevron || "", /opacity:\s*1\s*!important/);
 	assert.match(chevron || "", /width:\s*36px/);
 	assert.match(chevron || "", /height:\s*36px/);
@@ -1268,6 +1268,47 @@ test("scopes the dark shell, full-row active state, focus ring, and mobile overf
 	assert.match(
 		stylesheet,
 		/@media\s*\(min-width:\s*768px\)[\s\S]*body\.dlp-mes-navigation-enabled\s+\.body-sidebar-container\s*\{[^}]*display:\s*flex\s*!important/i
+	);
+});
+
+test("uses the approved readable palette, pending shell, and thin transparent scrollbar", () => {
+	const stylesheet = fs.readFileSync(
+		path.join(
+			__dirname,
+			"..",
+			"deeplinkerp_branding",
+			"public",
+			"css",
+			"deeplinkerp_navigation.css"
+		),
+		"utf8"
+	);
+	const navigationRow = stylesheet.match(
+		/body\.dlp-mes-navigation-enabled[^{}]*\.dlp-mes-navigation__row\s*\{([^}]*)\}/
+	)?.[1];
+	const nativeAnchor = stylesheet.match(
+		/body\.dlp-mes-navigation-enabled[^{}]*\.sidebar-items\s+\.item-anchor\s*\{([^}]*)\}/
+	)?.[1];
+
+	assert.match(stylesheet, /html\.dlp-interface-mode-dl-pending\s+body::before/);
+	assert.match(stylesheet, /html\.dlp-interface-mode-dl-pending\s+body::after/);
+	assert.match(
+		stylesheet,
+		/html\.dlp-interface-mode-dl-pending[\s\S]*\.desktop-container[\s\S]*visibility:\s*hidden\s*!important/
+	);
+	assert.match(navigationRow || "", /color:\s*#c1d0df/i);
+	assert.match(nativeAnchor || "", /color:\s*#afbfce/i);
+	assert.match(stylesheet, /\.standard-items-sections[\s\S]*#9fb4c8/i);
+	assert.match(stylesheet, /\.avatar-name-email[\s\S]*#d8e3ed/i);
+	assert.match(stylesheet, /scrollbar-width:\s*thin/);
+	assert.match(stylesheet, /scrollbar-color:[^;]*transparent/);
+	assert.match(
+		stylesheet,
+		/\.body-sidebar-top::-webkit-scrollbar\s*\{[^}]*width:\s*6px/i
+	);
+	assert.match(
+		stylesheet,
+		/\.body-sidebar-top::-webkit-scrollbar-track\s*\{[^}]*background:\s*transparent/i
 	);
 });
 

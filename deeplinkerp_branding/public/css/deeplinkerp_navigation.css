@@ -1,3 +1,40 @@
+html.dlp-interface-mode-dl-pending body {
+	--sidebar-width: 220px;
+	overflow-x: hidden;
+}
+
+html.dlp-interface-mode-dl-pending body::before {
+	position: fixed;
+	inset: 0 auto 0 0;
+	z-index: 1100;
+	width: var(--sidebar-width);
+	background: #001529;
+	content: "";
+	pointer-events: none;
+}
+
+html.dlp-interface-mode-dl-pending body::after {
+	position: fixed;
+	top: 14px;
+	left: 12px;
+	z-index: 1101;
+	display: flex;
+	align-items: center;
+	height: 28px;
+	padding-left: 38px;
+	background: url("/assets/deeplinkerp_branding/logo/deeplinkerp_logo_radius.png?v=0.0.6") left center / 28px 28px no-repeat;
+	color: #fff;
+	content: "DeepLinkERP";
+	font-size: 15px;
+	font-weight: 600;
+	line-height: 28px;
+	pointer-events: none;
+}
+
+html.dlp-interface-mode-dl-pending body .desktop-container {
+	visibility: hidden !important;
+}
+
 body.dlp-mes-navigation-enabled {
 	--sidebar-width: 220px;
 	overflow-x: hidden;
@@ -62,7 +99,7 @@ body.dlp-mes-navigation-enabled .custom-filters-right-sidebar-flyout {
 body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar {
 	background: #001529;
 	border-right: 0;
-	color: #91a3b7;
+	color: #c1d0df;
 	gap: 8px;
 }
 
@@ -145,6 +182,25 @@ body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .sideba
 body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .body-sidebar-top {
 	padding: 1px 0;
 	overflow-x: hidden;
+	scrollbar-color: rgba(132, 157, 181, 0.68) transparent;
+	scrollbar-width: thin;
+}
+
+body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .body-sidebar-top::-webkit-scrollbar {
+	width: 6px;
+}
+
+body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .body-sidebar-top::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .body-sidebar-top::-webkit-scrollbar-thumb {
+	border-radius: 999px;
+	background: rgba(132, 157, 181, 0.68);
+}
+
+body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .body-sidebar-top::-webkit-scrollbar-thumb:hover {
+	background: rgba(178, 199, 219, 0.82);
 }
 
 body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .dlp-mes-navigation,
@@ -163,7 +219,7 @@ body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .dlp-me
 	border: 0;
 	border-radius: 8px;
 	background: transparent;
-	color: #91a3b7;
+	color: #c1d0df;
 	font: inherit;
 	text-align: left;
 	text-decoration: none;
@@ -234,7 +290,7 @@ body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .dlp-me
 	height: 36px;
 	margin-left: 4px;
 	flex: 0 0 36px;
-	color: #c7d4e3;
+	color: #d0dbe6;
 	opacity: 1 !important;
 	pointer-events: none;
 }
@@ -280,7 +336,7 @@ body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .sideba
 	min-height: 40px;
 	padding: 0 8px;
 	border-radius: 8px;
-	color: #91a3b7;
+	color: #afbfce;
 }
 
 body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .sidebar-items .standard-sidebar-item:not(.active-sidebar):hover {
@@ -303,13 +359,28 @@ body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .sideba
 }
 
 body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .body-sidebar-bottom {
-	color: #91a3b7;
+	color: #9fb4c8;
+}
+
+body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .standard-items-sections .item-anchor,
+body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .standard-items-sections .sidebar-item-label,
+body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .standard-items-sections .sidebar-item-icon,
+body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .standard-items-sections .sidebar-item-suffix,
+body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .body-sidebar-bottom .onboarding-sidebar,
+body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .body-sidebar-bottom .onboarding-sidebar span,
+body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .body-sidebar-bottom .onboarding-sidebar svg,
+body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .body-sidebar-bottom .sidebar-user-button .text-secondary {
+	color: #9fb4c8 !important;
+}
+
+body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .body-sidebar-bottom .sidebar-user-button .avatar-name-email > :first-child {
+	color: #d8e3ed !important;
 }
 
 body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .collapse-sidebar-link {
 	background: #0b2742;
 	border-color: rgba(255, 255, 255, 0.18);
-	color: #91a3b7;
+	color: #d0dbe6;
 }
 
 body.dlp-mes-navigation-enabled .desktop-container > .icons-container {
@@ -406,6 +477,10 @@ body.dlp-mes-navigation-enabled .body-sidebar-container:not(.expanded) .dlp-mes-
 }
 
 @media (max-width: 767.98px) {
+	html.dlp-interface-mode-dl-pending body::before {
+		width: min(var(--sidebar-width), 84vw);
+	}
+
 	body.dlp-mes-navigation-enabled {
 		overflow-x: hidden;
 	}
