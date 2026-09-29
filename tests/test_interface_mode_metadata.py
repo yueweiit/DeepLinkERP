@@ -56,6 +56,11 @@ class InterfaceModeMetadataTest(unittest.TestCase):
 
 	def test_existing_settings_workspace_adds_one_interface_shortcut(self):
 		workspace = json.loads(WORKSPACE_JSON.read_text())
+		self.assertGreater(
+			workspace["modified"],
+			"2026-05-15 10:56:57.907043",
+			"changed standard Workspace JSON needs a newer timestamp so bench migrate imports it",
+		)
 		shortcuts = [
 			shortcut
 			for shortcut in workspace["shortcuts"]

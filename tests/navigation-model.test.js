@@ -410,7 +410,7 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 
 	assert.match(
 		hooks,
-		/app_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_navigation\.css\?v=0\.0\.6"/
+		/app_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_navigation\.css\?v=0\.0\.7"/
 	);
 	assert.ok(hooks.indexOf(modelAsset) < hooks.indexOf(interfaceModeAsset));
 	assert.ok(hooks.indexOf(interfaceModeAsset) < hooks.indexOf(lifecycleAsset));
@@ -758,6 +758,10 @@ test("scopes the dark shell, full-row active state, focus ring, and mobile overf
 	assert.match(chevronSvg || "", /width:\s*18px/);
 	assert.match(chevronSvg || "", /height:\s*18px/);
 	assert.match(activeChevron || "", /color:\s*#fff/i);
+	assert.match(
+		stylesheet,
+		/@media\s*\(min-width:\s*768px\)[\s\S]*body\.dlp-mes-navigation-enabled\s+\.body-sidebar-container\s*\{[^}]*display:\s*flex\s*!important/i
+	);
 });
 
 test("expands the root Desktop grid and keeps enhanced entries compact and horizontal", () => {
