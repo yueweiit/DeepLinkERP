@@ -493,6 +493,64 @@ test("uses the translated native workspace heading when boot sidebar items are a
 	assert.equal(model.activeItem.isOpen, true);
 });
 
+test("opens the full folder path and hosts live third-level items on the translated child workspace", () => {
+	const buildNavigationModel = productionFunction("buildNavigationModel");
+	const desktopIcons = [
+		{ label: "DLP Framework", icon_type: "Folder" },
+		{
+			label: "Build",
+			translated_label: "构建",
+			parent_icon: "DLP Framework",
+			navigation_route: "/desk/build",
+		},
+	];
+
+	const model = buildNavigationModel({
+		desktopIcons,
+		workspaceSidebars: { build: { label: "Build", items: [] } },
+		route: "/desk/page",
+		currentSidebar: "DLP Framework",
+		nativeWorkspaceLabel: "构建",
+		nativeActiveItem: { label: "页面", href: "/desk/page" },
+		nativeLeafSelected: true,
+	});
+
+	assert.deepEqual(model.activePathLabels, ["DLP Framework", "Build"]);
+	assert.equal(model.items[0].isOpen, true);
+	assert.equal(model.activeItem.isOpen, true);
+	assert.equal(model.nativeHostKey, model.activeItem.key);
+});
+
+test("observes only the live native items and hidden native header for late Frappe updates", () => {
+	const observeNativeSidebarChanges = productionFunction("observeNativeSidebarChanges");
+	const nativeItems = { name: "items" };
+	const nativeHeader = { name: "header" };
+	const calls = [];
+	const observer = {
+		observe(target, options) {
+			calls.push({ target, options });
+		},
+	};
+
+	observeNativeSidebarChanges(observer, nativeItems, nativeHeader);
+
+	assert.deepEqual(calls, [
+		{
+			target: nativeItems,
+			options: {
+				attributes: true,
+				attributeFilter: ["class", "href"],
+				childList: true,
+				subtree: true,
+			},
+		},
+		{
+			target: nativeHeader,
+			options: { characterData: true, childList: true, subtree: true },
+		},
+	]);
+});
+
 test("keeps an exact workspace parent open without blue when the native leaf is selected", () => {
 	const buildNavigationModel = productionFunction("buildNavigationModel");
 	const desktopIcons = [
@@ -561,9 +619,9 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 	);
 	assert.ok(hooks.indexOf(modelAsset) < hooks.indexOf(interfaceModeAsset));
 	assert.ok(hooks.indexOf(interfaceModeAsset) < hooks.indexOf(lifecycleAsset));
-	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.13/);
+	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.14/);
 	assert.match(hooks, /deeplinkerp_interface_mode\.js\?v=0\.0\.2/);
-	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.21/);
+	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.22/);
 	assert.match(hooks, /web_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_branding\.css"/);
 });
 
@@ -874,6 +932,11 @@ test("integrates the executable lifecycle helpers through the existing single ro
 		lifecycle,
 		/nativeWorkspaceLabel:\s*sidebar\.querySelector\("\.sidebar-header \.header-title"\)/
 	);
+	assert.match(lifecycle, /function bindNativeSidebarObserver\(sidebar, nativeItems\)/);
+	assert.match(lifecycle, /new MutationObserver\(scheduleNativeSidebarRefresh\)/);
+	assert.match(lifecycle, /observeNativeSidebarChanges\(/);
+	assert.match(lifecycle, /bindNativeSidebarObserver\(sidebar, nativeItems\)/);
+	assert.match(lifecycle, /disconnectNativeSidebarObserver\(\)/);
 	assert.doesNotMatch(lifecycle, /cloneNode\(/);
 });
 

@@ -20,6 +20,10 @@
 			: window.innerWidth < 768;
 	let eventsBound = false;
 	let authorizedWorkspaceSidebarSnapshot = null;
+	let nativeSidebarObserver = null;
+	let observedNativeSidebarItems = null;
+	let observedNativeSidebarHeader = null;
+	let nativeSidebarRefreshTimer = null;
 
 	function setFavicon() {
 		document
@@ -264,6 +268,47 @@
 		return authorizedWorkspaceSidebarSnapshot;
 	}
 
+	function scheduleNativeSidebarRefresh() {
+		if (nativeSidebarRefreshTimer !== null) clearTimeout(nativeSidebarRefreshTimer);
+		nativeSidebarRefreshTimer = setTimeout(() => {
+			nativeSidebarRefreshTimer = null;
+			refreshDeskEnhancements();
+		}, 0);
+	}
+
+	function disconnectNativeSidebarObserver() {
+		nativeSidebarObserver?.disconnect();
+		nativeSidebarObserver = null;
+		observedNativeSidebarItems = null;
+		observedNativeSidebarHeader = null;
+		if (nativeSidebarRefreshTimer !== null) {
+			clearTimeout(nativeSidebarRefreshTimer);
+			nativeSidebarRefreshTimer = null;
+		}
+	}
+
+	function bindNativeSidebarObserver(sidebar, nativeItems) {
+		if (typeof MutationObserver !== "function") return;
+		const nativeHeader = sidebar.querySelector(".sidebar-header");
+		if (
+			nativeSidebarObserver &&
+			observedNativeSidebarItems === nativeItems &&
+			observedNativeSidebarHeader === nativeHeader
+		) {
+			return;
+		}
+
+		disconnectNativeSidebarObserver();
+		nativeSidebarObserver = new MutationObserver(scheduleNativeSidebarRefresh);
+		observedNativeSidebarItems = nativeItems;
+		observedNativeSidebarHeader = nativeHeader;
+		DeepLinkERPNavigation.observeNativeSidebarChanges(
+			nativeSidebarObserver,
+			nativeItems,
+			nativeHeader
+		);
+	}
+
 	function makeLineIcon(name, size = "sm") {
 		if (typeof frappe.utils?.icon !== "function") return "";
 		return frappe.utils.icon(name, size, "", "", "dlp-mes-navigation__line-icon", true);
@@ -464,6 +509,7 @@
 		const top = sidebar?.querySelector(".body-sidebar-top");
 		const nativeItems = DeepLinkERPNavigation.claimNativeSidebarItems(sidebar);
 		if (!sidebarContainer || !sidebar || !top || !nativeItems) return;
+		bindNativeSidebarObserver(sidebar, nativeItems);
 		bindRenderedSidebarLinks(nativeItems);
 
 		document.body.classList.add("dlp-mes-navigation-enabled");
@@ -539,6 +585,7 @@
 	}
 
 	function disableDLEnhancements() {
+		disconnectNativeSidebarObserver();
 		const navigation = document.querySelector(".dlp-mes-navigation");
 		const top = navigation?.closest(".body-sidebar-top");
 		const sidebar = navigation?.closest(".body-sidebar");

@@ -100,6 +100,23 @@
 		return nativeItems;
 	}
 
+	function observeNativeSidebarChanges(observer, nativeItems, nativeHeader) {
+		observer.observe(nativeItems, {
+			attributes: true,
+			attributeFilter: ["class", "href"],
+			childList: true,
+			subtree: true,
+		});
+		if (nativeHeader) {
+			observer.observe(nativeHeader, {
+				characterData: true,
+				childList: true,
+				subtree: true,
+			});
+		}
+		return observer;
+	}
+
 	function bindNativeSidebarClose(
 		link,
 		{ isNarrowViewport, closeSidebar, preserveDesktopExpansion = () => {} }
@@ -493,6 +510,7 @@
 		collectDisclosureState,
 		getNavigationIcon,
 		normalizeRoute,
+		observeNativeSidebarChanges,
 		projectAuthorizedDesktopIcons,
 		rememberDesktopSidebarExpansion,
 		replaceNavigationRoot,
