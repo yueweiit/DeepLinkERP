@@ -4317,6 +4317,8 @@ def test_backfill_oa_item_details_from_raw_reads_row_snapshot(monkeypatch) -> No
         "recipient": "",
         "quantity": 0.0,
         "unit": "",
+        "category": "",
+        "purchase_currency": "",
         "gross_weight_kg": 0.0,
         "goods_value": 0.0,
         "raw_excel_json": json.dumps(
@@ -4327,6 +4329,8 @@ def test_backfill_oa_item_details_from_raw_reads_row_snapshot(monkeypatch) -> No
                 "重量 Peso": "12.85",
                 "单位Unidad": "个",
                 "货值Valor de mercancía": "1250",
+                "币种Moneda": "人民币RMB",
+                "物料类别TIPO": "Material物料",
             },
             ensure_ascii=False,
         ),
@@ -4364,6 +4368,8 @@ def test_backfill_oa_item_details_from_raw_reads_row_snapshot(monkeypatch) -> No
     assert written["ITEM-001"]["gross_weight_kg"] == 12.85
     assert written["ITEM-001"]["goods_value"] == 1250.0
     assert written["ITEM-001"]["product_name"] == "笔式万用表"
+    assert written["ITEM-001"]["purchase_currency"] == "人民币RMB"
+    assert written["ITEM-001"]["category"] == "Material物料"
 
 
 def test_backfill_oa_item_details_from_raw_falls_back_to_batch_form(monkeypatch) -> None:

@@ -3174,6 +3174,8 @@ def backfill_oa_item_details_from_raw(batch_name: str | None = None, *, dry_run:
             "recipient",
             "quantity",
             "unit",
+            "category",
+            "purchase_currency",
             "gross_weight_kg",
             "goods_value",
             "raw_excel_json",
@@ -3233,7 +3235,7 @@ def backfill_oa_item_details_from_raw(batch_name: str | None = None, *, dry_run:
         current_unit = normalize_unit(row.get("unit"))
         if source_unit and source_unit != current_unit:
             updates["unit"] = source_unit
-        for fieldname in ("product_name", "product_name_es", "spec_model", "recipient"):
+        for fieldname in ("product_name", "product_name_es", "spec_model", "recipient", "category", "purchase_currency"):
             source_value = mapped.get(fieldname)
             current_value = row.get(fieldname)
             if source_value not in (None, "") and str(source_value or "").strip() != str(current_value or "").strip():
