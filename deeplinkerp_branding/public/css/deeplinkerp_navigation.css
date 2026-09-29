@@ -118,8 +118,8 @@ body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .dlp-me
 }
 
 body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .dlp-mes-navigation__group--open > .dlp-mes-navigation__row {
-	background: #fff;
-	color: #001529;
+	background: transparent;
+	color: #fff;
 }
 
 body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .dlp-mes-navigation__group--self-active > .dlp-mes-navigation__row {

@@ -223,10 +223,12 @@
 	}
 
 	function getDesktopIcons() {
+		const authorizedIcons = frappe.boot.desktop_icons || [];
+		let runtimeLayout = frappe.desktop_icons || authorizedIcons;
 		if (frappe.pages?.desktop?.desktop_page?.edit_mode && Array.isArray(frappe.new_desktop_icons)) {
-			return frappe.new_desktop_icons;
+			runtimeLayout = frappe.new_desktop_icons;
 		}
-		return frappe.desktop_icons || frappe.boot.desktop_icons || [];
+		return DeepLinkERPNavigation.projectAuthorizedDesktopIcons(authorizedIcons, runtimeLayout);
 	}
 
 	function getIconsWithRoutes() {
@@ -253,6 +255,10 @@
 			fallback.className = "dlp-mes-navigation__brand-fallback";
 			fallback.href = "/desk";
 			fallback.setAttribute("aria-label", "DeepLinkERP Desktop");
+			DeepLinkERPNavigation.bindNativeSidebarClose(fallback, {
+				isMobile: () => frappe.is_mobile(),
+				closeSidebar: () => frappe.app.sidebar.close(),
+			});
 
 			const image = document.createElement("img");
 			image.src = BrandLogoURL;
@@ -291,6 +297,10 @@
 		row.className = "dlp-mes-navigation__row";
 		if (route) {
 			row.href = route;
+			DeepLinkERPNavigation.bindNativeSidebarClose(row, {
+				isMobile: () => frappe.is_mobile(),
+				closeSidebar: () => frappe.app.sidebar.close(),
+			});
 		} else {
 			row.type = "button";
 		}
@@ -382,26 +392,25 @@
 			currentSidebar: frappe.app.sidebar.sidebar_title || "",
 		});
 
-		// Keep Frappe's live node and its handlers; only relocate it before replacing our shell.
-		top.appendChild(nativeItems);
-		top.querySelectorAll(":scope > .dlp-mes-navigation").forEach((element) => element.remove());
-
-		const navigation = document.createElement("nav");
-		navigation.className = "dlp-mes-navigation";
-		navigation.setAttribute("aria-label", translate("Modules"));
-		model.items.forEach((item) => {
-			navigation.appendChild(
-				renderNavigationItem(item, nativeItems, model.nativeHostKey)
-			);
+		// Keep Frappe's live node and its handlers while replacing only our shell.
+		DeepLinkERPNavigation.replaceNavigationRoot(top, nativeItems, () => {
+			const navigation = document.createElement("nav");
+			navigation.className = "dlp-mes-navigation";
+			navigation.setAttribute("aria-label", translate("Modules"));
+			model.items.forEach((item) => {
+				navigation.appendChild(
+					renderNavigationItem(item, nativeItems, model.nativeHostKey)
+				);
+			});
+			if (!model.nativeHostKey) {
+				const nativeParking = document.createElement("div");
+				nativeParking.className = "dlp-mes-navigation__native-parking";
+				nativeParking.hidden = true;
+				nativeParking.appendChild(nativeItems);
+				navigation.appendChild(nativeParking);
+			}
+			return navigation;
 		});
-		if (!model.nativeHostKey) {
-			const nativeParking = document.createElement("div");
-			nativeParking.className = "dlp-mes-navigation__native-parking";
-			nativeParking.hidden = true;
-			nativeParking.appendChild(nativeItems);
-			navigation.appendChild(nativeParking);
-		}
-		top.prepend(navigation);
 		updateNativeLeafAccessibility(nativeItems);
 	}
 

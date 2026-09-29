@@ -46,6 +46,56 @@
 		return ICONS[normalized] || "layout-grid";
 	}
 
+	function desktopIconKey(icon) {
+		return normalizeIdentity(icon && (icon.name || icon.label));
+	}
+
+	function projectAuthorizedDesktopIcons(authorizedIcons, runtimeLayout) {
+		const authorized = new Map();
+		(authorizedIcons || []).forEach((icon) => {
+			const key = desktopIconKey(icon);
+			if (key && !authorized.has(key)) authorized.set(key, icon);
+		});
+
+		const projected = [];
+		const included = new Set();
+		(runtimeLayout || []).forEach((layoutIcon) => {
+			const key = desktopIconKey(layoutIcon);
+			const trustedIcon = authorized.get(key);
+			if (!trustedIcon || included.has(key)) return;
+
+			const icon = { ...trustedIcon };
+			["idx", "hidden", "parent_icon"].forEach((field) => {
+				if (Object.prototype.hasOwnProperty.call(layoutIcon, field)) {
+					icon[field] = layoutIcon[field];
+				}
+			});
+			projected.push(icon);
+			included.add(key);
+		});
+
+		for (const [key, icon] of authorized) {
+			if (!included.has(key)) projected.push({ ...icon });
+		}
+		return projected;
+	}
+
+	function replaceNavigationRoot(top, nativeItems, buildNavigation) {
+		top.appendChild(nativeItems);
+		Array.from(top.children)
+			.filter((element) => element.classList.contains("dlp-mes-navigation"))
+			.forEach((element) => element.remove());
+		const navigation = buildNavigation(nativeItems);
+		top.prepend(navigation);
+		return navigation;
+	}
+
+	function bindNativeSidebarClose(link, { isMobile, closeSidebar }) {
+		link.addEventListener("click", () => {
+			if (isMobile()) closeSidebar();
+		});
+	}
+
 	function normalizePath(pathname) {
 		let path = pathname || "/desk";
 		try {
@@ -202,9 +252,12 @@
 	}
 
 	return Object.freeze({
+		bindNativeSidebarClose,
 		buildNavigationModel,
 		buildNavigationTree,
 		getNavigationIcon,
 		normalizeRoute,
+		projectAuthorizedDesktopIcons,
+		replaceNavigationRoot,
 	});
 });

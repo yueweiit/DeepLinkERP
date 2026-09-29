@@ -18,6 +18,53 @@ function productionFunction(name) {
 	return navigation[name];
 }
 
+class FakeClassList {
+	constructor(names = []) {
+		this.names = new Set(names);
+	}
+
+	contains(name) {
+		return this.names.has(name);
+	}
+}
+
+class FakeElement {
+	constructor(classes = []) {
+		this.children = [];
+		this.classList = new FakeClassList(classes);
+		this.parentElement = null;
+		this.listeners = {};
+	}
+
+	appendChild(child) {
+		child.remove();
+		this.children.push(child);
+		child.parentElement = this;
+		return child;
+	}
+
+	prepend(child) {
+		child.remove();
+		this.children.unshift(child);
+		child.parentElement = this;
+		return child;
+	}
+
+	remove() {
+		if (!this.parentElement) return;
+		this.parentElement.children = this.parentElement.children.filter((child) => child !== this);
+		this.parentElement = null;
+	}
+
+	addEventListener(type, listener) {
+		this.listeners[type] = listener;
+	}
+
+	dispatch(type) {
+		this.listeners[type]?.({ currentTarget: this });
+	}
+}
+
 test("maps the approved MES line icons and keeps a deterministic fallback", () => {
 	const getNavigationIcon = productionFunction("getNavigationIcon");
 	const labels = [
@@ -86,6 +133,73 @@ test("builds the visible desktop tree in source order without mutating boot data
 	);
 	assert.deepEqual(second, first, "the model must be idempotent");
 	assert.deepEqual(icons, snapshot, "boot data must remain authoritative and unmodified");
+});
+
+test("projects stale runtime layout onto the boot authorization whitelist", () => {
+	const projectAuthorizedDesktopIcons = productionFunction("projectAuthorizedDesktopIcons");
+	const authorized = [
+		{ name: "Stock", label: "Stock", link: "/desk/stock", idx: 1, hidden: 0 },
+		{ name: "Operations", label: "Operations", icon_type: "Folder", idx: 2, hidden: 0 },
+		{ name: "Selling", label: "Selling", link: "/desk/selling", idx: 3, hidden: 0 },
+	];
+	const runtimeLayout = [
+		{ name: "Unauthorized", label: "Unauthorized", link: "/desk/secret", idx: 0 },
+		{
+			name: "Stock",
+			label: "Tampered Stock",
+			link: "https://invalid.example",
+			idx: 9,
+			hidden: 1,
+			parent_icon: "Operations",
+		},
+		{ name: "Operations", label: "Old Operations", idx: 1, hidden: 0 },
+		{ name: "Stock", label: "Duplicate Stock", idx: 10 },
+	];
+	const authorizedSnapshot = structuredClone(authorized);
+
+	const projected = projectAuthorizedDesktopIcons(authorized, runtimeLayout);
+
+	assert.deepEqual(projected.map((icon) => icon.name), ["Stock", "Operations", "Selling"]);
+	assert.equal(projected.some((icon) => icon.name === "Unauthorized"), false);
+	assert.deepEqual(
+		projected[0],
+		{
+			name: "Stock",
+			label: "Stock",
+			link: "/desk/stock",
+			idx: 9,
+			hidden: 1,
+			parent_icon: "Operations",
+		},
+		"only layout fields may override trusted boot metadata"
+	);
+	assert.deepEqual(authorized, authorizedSnapshot, "the authorization whitelist must not be mutated");
+});
+
+test("projects unsaved edit-state order, visibility, and folder placement without admitting new icons", () => {
+	const projectAuthorizedDesktopIcons = productionFunction("projectAuthorizedDesktopIcons");
+	const authorized = [
+		{ name: "Stock", label: "Stock", idx: 1, hidden: 0 },
+		{ name: "Operations", label: "Operations", icon_type: "Folder", idx: 2, hidden: 0 },
+		{ name: "Selling", label: "Selling", idx: 3, hidden: 0 },
+	];
+	const editState = [
+		{ name: "Selling", label: "Selling", idx: 0, hidden: 1, parent_icon: "Operations" },
+		{ name: "Draft Only", label: "Draft Only", idx: 1, hidden: 0 },
+		{ name: "Operations", label: "Operations", idx: 2, hidden: 0 },
+	];
+
+	const projected = projectAuthorizedDesktopIcons(authorized, editState);
+
+	assert.deepEqual(projected.map((icon) => icon.name), ["Selling", "Operations", "Stock"]);
+	assert.deepEqual(
+		projected.map(({ name, idx, hidden, parent_icon = "" }) => [name, idx, hidden, parent_icon]),
+		[
+			["Selling", 0, 1, "Operations"],
+			["Operations", 2, 0, ""],
+			["Stock", 1, 0, ""],
+		]
+	);
 });
 
 test("normalizes direct, refreshed, and sidebar-qualified Desk routes", () => {
@@ -159,12 +273,68 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 	const modelAsset = "/assets/deeplinkerp_branding/js/deeplinkerp_navigation.js";
 	const lifecycleAsset = "/assets/deeplinkerp_branding/js/deeplinkerp_branding.js";
 
-	assert.match(hooks, /app_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_navigation\.css/);
+	assert.match(
+		hooks,
+		/app_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_navigation\.css\?v=0\.0\.2"/
+	);
 	assert.ok(hooks.indexOf(modelAsset) < hooks.indexOf(lifecycleAsset));
+	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.2/);
+	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.9/);
 	assert.match(hooks, /web_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_branding\.css"/);
 });
 
-test("renders through the existing lifecycle and moves rather than clones the native sidebar", () => {
+test("mounts repeated route renders with one root and the same native sidebar node", () => {
+	const replaceNavigationRoot = productionFunction("replaceNavigationRoot");
+	const top = new FakeElement();
+	const nativeItems = new FakeElement(["sidebar-items"]);
+	top.appendChild(nativeItems);
+
+	const firstRoot = replaceNavigationRoot(top, nativeItems, () => {
+		const root = new FakeElement(["dlp-mes-navigation"]);
+		root.appendChild(nativeItems);
+		return root;
+	});
+	const secondRoot = replaceNavigationRoot(top, nativeItems, () => {
+		const root = new FakeElement(["dlp-mes-navigation"]);
+		root.appendChild(nativeItems);
+		return root;
+	});
+
+	assert.notEqual(secondRoot, firstRoot);
+	assert.equal(
+		top.children.filter((child) => child.classList.contains("dlp-mes-navigation")).length,
+		1
+	);
+	assert.equal(nativeItems.parentElement, secondRoot);
+	assert.equal(secondRoot.children[0], nativeItems, "the live native node identity must be preserved");
+});
+
+test("custom mobile navigation links close through the native sidebar contract", () => {
+	const bindNativeSidebarClose = productionFunction("bindNativeSidebarClose");
+	const link = new FakeElement();
+	let closeCalls = 0;
+	bindNativeSidebarClose(link, {
+		isMobile: () => true,
+		closeSidebar: () => {
+			closeCalls += 1;
+		},
+	});
+
+	link.dispatch("click");
+	assert.equal(closeCalls, 1);
+
+	const desktopLink = new FakeElement();
+	bindNativeSidebarClose(desktopLink, {
+		isMobile: () => false,
+		closeSidebar: () => {
+			closeCalls += 1;
+		},
+	});
+	desktopLink.dispatch("click");
+	assert.equal(closeCalls, 1, "desktop navigation must not collapse the sidebar");
+});
+
+test("integrates the executable lifecycle helpers through the existing single router binding", () => {
 	const lifecycle = fs.readFileSync(
 		path.join(
 			__dirname,
@@ -180,7 +350,9 @@ test("renders through the existing lifecycle and moves rather than clones the na
 	assert.equal((lifecycle.match(/frappe\.router\.on\("change"/g) || []).length, 1);
 	assert.match(lifecycle, /function renderPersistentNavigation\(/);
 	assert.match(lifecycle, /refreshDeskEnhancements[\s\S]*renderPersistentNavigation\(\)/);
-	assert.match(lifecycle, /appendChild\(nativeItems\)/);
+	assert.match(lifecycle, /projectAuthorizedDesktopIcons\(/);
+	assert.match(lifecycle, /replaceNavigationRoot\(/);
+	assert.match(lifecycle, /bindNativeSidebarClose\(/);
 	assert.doesNotMatch(lifecycle, /cloneNode\(/);
 });
 
@@ -202,4 +374,14 @@ test("scopes the dark shell, full-row active state, focus ring, and mobile overf
 	assert.match(stylesheet, /:focus-visible/);
 	assert.match(stylesheet, /@media\s*\(max-width:/);
 	assert.match(stylesheet, /overflow-x:\s*hidden/);
+	const openParent = stylesheet.match(
+		/\.dlp-mes-navigation__group--open\s*>\s*\.dlp-mes-navigation__row\s*\{([^}]*)\}/
+	)?.[1];
+	const activeItem = stylesheet.match(
+		/\.dlp-mes-navigation__group--self-active\s*>\s*\.dlp-mes-navigation__row\s*\{([^}]*)\}/
+	)?.[1];
+	assert.match(openParent || "", /background:\s*transparent/);
+	assert.match(openParent || "", /color:\s*#fff/i);
+	assert.match(activeItem || "", /background:\s*#1677ff/i);
+	assert.match(activeItem || "", /color:\s*#fff/i);
 });
