@@ -13,6 +13,7 @@
 	const getSettingsName = () => translate(DeeplinkERPSettingsName);
 	const getFrameworkName = () => translate(DLPFrameworkName);
 	const FaviconURL = "/assets/deeplinkerp_branding/logo/tab_logo.svg?v=0.0.6";
+	const BrandLogoURL = "/assets/deeplinkerp_branding/logo/deeplinkerp_logo_radius.png?v=0.0.6";
 	let eventsBound = false;
 
 	function setFavicon() {
@@ -221,9 +222,214 @@
 		frappe.ui.Sidebar.prototype.__deeplinkerpPatched = true;
 	}
 
+	function getDesktopIcons() {
+		if (frappe.pages?.desktop?.desktop_page?.edit_mode && Array.isArray(frappe.new_desktop_icons)) {
+			return frappe.new_desktop_icons;
+		}
+		return frappe.desktop_icons || frappe.boot.desktop_icons || [];
+	}
+
+	function getIconsWithRoutes() {
+		return getDesktopIcons().map((icon) => ({
+			...icon,
+			navigation_route:
+				typeof frappe.utils?.get_route_for_icon === "function"
+					? frappe.utils.get_route_for_icon(icon)
+					: icon.link || icon.url || "",
+		}));
+	}
+
+	function makeLineIcon(name, size = "sm") {
+		if (typeof frappe.utils?.icon !== "function") return "";
+		return frappe.utils.icon(name, size, "", "", "dlp-mes-navigation__line-icon", true);
+	}
+
+	function ensureBrandHeader(sidebar) {
+		const nativeHeader = sidebar.querySelector(".sidebar-header");
+		const fallbackHeader = sidebar.querySelector(".dlp-mes-navigation__brand-fallback");
+		if (!nativeHeader) {
+			if (fallbackHeader) return;
+			const fallback = document.createElement("a");
+			fallback.className = "dlp-mes-navigation__brand-fallback";
+			fallback.href = "/desk";
+			fallback.setAttribute("aria-label", "DeepLinkERP Desktop");
+
+			const image = document.createElement("img");
+			image.src = BrandLogoURL;
+			image.alt = "";
+			fallback.appendChild(image);
+
+			const label = document.createElement("span");
+			label.textContent = "DeepLinkERP";
+			fallback.appendChild(label);
+			sidebar.prepend(fallback);
+			return;
+		}
+
+		fallbackHeader?.remove();
+		nativeHeader.classList.add("dlp-mes-navigation__brand");
+		nativeHeader.setAttribute("aria-label", "DeepLinkERP menu");
+		const title = nativeHeader.querySelector(".header-title");
+		if (title) title.textContent = "DeepLinkERP";
+		const subtitle = nativeHeader.querySelector(".header-subtitle");
+		if (subtitle) subtitle.textContent = "";
+		const logo = nativeHeader.querySelector(".header-logo");
+		if (logo && logo.dataset.dlpBrandLogo !== BrandLogoURL) {
+			logo.replaceChildren();
+			const image = document.createElement("img");
+			image.src = BrandLogoURL;
+			image.alt = "";
+			logo.appendChild(image);
+			logo.dataset.dlpBrandLogo = BrandLogoURL;
+		}
+	}
+
+	function makeNavigationRow(item) {
+		const hasChildren = item.children.length > 0 || item.hasNativeChildren;
+		const route = item.navigation_route || item.route || item.link || item.url;
+		const row = document.createElement(route ? "a" : "button");
+		row.className = "dlp-mes-navigation__row";
+		if (route) {
+			row.href = route;
+		} else {
+			row.type = "button";
+		}
+		if (hasChildren) row.setAttribute("aria-expanded", String(item.isOpen));
+		if (item.isSelfActive) row.setAttribute("aria-current", "page");
+
+		const icon = document.createElement("span");
+		icon.className = "dlp-mes-navigation__icon";
+		icon.innerHTML = makeLineIcon(DeepLinkERPNavigation.getNavigationIcon(item.label));
+		row.appendChild(icon);
+
+		const label = document.createElement("span");
+		label.className = "dlp-mes-navigation__label";
+		label.textContent = translate(item.label);
+		row.appendChild(label);
+
+		if (hasChildren) {
+			const chevron = document.createElement("span");
+			chevron.className = "dlp-mes-navigation__chevron";
+			chevron.innerHTML = makeLineIcon(item.isOpen ? "chevron-down" : "chevron-right");
+			row.appendChild(chevron);
+		}
+		return row;
+	}
+
+	function renderNavigationItem(item, nativeItems, nativeHostKey, depth = 0) {
+		const group = document.createElement("div");
+		group.className = "dlp-mes-navigation__group";
+		group.dataset.navigationKey = item.key;
+		group.style.setProperty("--dlp-navigation-depth", depth);
+		if (item.isOpen) group.classList.add("dlp-mes-navigation__group--open");
+		if (item.isSelfActive) group.classList.add("dlp-mes-navigation__group--self-active");
+
+		const row = makeNavigationRow(item);
+		group.appendChild(row);
+		const needsBranch = item.children.length > 0 || item.key === nativeHostKey;
+		if (!needsBranch) return group;
+
+		const branch = document.createElement("div");
+		branch.className = "dlp-mes-navigation__children";
+		branch.hidden = !item.isOpen;
+		item.children.forEach((child) => {
+			branch.appendChild(renderNavigationItem(child, nativeItems, nativeHostKey, depth + 1));
+		});
+		if (item.key === nativeHostKey) {
+			branch.appendChild(nativeItems);
+		}
+		group.appendChild(branch);
+
+		if (!item.navigation_route && !item.route && !item.link && !item.url) {
+			row.addEventListener("click", () => {
+				const open = row.getAttribute("aria-expanded") !== "true";
+				row.setAttribute("aria-expanded", String(open));
+				branch.hidden = !open;
+				group.classList.toggle("dlp-mes-navigation__group--open", open);
+				const chevron = row.querySelector(".dlp-mes-navigation__chevron");
+				if (chevron) chevron.innerHTML = makeLineIcon(open ? "chevron-down" : "chevron-right");
+			});
+		}
+		return group;
+	}
+
+	function updateNativeLeafAccessibility(nativeItems) {
+		nativeItems.querySelectorAll(".item-anchor").forEach((anchor) => {
+			anchor.removeAttribute("aria-current");
+			if (anchor.closest(".standard-sidebar-item")?.classList.contains("active-sidebar")) {
+				anchor.setAttribute("aria-current", "page");
+			}
+		});
+	}
+
+	function renderPersistentNavigation() {
+		if (!window.frappe?.boot || !window.DeepLinkERPNavigation || !frappe.app?.sidebar) return;
+		const sidebarContainer = frappe.app.sidebar.wrapper?.[0] || document.querySelector(".body-sidebar-container");
+		const sidebar = sidebarContainer?.querySelector(".body-sidebar");
+		const top = sidebar?.querySelector(".body-sidebar-top");
+		const nativeItems = sidebar?.querySelector(".sidebar-items");
+		if (!sidebarContainer || !sidebar || !top || !nativeItems) return;
+
+		document.body.classList.add("dlp-mes-navigation-enabled");
+		sidebar.classList.add("dlp-mes-navigation-sidebar");
+		sidebarContainer.style.removeProperty("display");
+		ensureBrandHeader(sidebar);
+
+		const model = DeepLinkERPNavigation.buildNavigationModel({
+			desktopIcons: getIconsWithRoutes(),
+			workspaceSidebars: frappe.boot.workspace_sidebar_item || {},
+			route: window.location.href,
+			currentSidebar: frappe.app.sidebar.sidebar_title || "",
+		});
+
+		// Keep Frappe's live node and its handlers; only relocate it before replacing our shell.
+		top.appendChild(nativeItems);
+		top.querySelectorAll(":scope > .dlp-mes-navigation").forEach((element) => element.remove());
+
+		const navigation = document.createElement("nav");
+		navigation.className = "dlp-mes-navigation";
+		navigation.setAttribute("aria-label", translate("Modules"));
+		model.items.forEach((item) => {
+			navigation.appendChild(
+				renderNavigationItem(item, nativeItems, model.nativeHostKey)
+			);
+		});
+		if (!model.nativeHostKey) {
+			const nativeParking = document.createElement("div");
+			nativeParking.className = "dlp-mes-navigation__native-parking";
+			nativeParking.hidden = true;
+			nativeParking.appendChild(nativeItems);
+			navigation.appendChild(nativeParking);
+		}
+		top.prepend(navigation);
+		updateNativeLeafAccessibility(nativeItems);
+	}
+
+	function enhanceDesktopIcons() {
+		if (!window.DeepLinkERPNavigation || !window.frappe?.utils?.icon) return;
+		document.querySelectorAll(".desktop-container .desktop-icon:not(.add-new-icon)").forEach((entry) => {
+			const label = entry.dataset.id || entry.querySelector(".icon-title")?.textContent.trim();
+			if (!label) return;
+			const iconName = DeepLinkERPNavigation.getNavigationIcon(label);
+			entry.classList.add("dlp-desktop-icon-enhanced");
+			let visual = entry.querySelector(":scope > .dlp-desktop-line-icon");
+			if (!visual) {
+				visual = document.createElement("div");
+				visual.className = "icon-container dlp-desktop-line-icon";
+				entry.prepend(visual);
+			}
+			if (visual.dataset.dlpIcon !== iconName) {
+				visual.innerHTML = makeLineIcon(iconName, "md");
+				visual.dataset.dlpIcon = iconName;
+			}
+		});
+	}
+
 	function refreshDeskEnhancements() {
 		patchSidebarSubtitle();
 		applyBranding();
+		renderPersistentNavigation();
+		enhanceDesktopIcons();
 	}
 
 	function bindDeskEvents() {
@@ -239,7 +445,7 @@
 		}
 
 		if (window.jQuery) {
-			jQuery(document).on("page-change form-refresh", refreshDeskEnhancements);
+			jQuery(document).on("page-change form-refresh desktop_screen", refreshDeskEnhancements);
 		}
 	}
 

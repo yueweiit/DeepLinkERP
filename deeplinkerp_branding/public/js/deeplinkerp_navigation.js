@@ -1,0 +1,210 @@
+(function (root, factory) {
+	const navigation = factory();
+	if (typeof module === "object" && module.exports) {
+		module.exports = navigation;
+	}
+	root.DeepLinkERPNavigation = navigation;
+})(typeof globalThis !== "undefined" ? globalThis : this, function () {
+	"use strict";
+
+	const ICONS = Object.freeze({
+		"dlp framework": "blocks",
+		framework: "blocks",
+		"ai assistant": "bot",
+		"china finance": "file-text",
+		organization: "network",
+		accounting: "landmark",
+		assets: "warehouse",
+		buying: "tag",
+		manufacturing: "factory",
+		projects: "presentation",
+		quality: "shield-check",
+		selling: "briefcase",
+		stock: "boxes",
+		subcontracting: "repeat-2",
+	});
+
+	function normalizeIdentity(value) {
+		return String(value || "")
+			.trim()
+			.toLowerCase()
+			.replace(/[_-]+/g, " ")
+			.replace(/\s+/g, " ");
+	}
+
+	function getNavigationIcon(label) {
+		const normalized = normalizeIdentity(label);
+		if (normalized.includes("setting")) return "settings";
+		if (
+			normalized.includes("overseas cost") ||
+			normalized.includes("overseas costing") ||
+			normalized.includes("海外成本") ||
+			normalized.includes("综合成本")
+		) {
+			return "calculator";
+		}
+		return ICONS[normalized] || "layout-grid";
+	}
+
+	function normalizePath(pathname) {
+		let path = pathname || "/desk";
+		try {
+			path = decodeURIComponent(path);
+		} catch (error) {
+			// Keep malformed paths usable for matching instead of breaking navigation.
+		}
+		path = `/${String(path).replace(/^\/+/, "")}`.replace(/\/{2,}/g, "/");
+		return path.length > 1 ? path.replace(/\/+$/, "") : path;
+	}
+
+	function normalizeRoute(route) {
+		if (Array.isArray(route)) {
+			return {
+				path: normalizePath(`/desk/${route.filter(Boolean).join("/")}`),
+				sidebar: "",
+			};
+		}
+
+		let parsed;
+		try {
+			parsed = new URL(String(route || "/desk"), "https://deeplinkerp.invalid");
+		} catch (error) {
+			parsed = new URL("/desk", "https://deeplinkerp.invalid");
+		}
+		return {
+			path: normalizePath(parsed.pathname),
+			sidebar: parsed.searchParams.get("sidebar") || "",
+		};
+	}
+
+	function nodeAliases(node) {
+		return [node.label, node.name, node.link_to]
+			.map(normalizeIdentity)
+			.filter(Boolean);
+	}
+
+	function buildNavigationTree(desktopIcons) {
+		const visibleIcons = (desktopIcons || []).filter(
+			(icon) => icon && icon.hidden !== 1 && icon.hidden !== "1"
+		);
+		const nodes = visibleIcons.map((icon, index) => ({
+			...icon,
+			key: `${normalizeIdentity(icon.name || icon.label) || "desktop-icon"}:${index}`,
+			children: [],
+		}));
+		const parents = new Map();
+		nodes.forEach((node) => {
+			nodeAliases(node).forEach((alias) => {
+				if (!parents.has(alias)) parents.set(alias, node);
+			});
+		});
+
+		const roots = [];
+		nodes.forEach((node) => {
+			const parent = parents.get(normalizeIdentity(node.parent_icon));
+			if (parent && parent !== node) {
+				parent.children.push(node);
+			} else {
+				roots.push(node);
+			}
+		});
+		return roots;
+	}
+
+	function findPath(items, predicate, ancestors) {
+		for (const item of items) {
+			const path = [...ancestors, item];
+			if (predicate(item)) return path;
+			const nested = findPath(item.children, predicate, path);
+			if (nested.length) return nested;
+		}
+		return [];
+	}
+
+	function findBySidebar(items, sidebar) {
+		const wanted = normalizeIdentity(sidebar);
+		if (!wanted) return [];
+		return findPath(items, (item) => nodeAliases(item).includes(wanted), []);
+	}
+
+	function nodeRoute(node) {
+		return node.navigation_route || node.route || node.link || node.url || "";
+	}
+
+	function findByExactRoute(items, route) {
+		return findPath(items, (item) => {
+			const candidate = nodeRoute(item);
+			return candidate && normalizeRoute(candidate).path === route.path;
+		}, []);
+	}
+
+	function getWorkspaceSidebar(node, workspaceSidebars) {
+		const entries = Object.entries(workspaceSidebars || {});
+		const aliases = nodeAliases(node);
+		for (const [key, sidebar] of entries) {
+			if (
+				aliases.includes(normalizeIdentity(key)) ||
+				aliases.includes(normalizeIdentity(sidebar && (sidebar.label || sidebar.title)))
+			) {
+				return sidebar;
+			}
+		}
+		return null;
+	}
+
+	function buildNavigationModel({
+		desktopIcons = [],
+		workspaceSidebars = {},
+		route = "/desk",
+		currentSidebar = "",
+	} = {}) {
+		const items = buildNavigationTree(desktopIcons);
+		const normalizedRoute = normalizeRoute(route);
+		let activePath = findBySidebar(items, normalizedRoute.sidebar);
+		if (!activePath.length) activePath = findByExactRoute(items, normalizedRoute);
+		if (!activePath.length) activePath = findBySidebar(items, currentSidebar);
+
+		const activeKeys = new Set(activePath.map((item) => item.key));
+		const activeLeaf = activePath.at(-1) || null;
+		const exactRoute = Boolean(
+			activeLeaf &&
+			nodeRoute(activeLeaf) &&
+			normalizeRoute(nodeRoute(activeLeaf)).path === normalizedRoute.path
+		);
+		let activeItem = null;
+		let nativeHostKey = "";
+
+		function decorate(nodes) {
+			nodes.forEach((node) => {
+				decorate(node.children);
+				const nativeSidebar = getWorkspaceSidebar(node, workspaceSidebars);
+				const hasNativeChildren = Boolean(nativeSidebar && nativeSidebar.items?.length);
+				const isActive = Boolean(activeLeaf && node.key === activeLeaf.key);
+				node.hasNativeChildren = hasNativeChildren;
+				node.isOpen = activeKeys.has(node.key) && (node.children.length > 0 || hasNativeChildren);
+				node.isSelfActive = isActive && (exactRoute || (!node.children.length && !hasNativeChildren));
+				if (isActive) {
+					activeItem = node;
+					if (hasNativeChildren) nativeHostKey = node.key;
+				}
+			});
+		}
+		decorate(items);
+
+		return {
+			items,
+			normalizedRoute,
+			activePathLabels: activePath.map((item) => item.label),
+			activeItem,
+			nativeHostKey,
+			exactRoute,
+		};
+	}
+
+	return Object.freeze({
+		buildNavigationModel,
+		buildNavigationTree,
+		getNavigationIcon,
+		normalizeRoute,
+	});
+});
