@@ -6444,7 +6444,7 @@ class OverseasCostWorkbench {
                         `
                         : ""
                     }
-                    ${attachment.source_type === "OA" || attachment.audit_only ? '<em>归档证据只读</em>' : `<button class="ocw-outline-btn ocw-mini-btn danger" type="button" data-action="delete-manual-document" data-attachment-name="${this.escape(attachment.name || "")}">删除</button>`}
+                    ${attachment.audit_only || attachment.source_type === "OA" ? '<em>归档证据只读</em>' : `<button class="ocw-outline-btn ocw-mini-btn danger" type="button" data-action="delete-manual-document" data-attachment-name="${this.escape(attachment.name || "")}">删除</button>`}
                   </span>
                 </div>
               `;
@@ -6459,6 +6459,7 @@ class OverseasCostWorkbench {
     return plan
       .map((slot) => {
         const attachment = bySlot[slot.code] || null;
+        // OA 附件一律不可在本页删除或重传（来源在钉钉），这与是否"仅审计"无关。
         const archiveOnly = attachment && (attachment.source_type === "OA" || attachment.audit_only);
         const status = this.manualDocumentStatusInfo(slot, attachment, batch);
         const badge = this.manualDocumentBadgeInfo(slot);
@@ -6516,7 +6517,12 @@ class OverseasCostWorkbench {
   }
 
   manualDocumentStatusInfo(slot, attachment, batch = {}) {
-    if (attachment?.source_type === "OA") return { label: attachment.audit_only ? "审计留存" : "已归档 · 查看核对状态", className: "uploaded" };
+    if (attachment?.source_type === "OA") {
+      // 「仅审计」只留给真被排除审批的资料；审批进行中是业务常态，说成人话。
+      if (attachment.audit_only) return { label: "仅审计留档", className: "uploaded" };
+      if (attachment.pending_approval) return { label: "待审批 · 已归档", className: "uploaded" };
+      return { label: "已归档 · 查看核对状态", className: "uploaded" };
+    }
     if (attachment) return { label: "已补传", className: "uploaded" };
     const sourceAttachmentCount = Number(batch.source_attachment_count || 0);
     if (slot.oaSource && sourceAttachmentCount > 0) {
@@ -12969,8 +12975,11 @@ class OverseasCostWorkbench {
     });
     return Array.from(grouped.values()).map((group) => {
       const sheetRows = group.rows.filter((source) => this.materialAISourceSheetInfo(source).is_sheet);
+      // 服务端已经给出「能不能用于分析」的结论，前端不再自己按 status/read_status 猜。
+      // 早期版本这里自造判据，把"审批进行中"一并算成仅审计，和资料清单页口径不一致。
       const auditRows = sheetRows.length ? group.rows.filter((source) => {
         if (this.materialAISourceSheetInfo(source).is_sheet) return false;
+        if (source?.audit_only === true) return true;
         const readStatus = String(source?.read_status || "").toUpperCase();
         const status = String(source?.status || "").toUpperCase();
         return source?.selectable === false

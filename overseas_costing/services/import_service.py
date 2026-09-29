@@ -1032,7 +1032,22 @@ def list_manual_document_attachments(
                 "slot_label": manual_meta.get("slot_label") or row.get("source_doc_no") or "",
                 "logistics_type": row_logistics_type,
                 "required": bool(manual_meta.get("required")),
-                "audit_only": bool((source_bundle and source_bundle["context"]["root_kind"] == "expense" and not attachment_allowed(row,source_bundle)) or parse_result.get("approval_excluded") or parse_result.get("cost_source_allowed") is False or (row.get("source_type") == "OA" and not row.get("version"))),
+                "audit_only": bool(
+                    (
+                        source_bundle
+                        and source_bundle["context"]["root_kind"] == "expense"
+                        and not attachment_allowed(row, source_bundle)
+                    )
+                    or _settlement_audit_state(parse_result)["audit_only"]
+                ),
+                # 只有「审批被拒绝/撤销/终止」或「附件被撤销、替代」才叫仅审计；
+                # 审批进行中只提示待审批，避免把业务常态说成审计留档。
+                "pending_approval": bool(
+                    parse_result.get("approval_excluded")
+                    or parse_result.get("cost_source_allowed") is False
+                    or (row.get("source_type") == "OA" and not row.get("version"))
+                ),
+                "audit_state": _settlement_audit_state(parse_result).get("mode"),
                 "manual_note": manual_meta.get("manual_note") or row.get("remark") or "",
                 "remark": row.get("remark") or "",
                 "creation": row.get("creation"),
@@ -2137,12 +2152,42 @@ def _approval_reference_is_excluded(batch_name: str, snapshot: dict) -> bool:
             or linked.get("status"),
             linked.get("approval_result") or linked.get("result"),
         )
-    return True
+    # 找不到引用只能说明"查不到"，不能据此断定审批已被排除。
+    # 旧实现返回 True，于是任何挂不到批次的附件都被当成审计件，
+    # 表现为用户在审批批完前拉不到装箱单。真排除必须由 exclusion_reason
+    # 或审批状态本身证明（见 settlement_audit_policy）。
+    return False
+
+
+def _settlement_audit_state(parsed: dict) -> dict:
+    """复用统一审计口径；审批进行中不再被当成「仅审计」。"""
+
+    from overseas_costing.services.settlement_audit_policy import settlement_audit_state
+
+    return settlement_audit_state(parsed)
+
+
+def _settlement_blocks_write(parsed: dict) -> bool:
+    """写入闸门：真排除与审批未完成都拦。
+
+    「仅审计」只是展示口径（见 settlement_audit_policy）；但把附件内容写进
+    成本字段时，审批尚未完成的资料同样不能落库，否则未审批数据会污染核算。
+    """
+
+    from overseas_costing.services.settlement_audit_policy import is_blocked_from_settlement
+
+    return is_blocked_from_settlement(parsed)
 
 
 def _attachment_doc_is_audit_only(attachment_doc) -> bool:
+    """附件是否属于真排除（只拦截 A 类）。
+
+    这是**读口径**：审批进行中的附件仍可识别、分类、预览。写入闸门见
+    ``_settlement_blocks_write``，由写入方显式追加判断。
+    """
+
     snapshot = _json_loads_dict(getattr(attachment_doc, "parse_result_json", ""))
-    if snapshot.get("approval_excluded") or snapshot.get("cost_source_allowed") is False:
+    if _settlement_audit_state(snapshot)["audit_only"]:
         return True
     return _approval_reference_is_excluded(
         str(getattr(attachment_doc, "batch", "") or "").strip(),
@@ -2260,7 +2305,11 @@ def confirm_oa_source_attachment_type(
         attachment_doc = frappe.get_doc("Overseas Cost Attachment", resolved_attachment_name)
     except Exception as exc:
         return {"ok": False, "attachment_name": resolved_attachment_name, "message": f"未找到附件记录：{exc}"}
-    if _attachment_doc_is_audit_only(attachment_doc):
+    # 保存人工确认结果属于写入：审批未完成的附件同样不能定稿类型，
+    # 否则未审批资料会被当成已确认事实流入成本数据。
+    if _attachment_doc_is_audit_only(attachment_doc) or _settlement_blocks_write(
+        _json_loads_dict(getattr(attachment_doc, "parse_result_json", ""))
+    ):
         return _audit_only_attachment_response(resolved_attachment_name)
 
     mapped_result = _json_loads_dict(getattr(attachment_doc, "mapped_result_json", ""))
@@ -5598,8 +5647,7 @@ def _build_attachment_price_provenance(
             attachment_row = {}
     attachment_policy = _json_loads_dict(attachment_row.get("parse_result_json"))
     if (
-        attachment_policy.get("approval_excluded")
-        or attachment_policy.get("cost_source_allowed") is False
+        _settlement_blocks_write(attachment_policy)
         or _approval_reference_is_excluded(str(attachment_row.get("batch") or ""), attachment_policy)
     ):
         raise ValueError("该附件来自已排除审批，仅供审计查看和下载，不能写入成本数据。")
@@ -5683,10 +5731,10 @@ def _packing_attachment_is_audit_only(batch_name: str, attachment_name: str | No
     if row.get("batch") and str(row.get("batch")) != str(batch_name):
         return True
     snapshot = _json_loads_dict(row.get("parse_result_json"))
-    return bool(
-        snapshot.get("approval_excluded")
-        or snapshot.get("cost_source_allowed") is False
-        or _approval_reference_is_excluded(str(row.get("batch") or batch_name), snapshot)
+    # 预览装箱单是读路径：审批进行中（approval_excluded / cost_source_allowed=False）
+    # 是业务常态，此时必须放行，否则用户在审批批完前根本拉不到装箱单。
+    return _settlement_audit_state(snapshot)["audit_only"] or _approval_reference_is_excluded(
+        str(row.get("batch") or batch_name), snapshot
     )
 
 

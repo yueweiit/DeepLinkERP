@@ -2317,8 +2317,11 @@
     });
     return Array.from(grouped.values()).map((group) => {
       const sheetRows = group.rows.filter((source) => this.materialAISourceSheetInfo(source).is_sheet);
+      // 服务端已经给出「能不能用于分析」的结论，前端不再自己按 status/read_status 猜。
+      // 早期版本这里自造判据，把"审批进行中"一并算成仅审计，和资料清单页口径不一致。
       const auditRows = sheetRows.length ? group.rows.filter((source) => {
         if (this.materialAISourceSheetInfo(source).is_sheet) return false;
+        if (source?.audit_only === true) return true;
         const readStatus = String(source?.read_status || "").toUpperCase();
         const status = String(source?.status || "").toUpperCase();
         return source?.selectable === false

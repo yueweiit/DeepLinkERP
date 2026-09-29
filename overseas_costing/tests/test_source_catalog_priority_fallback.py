@@ -500,15 +500,18 @@ def _archived_related_attachment(monkeypatch, setup, tmp_path, flags):
     return store, batch, bundle, logistics, row
 
 
-@pytest.mark.parametrize('flags', [
-    {'approval_excluded': True},
-    {'approval_excluded': True, 'cost_source_allowed': False, 'exclusion_reason': '审批结果为拒绝'},
-])
-def test_current_local_approval_restores_only_proven_old_approval_exclusion(monkeypatch, setup, tmp_path, flags):
+def test_current_local_approval_restores_old_approval_exclusion_without_touching_data(
+    monkeypatch, setup, tmp_path
+):
+    """本批次的当前有效审批可以让旧标记落在"待审批"上继续可用，且不改写任何落库数据。
+
+    ``approval_excluded`` 在审批进行中同样成立，这是业务常态；重新解析只读取。
+    """
+
+    flags = {'approval_excluded': True}
     store, batch, bundle, logistics, row = _archived_related_attachment(monkeypatch, setup, tmp_path, flags)
     before = store.db.total_changes
     original = row['parse_result_json']
-    assert resolver._attachment_is_audit_only(row) is True
 
     trusted = resolver.resolve_trusted_packing_source(batch_name=batch['name'],
         source_kind='approval_attachment', source_id='ATT-L', sheet_name='Packing')
@@ -517,16 +520,49 @@ def test_current_local_approval_restores_only_proven_old_approval_exclusion(monk
     assert trusted['grid']['sheet_name'] == 'Packing'
     assert row['parse_result_json'] == original
     assert store.db.total_changes == before
+    assert resolver._attachment_is_audit_only(row) is False
+
+
+def test_proven_rejection_is_not_restored_as_usable(monkeypatch, setup, tmp_path):
+    """有钉钉归档写入的精确拒绝原因时，即便本批次审批仍有效也不得当作可用资料。"""
+
+    flags = {'approval_excluded': True, 'cost_source_allowed': False, 'exclusion_reason': '审批结果为拒绝'}
+    _, batch, _, _, row = _archived_related_attachment(monkeypatch, setup, tmp_path, flags)
+    original = row['parse_result_json']
+
+    assert resolver._attachment_is_audit_only(row) is True
+    with pytest.raises(ValueError, match='审计|排除'):
+        resolver.resolve_trusted_packing_source(batch_name=batch['name'],
+            source_kind='approval_attachment', source_id='ATT-L', sheet_name='Packing')
+    assert row['parse_result_json'] == original
 
 
 @pytest.mark.parametrize('flags', [
+    # 审批进行中不是审计件：资料照常可读可预览，只是还不能作为最终采用依据。
+    {'approval_excluded': True},
     {'approval_excluded': True, 'cost_source_allowed': False},
+    {'cost_source_allowed': False},
+])
+def test_pending_approval_attachment_stays_readable(monkeypatch, setup, tmp_path, flags):
+    """审批未完成不能把资料挡在解析之外——否则用户在审批批完前拉不到装箱单。"""
+
+    _, batch, _, _, row = _archived_related_attachment(monkeypatch, setup, tmp_path, flags)
+    original = row['parse_result_json']
+
+    trusted = resolver.resolve_trusted_packing_source(batch_name=batch['name'],
+        source_kind='approval_attachment', source_id='ATT-L', sheet_name='Packing')
+
+    assert trusted['grid']['sheet_name'] == 'Packing'
+    assert row['parse_result_json'] == original
+    assert resolver._attachment_is_audit_only(row) is False
+
+
+@pytest.mark.parametrize('flags', [
     {'approval_excluded': True, 'exclusion_reason': '人工停用'},
     {'approval_excluded': True, 'disabled': True},
     {'approval_excluded': True, 'excluded': True},
     {'approval_excluded': True, 'is_active': 0},
-    {'approval_excluded': True, 'audit_only': True},
-    {'cost_source_allowed': False},
+    {'approval_excluded': True, 'exclusion_reason': '审批已撤销、终止或作废'},
 ])
 def test_current_local_approval_does_not_clear_other_audit_restrictions(monkeypatch, setup, tmp_path, flags):
     _, batch, _, _, row = _archived_related_attachment(monkeypatch, setup, tmp_path, flags)

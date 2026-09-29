@@ -210,7 +210,7 @@
                         `
                         : ""
                     }
-                    ${attachment.source_type === "OA" || attachment.audit_only ? '<em>归档证据只读</em>' : `<button class="ocw-outline-btn ocw-mini-btn danger" type="button" data-action="delete-manual-document" data-attachment-name="${this.escape(attachment.name || "")}">删除</button>`}
+                    ${attachment.audit_only || attachment.source_type === "OA" ? '<em>归档证据只读</em>' : `<button class="ocw-outline-btn ocw-mini-btn danger" type="button" data-action="delete-manual-document" data-attachment-name="${this.escape(attachment.name || "")}">删除</button>`}
                   </span>
                 </div>
               `;
@@ -225,6 +225,7 @@
     return plan
       .map((slot) => {
         const attachment = bySlot[slot.code] || null;
+        // OA 附件一律不可在本页删除或重传（来源在钉钉），这与是否"仅审计"无关。
         const archiveOnly = attachment && (attachment.source_type === "OA" || attachment.audit_only);
         const status = this.manualDocumentStatusInfo(slot, attachment, batch);
         const badge = this.manualDocumentBadgeInfo(slot);
@@ -282,7 +283,12 @@
   }
 
   manualDocumentStatusInfo(slot, attachment, batch = {}) {
-    if (attachment?.source_type === "OA") return { label: attachment.audit_only ? "审计留存" : "已归档 · 查看核对状态", className: "uploaded" };
+    if (attachment?.source_type === "OA") {
+      // 「仅审计」只留给真被排除审批的资料；审批进行中是业务常态，说成人话。
+      if (attachment.audit_only) return { label: "仅审计留档", className: "uploaded" };
+      if (attachment.pending_approval) return { label: "待审批 · 已归档", className: "uploaded" };
+      return { label: "已归档 · 查看核对状态", className: "uploaded" };
+    }
     if (attachment) return { label: "已补传", className: "uploaded" };
     const sourceAttachmentCount = Number(batch.source_attachment_count || 0);
     if (slot.oaSource && sourceAttachmentCount > 0) {

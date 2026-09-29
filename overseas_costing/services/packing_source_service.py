@@ -313,13 +313,15 @@ def _attachment_is_audit_only(source: dict, *, bundle: dict | None = None) -> bo
     # These are the exact reasons written by the approval exclusion backfill.
     # Archive audit_only also means frozen/history-only; without a specific
     # approval reason it must not be mistaken for a stale approval-state flag.
-    approval_reasons = {'审批结果为拒绝', '审批状态为拒绝', '审批已撤销、终止或作废'}
-    reason = str(snapshot.get('exclusion_reason') or '').strip()
-    unknown_audit = bool(source.get('audit_only') or snapshot.get('audit_only')
-                         or (reason and reason not in approval_reasons)
-                         or ((snapshot.get('cost_source_allowed') is False or descriptor.get('audit_only'))
-                             and reason not in approval_reasons))
-    if unknown_audit:
+    # 白名单已上收到 settlement_audit_policy，这里只复用，避免两处常量漂移。
+    from overseas_costing.services.settlement_audit_policy import is_excluded_from_settlement
+
+    if is_excluded_from_settlement({**snapshot, 'settlement_document': descriptor}):
+        # 真排除（审批拒绝/撤销/终止，或附件已撤销、被替代）：确实只能留档。
+        return True
+    if descriptor.get('audit_only'):
+        # ``descriptor.audit_only`` 由 document_writer 写入，只对真排除为真。
+        # 旧的 ``source/snapshot.audit_only`` 在审批进行中也会为真，不能复用。
         return True
     context = (bundle or {}).get('context') or {}
     lineage = context.get('source_lineage') or {}
@@ -329,12 +331,11 @@ def _attachment_is_audit_only(source: dict, *, bundle: dict | None = None) -> bo
             and str(lineage.get('instance_id') or '') == str(context.get('instance_id') or '')
             and effective_source.attachment_allowed(source, bundle, for_analysis=True)):
         return False  # Current verified local approval supersedes only its old status.
-    return bool(
-        snapshot.get("approval_excluded")
-        or snapshot.get("cost_source_allowed") is False
-        or descriptor.get('audit_only')
-        or import_service._approval_reference_is_excluded(str(source.get("batch") or ""), snapshot)
-    )
+    # 只有「审批本身被拒绝/撤销/终止」才算归档审计留档。``approval_excluded`` /
+    # ``cost_source_allowed is False`` / ``descriptor.audit_only`` 在审批进行中也会成立，
+    # 那是业务常态：此时资料仍可读取、可预览、可在审批完成后参与核算，
+    # 因此不能把它当审计件从候选中剔除。
+    return import_service._approval_reference_is_excluded(str(source.get("batch") or ""), snapshot)
 
 
 def related_approval_detail(batch_name, version_name=None, *, bundle=None, store=None, ledger=None):

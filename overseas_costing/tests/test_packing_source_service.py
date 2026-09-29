@@ -121,6 +121,8 @@ def test_attachment_preview_requires_local_download_before_parsing(monkeypatch) 
 
 
 def test_attachment_preview_rejects_audit_only_excluded_approval(monkeypatch) -> None:
+    """真被排除的审批（有明确 exclusion_reason）不允许再解析。"""
+
     from overseas_costing.services import packing_source_service as service
 
     monkeypatch.setattr(service, "_attachment_source", lambda _batch, _source: {
@@ -131,6 +133,7 @@ def test_attachment_preview_rejects_audit_only_excluded_approval(monkeypatch) ->
         "parse_result_json": json.dumps({
             "approval_excluded": True,
             "cost_source_allowed": False,
+            "exclusion_reason": "审批结果为拒绝",
             "process_instance_id": "PROC-PUR-REFUSED",
         }),
     })
@@ -145,6 +148,40 @@ def test_attachment_preview_rejects_audit_only_excluded_approval(monkeypatch) ->
     assert result["ok"] is False
     assert result["audit_only"] is True
     assert "已排除审批" in result["message"]
+
+
+def test_attachment_preview_allows_pending_approval(monkeypatch) -> None:
+    """审批还在走流程时资料仍可解析预览，不能因为"尚未批准"就拒绝。
+
+    旧实现把 ``approval_excluded``/``cost_source_allowed is False`` 一律当审计件，
+    导致用户在审批完成前完全拉不到装箱单。没有明确排除原因的，只是待审批。
+    """
+
+    from overseas_costing.services import packing_source_service as service
+
+    monkeypatch.setattr(service, "_attachment_source", lambda _batch, _source: {
+        "name": "ATTACH-PENDING",
+        "file_name": "装箱单.xlsx",
+        "file_url": "/private/files/pending.xlsx",
+        "modified": "2026-09-04 10:00:00",
+        "parse_result_json": json.dumps({
+            "approval_excluded": True,
+            "cost_source_allowed": False,
+            "exclusion_reason": "",
+            "process_instance_id": "PROC-RUNNING",
+        }),
+    })
+    parsed = {}
+    monkeypatch.setattr(
+        service.import_service,
+        "preview_packing_list_attachment",
+        lambda **kwargs: parsed.update(kwargs) or {"ok": True, "mapped_preview_items": []},
+    )
+
+    result = service.preview_packing_source("BATCH-1", "attachment", "ATTACH-PENDING")
+
+    assert parsed.get("attachment_name") == "ATTACH-PENDING"
+    assert not result.get("audit_only")
 
 
 def test_attachment_preview_rejects_legacy_excluded_approval_from_batch_trace(monkeypatch) -> None:

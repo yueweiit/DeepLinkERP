@@ -294,8 +294,28 @@ def test_rejected_or_revoked_attachment_policy_is_never_a_selectable_cost_source
         {
             "batch": "BATCH-REJECTED",
             "parse_result_json": json.dumps(
-                {"approval_excluded": True, "cost_source_allowed": False},
+                {
+                    "approval_excluded": True,
+                    "cost_source_allowed": False,
+                    "exclusion_reason": "审批结果为拒绝",
+                },
                 ensure_ascii=False,
             ),
         }
     ) is True
+
+
+def test_pending_approval_attachment_is_not_treated_as_audit_only() -> None:
+    """审批进行中是业务常态，不能当成审计件从候选中剔除。"""
+
+    from overseas_costing.services import packing_source_service
+
+    assert packing_source_service._attachment_is_audit_only(
+        {
+            "batch": "BATCH-RUNNING",
+            "parse_result_json": json.dumps(
+                {"approval_excluded": True, "cost_source_allowed": False},
+                ensure_ascii=False,
+            ),
+        }
+    ) is False

@@ -336,23 +336,23 @@ def _candidate_audit_only(
     attachment: dict,
     version_name: str | None,
 ) -> tuple[bool, str]:
-    """Reuse the cost-source eligibility flags the import chain already maintains.
+    """Reuse the unified settlement audit policy for this candidate's flag and reason.
 
-    ``approval_excluded`` / ``cost_source_allowed`` 由钉钉归档链路写进
-    ``parse_result_json``，``import_service`` 与 ``effective_logistics_source``
-    都已在用它们判定“不得作为成本来源”。这里只**标注**、不隐藏：候选仍留在
-    列表里供审计与人工确认，前端据此提示它仅审计。
+    判定口径统一在 ``services/settlement_audit_policy.py``：只有**真排除**
+    （审批被拒绝/撤销/终止，或附件被撤销、替代）才叫“仅审计”。审批还在走流程
+    的属于业务常态，返回“审批未完成”而不是“仅审计”，避免误导使用者。
 
     刻意**不含** ``import_service`` 里“OA 且无版本”那一款：月结付款这类不在
     国际物流关联链里的资料本来就可能没有版本，照搬会把它们误判。
     """
 
-    if descriptor and descriptor.get("audit_only"):
-        return True, "资料已撤销或被替代，仅审计。"
-    if parsed.get("approval_excluded"):
-        return True, "审批已失效，不参与核算。"
-    if parsed.get("cost_source_allowed") is False:
-        return True, "来源已被判定不得作为成本来源，仅审计。"
+    from overseas_costing.services.settlement_audit_policy import settlement_audit_state
+
+    state = settlement_audit_state({**(parsed or {}), "settlement_document": descriptor or {}})
+    if state["audit_only"]:
+        return True, state["reason"]
+    if state["pending_approval"]:
+        return False, ""
     version = str(attachment.get("version") or "").strip()
     if version and version_name and version != str(version_name).strip():
         return True, "不属于当前版本，仅审计。"

@@ -851,6 +851,7 @@ def test_preview_packing_list_rejects_audit_only_excluded_attachment(monkeypatch
                 "parse_result_json": json.dumps({
                     "approval_excluded": True,
                     "cost_source_allowed": False,
+                    "exclusion_reason": "审批结果为拒绝",
                 }),
             }
 

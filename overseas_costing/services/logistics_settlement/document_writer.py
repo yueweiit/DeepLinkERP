@@ -250,16 +250,24 @@ def attachment_values(source, document, batch, version, reviews, *, audit_only=F
     transport = str(batch.get('transport_mode') or 'SEA').upper()
     packing_slot = {'SEA': 'sea_packing_list', 'AIR': 'air_packing_list', 'EXPRESS': 'express_goods_list'}.get(transport, 'sea_packing_list')
     slot = packing_slot if attachment_type == 'Packing List' else ''
-    allowed = bool(source.get('approved')) and not source.get('invalid') and not audit_only and not retired
+    # 「被撤销/被替代」和「审批未完成」是两回事：前者只能留档，后者是业务常态。
+    # 旧实现把两者都写进 audit_only，导致审批中的附件在页面上被显示成"仅审计"。
+    closed = bool(audit_only) or bool(retired) or bool(source.get('invalid'))
+    approved = bool(source.get('approved'))
+    allowed = approved and not closed
     descriptor = {'document_id': document['id'], 'source_id': source['id'], 'fingerprint': document.get('fingerprint') or document['id'],
                   'manifest': manifest, 'tables': document.get('tables') or [], 'reviews': reviews,
-                  'issues': document.get('issues') or [], 'status': document.get('status'), 'retired': retired, 'audit_only': not allowed}
+                  'issues': document.get('issues') or [], 'status': document.get('status'), 'retired': retired,
+                  'audit_only': closed, 'pending_approval': not approved and not closed}
     parsed = {'process_instance_id': source['instance'], 'corp_id': source['corp'], 'file_id': manifest.get('file_id'),
-              'data_source': 'local_archive', 'approval_excluded': not allowed, 'cost_source_allowed': allowed,
+              'data_source': 'local_archive', 'approval_excluded': not approved, 'cost_source_allowed': allowed,
               'settlement_document': descriptor, 'manual_document': {'logistics_type': transport, 'slot_code': slot,
                   'slot_label': '装箱单' if slot else '物流归档资料', 'required': bool(slot), 'read_only': True}}
     notes = ['物流归档附件（只读）']
-    if not allowed: notes.append('仅保留审计证据，不计入当前资料完成度')
+    if closed:
+        notes.append('仅保留审计证据，不计入当前资料完成度')
+    elif not approved:
+        notes.append('审批尚未完成，暂不计入当前资料完成度')
     if retired: notes.append('附件已撤销或被新版本替代')
     if reviews: notes.append('装箱数据待核对')
     return {'batch': batch['name'], 'version': version, 'source_type': 'OA', 'attachment_type': attachment_type,

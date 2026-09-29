@@ -688,20 +688,30 @@ def test_evidence_candidates_carry_no_material_category() -> None:
     "parse_result,version,version_name,expected_reason",
     [
         (
-            {"settlement_document": {"audit_only": True}},
+            {"settlement_document": {"audit_only": True, "retired": True}},
             "V1",
             "V1",
-            "资料已撤销或被替代，仅审计。",
+            "资料已撤销或被替代，仅留档备查。",
         ),
-        ({"approval_excluded": True}, "V1", "V1", "审批已失效，不参与核算。"),
-        ({"cost_source_allowed": False}, "V1", "V1", "来源已被判定不得作为成本来源，仅审计。"),
+        (
+            {"approval_excluded": True, "exclusion_reason": "审批结果为拒绝"},
+            "V1",
+            "V1",
+            "审批结果为拒绝",
+        ),
+        (
+            {"cost_source_allowed": False, "exclusion_reason": "审批已撤销、终止或作废"},
+            "V1",
+            "V1",
+            "审批已撤销、终止或作废",
+        ),
         ({}, "V0", "V1", "不属于当前版本，仅审计。"),
     ],
 )
 def test_evidence_candidates_mark_audit_only_sources_with_a_reason(
     parse_result, version, version_name, expected_reason
 ) -> None:
-    """失效／越界／非当前版本的候选只加注原因，仍然留在列表里供人工确认。"""
+    """真被排除的候选只加注原因，仍然留在列表里供人工确认。"""
 
     attachments = [
         {
@@ -720,6 +730,41 @@ def test_evidence_candidates_mark_audit_only_sources_with_a_reason(
 
     assert candidate["audit_only"] is True
     assert candidate["audit_only_reason"] == expected_reason
+
+
+@pytest.mark.parametrize(
+    "parse_result",
+    [
+        pytest.param({"approval_excluded": True}, id="approval_excluded"),
+        pytest.param({"cost_source_allowed": False}, id="cost_source_allowed_false"),
+        pytest.param({"settlement_document": {"audit_only": True, "pending_approval": True}},
+                     id="descriptor_pending"),
+    ],
+)
+def test_pending_approval_is_not_reported_as_audit_only(parse_result) -> None:
+    """审批进行中是业务常态，不能标成「仅审计」误导使用者。
+
+    这些标记在钉钉审批还在走流程时同样成立。旧实现把它们一律写成“仅审计”，
+    用户看到的状态与实际不符。真排除必须另有 ``exclusion_reason`` 佐证。
+    """
+
+    attachments = [
+        {
+            "name": "ATT-PENDING",
+            "file_name": "装箱单.xlsx",
+            "attachment_type": "Packing List",
+            "source_type": "OA",
+            "version": "V1",
+            "parse_status": "Parsed",
+            "parse_result_json": json.dumps(parse_result, ensure_ascii=False),
+            "mapped_result_json": "{}",
+        }
+    ]
+
+    candidate = build_evidence_candidates(attachments, version_name="V1")[0]
+
+    assert candidate["audit_only"] is False
+    assert candidate["audit_only_reason"] == ""
 
 
 def test_evidence_candidates_without_source_flags_are_not_audit_only() -> None:
@@ -841,7 +886,7 @@ def test_merging_duplicates_prefers_the_copy_that_can_enter_costing() -> None:
             "运费账单.pdf",
             version="V1",
             file_url="/private/files/运费账单-retired.pdf",
-            parse_result={"settlement_document": {"audit_only": True}},
+            parse_result={"settlement_document": {"audit_only": True, "retired": True}},
         ),
         _attachment_row("ATT-LIVE", "运费账单.pdf", version="V1"),
     ]
@@ -856,7 +901,7 @@ def test_merging_duplicates_prefers_the_copy_that_can_enter_costing() -> None:
 def test_merged_candidate_borrows_the_file_url_from_the_sibling_copy() -> None:
     """留下的副本缺文件地址时，从同版本同文件的其它副本借一个。
 
-    线上实况：能进核算的那条 ``file_url`` 为空，被标仅审计的副本反而有地址。
+    线上实况：能进核算的那条 ``file_url`` 为空，已被替代的副本反而有地址。
     不借的话，界面上留下的候选既打不开也解析不了。
     """
 
@@ -867,7 +912,7 @@ def test_merged_candidate_borrows_the_file_url_from_the_sibling_copy() -> None:
             "运费账单.pdf",
             version="V1",
             file_url="/private/files/运费账单-retired.pdf",
-            parse_result={"settlement_document": {"audit_only": True}},
+            parse_result={"settlement_document": {"audit_only": True, "retired": True}},
         ),
     ]
 

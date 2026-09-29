@@ -646,7 +646,11 @@ def test_material_ai_source_manifest_uses_current_version_and_marks_audit_only_e
             "file_name": "rejected.docx",
             "file_url": "/private/files/rejected.docx",
             "modified": "2026-09-08",
-            "parse_result_json": json.dumps({"approval_excluded": True, "cost_source_allowed": False}),
+            "parse_result_json": json.dumps({
+                "approval_excluded": True,
+                "cost_source_allowed": False,
+                "exclusion_reason": "审批结果为拒绝",
+            }),
         },
     ]
     monkeypatch.setattr(service, "frappe", SimpleNamespace(get_list=lambda *_args, **_kwargs: rows))
@@ -764,7 +768,8 @@ def test_material_ai_duplicate_audit_copy_cannot_hide_readable_attachment(monkey
     active = {'name': 'ACTIVE', 'version': 'V1', 'source_type': 'OA', 'file_name': '装箱单.xlsx',
               'file_url': '/private/files/packing.xlsx', 'parse_result_json': json.dumps(metadata)}
     audit = {**active, 'name': 'AUDIT', 'parse_result_json': json.dumps({**metadata,
-             'approval_excluded': True, 'cost_source_allowed': False})}
+             'approval_excluded': True, 'cost_source_allowed': False,
+             'exclusion_reason': '审批结果为拒绝'})}
     rows = [audit, active] if audit_first else [active, audit]
     original = copy.deepcopy(rows)
     monkeypatch.setattr(service, 'frappe', SimpleNamespace(get_list=lambda *a, **kw: rows))
