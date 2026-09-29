@@ -103,7 +103,10 @@ def test_local_packing_tab_keeps_upload_right_beside_refresh() -> None:
     assert 'data-action="mf-source-reload"' in actions
     assert 'data-action="mf-source-upload"' in actions
     assert actions.index("刷新来源") < actions.index("本地上传装箱单")
-    assert "还没有本地装箱单" in rendered
+    # 空态要同时告诉用户两个来源：本地可补传，国际物流附件会随审批同步自己出现。
+    assert "暂无可导入的装箱单" in rendered
+    assert "本地上传装箱单" in rendered
+    assert "国际物流" in rendered
 
 
 def test_source_tabs_keep_only_packing_plan_and_local_upload() -> None:
@@ -114,8 +117,13 @@ def test_source_tabs_keep_only_packing_plan_and_local_upload() -> None:
     assert "钉钉表单附件" not in tabs
     assert "评论附件与评论" not in tabs
     loader = source.split("async loadWikiMaterialSources", 1)[1].split("renderMaterialSourceTabs", 1)[0]
+    # 页签仍是「装箱计划表 / 本地上传装箱单」两个，但后者要同时列出
+    # 本地手工上传件与国际物流审批里的装箱单附件（approval_sources）——
+    # 服务端一直两者都给，早期这里只取 manual_attachments，
+    # 导致国际物流的装箱单 Excel 在这个弹窗里看不到也选不了。
     assert "result?.manual_attachments" in loader
-    assert "result?.approval_sources" not in loader
+    assert "result?.approval_sources" in loader
+    assert "supported_for_material_import" in loader
     assert "allowed_file_types" in source
     for suffix in (".xlsx", ".xlsm", ".pdf", ".png", ".doc", ".docx"):
         assert suffix in source
@@ -934,3 +942,47 @@ console.log(JSON.stringify({html,error}));
     assert result["error"] == ""
     assert ">50<" in result["html"]
     assert "unexpected" not in result["html"]
+
+
+def test_local_tab_lists_logistics_approval_packing_attachments() -> None:
+    """国际物流审批里的装箱单 Excel 必须出现在「本地上传装箱单」页签。
+
+    服务端 list_packing_sources 一直同时返回 manual_attachments 与
+    approval_sources；早期前端只取 manual_attachments，导致用户在物料页
+    「获取装箱资料」里看不到国际物流的装箱单，只能从别处绕。
+    """
+    result = _fee_workspace_result(r"""
+const workspace=Object.create(Harness.prototype);
+workspace.escape=(value)=>String(value??'');
+const dialog={materialSourceTab:'local',wikiMaterialBusy:'',wikiMaterialOperationError:'',sourceContext:{root_kind:'logistics'},
+  materialAttachmentSources:[
+    {source_kind:'manual_attachment',source_id:'MANUAL-1',source_label:'本地装箱单.xlsx',file_name:'本地装箱单.xlsx',available:true,sheets:['Sheet1'],supported_for_material_import:true},
+    {source_kind:'approval_attachment',source_id:'aat0n82ved',source_label:'通用装箱单模板（核算系统）.xlsx',file_name:'通用装箱单模板（核算系统）.xlsx',available:true,sheets:['装箱单'],supported_for_material_import:true}]};
+const html=workspace.renderMaterialAttachmentSources(dialog);
+console.log(JSON.stringify({
+  html,
+  manualCard:html.includes('data-mf-attachment-source="MANUAL-1"'),
+  approvalCard:html.includes('data-mf-attachment-source="aat0n82ved"'),
+  approvalBadge:html.includes('国际物流 OA 附件'),
+  manualBadge:html.includes('本地文件')}));
+""")
+    assert result["manualCard"] is True
+    assert result["approvalCard"] is True, result["html"]
+    assert result["approvalBadge"] is True
+    assert result["manualBadge"] is True
+    # 两类来源都能直接点「预览」进入导入，不再只有本地文件可点。
+    assert result["html"].count("data-mf-attachment-source=") == 2
+
+
+def test_local_tab_source_loader_keeps_both_kinds_and_drops_non_excel() -> None:
+    """加载器要合并两类来源，并排除审批正文/评论等非表格项。"""
+    source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    loader = source.split("async loadMaterialAttachmentSources", 1)[1].split(
+        "\n  renderWikiMaterialSources", 1
+    )[0]
+    assert "materialImportableSources" in loader
+    assert "manual_attachments" in loader
+    assert "approval_sources" in loader
+    # 非表格来源（approval_form / approval_comment / wiki_sheet）不得混入本页签。
+    assert '"manual_attachment", "approval_attachment"' in loader
+    assert "supported_for_material_import" in loader

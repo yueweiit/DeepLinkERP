@@ -1918,18 +1918,44 @@ await workspace.previewMaterialAttachmentSource(dialog,'ATT');console.log(JSON.s
     assert result[1][1]['sheet_name'] == '货物'
 
 
-def test_direct_source_picker_excludes_dingtalk_attachments():
+def test_direct_source_picker_keeps_authorized_excel_and_drops_non_table_sources():
+    """本页签保留「已授权且可导入」的 Excel，排除审批正文/评论等非表格来源。
+
+    历史：这里曾把 approval_attachment 一律排除，导致国际物流的装箱单 Excel
+    在物料页「获取装箱资料」里看不到也选不了。但同一批来源在装箱流程弹窗
+    （86-packing-flow 的「钉钉审批附件/评论」页签）一直可读可预览，
+    服务端 list_packing_attachment_sources 也带 read 权限校验 ——
+    因此排除并非安全边界，而是功能不一致。
+
+    分层：过滤在加载器（loadMaterialAttachmentSources）完成，渲染层信任
+    加载器已筛好的列表。这里两层分别验证。
+    """
+    source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    loader = source.split("async loadMaterialAttachmentSources", 1)[1].split(
+        "\n  renderWikiMaterialSources", 1
+    )[0]
+    # 加载器：两类可导入来源都留，非表格来源（正文/评论/Sheet）剔除。
+    assert "supported_for_material_import" in loader
+    assert '"manual_attachment", "approval_attachment"' in loader
+    assert "manual_attachments" in loader and "approval_sources" in loader
+
+    # 渲染层：喂进去的两类来源都要出现，且能点「预览」。
     result = _fee_workspace_result(r"""
 const workspace=Object.create(Harness.prototype);workspace.detailState={batchName:'B',versionName:'V'};
 workspace.escape=(value)=>String(value??'');
-const dialog={materialSourceTab:'local',wikiMaterialBusy:'',materialAttachmentSources:[
-  {source_id:'OA',source_label:'钉钉秘密附件.xlsx',source_kind:'approval_attachment',available:true,sheets:['Sheet1']},
-  {source_id:'LOCAL',source_label:'本地装箱单.xlsx',source_kind:'manual_attachment',available:true,sheets:['Sheet1']}
+const dialog={materialSourceTab:'local',wikiMaterialBusy:'',wikiMaterialOperationError:'',materialAttachmentSources:[
+  {source_id:'OA',source_label:'国际物流装箱单.xlsx',source_kind:'approval_attachment',available:true,sheets:['Sheet1'],supported_for_material_import:true},
+  {source_id:'LOCAL',source_label:'本地装箱单.xlsx',source_kind:'manual_attachment',available:true,sheets:['Sheet1'],supported_for_material_import:true}
 ]};
 const html=workspace.renderMaterialAttachmentSources(dialog);
-console.log(JSON.stringify({hasDingtalk:html.includes('钉钉秘密附件'),hasLocal:html.includes('本地装箱单')}));
+console.log(JSON.stringify({
+  hasApprovalExcel:html.includes('国际物流装箱单.xlsx'),
+  hasLocal:html.includes('本地装箱单.xlsx'),
+  approvalPortable:html.includes('data-mf-attachment-source="OA"'),
+  localPortable:html.includes('data-mf-attachment-source="LOCAL"')}));
 """)
-    assert result == dict(hasDingtalk=False, hasLocal=True)
+    assert result == dict(hasApprovalExcel=True, hasLocal=True,
+                         approvalPortable=True, localPortable=True)
 
 
 def test_trial_waits_for_pending_writes_and_ignores_duplicate_clicks():

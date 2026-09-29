@@ -17389,8 +17389,19 @@ class OverseasCostWorkbench {
       && dialog.sourceContext.fingerprint !== nextContext.fingerprint
     ) throw new Error("当前资料来源已变化，请关闭后重新获取资料。");
     dialog.sourceContext = nextContext;
-    dialog.materialAttachmentSources = [...(result?.manual_attachments || [])]
-      .filter((row, index, rows) => rows.findIndex((candidate) => candidate.source_id === row.source_id) === index);
+    // 「本地上传装箱单」页签同时列出本地手工上传件与国际物流审批里的装箱单附件：
+    // 服务端 list_packing_sources 早就两者都给（manual_attachments / approval_sources），
+    // 早期只取前者，导致国际物流的装箱单 Excel 在这个弹窗里看不到也选不了。
+    // 只保留服务端标为可导入 Excel 的项（supported_for_material_import），
+    // 审批正文/评论等非表格来源不进这个页签。
+    const materialImportableSources = (rows) => (rows || []).filter((row) =>
+      row?.supported_for_material_import !== false
+      && ["manual_attachment", "approval_attachment"].includes(String(row?.source_kind || ""))
+    );
+    dialog.materialAttachmentSources = [
+      ...materialImportableSources(result?.manual_attachments),
+      ...materialImportableSources(result?.approval_sources),
+    ].filter((row, index, rows) => rows.findIndex((candidate) => candidate.source_id === row.source_id) === index);
     dialog.materialAttachmentsLoaded = true;
     dialog.wikiMaterialOperationError = "";
     if (!dialog.wikiMaterialClosed) this.renderWikiMaterialSources(dialog);
@@ -17449,23 +17460,33 @@ class OverseasCostWorkbench {
 
   renderMaterialAttachmentSources(dialog) {
     const bound = dialog.sourceContext?.root_kind === "expense";
-    const rows = (dialog.materialAttachmentSources || []).filter((row) => row.source_kind === "manual_attachment");
+    // 不再按 source_kind 过滤：本地手工上传件与国际物流 OA 附件都在这里列出，
+    // 来源已在 loadMaterialAttachmentSources 收敛为「可导入 Excel」。
+    const rows = dialog.materialAttachmentSources || [];
+    const hasManual = rows.some((row) => row.source_kind === "manual_attachment");
+    const hasApproval = rows.some((row) => row.source_kind === "approval_attachment");
     const cards = rows.map((row) => {
       const sheets = row.sheets?.length ? row.sheets : [""];
       const semanticOnly = row.supported_for_material_import === false;
       const status = semanticOnly ? (row.available ? "可供 AI 识别" : "选择 AI 填充后自动获取并识别") : row.available ? "可预览" : ({ archived: "已归档，选择后自动获取", pending: "等待归档，可重试", manual_required: "需从钉钉下载后手动上传" }[row.archive_status] || "选择后获取附件");
-      return `<article class="ocw-mf-wiki-card"><strong>${this.escape(row.source_label || row.source_id)}</strong><small>${this.escape(status)}</small><div class="ocw-mf-wiki-card-meta">${semanticOnly ? `<span>AI 资料</span>` : sheets.map((sheet) => `<button class="ocw-outline-btn" type="button" data-mf-attachment-source="${this.escape(row.source_id)}" data-sheet-name="${this.escape(sheet)}" ${dialog.wikiMaterialBusy ? "disabled" : ""}>${dialog.wikiMaterialBusy === `attachment:${row.source_id}` ? "正在获取…" : sheet ? `预览 ${this.escape(sheet)}` : row.available ? "预览" : "获取并预览"}</button>`).join("")}</div></article>`;
+      // 国际物流附件来自钉钉审批，标注来源便于与本地手工上传件区分。
+      const fromApproval = row.source_kind === "approval_attachment";
+      const badge = semanticOnly ? `<span>AI 资料</span>` : fromApproval ? `<span>国际物流 OA 附件</span>` : `<span>本地文件</span>`;
+      return `<article class="ocw-mf-wiki-card"><strong>${this.escape(row.source_label || row.source_id)}</strong><small>${this.escape(status)}</small><div class="ocw-mf-wiki-card-meta">${badge}${semanticOnly ? "" : sheets.map((sheet) => `<button class="ocw-outline-btn" type="button" data-mf-attachment-source="${this.escape(row.source_id)}" data-sheet-name="${this.escape(sheet)}" ${dialog.wikiMaterialBusy ? "disabled" : ""}>${dialog.wikiMaterialBusy === `attachment:${row.source_id}` ? "正在获取…" : sheet ? `预览 ${this.escape(sheet)}` : row.available ? "预览" : "获取并预览"}</button>`).join("")}</div></article>`;
     }).join("");
+    const emptyHint = hasManual || hasApproval
+      ? "还没有可导入的装箱单，可用上方「本地上传装箱单」补充。"
+      : "还没有可导入的装箱单。本地文件可用上方「本地上传装箱单」补充；国际物流的装箱单附件会随审批同步自动出现。";
     return `
       <div class="ocw-mf-wiki-toolbar">
-        <span>${bound ? "当前资料来源：采购支出。正文、评论和附件也会纳入“AI 分析资料”。" : "本地装箱单；国际物流正文、附件和评论由 AI 自动收集。"}</span>
+        <span>${bound ? "当前资料来源：采购支出。正文、评论和附件也会纳入“AI 分析资料”。" : "本地装箱单与国际物流 OA 附件都可直接预览导入；正文和评论由 AI 自动收集。"}</span>
         <div class="ocw-mf-wiki-toolbar-actions">
           <button class="ocw-outline-btn" type="button" data-action="mf-source-reload" ${dialog.wikiMaterialBusy ? "disabled" : ""}>刷新来源</button>
           <button class="ocw-primary-btn" type="button" data-action="mf-source-upload">本地上传装箱单</button>
         </div>
       </div>
       ${dialog.wikiMaterialOperationError ? `<div class="ocw-mf-wiki-error">${this.escape(dialog.wikiMaterialOperationError)}</div>` : ""}
-      <div class="ocw-mf-wiki-list">${cards || `<div class="ocw-detail-empty"><strong>暂无本地装箱单</strong><span>还没有本地装箱单，可用上方「本地上传装箱单」补充。</span></div>`}</div>
+      <div class="ocw-mf-wiki-list">${cards || `<div class="ocw-detail-empty"><strong>暂无可导入的装箱单</strong><span>${this.escape(emptyHint)}</span></div>`}</div>
     `;
   }
 
