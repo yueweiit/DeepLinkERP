@@ -1,0 +1,189 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-09-28 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "operation_id",
+  "request_id",
+  "request_hash",
+  "sales_order",
+  "external_order_id",
+  "order_no",
+  "source_version",
+  "field_key",
+  "expected_value",
+  "requested_value",
+  "status",
+  "applied_value",
+  "current_value",
+  "error_code",
+  "message",
+  "retryable",
+  "processed_by"
+ ],
+ "fields": [
+  {
+   "fieldname": "operation_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Operation ID",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "request_id",
+   "fieldtype": "Data",
+   "in_standard_filter": 1,
+   "label": "Request ID",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "request_hash",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Request Hash",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "sales_order",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Sales Order",
+   "options": "Sales Order",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "external_order_id",
+   "fieldtype": "Data",
+   "label": "External Order ID",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "order_no",
+   "fieldtype": "Data",
+   "label": "Order No",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "source_version",
+   "fieldtype": "Int",
+   "in_standard_filter": 1,
+   "label": "Source Version",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "field_key",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Field Key",
+   "options": "odtNo\ndeliveryDate",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "expected_value",
+   "fieldtype": "Data",
+   "label": "Expected Value",
+   "read_only": 1
+  },
+  {
+   "fieldname": "requested_value",
+   "fieldtype": "Data",
+   "label": "Requested Value",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "success\nconflict\nfailed",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "applied_value",
+   "fieldtype": "Data",
+   "label": "Applied Value",
+   "read_only": 1
+  },
+  {
+   "fieldname": "current_value",
+   "fieldtype": "Data",
+   "label": "Current Value",
+   "read_only": 1
+  },
+  {
+   "fieldname": "error_code",
+   "fieldtype": "Data",
+   "in_standard_filter": 1,
+   "label": "Error Code",
+   "read_only": 1
+  },
+  {
+   "fieldname": "message",
+   "fieldtype": "Small Text",
+   "label": "Message",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "retryable",
+   "fieldtype": "Check",
+   "label": "Retryable",
+   "read_only": 1
+  },
+  {
+   "fieldname": "processed_by",
+   "fieldtype": "Link",
+   "label": "Processed By",
+   "options": "User",
+   "read_only": 1,
+   "reqd": 1
+  }
+ ],
+ "in_create": 1,
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-09-28 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Mes Integration",
+ "name": "MES Sales Order Field Change Operation",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "operation_id",
+ "track_changes": 0
+}

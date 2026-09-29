@@ -45,6 +45,26 @@ def create_and_submit_stock_entry(data=None, stock_entry=None):
 
 
 @frappe.whitelist(methods=["POST"])
+def update_sales_order_fields_batch(data=None):
+    """Apply an idempotent batch of MES ODT and delivery-date changes."""
+    from mes_integration.mes_integration.sales_order_field_change import (
+        update_sales_order_fields_batch as update_batch,
+    )
+
+    return update_batch(data=data)
+
+
+@frappe.whitelist(methods=["GET", "POST"])
+def get_sales_order_field_change_result(operation_id=None):
+    """Return the persisted result for one MES field-change operation."""
+    from mes_integration.mes_integration.sales_order_field_change import (
+        get_sales_order_field_change_result as get_result,
+    )
+
+    return get_result(operation_id=operation_id)
+
+
+@frappe.whitelist(methods=["POST"])
 def create_material_request(data=None, material_request=None):
     """Short public alias for MES to enqueue a Material Request creation task."""
     from mes_integration.mes_integration.material_request import (

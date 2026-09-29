@@ -81,6 +81,18 @@ MES 创建物料需求后，响应会同时放在 Frappe 标准的 `message` 和
 
 状态为 queued、processing、success 或 failed。响应中的 `request_id` 对应请求的 `custom_material_request_no`。只有 success 表示 Material Request 已创建并提交；失败时可使用同一个幂等号重新调用创建接口。任务成功后会自动清空暂存的原始大 payload，只保留状态和单据号。
 
+### MES 销售订单 ODT/交期回传
+
+MES 收到 ERP 下发的销售订单后，可批量回传订单头 ODT 和交期：
+
+    POST /api/method/mes_integration.api.update_sales_order_fields_batch
+
+请求使用顶层 JSON，必须携带与 `requestId` 相同的 `X-Idempotency-Key`。每批最多 200 张订单；`externalOrderId` 固定为 ERP `Sales Order.name`，每个字段分别提供稳定的 `operationId`、递增的 `sourceVersion`、`expectedValue` 和新 `value`。ERP 仅在订单流程状态为 `Deposit Confirmation Processing` 或 `Pending Production` 时接收，修改 ODT/交期不会改变流程状态。交期写入订单头时也会同步现有订单明细的交期。
+
+接口支持批次部分成功，HTTP 200 后仍需逐字段检查 `status`。相同 `requestId` 和相同内容会重放原批次响应；相同 `operationId` 和相同内容会返回首次字段结果。内容变化、旧版本、预期原值不一致或订单状态不允许时会返回明确的冲突码。结果不确定时按 `operationId` 查询：
+
+    GET /api/method/mes_integration.api.get_sales_order_field_change_result?operation_id=<operationId>
+
 ### Contributing
 
 This app uses `pre-commit` for code formatting and linting. Please [install pre-commit](https://pre-commit.com/#installation) and enable it for this repository:

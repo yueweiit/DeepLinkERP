@@ -114,6 +114,7 @@ class TestMESAPIHTTPMethods(UnitTestCase):
 			api.create_stock_entry,
 			api.create_and_submit_stock_entry,
 			api.create_material_request,
+			api.update_sales_order_fields_batch,
 			create_draft_stock_entry_from_mes,
 			create_and_submit_stock_entry_from_mes,
 			create_and_submit_material_request_from_mes,
@@ -137,6 +138,7 @@ class TestMESAPIHTTPMethods(UnitTestCase):
 		read_endpoints = (
 			api.get_material_request_task_status,
 			api.get_batch_bin_rows,
+			api.get_sales_order_field_change_result,
 			get_material_request_task_status,
 		)
 
