@@ -84,6 +84,13 @@ class InterfaceModeMetadataTest(unittest.TestCase):
 		self.assertEqual(translations["classic"], "经典模式")
 		self.assertEqual(translations["dl"], "DL 模式")
 		self.assertEqual(translations["Default Interface Mode"], "公司默认界面模式")
+		for source in ("Follow Company Default", "Current", "Classic Mode", "DL Mode", "Profile"):
+			self.assertIn(source, translations)
+		self.assertEqual(translations["Follow Company Default"], "跟随公司默认")
+		self.assertEqual(translations["Current"], "当前")
+		self.assertEqual(translations["Classic Mode"], "经典模式")
+		self.assertEqual(translations["DL Mode"], "DL 模式")
+		self.assertEqual(translations["Profile"], "个人资料")
 
 
 if __name__ == "__main__":

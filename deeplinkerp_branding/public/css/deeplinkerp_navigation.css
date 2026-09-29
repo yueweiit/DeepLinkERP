@@ -3,6 +3,57 @@ body.dlp-mes-navigation-enabled {
 	overflow-x: hidden;
 }
 
+.dlp-interface-mode-menu-host {
+	position: relative;
+}
+
+.dlp-interface-mode-menu {
+	position: absolute;
+	right: 0;
+	bottom: calc(100% + 6px);
+	z-index: 1050;
+	display: grid;
+	width: min(220px, calc(100vw - 24px));
+	padding: 6px;
+	border: 1px solid var(--border-color, #d8dfe6);
+	border-radius: 10px;
+	background: var(--fg-color, #fff);
+	box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+}
+
+.dlp-interface-mode-menu[hidden] {
+	display: none !important;
+}
+
+.dlp-interface-mode-menu__item {
+	width: 100%;
+	min-height: 36px;
+	padding: 7px 10px;
+	border: 0;
+	border-radius: 7px;
+	background: transparent;
+	color: var(--text-color, #1f272e);
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+
+.dlp-interface-mode-menu__item:hover,
+.dlp-interface-mode-menu__item[aria-checked="true"] {
+	background: var(--control-bg, #f1f3f5);
+}
+
+.dlp-interface-mode-menu__item:focus-visible {
+	outline: 2px solid #1677ff;
+	outline-offset: -2px;
+}
+
+.dlp-interface-mode-menu__profile {
+	margin-top: 4px;
+	border-top: 1px solid var(--border-color, #d8dfe6);
+	border-radius: 0 0 7px 7px;
+}
+
 body.dlp-mes-navigation-enabled .custom-filters-right-sidebar-container,
 body.dlp-mes-navigation-enabled .custom-filters-right-sidebar-flyout {
 	display: none !important;

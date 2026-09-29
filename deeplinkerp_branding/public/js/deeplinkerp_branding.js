@@ -481,11 +481,36 @@
 		});
 	}
 
+	function disableDLEnhancements() {
+		const navigation = document.querySelector(".dlp-mes-navigation");
+		const top = navigation?.closest(".body-sidebar-top");
+		const nativeItems = navigation?.querySelector(".sidebar-items");
+		if (top && nativeItems) top.prepend(nativeItems);
+		navigation?.remove();
+		document.body.classList.remove("dlp-mes-navigation-enabled");
+		document
+			.querySelector(".body-sidebar.dlp-mes-navigation-sidebar")
+			?.classList.remove("dlp-mes-navigation-sidebar");
+		document.querySelectorAll(".dlp-desktop-line-icon").forEach((icon) => icon.remove());
+		document
+			.querySelectorAll(".desktop-icon.dlp-desktop-icon-enhanced")
+			.forEach((entry) => entry.classList.remove("dlp-desktop-icon-enhanced"));
+	}
+
 	function refreshDeskEnhancements() {
 		patchSidebarSubtitle();
 		applyBranding();
-		renderPersistentNavigation();
-		enhanceDesktopIcons();
+		if (window.DeepLinkERPInterfaceMode) {
+			DeepLinkERPInterfaceMode.ensureUserMenu({ document, frappe, translate });
+		}
+		const dlModeEnabled =
+			!window.DeepLinkERPInterfaceMode || DeepLinkERPInterfaceMode.isDLMode(frappe.boot);
+		if (dlModeEnabled) {
+			renderPersistentNavigation();
+			enhanceDesktopIcons();
+		} else {
+			disableDLEnhancements();
+		}
 	}
 
 	function bindDeskEvents() {
