@@ -329,7 +329,7 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 
 	assert.match(
 		hooks,
-		/app_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_navigation\.css\?v=0\.0\.2"/
+		/app_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_navigation\.css\?v=0\.0\.3"/
 	);
 	assert.ok(hooks.indexOf(modelAsset) < hooks.indexOf(lifecycleAsset));
 	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.4/);
@@ -442,4 +442,8 @@ test("scopes the dark shell, full-row active state, focus ring, and mobile overf
 	assert.match(openParent || "", /color:\s*#fff/i);
 	assert.match(activeItem || "", /background:\s*#1677ff/i);
 	assert.match(activeItem || "", /color:\s*#fff/i);
+	const supersededCustomFiltersSidebar = stylesheet.match(
+		/body\.dlp-mes-navigation-enabled\s+\.custom-filters-right-sidebar-container\s*,\s*body\.dlp-mes-navigation-enabled\s+\.custom-filters-right-sidebar-flyout\s*\{([^}]*)\}/
+	)?.[1];
+	assert.match(supersededCustomFiltersSidebar || "", /display:\s*none\s*!important/);
 });

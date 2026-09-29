@@ -3,6 +3,11 @@ body.dlp-mes-navigation-enabled {
 	overflow-x: hidden;
 }
 
+body.dlp-mes-navigation-enabled .custom-filters-right-sidebar-container,
+body.dlp-mes-navigation-enabled .custom-filters-right-sidebar-flyout {
+	display: none !important;
+}
+
 body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar {
 	background: #001529;
 	border-right: 0;
