@@ -5,12 +5,40 @@ import types
 import unittest
 
 
+class FakeDB:
+	def __init__(self):
+		self.doctype_exists = True
+		self.company_default = "dl"
+
+	def exists(self, doctype, name):
+		if doctype == "DocType" and name == "DeepLinkERP Interface Settings":
+			return self.doctype_exists
+		return False
+
+	def get_single_value(self, doctype, fieldname):
+		return self.company_default
+
+
+class FakeDefaults:
+	def __init__(self):
+		self.values = {}
+
+	def get_user_default(self, key, user=None):
+		return self.values.get((user, key))
+
+
 FAKE_FRAPPE = types.ModuleType("frappe")
 FAKE_FRAPPE.session = types.SimpleNamespace(user="Guest")
+FAKE_FRAPPE.db = FakeDB()
+FAKE_FRAPPE.defaults = FakeDefaults()
+FAKE_FRAPPE.whitelist = lambda function=None: function if function else (lambda method: method)
+FAKE_FRAPPE.PermissionError = type("PermissionError", (Exception,), {})
+FAKE_FRAPPE.ValidationError = type("ValidationError", (Exception,), {})
 
 previous_frappe = sys.modules.get("frappe")
 sys.modules["frappe"] = FAKE_FRAPPE
 try:
+	sys.modules.pop("deeplinkerp_branding.deeplinkerp_branding.interface_mode", None)
 	branding = importlib.import_module("deeplinkerp_branding.deeplinkerp_branding.branding")
 finally:
 	if previous_frappe is None:
@@ -21,12 +49,14 @@ finally:
 
 class BootBrandingTest(unittest.TestCase):
 	def setUp(self):
+		FAKE_FRAPPE.db = FakeDB()
+		FAKE_FRAPPE.defaults = FakeDefaults()
 		self.configure_user("employee@example.com", roles=["Employee"])
 
 	def configure_user(self, user, roles, blocked_by_user=None):
 		blocked_by_user = blocked_by_user or {}
 		FAKE_FRAPPE.session.user = user
-		FAKE_FRAPPE.get_roles = lambda: list(roles)
+		FAKE_FRAPPE.get_roles = lambda user=None: list(roles)
 
 		def get_cached_doc(doctype, docname):
 			self.assertEqual(doctype, "User")
@@ -187,6 +217,41 @@ class BootBrandingTest(unittest.TestCase):
 			[(icon["name"], icon["label"], icon["idx"]) for icon in bootinfo["desktop_icons"]],
 			[(icon["name"], icon["label"], icon["idx"]) for icon in original_icons],
 		)
+
+	def test_boot_includes_the_server_resolved_interface_mode(self):
+		FAKE_FRAPPE.db.company_default = "classic"
+		FAKE_FRAPPE.defaults.values[
+			("employee@example.com", "deeplinkerp_navigation_mode_override")
+		] = "dl"
+		bootinfo = self.bootinfo([{"name": "Stock", "label": "Stock", "hidden": 0}])
+
+		branding.apply_boot_branding(bootinfo)
+
+		self.assertIn("deeplinkerp_interface_mode", bootinfo)
+		self.assertEqual(
+			bootinfo["deeplinkerp_interface_mode"],
+			{
+				"company_default": "classic",
+				"user_override": "dl",
+				"effective_mode": "dl",
+				"can_manage_company_default": False,
+			},
+		)
+
+	def test_missing_settings_doctype_keeps_existing_boot_filtering_and_falls_back_to_dl(self):
+		FAKE_FRAPPE.db.doctype_exists = False
+		bootinfo = self.bootinfo(
+			[
+				{"name": "DLP Framework", "label": "DLP Framework", "hidden": 0},
+				{"name": "Stock", "label": "Stock", "hidden": 0},
+			]
+		)
+
+		branding.apply_boot_branding(bootinfo)
+
+		self.assertEqual([icon["name"] for icon in bootinfo["desktop_icons"]], ["Stock"])
+		self.assertIn("deeplinkerp_interface_mode", bootinfo)
+		self.assertEqual(bootinfo["deeplinkerp_interface_mode"]["effective_mode"], "dl")
 
 
 if __name__ == "__main__":

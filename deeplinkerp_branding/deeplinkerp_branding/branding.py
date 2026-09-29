@@ -1,5 +1,7 @@
 import frappe
 
+from deeplinkerp_branding.deeplinkerp_branding.interface_mode import apply_interface_mode_bootinfo
+
 
 BRAND_NAME = "Deeplinkerp"
 BRAND_LOGO_URL = "/assets/deeplinkerp_branding/logo/deeplinkerp_logo_radius.png?v=0.0.6"
@@ -424,6 +426,7 @@ def apply_boot_branding(bootinfo):
 		for icon in filtered_icons
 		if not icon.get("parent_icon") or icon.get("parent_icon") in visible_parent_labels
 	]
+	apply_interface_mode_bootinfo(bootinfo)
 
 
 def append_unique(values, value):
