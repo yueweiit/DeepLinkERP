@@ -107,7 +107,6 @@
 			group,
 			branch,
 			route = "",
-			itemIsOpen = false,
 			updateChevron,
 			isNarrowViewport,
 			closeSidebar,
@@ -118,10 +117,9 @@
 			bindNavigationBranchToggle(row, {
 				group,
 				branch,
-				route,
-				itemIsOpen,
 				updateChevron,
 			});
+			return;
 		}
 		if (route) {
 			bindNativeSidebarClose(row, {
@@ -152,12 +150,12 @@
 		return shouldRestore;
 	}
 
-	function collectUserCollapsedKeys(navigation) {
+	function collectDisclosureKeys(navigation, attribute) {
 		if (!navigation) return new Set();
 		return new Set(
 			Array.from(
 				navigation.querySelectorAll(
-					'.dlp-mes-navigation__group[data-user-collapsed="true"]'
+					`.dlp-mes-navigation__group[data-${attribute}="true"]`
 				)
 			)
 				.map((group) => group.dataset.navigationKey)
@@ -165,26 +163,33 @@
 		);
 	}
 
-	function applyUserCollapsedState(group, item, userCollapsedKeys) {
-		const collapsed = Boolean(item.isOpen && userCollapsedKeys?.has(item.key));
-		if (collapsed) group.dataset.userCollapsed = "true";
-		else delete group.dataset.userCollapsed;
-		return Boolean(item.isOpen && !collapsed);
+	function collectDisclosureState(navigation) {
+		return {
+			expandedKeys: collectDisclosureKeys(navigation, "user-expanded"),
+			collapsedKeys: collectDisclosureKeys(navigation, "user-collapsed"),
+		};
 	}
 
-	function bindNavigationBranchToggle(
-		row,
-		{ group, branch, route = "", itemIsOpen = false, updateChevron }
-	) {
-		if (route && !itemIsOpen) return;
+	function resolveItemOpen(item, disclosureState = {}) {
+		if (disclosureState.collapsedKeys?.has(item.key)) return false;
+		if (disclosureState.expandedKeys?.has(item.key)) return true;
+		return Boolean(item.isOpen);
+	}
+
+	function bindNavigationBranchToggle(row, { group, branch, updateChevron }) {
 		row.addEventListener("click", (event) => {
-			if (route) event.preventDefault();
+			event.preventDefault();
 			const open = row.getAttribute("aria-expanded") !== "true";
 			row.setAttribute("aria-expanded", String(open));
 			branch.hidden = !open;
 			group.classList.toggle("dlp-mes-navigation__group--open", open);
-			if (open) delete group.dataset.userCollapsed;
-			else group.dataset.userCollapsed = "true";
+			if (open) {
+				delete group.dataset.userCollapsed;
+				group.dataset.userExpanded = "true";
+			} else {
+				delete group.dataset.userExpanded;
+				group.dataset.userCollapsed = "true";
+			}
 			updateChevron(open);
 		});
 	}
@@ -323,6 +328,7 @@
 				decorate(node.children);
 				const nativeSidebar = getWorkspaceSidebar(node, workspaceSidebars);
 				const hasNativeChildren = Boolean(nativeSidebar && nativeSidebar.items?.length);
+				node.workspaceSidebar = nativeSidebar;
 				const isActive = Boolean(activeLeaf && node.key === activeLeaf.key);
 				node.hasNativeChildren = hasNativeChildren;
 				node.isOpen = activeKeys.has(node.key) && (node.children.length > 0 || hasNativeChildren);
@@ -352,18 +358,18 @@
 	}
 
 	return Object.freeze({
-		applyUserCollapsedState,
 		bindNavigationBranchToggle,
 		bindNavigationRowInteractions,
 		bindNativeSidebarClose,
 		buildNavigationModel,
 		buildNavigationTree,
-		collectUserCollapsedKeys,
+		collectDisclosureState,
 		getNavigationIcon,
 		normalizeRoute,
 		projectAuthorizedDesktopIcons,
 		rememberDesktopSidebarExpansion,
 		replaceNavigationRoot,
+		resolveItemOpen,
 		restoreDesktopSidebarExpansion,
 	});
 });

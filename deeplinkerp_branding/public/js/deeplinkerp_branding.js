@@ -331,16 +331,14 @@
 		return row;
 	}
 
-	function renderNavigationItem(item, nativeItems, nativeHostKey, userCollapsedKeys, depth = 0) {
+	function renderNavigationItem(item, nativeItems, nativeHostKey, disclosureState, depth = 0) {
 		const group = document.createElement("div");
 		group.className = "dlp-mes-navigation__group";
 		group.dataset.navigationKey = item.key;
 		group.style.setProperty("--dlp-navigation-depth", depth);
-		const isOpen = DeepLinkERPNavigation.applyUserCollapsedState(
-			group,
-			item,
-			userCollapsedKeys
-		);
+		const isOpen = DeepLinkERPNavigation.resolveItemOpen(item, disclosureState);
+		if (disclosureState.expandedKeys?.has(item.key)) group.dataset.userExpanded = "true";
+		if (disclosureState.collapsedKeys?.has(item.key)) group.dataset.userCollapsed = "true";
 		if (isOpen) group.classList.add("dlp-mes-navigation__group--open");
 		if (item.isSelfActive) group.classList.add("dlp-mes-navigation__group--self-active");
 
@@ -372,7 +370,7 @@
 					child,
 					nativeItems,
 					nativeHostKey,
-					userCollapsedKeys,
+					disclosureState,
 					depth + 1
 				)
 			);
@@ -386,7 +384,6 @@
 			...interactionOptions,
 			group,
 			branch,
-			itemIsOpen: item.isOpen,
 			updateChevron: (open) => {
 				const chevron = row.querySelector(".dlp-mes-navigation__chevron");
 				if (chevron) chevron.innerHTML = makeLineIcon(open ? "chevron-down" : "chevron-right");
@@ -422,7 +419,7 @@
 			sidebarContainer,
 			isNarrowNavigationViewport()
 		);
-		const userCollapsedKeys = DeepLinkERPNavigation.collectUserCollapsedKeys(
+		const disclosureState = DeepLinkERPNavigation.collectDisclosureState(
 			previousNavigation
 		);
 
@@ -445,7 +442,7 @@
 						item,
 						nativeItems,
 						model.nativeHostKey,
-						userCollapsedKeys
+						disclosureState
 					)
 				);
 			});

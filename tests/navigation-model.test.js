@@ -88,14 +88,20 @@ class FakeElement {
 	}
 
 	querySelectorAll(selector) {
-		const matchesUserCollapse = (element) =>
-			selector === '.dlp-mes-navigation__group[data-user-collapsed="true"]' &&
-			element.classList.contains("dlp-mes-navigation__group") &&
-			element.dataset.userCollapsed === "true";
+		const matchesDisclosure = (element) => {
+			if (!element.classList.contains("dlp-mes-navigation__group")) return false;
+			if (selector === '.dlp-mes-navigation__group[data-user-collapsed="true"]') {
+				return element.dataset.userCollapsed === "true";
+			}
+			if (selector === '.dlp-mes-navigation__group[data-user-expanded="true"]') {
+				return element.dataset.userExpanded === "true";
+			}
+			return false;
+		};
 		const matches = [];
 		const visit = (element) => {
 			element.children.forEach((child) => {
-				if (matchesUserCollapse(child)) matches.push(child);
+				if (matchesDisclosure(child)) matches.push(child);
 				visit(child);
 			});
 		};
@@ -291,6 +297,12 @@ test("resolves query, exact route, and native sidebar active states in authority
 	assert.equal(selectedLeaf.activeItem.isOpen, true);
 	assert.equal(selectedLeaf.activeItem.isSelfActive, false);
 	assert.equal(selectedLeaf.nativeHostKey, selectedLeaf.activeItem.key);
+	assert.equal(selectedLeaf.activeItem.workspaceSidebar, workspaceSidebars.stock);
+	assert.equal(
+		selectedLeaf.items.find((item) => item.label === "Accounting").workspaceSidebar,
+		workspaceSidebars.accounting,
+		"inactive authorized modules retain their own sidebar data"
+	);
 
 	const exactModule = buildNavigationModel({
 		desktopIcons,
@@ -439,7 +451,7 @@ test("custom mobile navigation links close through the native sidebar contract",
 	assert.equal(closeCalls, 1, "desktop navigation must not collapse the sidebar");
 });
 
-test("current routed parent toggles without navigation and updates its collapsed DOM marker", () => {
+test("any routed parent toggles without navigation and records its disclosure state", () => {
 	const bindNavigationBranchToggle = productionFunction("bindNavigationBranchToggle");
 	const row = new FakeElement();
 	const group = new FakeElement(["dlp-mes-navigation__group", "dlp-mes-navigation__group--open"]);
@@ -461,6 +473,7 @@ test("current routed parent toggles without navigation and updates its collapsed
 	assert.equal(branch.hidden, true);
 	assert.equal(group.classList.contains("dlp-mes-navigation__group--open"), false);
 	assert.equal(group.dataset.userCollapsed, "true");
+	assert.equal(group.dataset.userExpanded, undefined);
 
 	const expandEvent = row.dispatch("click");
 	assert.equal(expandEvent.defaultPrevented, true);
@@ -468,10 +481,11 @@ test("current routed parent toggles without navigation and updates its collapsed
 	assert.equal(branch.hidden, false);
 	assert.equal(group.classList.contains("dlp-mes-navigation__group--open"), true);
 	assert.equal(group.dataset.userCollapsed, undefined);
+	assert.equal(group.dataset.userExpanded, "true");
 	assert.deepEqual(chevronStates, [false, true]);
 });
 
-test("inactive routed parent retains normal navigation", () => {
+test("inactive routed parent expands in place instead of navigating or closing mobile sidebar", () => {
 	const bindNavigationRowInteractions = productionFunction("bindNavigationRowInteractions");
 	const row = new FakeElement();
 	row.setAttribute("aria-expanded", "false");
@@ -484,7 +498,7 @@ test("inactive routed parent retains normal navigation", () => {
 		branch,
 		route: "/desk/projects",
 		itemIsOpen: false,
-		updateChevron: () => assert.fail("inactive route must not toggle"),
+		updateChevron: () => {},
 		isNarrowViewport: () => true,
 		closeSidebar: () => {
 			closeCalls += 1;
@@ -492,10 +506,10 @@ test("inactive routed parent retains normal navigation", () => {
 	});
 
 	const event = row.dispatch("click");
-	assert.equal(event.defaultPrevented, false);
-	assert.equal(row.getAttribute("aria-expanded"), "false");
-	assert.equal(branch.hidden, true);
-	assert.equal(closeCalls, 1);
+	assert.equal(event.defaultPrevented, true);
+	assert.equal(row.getAttribute("aria-expanded"), "true");
+	assert.equal(branch.hidden, false);
+	assert.equal(closeCalls, 0);
 });
 
 test("current mobile routed parent toggles before close and keeps the sidebar expanded", () => {
@@ -580,43 +594,45 @@ test("desktop routed navigation neither closes the sidebar nor loses expanded on
 	);
 });
 
-test("same-route rerender preserves DOM-only collapse and switching modules discards it", () => {
-	const collectUserCollapsedKeys = productionFunction("collectUserCollapsedKeys");
-	const applyUserCollapsedState = productionFunction("applyUserCollapsedState");
-	const projectsKey = "projects:0";
+test("rerender preserves multiple open groups, explicit collapse, and fresh-load reset", () => {
+	const collectDisclosureState = productionFunction("collectDisclosureState");
+	const resolveItemOpen = productionFunction("resolveItemOpen");
+	const buyingKey = "buying:0";
+	const manufacturingKey = "manufacturing:1";
+	const projectsKey = "projects:2";
 	const oldNavigation = new FakeElement(["dlp-mes-navigation"]);
+	const oldBuying = new FakeElement(["dlp-mes-navigation__group", "dlp-mes-navigation__group--open"]);
+	oldBuying.dataset.navigationKey = buyingKey;
+	oldBuying.dataset.userExpanded = "true";
+	oldNavigation.appendChild(oldBuying);
+	const oldManufacturing = new FakeElement(["dlp-mes-navigation__group", "dlp-mes-navigation__group--open"]);
+	oldManufacturing.dataset.navigationKey = manufacturingKey;
+	oldManufacturing.dataset.userExpanded = "true";
+	oldNavigation.appendChild(oldManufacturing);
 	const oldProjects = new FakeElement(["dlp-mes-navigation__group"]);
 	oldProjects.dataset.navigationKey = projectsKey;
 	oldProjects.dataset.userCollapsed = "true";
 	oldNavigation.appendChild(oldProjects);
 
-	const collapsedKeys = collectUserCollapsedKeys(oldNavigation);
-	const rerenderedProjects = new FakeElement(["dlp-mes-navigation__group"]);
+	const state = collectDisclosureState(oldNavigation);
+	assert.deepEqual([...state.expandedKeys], [buyingKey, manufacturingKey]);
+	assert.deepEqual([...state.collapsedKeys], [projectsKey]);
+	assert.equal(resolveItemOpen({ key: buyingKey, isOpen: false }, state), true);
+	assert.equal(resolveItemOpen({ key: manufacturingKey, isOpen: false }, state), true);
 	assert.equal(
-		applyUserCollapsedState(rerenderedProjects, { key: projectsKey, isOpen: true }, collapsedKeys),
-		false
+		resolveItemOpen({ key: projectsKey, isOpen: true }, state),
+		false,
+		"explicit collapse survives an asynchronous rerender on the same route"
 	);
-	assert.equal(rerenderedProjects.dataset.userCollapsed, "true");
+	assert.equal(
+		resolveItemOpen({ key: "quality:3", isOpen: true }, state),
+		true,
+		"a newly routed active module opens without closing other groups"
+	);
 
-	const switchedNavigation = new FakeElement(["dlp-mes-navigation"]);
-	const selling = new FakeElement(["dlp-mes-navigation__group"]);
-	selling.dataset.navigationKey = "selling:1";
-	assert.equal(
-		applyUserCollapsedState(selling, { key: "selling:1", isOpen: true }, collapsedKeys),
-		true
-	);
-	switchedNavigation.appendChild(selling);
-	const keysAfterSwitch = collectUserCollapsedKeys(switchedNavigation);
-	const revisitedProjects = new FakeElement(["dlp-mes-navigation__group"]);
-	assert.equal(
-		applyUserCollapsedState(
-			revisitedProjects,
-			{ key: projectsKey, isOpen: true },
-			keysAfterSwitch
-		),
-		true
-	);
-	assert.equal(revisitedProjects.dataset.userCollapsed, undefined);
+	const freshState = collectDisclosureState(null);
+	assert.equal(resolveItemOpen({ key: buyingKey, isOpen: false }, freshState), false);
+	assert.equal(resolveItemOpen({ key: projectsKey, isOpen: true }, freshState), true);
 });
 
 test("integrates the executable lifecycle helpers through the existing single router binding", () => {
@@ -638,8 +654,8 @@ test("integrates the executable lifecycle helpers through the existing single ro
 	assert.match(lifecycle, /projectAuthorizedDesktopIcons\(/);
 	assert.match(lifecycle, /replaceNavigationRoot\(/);
 	assert.match(lifecycle, /bindNativeSidebarClose\(/);
-	assert.match(lifecycle, /collectUserCollapsedKeys\(/);
-	assert.match(lifecycle, /applyUserCollapsedState\(/);
+	assert.match(lifecycle, /collectDisclosureState\(/);
+	assert.match(lifecycle, /resolveItemOpen\(/);
 	assert.match(lifecycle, /bindNavigationRowInteractions\(/);
 	assert.match(lifecycle, /restoreDesktopSidebarExpansion\(/);
 	assert.match(lifecycle, /matchMedia\("\(max-width: 767\.98px\)"\)\.matches/);
