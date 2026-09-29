@@ -405,15 +405,18 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 		"utf8"
 	);
 	const modelAsset = "/assets/deeplinkerp_branding/js/deeplinkerp_navigation.js";
+	const interfaceModeAsset = "/assets/deeplinkerp_branding/js/deeplinkerp_interface_mode.js";
 	const lifecycleAsset = "/assets/deeplinkerp_branding/js/deeplinkerp_branding.js";
 
 	assert.match(
 		hooks,
-		/app_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_navigation\.css\?v=0\.0\.5"/
+		/app_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_navigation\.css\?v=0\.0\.6"/
 	);
-	assert.ok(hooks.indexOf(modelAsset) < hooks.indexOf(lifecycleAsset));
-	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.6/);
-	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.12/);
+	assert.ok(hooks.indexOf(modelAsset) < hooks.indexOf(interfaceModeAsset));
+	assert.ok(hooks.indexOf(interfaceModeAsset) < hooks.indexOf(lifecycleAsset));
+	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.7/);
+	assert.match(hooks, /deeplinkerp_interface_mode\.js\?v=0\.0\.1/);
+	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.13/);
 	assert.match(hooks, /web_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_branding\.css"/);
 });
 
@@ -746,9 +749,14 @@ test("scopes the dark shell, full-row active state, focus ring, and mobile overf
 	)?.[1];
 	assert.match(chevron || "", /color:\s*#c7d4e3/i);
 	assert.match(chevron || "", /opacity:\s*1\s*!important/);
+	assert.match(chevron || "", /width:\s*36px/);
+	assert.match(chevron || "", /height:\s*36px/);
+	assert.match(chevron || "", /flex:\s*0\s+0\s+36px/);
 	assert.match(chevronSvg || "", /color:\s*inherit\s*!important/);
 	assert.match(chevronSvg || "", /stroke:\s*currentColor\s*!important/i);
 	assert.match(chevronSvg || "", /opacity:\s*1\s*!important/);
+	assert.match(chevronSvg || "", /width:\s*18px/);
+	assert.match(chevronSvg || "", /height:\s*18px/);
 	assert.match(activeChevron || "", /color:\s*#fff/i);
 });
 

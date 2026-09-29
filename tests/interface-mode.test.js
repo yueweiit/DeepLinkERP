@@ -272,3 +272,21 @@ test("gates DL navigation and desktop enhancement behind the effective mode", ()
 	assert.match(lifecycle, /disableDLEnhancements\(\)/);
 	assert.doesNotMatch(lifecycle, /disableDLEnhancements[\s\S]*custom-filters-right-sidebar/);
 });
+
+test("keeps the user mode menu available outside the DL-only style scope", () => {
+	const stylesheet = fs.readFileSync(
+		path.join(
+			__dirname,
+			"..",
+			"deeplinkerp_branding",
+			"public",
+			"css",
+			"deeplinkerp_navigation.css"
+		),
+		"utf8"
+	);
+
+	assert.match(stylesheet, /(?:^|\n)\.dlp-interface-mode-menu\s*\{/);
+	assert.doesNotMatch(stylesheet, /body\.dlp-mes-navigation-enabled\s+\.dlp-interface-mode-menu/);
+	assert.match(stylesheet, /body\.dlp-mes-navigation-enabled[\s\S]*\.dlp-mes-navigation__row/);
+});

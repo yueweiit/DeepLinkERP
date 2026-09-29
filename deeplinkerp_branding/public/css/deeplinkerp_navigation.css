@@ -217,14 +217,20 @@ body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .dlp-me
 
 body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .dlp-mes-navigation__chevron {
 	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 36px;
+	height: 36px;
 	margin-left: 4px;
+	flex: 0 0 36px;
 	color: #c7d4e3;
 	opacity: 1 !important;
+	pointer-events: none;
 }
 
 body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .dlp-mes-navigation__chevron svg {
-	width: 16px;
-	height: 16px;
+	width: 18px;
+	height: 18px;
 	color: inherit !important;
 	stroke: currentColor !important;
 	opacity: 1 !important;
