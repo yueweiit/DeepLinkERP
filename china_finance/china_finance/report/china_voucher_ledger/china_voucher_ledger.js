@@ -687,7 +687,15 @@ async function save_inline_voucher_changes(report, confirmed = false) {
 		report._china_inline_edit_state = null;
 		show_inline_notice(report, message, "green");
 		frappe.show_alert({ message, indicator: "green" });
-		await report.refresh();
+		const scroll_state = capture_voucher_ledger_scroll(report);
+		report._china_inline_restore_scroll = scroll_state;
+		try {
+			await report.refresh();
+		} finally {
+			if (report._china_inline_restore_scroll === scroll_state) {
+				report._china_inline_restore_scroll = null;
+			}
+		}
 	} catch (error) {
 		state.pending = false;
 		state.confirming = false;
@@ -740,6 +748,23 @@ function show_inline_notice(report, message, indicator = "blue", bank_transactio
 function bind_inline_voucher_actions(report) {
 	const page_wrapper = report?.page?.wrapper?.[0] || report?.page?.wrapper;
 	if (!page_wrapper?.addEventListener) return;
+	const action_selector =
+		".china-inline-open-source, .china-inline-save, .china-inline-confirm, .china-inline-cancel";
+
+	// DataTable focuses a cell on mousedown and scrolls it into view. When the
+	// operation column is only partly visible, that horizontal visibility check
+	// can also change the vertical scroll position. Keep action buttons outside
+	// that cell-navigation path; their click handler below still runs normally.
+	report._china_inline_action_pointer_handler = (event) => {
+		const target =
+			event.target instanceof Element ? event.target : event.target?.parentElement;
+		const button = target?.closest?.(action_selector);
+		if (!button || !page_wrapper.contains(button)) return;
+		event.stopPropagation();
+	};
+	page_wrapper.addEventListener("mousedown", report._china_inline_action_pointer_handler, true);
+	page_wrapper.addEventListener("touchstart", report._china_inline_action_pointer_handler, true);
+
 	report._china_inline_action_handler = (event) => {
 		const target =
 			event.target instanceof Element ? event.target : event.target?.parentElement;
@@ -754,9 +779,7 @@ function bind_inline_voucher_actions(report) {
 			report.datatable.cellmanager.activateEditing(cell);
 			return;
 		}
-		const button = target?.closest?.(
-			".china-inline-open-source, .china-inline-save, .china-inline-confirm, .china-inline-cancel"
-		);
+		const button = target?.closest?.(action_selector);
 		if (!button || !page_wrapper.contains(button)) return;
 		event.preventDefault();
 		event.stopPropagation();
@@ -781,6 +804,7 @@ function wrap_report_refresh_for_inline_edits(report) {
 	if (report._china_inline_native_refresh) return;
 	report._china_inline_native_refresh = report.refresh.bind(report);
 	report.refresh = (...args) => {
+		const restore_scroll = report._china_inline_restore_scroll;
 		const dirty = Boolean(get_inline_edit_state(report)?.changes?.size);
 		if (dirty) cancel_inline_voucher_changes(report, false);
 		if (dirty)
@@ -788,8 +812,48 @@ function wrap_report_refresh_for_inline_edits(report) {
 				message: __("报表刷新，未保存的凭证修改已取消"),
 				indicator: "orange",
 			});
-		return report._china_inline_native_refresh(...args);
+		const result = report._china_inline_native_refresh(...args);
+		if (!restore_scroll) return result;
+		const restore = () => restore_voucher_ledger_scroll(report, restore_scroll);
+		if (result && typeof result.then === "function") {
+			return Promise.resolve(result).finally(restore);
+		}
+		restore();
+		return result;
 	};
+}
+
+function get_voucher_ledger_scrollable(report) {
+	return (
+		report?.datatable?.bodyScrollable ||
+		report?.$report?.[0]?.querySelector?.(".dt-scrollable") ||
+		null
+	);
+}
+
+function capture_voucher_ledger_scroll(report) {
+	const scrollable = get_voucher_ledger_scrollable(report);
+	if (!scrollable) return null;
+	return {
+		left: scrollable.scrollLeft,
+		top: scrollable.scrollTop,
+	};
+}
+
+function restore_voucher_ledger_scroll(report, state) {
+	if (!state) return;
+	const restore = () => {
+		const scrollable = get_voucher_ledger_scrollable(report);
+		if (!scrollable) return;
+		scrollable.scrollLeft = state.left;
+		scrollable.scrollTop = state.top;
+	};
+	restore();
+	if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+		window.requestAnimationFrame(() => window.requestAnimationFrame(restore));
+	} else if (typeof window !== "undefined") {
+		window?.setTimeout?.(restore, 0);
+	}
 }
 
 function ensure_voucher_ledger_styles() {
@@ -829,7 +893,14 @@ function ensure_voucher_ledger_styles() {
 				font-weight: 600;
 			}
 			.china-inline-summary__edit { margin-left: auto; color: var(--text-muted); }
-			.china-inline-actions { display: flex; align-items: center; gap: 4px; }
+			.china-inline-actions {
+				display: flex;
+				align-items: center;
+				gap: 4px;
+				flex-wrap: nowrap;
+				min-width: max-content;
+				height: 100%;
+			}
 			.china-voucher-ledger-report .dt-cell--editing .dt-cell__edit .form-group { margin: 0; }
 			.china-voucher-ledger-report .dt-cell--editing .dt-cell__edit .control-input-wrapper { padding: 0; }
 			.china-voucher-ledger-report .dt-cell__content {

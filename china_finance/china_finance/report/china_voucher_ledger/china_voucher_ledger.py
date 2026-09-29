@@ -278,7 +278,15 @@ def get_columns():
 		{"label": _("凭证字号"), "fieldname": "statutory_number", "fieldtype": "Data", "width": 100},
 		{"label": _("状态"), "fieldname": "voucher_status", "fieldtype": "Data", "width": 85},
 		{"label": _("凭证日期"), "fieldname": "posting_date", "fieldtype": "Date", "width": 130},
-		{"label": _("会计期间"), "fieldname": "accounting_period", "fieldtype": "Data", "width": 110},
+		# Keep these fields available to the report filters and export, but hide
+		# them from the daily review grid so the voucher fits on one screen.
+		{
+			"label": _("会计期间"),
+			"fieldname": "accounting_period",
+			"fieldtype": "Data",
+			"width": 110,
+			"hidden": 1,
+		},
 		{
 			"label": _("摘要"),
 			"fieldname": "remarks",
@@ -300,6 +308,7 @@ def get_columns():
 			"fieldtype": "Dynamic Link",
 			"options": "party_type",
 			"width": 150,
+			"hidden": 1,
 		},
 		{
 			"label": _("借方"),
