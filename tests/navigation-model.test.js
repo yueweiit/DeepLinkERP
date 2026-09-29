@@ -265,6 +265,30 @@ test("resolves query, exact route, and native sidebar active states in authority
 	);
 });
 
+test("keeps a sidebar-qualified exact module route open without making its parent blue", () => {
+	const buildNavigationModel = productionFunction("buildNavigationModel");
+	const desktopIcons = [
+		{
+			label: "Stock",
+			navigation_route: "/desk/item?sidebar=Stock",
+		},
+	];
+	const workspaceSidebars = {
+		stock: { label: "Stock", items: [{ type: "Link", link_to: "Item" }] },
+	};
+
+	const model = buildNavigationModel({
+		desktopIcons,
+		workspaceSidebars,
+		route: "/desk/item?sidebar=Stock",
+	});
+
+	assert.equal(model.activeItem.label, "Stock");
+	assert.equal(model.activeItem.isOpen, true);
+	assert.equal(model.activeItem.isSelfActive, false);
+	assert.equal(model.nativeHostKey, model.activeItem.key);
+});
+
 test("keeps the Desk assets separate from website CSS and loads the model before the lifecycle", () => {
 	const hooks = fs.readFileSync(
 		path.join(__dirname, "..", "deeplinkerp_branding", "hooks.py"),
@@ -278,7 +302,7 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 		/app_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_navigation\.css\?v=0\.0\.2"/
 	);
 	assert.ok(hooks.indexOf(modelAsset) < hooks.indexOf(lifecycleAsset));
-	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.2/);
+	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.3/);
 	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.9/);
 	assert.match(hooks, /web_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_branding\.css"/);
 });

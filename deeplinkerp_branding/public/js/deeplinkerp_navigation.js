@@ -232,7 +232,11 @@
 				const isActive = Boolean(activeLeaf && node.key === activeLeaf.key);
 				node.hasNativeChildren = hasNativeChildren;
 				node.isOpen = activeKeys.has(node.key) && (node.children.length > 0 || hasNativeChildren);
-				node.isSelfActive = isActive && (exactRoute || (!node.children.length && !hasNativeChildren));
+				const hasSelectedNativeLeaf = Boolean(normalizedRoute.sidebar && hasNativeChildren);
+				node.isSelfActive =
+					isActive &&
+					!hasSelectedNativeLeaf &&
+					(exactRoute || (!node.children.length && !hasNativeChildren));
 				if (isActive) {
 					activeItem = node;
 					if (hasNativeChildren) nativeHostKey = node.key;
