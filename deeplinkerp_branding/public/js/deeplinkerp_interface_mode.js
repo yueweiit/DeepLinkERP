@@ -4,13 +4,23 @@
 		module.exports = interfaceMode;
 	}
 	root.DeepLinkERPInterfaceMode = interfaceMode;
+	interfaceMode.startDLPreparation({
+		document: root.document,
+		boot: root.frappe?.boot,
+		schedule: root.setTimeout?.bind(root),
+		cancel: root.clearTimeout?.bind(root),
+		warn: root.console?.warn?.bind(root.console),
+	});
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
 	"use strict";
 
 	const SAVE_METHOD =
 		"deeplinkerp_branding.deeplinkerp_branding.interface_mode.set_user_navigation_mode";
 	const VALID_MODES = new Set(["classic", "dl"]);
+	const DL_PREPARING_CLASS = "dlp-interface-mode-dl-pending";
+	const DL_PREPARATION_TIMEOUT_MS = 2000;
 	const activeMenus = new WeakMap();
+	const activePreparations = new WeakMap();
 	const boundDocuments = new WeakSet();
 
 	function normalizeMode(value) {
@@ -30,6 +40,54 @@
 
 	function isDLMode(boot = {}) {
 		return getModeState(boot).effectiveMode === "dl";
+	}
+
+	function explicitEffectiveMode(boot = {}) {
+		return normalizeMode(boot?.deeplinkerp_interface_mode?.effective_mode);
+	}
+
+	function startDLPreparation({
+		document,
+		boot,
+		schedule = globalThis.setTimeout?.bind(globalThis),
+		cancel = globalThis.clearTimeout?.bind(globalThis),
+		warn = globalThis.console?.warn?.bind(globalThis.console),
+		timeoutMs = DL_PREPARATION_TIMEOUT_MS,
+	} = {}) {
+		const rootElement = document?.documentElement;
+		if (!rootElement || explicitEffectiveMode(boot) !== "dl") return null;
+		const existing = activePreparations.get(document);
+		if (existing) return existing;
+
+		rootElement.classList.add(DL_PREPARING_CLASS);
+		rootElement.setAttribute("aria-busy", "true");
+		let finished = false;
+		let timerId;
+		const controller = {
+			finish({ timedOut = false } = {}) {
+				if (finished) return false;
+				finished = true;
+				if (!timedOut && timerId !== undefined && cancel) cancel(timerId);
+				rootElement.classList.remove(DL_PREPARING_CLASS);
+				rootElement.removeAttribute("aria-busy");
+				activePreparations.delete(document);
+				if (timedOut && warn) {
+					warn("DL navigation preparation timed out; showing the native Desk UI.");
+				}
+				return true;
+			},
+		};
+		activePreparations.set(document, controller);
+		if (schedule) timerId = schedule(() => controller.finish({ timedOut: true }), timeoutMs);
+		return controller;
+	}
+
+	function finishDLPreparation(document) {
+		const controller = document ? activePreparations.get(document) : null;
+		if (controller) return controller.finish();
+		document?.documentElement?.classList.remove(DL_PREPARING_CLASS);
+		document?.documentElement?.removeAttribute("aria-busy");
+		return false;
 	}
 
 	function buildModeOptions(boot = {}, translate = (value) => value) {
@@ -208,9 +266,11 @@
 		SAVE_METHOD,
 		buildModeOptions,
 		ensureUserMenu,
+		finishDLPreparation,
 		getModeState,
 		isDLMode,
 		normalizeMode,
 		saveNavigationMode,
+		startDLPreparation,
 	});
 });

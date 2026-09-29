@@ -33,6 +33,27 @@ class FakeElement {
 		this.type = "";
 	}
 
+	get classList() {
+		const element = this;
+		return {
+			add(...names) {
+				const classes = new Set(element.className.split(/\s+/).filter(Boolean));
+				names.forEach((name) => classes.add(name));
+				element.className = Array.from(classes).join(" ");
+			},
+			remove(...names) {
+				const removed = new Set(names);
+				element.className = element.className
+					.split(/\s+/)
+					.filter((name) => name && !removed.has(name))
+					.join(" ");
+			},
+			contains(name) {
+				return element.className.split(/\s+/).includes(name);
+			},
+		};
+	}
+
 	appendChild(child) {
 		child.parentElement = this;
 		this.children.push(child);
@@ -78,6 +99,7 @@ class FakeElement {
 class FakeDocument {
 	constructor(root) {
 		this.root = root;
+		this.documentElement = root;
 		this.listeners = {};
 	}
 
@@ -146,6 +168,105 @@ test("builds follow-company, classic, and DL choices from the boot payload", () 
 	assert.equal(options[0].checked, false);
 	assert.equal(options[1].checked, false);
 	assert.equal(options[2].checked, true);
+});
+
+test("starts one synchronous preparation only for an explicit DL boot mode", () => {
+	const startDLPreparation = productionFunction("startDLPreparation");
+	const root = new FakeElement("html");
+	const document = new FakeDocument(root);
+	let scheduled;
+	const schedule = (callback, delay) => {
+		scheduled = { callback, delay };
+		return 42;
+	};
+
+	const first = startDLPreparation({
+		document,
+		boot: { deeplinkerp_interface_mode: { effective_mode: "dl" } },
+		schedule,
+		cancel() {},
+		warn() {},
+	});
+	const second = startDLPreparation({
+		document,
+		boot: { deeplinkerp_interface_mode: { effective_mode: "dl" } },
+		schedule,
+		cancel() {},
+		warn() {},
+	});
+
+	assert.equal(first, second);
+	assert.equal(root.classList.contains("dlp-interface-mode-dl-pending"), true);
+	assert.equal(root.getAttribute("aria-busy"), "true");
+	assert.equal(scheduled.delay, 2000);
+});
+
+test("does not prepare classic or missing boot state", () => {
+	const startDLPreparation = productionFunction("startDLPreparation");
+	for (const boot of [
+		{},
+		{ deeplinkerp_interface_mode: { effective_mode: "classic" } },
+	]) {
+		const root = new FakeElement("html");
+		const document = new FakeDocument(root);
+		assert.equal(startDLPreparation({ document, boot }), null);
+		assert.equal(root.classList.contains("dlp-interface-mode-dl-pending"), false);
+	}
+});
+
+test("finishes preparation once and cancels its watchdog", () => {
+	const startDLPreparation = productionFunction("startDLPreparation");
+	const finishDLPreparation = productionFunction("finishDLPreparation");
+	const root = new FakeElement("html");
+	const document = new FakeDocument(root);
+	const cancelled = [];
+	startDLPreparation({
+		document,
+		boot: { deeplinkerp_interface_mode: { effective_mode: "dl" } },
+		schedule: () => 42,
+		cancel: (timer) => cancelled.push(timer),
+		warn() {},
+	});
+
+	assert.equal(finishDLPreparation(document), true);
+	assert.equal(finishDLPreparation(document), false);
+	assert.deepEqual(cancelled, [42]);
+	assert.equal(root.classList.contains("dlp-interface-mode-dl-pending"), false);
+	assert.equal(root.getAttribute("aria-busy"), null);
+});
+
+test("times out to the native UI with one warning", () => {
+	const startDLPreparation = productionFunction("startDLPreparation");
+	const root = new FakeElement("html");
+	const document = new FakeDocument(root);
+	let timeoutCallback;
+	const warnings = [];
+	startDLPreparation({
+		document,
+		boot: { deeplinkerp_interface_mode: { effective_mode: "dl" } },
+		schedule: (callback) => {
+			timeoutCallback = callback;
+			return 7;
+		},
+		cancel() {},
+		warn: (message) => warnings.push(message),
+	});
+
+	timeoutCallback();
+	timeoutCallback();
+	assert.equal(root.classList.contains("dlp-interface-mode-dl-pending"), false);
+	assert.equal(root.getAttribute("aria-busy"), null);
+	assert.equal(warnings.length, 1);
+});
+
+test("boots preparation before the branding lifecycle waits for DOMContentLoaded", () => {
+	const source = fs.readFileSync(modulePath, "utf8");
+	assert.match(source, /root\.DeepLinkERPInterfaceMode\s*=\s*interfaceMode/);
+	assert.match(source, /interfaceMode\.startDLPreparation\(/);
+	assert.ok(
+		source.indexOf("root.DeepLinkERPInterfaceMode = interfaceMode") <
+			source.indexOf("interfaceMode.startDLPreparation(")
+	);
 });
 
 test("saves only the requested mode and reloads once after success", async () => {
