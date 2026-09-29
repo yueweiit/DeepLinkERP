@@ -90,6 +90,9 @@ class FakeElement {
 	querySelectorAll(selector) {
 		const matchesDisclosure = (element) => {
 			if (!element.classList.contains("dlp-mes-navigation__group")) return false;
+			if (selector === ".dlp-mes-navigation__group--open") {
+				return element.classList.contains("dlp-mes-navigation__group--open");
+			}
 			if (selector === '.dlp-mes-navigation__group[data-user-collapsed="true"]') {
 				return element.dataset.userCollapsed === "true";
 			}
@@ -619,7 +622,7 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 	);
 	assert.ok(hooks.indexOf(modelAsset) < hooks.indexOf(interfaceModeAsset));
 	assert.ok(hooks.indexOf(interfaceModeAsset) < hooks.indexOf(lifecycleAsset));
-	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.14/);
+	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.15/);
 	assert.match(hooks, /deeplinkerp_interface_mode\.js\?v=0\.0\.2/);
 	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.22/);
 	assert.match(hooks, /web_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_branding\.css"/);
@@ -851,6 +854,7 @@ test("rerender preserves multiple open groups, explicit collapse, and fresh-load
 	const buyingKey = "buying:0";
 	const manufacturingKey = "manufacturing:1";
 	const projectsKey = "projects:2";
+	const accountingKey = "accounting:3";
 	const oldNavigation = new FakeElement(["dlp-mes-navigation"]);
 	const oldBuying = new FakeElement(["dlp-mes-navigation__group", "dlp-mes-navigation__group--open"]);
 	oldBuying.dataset.navigationKey = buyingKey;
@@ -864,9 +868,15 @@ test("rerender preserves multiple open groups, explicit collapse, and fresh-load
 	oldProjects.dataset.navigationKey = projectsKey;
 	oldProjects.dataset.userCollapsed = "true";
 	oldNavigation.appendChild(oldProjects);
+	const oldAccounting = new FakeElement([
+		"dlp-mes-navigation__group",
+		"dlp-mes-navigation__group--open",
+	]);
+	oldAccounting.dataset.navigationKey = accountingKey;
+	oldNavigation.appendChild(oldAccounting);
 
 	const state = collectDisclosureState(oldNavigation);
-	assert.deepEqual([...state.expandedKeys], [buyingKey, manufacturingKey]);
+	assert.deepEqual([...state.expandedKeys], [buyingKey, manufacturingKey, accountingKey]);
 	assert.deepEqual([...state.collapsedKeys], [projectsKey]);
 	assert.equal(resolveItemOpen({ key: buyingKey, isOpen: false }, state), true);
 	assert.equal(resolveItemOpen({ key: manufacturingKey, isOpen: false }, state), true);
@@ -879,6 +889,11 @@ test("rerender preserves multiple open groups, explicit collapse, and fresh-load
 		resolveItemOpen({ key: "quality:3", isOpen: true }, state),
 		true,
 		"a newly routed active module opens without closing other groups"
+	);
+	assert.equal(
+		resolveItemOpen({ key: accountingKey, isOpen: false }, state),
+		true,
+		"an automatically open module survives same-page asynchronous correction"
 	);
 
 	const freshState = collectDisclosureState(null);

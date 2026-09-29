@@ -191,9 +191,17 @@
 	}
 
 	function collectDisclosureState(navigation) {
+		const collapsedKeys = collectDisclosureKeys(navigation, "user-collapsed");
+		const expandedKeys = collectDisclosureKeys(navigation, "user-expanded");
+		if (navigation) {
+			Array.from(navigation.querySelectorAll(".dlp-mes-navigation__group--open"))
+				.map((group) => group.dataset.navigationKey)
+				.filter((key) => key && !collapsedKeys.has(key))
+				.forEach((key) => expandedKeys.add(key));
+		}
 		return {
-			expandedKeys: collectDisclosureKeys(navigation, "user-expanded"),
-			collapsedKeys: collectDisclosureKeys(navigation, "user-collapsed"),
+			expandedKeys,
+			collapsedKeys,
 		};
 	}
 
