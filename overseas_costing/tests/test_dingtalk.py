@@ -1879,6 +1879,40 @@ def test_extract_oa_goods_rows_and_build_item_values() -> None:
     assert items[0]["parse_status"] == "SUCCESS"
 
 
+def test_extract_oa_goods_rows_reads_new_material_category_field() -> None:
+    """新表单单头字段名是「物料类别Tipo de Material」，必须能注入到货物行 category。"""
+
+    approval = {
+        "source_approval_no": "202609221831000580722",
+        "source_instance_id": "PROC-SEA-NEW",
+        "transport_mode_raw": "DDP Marítimo海运DDP",
+        "logistics_no": None,
+        "form_fields": {
+            "物料类别Tipo de Material": "Material物料",
+            "货物信息Bienes": [
+                {
+                    "rowValue": [
+                        {"label": "物料编码 Código de material", "value": "FL004116"},
+                        {"label": "物料名称（中文）Nombre del material (chino)", "value": "笔式万用表"},
+                        {"label": "数量Cantidad", "value": "50"},
+                        {"label": "重量 Peso", "value": "12.85"},
+                        {"label": "单位Unidad", "value": "个"},
+                        {"label": "货值Valor de mercancía", "value": "1250"},
+                        {"label": "币种Moneda", "value": "人民币RMB"},
+                    ],
+                    "rowNumber": "TableField_1",
+                }
+            ],
+        },
+    }
+
+    items = build_oa_item_values_from_approval(approval)
+
+    assert items[0]["category"] == "Material物料"
+    assert items[0]["goods_value"] == "1250"
+    assert items[0]["purchase_currency"] == "人民币RMB"
+
+
 def test_extract_oa_goods_text_rows_and_skip_summary() -> None:
     approval = {
         "source_approval_no": "202601121522000486665",

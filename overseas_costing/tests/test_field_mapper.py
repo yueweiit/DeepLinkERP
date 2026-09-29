@@ -105,6 +105,7 @@ def test_map_oa_row_to_item_reads_weight_and_goods_value() -> None:
 
     assert mapped["gross_weight_kg"] == "12.85"
     assert mapped["goods_value"] == "1250"
+    assert mapped["purchase_currency"] == "人民币RMB"
 
 
 def test_map_oa_row_to_item_reads_goods_value_without_accent() -> None:

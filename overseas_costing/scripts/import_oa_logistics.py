@@ -3746,7 +3746,9 @@ def extract_oa_goods_rows(item: dict) -> list[dict]:
     common_values = {
         "project_collection": project_ownership["candidates"][0]["name"] if len(project_ownership["candidates"]) == 1 else "",
         "项目proyecto": form_fields.get("项目proyecto"),
-        "物料类别TIPO": form_fields.get("物料类别TIPO"),
+        "物料类别TIPO": _find_field_value(
+            form_fields, ("物料类别Tipo de Material", "物料类别TIPO")
+        ),
         "物流方式Camino Envío": item.get("transport_mode_raw"),
         "柜号/单号Número DE Logística": item.get("logistics_no"),
         "备注otro": form_fields.get("备注otro"),

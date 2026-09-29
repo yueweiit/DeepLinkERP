@@ -349,6 +349,14 @@ def map_oa_row_to_item(row: dict) -> dict:
             "Valor de mercancia",
             "goods_value",
         ),
+        "purchase_currency": _first_value(
+            row,
+            "币种Moneda",
+            "币种",
+            "Moneda",
+            "采购币种",
+            "purchase_currency",
+        ),
         "waybill_no": _first_value(
             row,
             "柜号/单号Número DE Logística",
