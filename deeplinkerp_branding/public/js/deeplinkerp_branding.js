@@ -239,6 +239,7 @@
 	function getIconsWithRoutes() {
 		return getDesktopIcons().map((icon) => ({
 			...icon,
+			translated_label: translate(icon.label),
 			navigation_route:
 				typeof frappe.utils?.get_route_for_icon === "function"
 					? frappe.utils.get_route_for_icon(icon)
@@ -484,6 +485,8 @@
 			workspaceSidebars: getAuthorizedWorkspaceSidebars(),
 			route: window.location.href,
 			currentSidebar: frappe.app.sidebar.sidebar_title || "",
+			nativeWorkspaceLabel:
+				sidebar.querySelector(".sidebar-header .header-title")?.textContent?.trim() || "",
 			nativeActiveItem: getNativeActiveItem(nativeItems),
 			nativeLeafSelected: Boolean(nativeItems.querySelector(".active-sidebar")),
 		});

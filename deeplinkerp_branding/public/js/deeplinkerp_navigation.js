@@ -236,7 +236,7 @@
 	}
 
 	function nodeAliases(node) {
-		return [node.label, node.name, node.link_to]
+		return [node.label, node.translated_label, node.name, node.link_to]
 			.map(normalizeIdentity)
 			.filter(Boolean);
 	}
@@ -415,6 +415,7 @@
 		workspaceSidebars = {},
 		route = "/desk",
 		currentSidebar = "",
+		nativeWorkspaceLabel = "",
 		nativeActiveItem = null,
 		nativeLeafSelected = false,
 	} = {}) {
@@ -430,6 +431,7 @@
 				normalizedRoute
 			);
 		}
+		if (!activePath.length) activePath = findBySidebar(items, nativeWorkspaceLabel);
 		if (!activePath.length) activePath = findBySidebar(items, currentSidebar);
 
 		const activeKeys = new Set(activePath.map((item) => item.key));
@@ -446,9 +448,11 @@
 			nodes.forEach((node) => {
 				decorate(node.children);
 				const nativeSidebar = getWorkspaceSidebar(node, workspaceSidebars);
-				const hasNativeChildren = Boolean(nativeSidebar && nativeSidebar.items?.length);
-				node.workspaceSidebar = nativeSidebar;
 				const isActive = Boolean(activeLeaf && node.key === activeLeaf.key);
+				const hasNativeChildren = Boolean(
+					(nativeSidebar && nativeSidebar.items?.length) || (isActive && nativeLeafSelected)
+				);
+				node.workspaceSidebar = nativeSidebar;
 				node.hasNativeChildren = hasNativeChildren;
 				node.isOpen = activeKeys.has(node.key) && (node.children.length > 0 || hasNativeChildren);
 				const hasSelectedNativeLeaf = Boolean(

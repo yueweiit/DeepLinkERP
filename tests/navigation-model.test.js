@@ -463,6 +463,36 @@ test("uses the active leaf href to disambiguate repeated child labels", () => {
 	assert.equal(model.nativeHostKey, model.activeItem.key);
 });
 
+test("uses the translated native workspace heading when boot sidebar items are already consumed", () => {
+	const buildNavigationModel = productionFunction("buildNavigationModel");
+	const desktopIcons = [
+		{ label: "Buying", translated_label: "采购", navigation_route: "/desk/buying" },
+		{
+			label: "Manufacturing",
+			translated_label: "生产",
+			navigation_route: "/desk/manufacturing",
+		},
+	];
+	const workspaceSidebars = {
+		buying: { label: "Buying", items: [] },
+		manufacturing: { label: "Manufacturing", items: [] },
+	};
+
+	const model = buildNavigationModel({
+		desktopIcons,
+		workspaceSidebars,
+		route: "/desk/bom",
+		currentSidebar: "Buying",
+		nativeWorkspaceLabel: "生产",
+		nativeActiveItem: { label: "物料清单", href: "/desk/bom" },
+		nativeLeafSelected: true,
+	});
+
+	assert.equal(model.activeItem.label, "Manufacturing");
+	assert.equal(model.nativeHostKey, model.activeItem.key);
+	assert.equal(model.activeItem.isOpen, true);
+});
+
 test("keeps an exact workspace parent open without blue when the native leaf is selected", () => {
 	const buildNavigationModel = productionFunction("buildNavigationModel");
 	const desktopIcons = [
@@ -531,9 +561,9 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 	);
 	assert.ok(hooks.indexOf(modelAsset) < hooks.indexOf(interfaceModeAsset));
 	assert.ok(hooks.indexOf(interfaceModeAsset) < hooks.indexOf(lifecycleAsset));
-	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.12/);
+	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.13/);
 	assert.match(hooks, /deeplinkerp_interface_mode\.js\?v=0\.0\.2/);
-	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.20/);
+	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.21/);
 	assert.match(hooks, /web_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_branding\.css"/);
 });
 
@@ -839,6 +869,11 @@ test("integrates the executable lifecycle helpers through the existing single ro
 	);
 	assert.match(lifecycle, /function getNativeActiveItem\(nativeItems\)/);
 	assert.match(lifecycle, /nativeActiveItem:\s*getNativeActiveItem\(nativeItems\)/);
+	assert.match(lifecycle, /translated_label:\s*translate\(icon\.label\)/);
+	assert.match(
+		lifecycle,
+		/nativeWorkspaceLabel:\s*sidebar\.querySelector\("\.sidebar-header \.header-title"\)/
+	);
 	assert.doesNotMatch(lifecycle, /cloneNode\(/);
 });
 
