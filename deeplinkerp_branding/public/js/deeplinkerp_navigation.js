@@ -96,6 +96,43 @@
 		});
 	}
 
+	function collectUserCollapsedKeys(navigation) {
+		if (!navigation) return new Set();
+		return new Set(
+			Array.from(
+				navigation.querySelectorAll(
+					'.dlp-mes-navigation__group[data-user-collapsed="true"]'
+				)
+			)
+				.map((group) => group.dataset.navigationKey)
+				.filter(Boolean)
+		);
+	}
+
+	function applyUserCollapsedState(group, item, userCollapsedKeys) {
+		const collapsed = Boolean(item.isOpen && userCollapsedKeys?.has(item.key));
+		if (collapsed) group.dataset.userCollapsed = "true";
+		else delete group.dataset.userCollapsed;
+		return Boolean(item.isOpen && !collapsed);
+	}
+
+	function bindNavigationBranchToggle(
+		row,
+		{ group, branch, route = "", itemIsOpen = false, updateChevron }
+	) {
+		if (route && !itemIsOpen) return;
+		row.addEventListener("click", (event) => {
+			if (route) event.preventDefault();
+			const open = row.getAttribute("aria-expanded") !== "true";
+			row.setAttribute("aria-expanded", String(open));
+			branch.hidden = !open;
+			group.classList.toggle("dlp-mes-navigation__group--open", open);
+			if (open) delete group.dataset.userCollapsed;
+			else group.dataset.userCollapsed = "true";
+			updateChevron(open);
+		});
+	}
+
 	function normalizePath(pathname) {
 		let path = pathname || "/desk";
 		try {
@@ -259,9 +296,12 @@
 	}
 
 	return Object.freeze({
+		applyUserCollapsedState,
+		bindNavigationBranchToggle,
 		bindNativeSidebarClose,
 		buildNavigationModel,
 		buildNavigationTree,
+		collectUserCollapsedKeys,
 		getNavigationIcon,
 		normalizeRoute,
 		projectAuthorizedDesktopIcons,

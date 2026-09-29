@@ -26,12 +26,30 @@ class FakeClassList {
 	contains(name) {
 		return this.names.has(name);
 	}
+
+	add(name) {
+		this.names.add(name);
+	}
+
+	remove(name) {
+		this.names.delete(name);
+	}
+
+	toggle(name, force) {
+		const enabled = force === undefined ? !this.names.has(name) : force;
+		if (enabled) this.names.add(name);
+		else this.names.delete(name);
+		return enabled;
+	}
 }
 
 class FakeElement {
 	constructor(classes = []) {
 		this.children = [];
 		this.classList = new FakeClassList(classes);
+		this.dataset = {};
+		this.attributes = new Map();
+		this.hidden = false;
 		this.parentElement = null;
 		this.listeners = {};
 	}
@@ -60,8 +78,40 @@ class FakeElement {
 		this.listeners[type] = listener;
 	}
 
+	setAttribute(name, value) {
+		this.attributes.set(name, String(value));
+	}
+
+	getAttribute(name) {
+		return this.attributes.get(name) ?? null;
+	}
+
+	querySelectorAll(selector) {
+		const matchesUserCollapse = (element) =>
+			selector === '.dlp-mes-navigation__group[data-user-collapsed="true"]' &&
+			element.classList.contains("dlp-mes-navigation__group") &&
+			element.dataset.userCollapsed === "true";
+		const matches = [];
+		const visit = (element) => {
+			element.children.forEach((child) => {
+				if (matchesUserCollapse(child)) matches.push(child);
+				visit(child);
+			});
+		};
+		visit(this);
+		return matches;
+	}
+
 	dispatch(type) {
-		this.listeners[type]?.({ currentTarget: this });
+		const event = {
+			currentTarget: this,
+			defaultPrevented: false,
+			preventDefault() {
+				this.defaultPrevented = true;
+			},
+		};
+		this.listeners[type]?.(event);
+		return event;
 	}
 }
 
@@ -329,11 +379,11 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 
 	assert.match(
 		hooks,
-		/app_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_navigation\.css\?v=0\.0\.4"/
+		/app_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_navigation\.css\?v=0\.0\.5"/
 	);
 	assert.ok(hooks.indexOf(modelAsset) < hooks.indexOf(lifecycleAsset));
-	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.4/);
-	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.10/);
+	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.5/);
+	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.11/);
 	assert.match(hooks, /web_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_branding\.css"/);
 });
 
@@ -388,6 +438,98 @@ test("custom mobile navigation links close through the native sidebar contract",
 	assert.equal(closeCalls, 1, "desktop navigation must not collapse the sidebar");
 });
 
+test("current routed parent toggles without navigation and updates its collapsed DOM marker", () => {
+	const bindNavigationBranchToggle = productionFunction("bindNavigationBranchToggle");
+	const row = new FakeElement();
+	const group = new FakeElement(["dlp-mes-navigation__group", "dlp-mes-navigation__group--open"]);
+	const branch = new FakeElement();
+	row.setAttribute("aria-expanded", "true");
+	branch.hidden = false;
+	const chevronStates = [];
+	bindNavigationBranchToggle(row, {
+		group,
+		branch,
+		route: "/desk/projects",
+		itemIsOpen: true,
+		updateChevron: (open) => chevronStates.push(open),
+	});
+
+	const collapseEvent = row.dispatch("click");
+	assert.equal(collapseEvent.defaultPrevented, true);
+	assert.equal(row.getAttribute("aria-expanded"), "false");
+	assert.equal(branch.hidden, true);
+	assert.equal(group.classList.contains("dlp-mes-navigation__group--open"), false);
+	assert.equal(group.dataset.userCollapsed, "true");
+
+	const expandEvent = row.dispatch("click");
+	assert.equal(expandEvent.defaultPrevented, true);
+	assert.equal(row.getAttribute("aria-expanded"), "true");
+	assert.equal(branch.hidden, false);
+	assert.equal(group.classList.contains("dlp-mes-navigation__group--open"), true);
+	assert.equal(group.dataset.userCollapsed, undefined);
+	assert.deepEqual(chevronStates, [false, true]);
+});
+
+test("inactive routed parent retains normal navigation", () => {
+	const bindNavigationBranchToggle = productionFunction("bindNavigationBranchToggle");
+	const row = new FakeElement();
+	row.setAttribute("aria-expanded", "false");
+	const group = new FakeElement(["dlp-mes-navigation__group"]);
+	const branch = new FakeElement();
+	branch.hidden = true;
+	bindNavigationBranchToggle(row, {
+		group,
+		branch,
+		route: "/desk/projects",
+		itemIsOpen: false,
+		updateChevron: () => assert.fail("inactive route must not toggle"),
+	});
+
+	const event = row.dispatch("click");
+	assert.equal(event.defaultPrevented, false);
+	assert.equal(row.getAttribute("aria-expanded"), "false");
+	assert.equal(branch.hidden, true);
+});
+
+test("same-route rerender preserves DOM-only collapse and switching modules discards it", () => {
+	const collectUserCollapsedKeys = productionFunction("collectUserCollapsedKeys");
+	const applyUserCollapsedState = productionFunction("applyUserCollapsedState");
+	const projectsKey = "projects:0";
+	const oldNavigation = new FakeElement(["dlp-mes-navigation"]);
+	const oldProjects = new FakeElement(["dlp-mes-navigation__group"]);
+	oldProjects.dataset.navigationKey = projectsKey;
+	oldProjects.dataset.userCollapsed = "true";
+	oldNavigation.appendChild(oldProjects);
+
+	const collapsedKeys = collectUserCollapsedKeys(oldNavigation);
+	const rerenderedProjects = new FakeElement(["dlp-mes-navigation__group"]);
+	assert.equal(
+		applyUserCollapsedState(rerenderedProjects, { key: projectsKey, isOpen: true }, collapsedKeys),
+		false
+	);
+	assert.equal(rerenderedProjects.dataset.userCollapsed, "true");
+
+	const switchedNavigation = new FakeElement(["dlp-mes-navigation"]);
+	const selling = new FakeElement(["dlp-mes-navigation__group"]);
+	selling.dataset.navigationKey = "selling:1";
+	assert.equal(
+		applyUserCollapsedState(selling, { key: "selling:1", isOpen: true }, collapsedKeys),
+		true
+	);
+	switchedNavigation.appendChild(selling);
+	const keysAfterSwitch = collectUserCollapsedKeys(switchedNavigation);
+	const revisitedProjects = new FakeElement(["dlp-mes-navigation__group"]);
+	assert.equal(
+		applyUserCollapsedState(
+			revisitedProjects,
+			{ key: projectsKey, isOpen: true },
+			keysAfterSwitch
+		),
+		true
+	);
+	assert.equal(revisitedProjects.dataset.userCollapsed, undefined);
+});
+
 test("integrates the executable lifecycle helpers through the existing single router binding", () => {
 	const lifecycle = fs.readFileSync(
 		path.join(
@@ -407,6 +549,9 @@ test("integrates the executable lifecycle helpers through the existing single ro
 	assert.match(lifecycle, /projectAuthorizedDesktopIcons\(/);
 	assert.match(lifecycle, /replaceNavigationRoot\(/);
 	assert.match(lifecycle, /bindNativeSidebarClose\(/);
+	assert.match(lifecycle, /collectUserCollapsedKeys\(/);
+	assert.match(lifecycle, /applyUserCollapsedState\(/);
+	assert.match(lifecycle, /bindNavigationBranchToggle\(/);
 	assert.match(
 		lifecycle,
 		/nativeLeafSelected:\s*Boolean\(nativeItems\.querySelector\("\.active-sidebar"\)\)/
@@ -446,6 +591,17 @@ test("scopes the dark shell, full-row active state, focus ring, and mobile overf
 		/body\.dlp-mes-navigation-enabled\s+\.custom-filters-right-sidebar-container\s*,\s*body\.dlp-mes-navigation-enabled\s+\.custom-filters-right-sidebar-flyout\s*\{([^}]*)\}/
 	)?.[1];
 	assert.match(supersededCustomFiltersSidebar || "", /display:\s*none\s*!important/);
+	const chevron = stylesheet.match(/\.dlp-mes-navigation__chevron\s*\{([^}]*)\}/)?.[1];
+	const chevronSvg = stylesheet.match(/\.dlp-mes-navigation__chevron svg\s*\{([^}]*)\}/)?.[1];
+	const activeChevron = stylesheet.match(
+		/\.dlp-mes-navigation__group--open\s*>\s*\.dlp-mes-navigation__row\s+\.dlp-mes-navigation__chevron\s*,\s*body\.dlp-mes-navigation-enabled[^{}]*\.dlp-mes-navigation__group--self-active\s*>\s*\.dlp-mes-navigation__row\s+\.dlp-mes-navigation__chevron\s*\{([^}]*)\}/
+	)?.[1];
+	assert.match(chevron || "", /color:\s*#c7d4e3/i);
+	assert.match(chevron || "", /opacity:\s*1\s*!important/);
+	assert.match(chevronSvg || "", /color:\s*inherit\s*!important/);
+	assert.match(chevronSvg || "", /stroke:\s*currentColor\s*!important/i);
+	assert.match(chevronSvg || "", /opacity:\s*1\s*!important/);
+	assert.match(activeChevron || "", /color:\s*#fff/i);
 });
 
 test("expands the root Desktop grid and keeps enhanced entries compact and horizontal", () => {

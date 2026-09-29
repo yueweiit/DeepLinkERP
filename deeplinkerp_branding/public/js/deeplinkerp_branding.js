@@ -290,7 +290,7 @@
 		}
 	}
 
-	function makeNavigationRow(item) {
+	function makeNavigationRow(item, isOpen = item.isOpen) {
 		const hasChildren = item.children.length > 0 || item.hasNativeChildren;
 		const route = item.navigation_route || item.route || item.link || item.url;
 		const row = document.createElement(route ? "a" : "button");
@@ -304,7 +304,7 @@
 		} else {
 			row.type = "button";
 		}
-		if (hasChildren) row.setAttribute("aria-expanded", String(item.isOpen));
+		if (hasChildren) row.setAttribute("aria-expanded", String(isOpen));
 		if (item.isSelfActive) row.setAttribute("aria-current", "page");
 
 		const icon = document.createElement("span");
@@ -320,46 +320,60 @@
 		if (hasChildren) {
 			const chevron = document.createElement("span");
 			chevron.className = "dlp-mes-navigation__chevron";
-			chevron.innerHTML = makeLineIcon(item.isOpen ? "chevron-down" : "chevron-right");
+			chevron.innerHTML = makeLineIcon(isOpen ? "chevron-down" : "chevron-right");
 			row.appendChild(chevron);
 		}
 		return row;
 	}
 
-	function renderNavigationItem(item, nativeItems, nativeHostKey, depth = 0) {
+	function renderNavigationItem(item, nativeItems, nativeHostKey, userCollapsedKeys, depth = 0) {
 		const group = document.createElement("div");
 		group.className = "dlp-mes-navigation__group";
 		group.dataset.navigationKey = item.key;
 		group.style.setProperty("--dlp-navigation-depth", depth);
-		if (item.isOpen) group.classList.add("dlp-mes-navigation__group--open");
+		const isOpen = DeepLinkERPNavigation.applyUserCollapsedState(
+			group,
+			item,
+			userCollapsedKeys
+		);
+		if (isOpen) group.classList.add("dlp-mes-navigation__group--open");
 		if (item.isSelfActive) group.classList.add("dlp-mes-navigation__group--self-active");
 
-		const row = makeNavigationRow(item);
+		const row = makeNavigationRow(item, isOpen);
 		group.appendChild(row);
 		const needsBranch = item.children.length > 0 || item.key === nativeHostKey;
 		if (!needsBranch) return group;
 
 		const branch = document.createElement("div");
 		branch.className = "dlp-mes-navigation__children";
-		branch.hidden = !item.isOpen;
+		branch.hidden = !isOpen;
 		item.children.forEach((child) => {
-			branch.appendChild(renderNavigationItem(child, nativeItems, nativeHostKey, depth + 1));
+			branch.appendChild(
+				renderNavigationItem(
+					child,
+					nativeItems,
+					nativeHostKey,
+					userCollapsedKeys,
+					depth + 1
+				)
+			);
 		});
 		if (item.key === nativeHostKey) {
 			branch.appendChild(nativeItems);
 		}
 		group.appendChild(branch);
 
-		if (!item.navigation_route && !item.route && !item.link && !item.url) {
-			row.addEventListener("click", () => {
-				const open = row.getAttribute("aria-expanded") !== "true";
-				row.setAttribute("aria-expanded", String(open));
-				branch.hidden = !open;
-				group.classList.toggle("dlp-mes-navigation__group--open", open);
+		const route = item.navigation_route || item.route || item.link || item.url || "";
+		DeepLinkERPNavigation.bindNavigationBranchToggle(row, {
+			group,
+			branch,
+			route,
+			itemIsOpen: item.isOpen,
+			updateChevron: (open) => {
 				const chevron = row.querySelector(".dlp-mes-navigation__chevron");
 				if (chevron) chevron.innerHTML = makeLineIcon(open ? "chevron-down" : "chevron-right");
-			});
-		}
+			},
+		});
 		return group;
 	}
 
@@ -384,6 +398,9 @@
 		sidebar.classList.add("dlp-mes-navigation-sidebar");
 		sidebarContainer.style.removeProperty("display");
 		ensureBrandHeader(sidebar);
+		const userCollapsedKeys = DeepLinkERPNavigation.collectUserCollapsedKeys(
+			top.querySelector(":scope > .dlp-mes-navigation")
+		);
 
 		const model = DeepLinkERPNavigation.buildNavigationModel({
 			desktopIcons: getIconsWithRoutes(),
@@ -400,7 +417,12 @@
 			navigation.setAttribute("aria-label", translate("Modules"));
 			model.items.forEach((item) => {
 				navigation.appendChild(
-					renderNavigationItem(item, nativeItems, model.nativeHostKey)
+					renderNavigationItem(
+						item,
+						nativeItems,
+						model.nativeHostKey,
+						userCollapsedKeys
+					)
 				);
 			});
 			if (!model.nativeHostKey) {

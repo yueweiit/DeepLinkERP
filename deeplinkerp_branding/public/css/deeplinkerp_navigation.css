@@ -167,11 +167,21 @@ body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .dlp-me
 body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .dlp-mes-navigation__chevron {
 	display: flex;
 	margin-left: 4px;
+	color: #c7d4e3;
+	opacity: 1 !important;
 }
 
 body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .dlp-mes-navigation__chevron svg {
 	width: 16px;
 	height: 16px;
+	color: inherit !important;
+	stroke: currentColor !important;
+	opacity: 1 !important;
+}
+
+body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .dlp-mes-navigation__group--open > .dlp-mes-navigation__row .dlp-mes-navigation__chevron,
+body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .dlp-mes-navigation__group--self-active > .dlp-mes-navigation__row .dlp-mes-navigation__chevron {
+	color: #fff;
 }
 
 body.dlp-mes-navigation-enabled .body-sidebar.dlp-mes-navigation-sidebar .dlp-mes-navigation__children {
