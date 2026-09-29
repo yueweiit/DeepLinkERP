@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 from overseas_costing.overseas_costing.report.inventory_on_hand import inventory_on_hand
@@ -26,6 +27,15 @@ def test_quantity_precision_uses_zero_for_whole_count_units_and_two_for_continuo
         2,
         "计数单位存在小数库存",
     )
+
+
+def test_js_formatter_uses_integer_fieldtype_for_zero_decimal_count_units() -> None:
+    source = Path(
+        inventory_on_hand.__file__.replace(".py", ".js")
+    ).read_text(encoding="utf-8")
+
+    assert 'fieldtype: "Int"' in source
+    assert 'precision: 2' in source
 
 
 def test_get_data_uses_actual_nonzero_bin_balances_and_bound_filters(monkeypatch) -> None:
@@ -73,6 +83,8 @@ def test_get_data_uses_actual_nonzero_bin_balances_and_bound_filters(monkeypatch
     assert "bin.actual_qty != 0" in compact_query
     assert "bin.actual_qty AS actual_qty" in compact_query
     assert "bin.projected_qty" not in compact_query
+    assert "item.disabled" not in compact_query
+    assert "item.is_stock_item" not in compact_query
     assert fake_db.params == {
         "company": "YW Fabricación MX 核心制造",
         "warehouse": "综合仓库 - YWFM",
@@ -97,6 +109,8 @@ def test_execute_returns_rows_with_hidden_display_metadata(monkeypatch) -> None:
             {
                 "actual_qty": 7,
                 "stock_uom": "卷：rollo",
+                "quantity_precision": 0,
+                "quantity_warning": "",
             }
         ],
     )

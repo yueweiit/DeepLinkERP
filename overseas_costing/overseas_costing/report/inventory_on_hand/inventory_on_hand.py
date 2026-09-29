@@ -37,7 +37,6 @@ COUNT_UOM_TOKENS = (
 def execute(filters=None):
     filters = frappe._dict(filters or {})
     rows = get_data(filters)
-    _decorate_quantity_display(rows)
     return get_columns(), rows
 
 
@@ -101,7 +100,7 @@ def get_quantity_display(actual_qty: Any, stock_uom: str | None) -> tuple[int, s
 
 
 def get_data(filters) -> list[dict[str, Any]]:
-    conditions = ["bin.actual_qty != 0", "item.disabled = 0", "item.is_stock_item = 1"]
+    conditions = ["bin.actual_qty != 0"]
     params: dict[str, Any] = {}
 
     filter_specs = (

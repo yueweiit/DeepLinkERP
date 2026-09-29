@@ -21,8 +21,6 @@ WORKBENCH_PAGE = "overseas-cost-workbench"
 COMPARISON_PAGE = "air-sea-cost-comparison"
 ACCESS_ROLE = "海外成本核算用户"
 ERP_SETTINGS_DOCTYPE = "Overseas Cost ERP Settings"
-INVENTORY_ON_HAND_REPORT = "Inventory On Hand"
-STOCK_WORKSPACE = "Stock"
 HOME_WORKSPACE_LABEL = "Home"
 HOME_SHORTCUT_LABEL = "海外成本核算"
 HOME_SHORTCUT_ID = "overseas-cost-home-shortcut"
@@ -51,7 +49,6 @@ def after_install() -> None:
     ensure_language_defaults()
     ensure_access_role()
     ensure_erpnext_standard_fields()
-    ensure_stock_workspace_inventory_shortcut()
     ensure_workspace()
     ensure_workspace_sidebar()
     ensure_desktop_icon()
@@ -115,7 +112,6 @@ def after_migrate() -> None:
     ensure_language_defaults()
     ensure_access_role()
     ensure_erpnext_standard_fields()
-    ensure_stock_workspace_inventory_shortcut()
     ensure_workspace()
     ensure_workspace_sidebar()
     ensure_desktop_icon()
@@ -406,7 +402,7 @@ def ensure_erpnext_standard_fields() -> dict:
     except Exception:
         return {"ok": False, "message": "当前未连接 Frappe 或 Custom Field 工具不可用。"}
 
-    required_doctypes = ("Item", "Bin", "Purchase Order", "Purchase Order Item")
+    required_doctypes = ("Item", "Purchase Order", "Purchase Order Item")
     missing_doctypes = [doctype for doctype in required_doctypes if not frappe.db.exists("DocType", doctype)]
     if missing_doctypes:
         return {"ok": False, "message": "ERPNext 标准 DocType 不存在，已跳过自定义字段。", "missing": missing_doctypes}
@@ -557,87 +553,14 @@ def ensure_erpnext_standard_fields() -> dict:
             },
         ],
     }
-    supplemental_specs = (
-        build_erpnext_standard_field_spec(),
-        get_inventory_trace_custom_fields(),
-    )
-    for field_spec in supplemental_specs:
-        for doctype, fields in field_spec.items():
-            existing = {
-                field["fieldname"] for field in custom_fields.get(doctype, [])
-            }
-            custom_fields.setdefault(doctype, []).extend(
-                field for field in fields if field["fieldname"] not in existing
-            )
+    for doctype, fields in build_erpnext_standard_field_spec().items():
+        existing = {field["fieldname"] for field in custom_fields.get(doctype, [])}
+        custom_fields.setdefault(doctype, []).extend(field for field in fields if field["fieldname"] not in existing)
     try:
         create_custom_fields(custom_fields, ignore_validate=True)
     except TypeError:
         create_custom_fields(custom_fields)
     return {"ok": True, "message": "ERPNext 标准单据海外成本字段已确保存在。"}
-
-
-def get_inventory_trace_custom_fields() -> dict[str, list[dict]]:
-    """返回实际库存报表使用的来源追溯字段定义。"""
-
-    return {
-        "Item": [
-            {
-                "fieldname": "custom_original_identifier_alias",
-                "label": "原始标识/别名",
-                "fieldtype": "Small Text",
-                "insert_after": "custom_external_code",
-            }
-        ],
-        "Bin": [
-            {
-                "fieldname": "custom_original_location",
-                "label": "原始库位",
-                "fieldtype": "Data",
-                "insert_after": "warehouse",
-                "read_only": 1,
-            }
-        ],
-    }
-
-
-def ensure_stock_workspace_inventory_shortcut() -> dict:
-    """把库存工作区现有“可用数量”入口指向精简实际库存报表。"""
-
-    try:
-        import frappe
-    except Exception:
-        return {"ok": False, "message": "当前未连接 Frappe。"}
-
-    if not frappe.db.exists("Workspace", STOCK_WORKSPACE):
-        return {"ok": False, "message": "未找到库存工作区。"}
-    if not frappe.db.exists("Report", INVENTORY_ON_HAND_REPORT):
-        return {"ok": False, "message": "实际库存报表尚未安装。"}
-
-    workspace = frappe.get_doc("Workspace", STOCK_WORKSPACE)
-    changed = _update_stock_workspace_inventory_link(workspace)
-    if changed:
-        workspace.save(ignore_permissions=True)
-        frappe.db.commit()
-    return {
-        "ok": True,
-        "changed": changed,
-        "workspace": workspace.name,
-        "report": INVENTORY_ON_HAND_REPORT,
-    }
-
-
-def _update_stock_workspace_inventory_link(workspace) -> bool:
-    for row in workspace.get("links") or []:
-        label = getattr(row, "label", None)
-        link_to = getattr(row, "link_to", None)
-        if label in ("可用数量", "Stock Projected Qty") and link_to == "Stock Projected Qty":
-            row.link_to = INVENTORY_ON_HAND_REPORT
-            row.link_type = "Report"
-            row.report_ref_doctype = "Item"
-            return True
-        if label in ("可用数量", "Inventory On Hand") and link_to == INVENTORY_ON_HAND_REPORT:
-            return False
-    return False
 
 
 def ensure_workspace() -> dict:

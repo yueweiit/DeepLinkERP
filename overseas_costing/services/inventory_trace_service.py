@@ -1,4 +1,4 @@
-"""原始库位与原始标识的幂等回填服务。"""
+"""一次性回填库存来源追溯字段。"""
 
 from __future__ import annotations
 
@@ -19,6 +19,29 @@ TRACE_FIELDS = (
 
 
 class FrappeInventoryTraceRepository:
+    def lock_targets(self, rows: list[dict[str, str]]) -> None:
+        item_codes = tuple(sorted({row["item_code"] for row in rows}))
+        warehouses = tuple(sorted({row["warehouse"] for row in rows}))
+        if not item_codes:
+            return
+        frappe.db.sql(
+            """
+            SELECT name FROM `tabItem`
+            WHERE name IN %(item_codes)s
+            ORDER BY name FOR UPDATE
+            """,
+            {"item_codes": item_codes},
+        )
+        frappe.db.sql(
+            """
+            SELECT name FROM `tabBin`
+            WHERE item_code IN %(item_codes)s
+              AND warehouse IN %(warehouses)s
+            ORDER BY item_code, warehouse FOR UPDATE
+            """,
+            {"item_codes": item_codes, "warehouses": warehouses},
+        )
+
     def get_bin(self, item_code: str, warehouse: str):
         return frappe.db.get_value(
             "Bin",
@@ -30,12 +53,9 @@ class FrappeInventoryTraceRepository:
     def get_item_alias(self, item_code: str):
         if not frappe.db.exists("Item", item_code):
             return None
-        return (
-            frappe.db.get_value(
-                "Item", item_code, "custom_original_identifier_alias"
-            )
-            or ""
-        )
+        return frappe.db.get_value(
+            "Item", item_code, "custom_original_identifier_alias"
+        ) or ""
 
     def set_bin_location(self, bin_name: str, value: str) -> None:
         frappe.db.set_value(
@@ -59,30 +79,46 @@ class FrappeInventoryTraceRepository:
 def normalize_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, str]]:
     normalized: list[dict[str, str]] = []
     seen: dict[tuple[str, str], dict[str, str]] = {}
+    aliases_by_item: dict[str, list[str]] = {}
     for index, raw_row in enumerate(rows or [], start=1):
-        row = {fieldname: str(raw_row.get(fieldname) or "").strip() for fieldname in TRACE_FIELDS}
-        missing_fields = [fieldname for fieldname, value in row.items() if not value]
+        row = {
+            fieldname: str(raw_row.get(fieldname) or "").strip()
+            for fieldname in TRACE_FIELDS
+        }
+        missing_fields = [name for name, value in row.items() if not value]
         if missing_fields:
-            raise ValueError(
-                f"第 {index} 行缺少字段：{', '.join(missing_fields)}"
-            )
+            raise ValueError(f"第 {index} 行缺少字段：{', '.join(missing_fields)}")
 
         key = (row["item_code"], row["warehouse"])
         previous = seen.get(key)
-        if previous and previous != row:
+        if previous and previous["original_location"] != row["original_location"]:
             raise ValueError(
-                f"同一物料和仓库存在冲突的追溯数据：{row['item_code']} / {row['warehouse']}"
+                "同一物料和仓库存在冲突的追溯数据："
+                f"{row['item_code']} / {row['warehouse']}"
             )
-        if previous:
-            continue
-        seen[key] = row
-        normalized.append(row)
+        if not previous:
+            seen[key] = row
+            normalized.append(row)
+
+        aliases = aliases_by_item.setdefault(row["item_code"], [])
+        for alias in row["original_identifier_alias"].split(" / "):
+            alias = alias.strip()
+            if alias and alias not in aliases:
+                aliases.append(alias)
+
+    for row in normalized:
+        row["original_identifier_alias"] = " / ".join(
+            aliases_by_item[row["item_code"]]
+        )
     return normalized
 
 
-def apply_inventory_trace(rows, *, dry_run: bool = True, repository=None) -> dict[str, Any]:
+def apply_inventory_trace(rows, *, dry_run: bool = True, repository=None):
     repository = repository or FrappeInventoryTraceRepository()
     normalized_rows = normalize_rows(rows)
+    if not dry_run:
+        repository.lock_targets(normalized_rows)
+
     bin_updates: dict[str, str] = {}
     item_updates: dict[str, str] = {}
     missing: list[dict[str, str]] = []
@@ -98,7 +134,6 @@ def apply_inventory_trace(rows, *, dry_run: bool = True, repository=None) -> dic
         warehouse = row["warehouse"]
         requested_location = row["original_location"]
         requested_alias = row["original_identifier_alias"]
-
         bin_row = repository.get_bin(item_code, warehouse)
         item_alias = repository.get_item_alias(item_code)
         if not bin_row:
@@ -125,11 +160,12 @@ def apply_inventory_trace(rows, *, dry_run: bool = True, repository=None) -> dic
             )
             continue
 
-        current_location = str(bin_row.get("custom_original_location") or "").strip()
+        current_location = str(
+            bin_row.get("custom_original_location") or ""
+        ).strip()
         current_alias = str(item_alias or "").strip()
         location_matches = current_location == requested_location
         alias_matches = current_alias == requested_alias
-
         if current_location and not location_matches:
             add_unique(
                 conflicts,
@@ -156,7 +192,6 @@ def apply_inventory_trace(rows, *, dry_run: bool = True, repository=None) -> dic
             )
         elif not current_alias:
             item_updates[item_code] = requested_alias
-
         if location_matches and alias_matches:
             unchanged_rows += 1
 
@@ -179,7 +214,6 @@ def apply_inventory_trace(rows, *, dry_run: bool = True, repository=None) -> dic
         repository.set_bin_location(bin_name, value)
     for item_code, value in item_updates.items():
         repository.set_item_alias(item_code, value)
-
     result["updated_bins"] = len(bin_updates)
     result["updated_items"] = len(item_updates)
     result["applied"] = True

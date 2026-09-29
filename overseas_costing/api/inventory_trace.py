@@ -1,4 +1,4 @@
-"""实际库存来源追溯字段回填接口。"""
+"""临时库存追溯回填接口；本批次验收后删除。"""
 
 from __future__ import annotations
 
@@ -8,10 +8,8 @@ from frappe.utils import cint
 from overseas_costing.services.inventory_trace_service import apply_inventory_trace
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def backfill_inventory_trace(rows, dry_run=1):
-    """由 System Manager 先预演、再原子回填库存来源追溯字段。"""
-
     frappe.only_for("System Manager")
     parsed_rows = frappe.parse_json(rows) if isinstance(rows, str) else rows
     try:

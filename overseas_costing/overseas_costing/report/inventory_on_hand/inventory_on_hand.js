@@ -44,10 +44,14 @@ frappe.query_reports["Inventory On Hand"] = {
 			return default_formatter(value, row, column, data);
 		}
 
+		const quantity_column =
+			data.quantity_precision === 0
+				? Object.assign({}, column, { fieldtype: "Int" })
+				: Object.assign({}, column, { fieldtype: "Float", precision: 2 });
 		const formatted = default_formatter(
 			value,
 			row,
-			Object.assign({}, column, { precision: data.quantity_precision ?? 2 }),
+			quantity_column,
 			data,
 		);
 		if (!data.quantity_warning) {
