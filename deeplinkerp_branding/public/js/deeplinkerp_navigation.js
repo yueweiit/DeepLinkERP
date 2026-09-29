@@ -23,6 +23,23 @@
 		stock: "boxes",
 		subcontracting: "repeat-2",
 	});
+	const ROOT_NAVIGATION_ORDER = Object.freeze([
+		["organization", "组织"],
+		["buying", "采购"],
+		["selling", "销售"],
+		["stock", "库存"],
+		["manufacturing", "生产"],
+		["assets", "资产"],
+		["china finance", "中国财务", "财务"],
+		["overseas costing", "overseas cost", "overseas cost workbench", "海外成本核算"],
+		["projects", "项目"],
+		["quality", "质量"],
+		["subcontracting", "委外"],
+		["accounting", "会计"],
+		["ai assistant", "ai 助手"],
+		["dlp framework"],
+		["deeplinkerp settings", "deeplinkerp setting", "erpnext settings"],
+	]);
 
 	function normalizeIdentity(value) {
 		return String(value || "")
@@ -283,6 +300,38 @@
 			.filter(Boolean);
 	}
 
+	function getNavigationDisplayLabel(node) {
+		const aliases = nodeAliases(node);
+		if (aliases.includes("china finance") || aliases.includes("中国财务")) return "Finance";
+		return node?.translated_label || node?.label || node?.name || "";
+	}
+
+	const ROOT_NAVIGATION_PRIORITY = new Map(
+		ROOT_NAVIGATION_ORDER.flatMap((aliases, priority) =>
+			aliases.map((alias) => [normalizeIdentity(alias), priority])
+		)
+	);
+
+	function arrangeNavigationRoots(roots) {
+		return roots
+			.map((node, sourceIndex) => ({
+				node,
+				sourceIndex,
+				priority: Math.min(
+					Number.POSITIVE_INFINITY,
+					...nodeAliases(node)
+						.map((alias) => ROOT_NAVIGATION_PRIORITY.get(alias))
+						.filter((priority) => priority !== undefined)
+				),
+			}))
+			.sort((left, right) =>
+				left.priority === right.priority
+					? left.sourceIndex - right.sourceIndex
+					: left.priority - right.priority
+			)
+			.map(({ node }) => node);
+	}
+
 	function buildNavigationTree(desktopIcons) {
 		const visibleIcons = (desktopIcons || []).filter(
 			(icon) => icon && icon.hidden !== 1 && icon.hidden !== "1"
@@ -308,7 +357,7 @@
 				roots.push(node);
 			}
 		});
-		return roots;
+		return arrangeNavigationRoots(roots);
 	}
 
 	function cloneSidebarItems(items) {
@@ -554,6 +603,7 @@
 		cloneWorkspaceSidebars,
 		countWorkspaceSidebarItems,
 		collectDisclosureState,
+		getNavigationDisplayLabel,
 		getNavigationIcon,
 		isInternalDeskLink,
 		normalizeRoute,

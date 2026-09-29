@@ -381,7 +381,7 @@
 
 		const label = document.createElement("span");
 		label.className = "dlp-mes-navigation__label";
-		label.textContent = translate(item.label);
+		label.textContent = translate(DeepLinkERPNavigation.getNavigationDisplayLabel(item));
 		row.appendChild(label);
 
 		if (hasChildren) {
@@ -533,6 +533,7 @@
 		if (!sidebarContainer || !sidebar || !top || !nativeItems) return;
 		bindNativeSidebarObserver(sidebar, nativeItems);
 		bindRenderedSidebarLinks(nativeItems);
+		updateRenderedSidebarActive(nativeItems);
 
 		document.body.classList.add("dlp-mes-navigation-enabled");
 		sidebar.classList.add("dlp-mes-navigation-sidebar");

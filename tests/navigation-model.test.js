@@ -169,7 +169,24 @@ test("maps the approved MES line icons and keeps a deterministic fallback", () =
 	);
 });
 
-test("builds the visible desktop tree in source order without mutating boot data", () => {
+test("uses a navigation display label without replacing workspace identity", () => {
+	const getNavigationDisplayLabel = productionFunction("getNavigationDisplayLabel");
+
+	assert.equal(
+		getNavigationDisplayLabel({ name: "China Finance", label: "China Finance" }),
+		"Finance"
+	);
+	assert.equal(
+		getNavigationDisplayLabel({
+			name: "Buying",
+			label: "Buying",
+			translated_label: "采购",
+		}),
+		"采购"
+	);
+});
+
+test("builds the visible desktop tree with configured root order without mutating boot data", () => {
 	const buildNavigationTree = productionFunction("buildNavigationTree");
 	const icons = [
 		{ name: "Operations", label: "Operations", icon_type: "Folder" },
@@ -186,13 +203,77 @@ test("builds the visible desktop tree in source order without mutating boot data
 	assert.deepEqual(
 		first.map((item) => [item.label, item.children.map((child) => child.label)]),
 		[
-			["Operations", ["Stock"]],
 			["Selling", []],
+			["Operations", ["Stock"]],
 			["Orphan", []],
 		]
 	);
 	assert.deepEqual(second, first, "the model must be idempotent");
 	assert.deepEqual(icons, snapshot, "boot data must remain authoritative and unmodified");
+});
+
+test("applies the approved fixed DL root order", () => {
+	const buildNavigationTree = productionFunction("buildNavigationTree");
+	const icons = [
+		{ name: "Deeplinkerp Settings", label: "Deeplinkerp Settings" },
+		{ name: "Selling", label: "Selling" },
+		{ name: "DLP Framework", label: "DLP Framework" },
+		{ name: "Manufacturing", label: "Manufacturing" },
+		{ name: "Organization", label: "Organization" },
+		{ name: "China Finance", label: "China Finance" },
+		{ name: "Buying", label: "Buying" },
+		{ name: "Overseas Costing", label: "Overseas Costing" },
+		{ name: "Stock", label: "Stock" },
+		{ name: "Quality", label: "Quality" },
+		{ name: "Assets", label: "Assets" },
+		{ name: "AI Assistant", label: "AI Assistant" },
+		{ name: "Subcontracting", label: "Subcontracting" },
+		{ name: "Projects", label: "Projects" },
+		{ name: "Accounting", label: "Accounting" },
+	];
+	const snapshot = structuredClone(icons);
+
+	assert.deepEqual(
+		buildNavigationTree(icons).map((item) => item.name),
+		[
+			"Organization",
+			"Buying",
+			"Selling",
+			"Stock",
+			"Manufacturing",
+			"Assets",
+			"China Finance",
+			"Overseas Costing",
+			"Projects",
+			"Quality",
+			"Subcontracting",
+			"Accounting",
+			"AI Assistant",
+			"DLP Framework",
+			"Deeplinkerp Settings",
+		]
+	);
+	assert.deepEqual(icons, snapshot, "ordering must not mutate Frappe boot data");
+});
+
+test("keeps unknown DL roots stable after known roots and preserves children", () => {
+	const buildNavigationTree = productionFunction("buildNavigationTree");
+	const icons = [
+		{ name: "Custom B", label: "Custom B" },
+		{ name: "Quality", label: "Quality" },
+		{ name: "Buying Settings", label: "Buying Settings", parent_icon: "Buying" },
+		{ name: "Buying", label: "Buying" },
+		{ name: "Custom A", label: "Custom A" },
+	];
+	const snapshot = structuredClone(icons);
+	const roots = buildNavigationTree(icons);
+
+	assert.deepEqual(
+		roots.map((item) => item.name),
+		["Buying", "Quality", "Custom B", "Custom A"]
+	);
+	assert.deepEqual(roots[0].children.map((item) => item.name), ["Buying Settings"]);
+	assert.deepEqual(icons, snapshot, "tree construction must not mutate its input");
 });
 
 test("clones authorized workspace items before native nesting mutates them", () => {
@@ -713,9 +794,9 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 	);
 	assert.ok(hooks.indexOf(modelAsset) < hooks.indexOf(interfaceModeAsset));
 	assert.ok(hooks.indexOf(interfaceModeAsset) < hooks.indexOf(lifecycleAsset));
-	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.17/);
+	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.18/);
 	assert.match(hooks, /deeplinkerp_interface_mode\.js\?v=0\.0\.2/);
-	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.24/);
+	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.25/);
 	assert.match(hooks, /web_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_branding\.css"/);
 });
 
@@ -992,6 +1073,30 @@ test("rerender preserves multiple open groups, explicit collapse, and fresh-load
 	assert.equal(resolveItemOpen({ key: projectsKey, isOpen: true }, freshState), true);
 });
 
+test("synchronizes the live native sidebar before resolving navigation ownership", () => {
+	const lifecycle = fs.readFileSync(
+		path.join(
+			__dirname,
+			"..",
+			"deeplinkerp_branding",
+			"public",
+			"js",
+			"deeplinkerp_branding.js"
+		),
+		"utf8"
+	);
+	const start = lifecycle.indexOf("function renderPersistentNavigation()");
+	const end = lifecycle.indexOf("function enhanceDesktopIcons()", start);
+	const renderSource = lifecycle.slice(start, end);
+
+	assert.ok(start >= 0 && end > start);
+	assert.match(renderSource, /updateRenderedSidebarActive\(nativeItems\)/);
+	assert.ok(
+		renderSource.indexOf("updateRenderedSidebarActive(nativeItems)") <
+			renderSource.indexOf("DeepLinkERPNavigation.buildNavigationModel")
+	);
+});
+
 test("integrates the executable lifecycle helpers through the existing single router binding", () => {
 	const lifecycle = fs.readFileSync(
 		path.join(
@@ -1046,6 +1151,10 @@ test("integrates the executable lifecycle helpers through the existing single ro
 	assert.match(lifecycle, /function updateRenderedSidebarActive\(container\)/);
 	assert.match(lifecycle, /DeepLinkERPNavigation\.routesMatch\(/);
 	assert.match(lifecycle, /classList\.toggle\("active-sidebar", isCurrent\)/);
+	assert.match(
+		lifecycle,
+		/translate\(DeepLinkERPNavigation\.getNavigationDisplayLabel\(item\)\)/
+	);
 	assert.match(lifecycle, /function normalizeRenderedSidebarTarget\(link\)/);
 	assert.match(lifecycle, /DeepLinkERPNavigation\.isInternalDeskLink\(/);
 	assert.match(lifecycle, /link\.removeAttribute\("target"\)/);
