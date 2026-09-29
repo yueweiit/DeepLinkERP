@@ -471,7 +471,7 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 	assert.ok(hooks.indexOf(interfaceModeAsset) < hooks.indexOf(lifecycleAsset));
 	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.11/);
 	assert.match(hooks, /deeplinkerp_interface_mode\.js\?v=0\.0\.1/);
-	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.18/);
+	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.19/);
 	assert.match(hooks, /web_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_branding\.css"/);
 });
 
@@ -755,6 +755,7 @@ test("integrates the executable lifecycle helpers through the existing single ro
 	assert.match(lifecycle, /projectAuthorizedDesktopIcons\(/);
 	assert.match(lifecycle, /replaceNavigationRoot\(/);
 	assert.match(lifecycle, /claimNativeSidebarItems\(sidebar\)/);
+	assert.match(lifecycle, /bindRenderedSidebarLinks\(nativeItems\)/);
 	assert.match(lifecycle, /bindNativeSidebarClose\(/);
 	assert.match(lifecycle, /collectDisclosureState\(/);
 	assert.match(lifecycle, /resolveItemOpen\(/);

@@ -465,6 +465,7 @@
 		const top = sidebar?.querySelector(".body-sidebar-top");
 		const nativeItems = DeepLinkERPNavigation.claimNativeSidebarItems(sidebar);
 		if (!sidebarContainer || !sidebar || !top || !nativeItems) return;
+		bindRenderedSidebarLinks(nativeItems);
 
 		document.body.classList.add("dlp-mes-navigation-enabled");
 		sidebar.classList.add("dlp-mes-navigation-sidebar");
