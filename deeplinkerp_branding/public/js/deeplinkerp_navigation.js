@@ -90,6 +90,16 @@
 		return navigation;
 	}
 
+	function claimNativeSidebarItems(sidebar) {
+		if (!sidebar) return null;
+		const nativeItems =
+			sidebar.querySelector('[data-dlp-native-sidebar-items="true"]') ||
+			sidebar.querySelector(":scope > .body-sidebar-top > .sidebar-items") ||
+			sidebar.querySelector(".sidebar-items:not(.dlp-mes-navigation__workspace-items)");
+		if (nativeItems) nativeItems.dataset.dlpNativeSidebarItems = "true";
+		return nativeItems;
+	}
+
 	function bindNativeSidebarClose(
 		link,
 		{ isNarrowViewport, closeSidebar, preserveDesktopExpansion = () => {} }
@@ -401,6 +411,7 @@
 		bindNativeSidebarClose,
 		buildNavigationModel,
 		buildNavigationTree,
+		claimNativeSidebarItems,
 		cloneSidebarItems,
 		cloneWorkspaceSidebars,
 		countWorkspaceSidebarItems,

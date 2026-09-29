@@ -463,7 +463,7 @@
 		const sidebarContainer = frappe.app.sidebar.wrapper?.[0] || document.querySelector(".body-sidebar-container");
 		const sidebar = sidebarContainer?.querySelector(".body-sidebar");
 		const top = sidebar?.querySelector(".body-sidebar-top");
-		const nativeItems = sidebar?.querySelector(".sidebar-items");
+		const nativeItems = DeepLinkERPNavigation.claimNativeSidebarItems(sidebar);
 		if (!sidebarContainer || !sidebar || !top || !nativeItems) return;
 
 		document.body.classList.add("dlp-mes-navigation-enabled");
@@ -538,7 +538,10 @@
 	function disableDLEnhancements() {
 		const navigation = document.querySelector(".dlp-mes-navigation");
 		const top = navigation?.closest(".body-sidebar-top");
-		const nativeItems = navigation?.querySelector(".sidebar-items");
+		const sidebar = navigation?.closest(".body-sidebar");
+		const nativeItems = navigation
+			? DeepLinkERPNavigation.claimNativeSidebarItems(sidebar)
+			: null;
 		if (top && nativeItems) top.prepend(nativeItems);
 		navigation?.remove();
 		document.body.classList.remove("dlp-mes-navigation-enabled");

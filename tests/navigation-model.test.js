@@ -469,9 +469,9 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 	);
 	assert.ok(hooks.indexOf(modelAsset) < hooks.indexOf(interfaceModeAsset));
 	assert.ok(hooks.indexOf(interfaceModeAsset) < hooks.indexOf(lifecycleAsset));
-	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.10/);
+	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.11/);
 	assert.match(hooks, /deeplinkerp_interface_mode\.js\?v=0\.0\.1/);
-	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.17/);
+	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.18/);
 	assert.match(hooks, /web_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_branding\.css"/);
 });
 
@@ -499,6 +499,32 @@ test("mounts repeated route renders with one root and the same native sidebar no
 	);
 	assert.equal(nativeItems.parentElement, secondRoot);
 	assert.equal(secondRoot.children[0], nativeItems, "the live native node identity must be preserved");
+});
+
+test("claims the live native sidebar once instead of reusing a projected workspace branch", () => {
+	const claimNativeSidebarItems = productionFunction("claimNativeSidebarItems");
+	const nativeItems = { dataset: {} };
+	const projectedItems = { dataset: {} };
+	const queries = [];
+	const sidebar = {
+		querySelector(selector) {
+			queries.push(selector);
+			if (selector === '[data-dlp-native-sidebar-items="true"]') {
+				return nativeItems.dataset.dlpNativeSidebarItems === "true" ? nativeItems : null;
+			}
+			if (selector === ":scope > .body-sidebar-top > .sidebar-items") return nativeItems;
+			if (selector === ".sidebar-items:not(.dlp-mes-navigation__workspace-items)") {
+				return projectedItems;
+			}
+			return null;
+		},
+	};
+
+	assert.equal(claimNativeSidebarItems(sidebar), nativeItems);
+	assert.equal(nativeItems.dataset.dlpNativeSidebarItems, "true");
+	queries.length = 0;
+	assert.equal(claimNativeSidebarItems(sidebar), nativeItems);
+	assert.deepEqual(queries, ['[data-dlp-native-sidebar-items="true"]']);
 });
 
 test("custom mobile navigation links close through the native sidebar contract", () => {
@@ -728,6 +754,7 @@ test("integrates the executable lifecycle helpers through the existing single ro
 	assert.match(lifecycle, /refreshDeskEnhancements[\s\S]*renderPersistentNavigation\(\)/);
 	assert.match(lifecycle, /projectAuthorizedDesktopIcons\(/);
 	assert.match(lifecycle, /replaceNavigationRoot\(/);
+	assert.match(lifecycle, /claimNativeSidebarItems\(sidebar\)/);
 	assert.match(lifecycle, /bindNativeSidebarClose\(/);
 	assert.match(lifecycle, /collectDisclosureState\(/);
 	assert.match(lifecycle, /resolveItemOpen\(/);
