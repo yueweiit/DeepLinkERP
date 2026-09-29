@@ -401,9 +401,17 @@
 		return context.workspace_sidebar_items;
 	}
 
+	function normalizeRenderedSidebarTarget(link) {
+		const href = link.getAttribute("href") || "";
+		if (!DeepLinkERPNavigation.isInternalDeskLink(href, window.location.origin)) return false;
+		link.removeAttribute("target");
+		return true;
+	}
+
 	function bindRenderedSidebarLinks(container) {
 		container.querySelectorAll(".item-anchor").forEach((link) => {
 			if (link.dataset.dlpNavigationBound === "true") return;
+			normalizeRenderedSidebarTarget(link);
 			link.dataset.dlpNavigationBound = "true";
 			DeepLinkERPNavigation.bindNativeSidebarClose(link, {
 				isNarrowViewport: isNarrowNavigationViewport,

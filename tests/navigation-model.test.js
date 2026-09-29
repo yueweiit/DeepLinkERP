@@ -351,6 +351,19 @@ test("normalizes direct, refreshed, and sidebar-qualified Desk routes", () => {
 	assert.equal(routesMatch("/desk/assignment-rule", "/desk/ai-chat"), false);
 });
 
+test("classifies only same-origin Desk links as internal navigation", () => {
+	const isInternalDeskLink = productionFunction("isInternalDeskLink");
+	const origin = "https://erp.test";
+
+	assert.equal(isInternalDeskLink("/desk/china-finance", origin), true);
+	assert.equal(isInternalDeskLink("https://erp.test/desk/buying?view=1", origin), true);
+	assert.equal(isInternalDeskLink("/desk", origin), true);
+	assert.equal(isInternalDeskLink("https://external.test/desk/buying", origin), false);
+	assert.equal(isInternalDeskLink("/files/report.pdf", origin), false);
+	assert.equal(isInternalDeskLink("mailto:help@example.com", origin), false);
+	assert.equal(isInternalDeskLink("not a valid url", "not an origin"), false);
+});
+
 test("resolves query, exact route, and native sidebar active states in authority order", () => {
 	const buildNavigationModel = productionFunction("buildNavigationModel");
 	const desktopIcons = [
@@ -700,9 +713,9 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 	);
 	assert.ok(hooks.indexOf(modelAsset) < hooks.indexOf(interfaceModeAsset));
 	assert.ok(hooks.indexOf(interfaceModeAsset) < hooks.indexOf(lifecycleAsset));
-	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.16/);
+	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.17/);
 	assert.match(hooks, /deeplinkerp_interface_mode\.js\?v=0\.0\.2/);
-	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.23/);
+	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.24/);
 	assert.match(hooks, /web_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_branding\.css"/);
 });
 
@@ -1033,6 +1046,13 @@ test("integrates the executable lifecycle helpers through the existing single ro
 	assert.match(lifecycle, /function updateRenderedSidebarActive\(container\)/);
 	assert.match(lifecycle, /DeepLinkERPNavigation\.routesMatch\(/);
 	assert.match(lifecycle, /classList\.toggle\("active-sidebar", isCurrent\)/);
+	assert.match(lifecycle, /function normalizeRenderedSidebarTarget\(link\)/);
+	assert.match(lifecycle, /DeepLinkERPNavigation\.isInternalDeskLink\(/);
+	assert.match(lifecycle, /link\.removeAttribute\("target"\)/);
+	assert.match(
+		lifecycle,
+		/function bindRenderedSidebarLinks\(container\)[\s\S]*normalizeRenderedSidebarTarget\(link\)/
+	);
 	assert.doesNotMatch(lifecycle, /cloneNode\(/);
 });
 

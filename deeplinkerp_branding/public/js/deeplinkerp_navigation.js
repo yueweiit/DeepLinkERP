@@ -260,6 +260,18 @@
 		};
 	}
 
+	function isInternalDeskLink(href, origin) {
+		if (!href || !origin) return false;
+		try {
+			const base = new URL(origin);
+			const target = new URL(href, base);
+			const path = normalizePath(target.pathname);
+			return target.origin === base.origin && (path === "/desk" || path.startsWith("/desk/"));
+		} catch (error) {
+			return false;
+		}
+	}
+
 	function routesMatch(candidate, current) {
 		if (!candidate) return false;
 		return normalizeRoute(candidate).path === normalizeRoute(current).path;
@@ -543,6 +555,7 @@
 		countWorkspaceSidebarItems,
 		collectDisclosureState,
 		getNavigationIcon,
+		isInternalDeskLink,
 		normalizeRoute,
 		observeNativeSidebarChanges,
 		projectAuthorizedDesktopIcons,
