@@ -19,6 +19,7 @@
 			? window.matchMedia("(max-width: 767.98px)").matches
 			: window.innerWidth < 768;
 	let eventsBound = false;
+	let authorizedWorkspaceSidebarSnapshot = null;
 
 	function setFavicon() {
 		document
@@ -245,6 +246,15 @@
 		}));
 	}
 
+	function getAuthorizedWorkspaceSidebars() {
+		if (!authorizedWorkspaceSidebarSnapshot) {
+			authorizedWorkspaceSidebarSnapshot = DeepLinkERPNavigation.cloneWorkspaceSidebars(
+				frappe.boot.workspace_sidebar_item || {}
+			);
+		}
+		return authorizedWorkspaceSidebarSnapshot;
+	}
+
 	function makeLineIcon(name, size = "sm") {
 		if (typeof frappe.utils?.icon !== "function") return "";
 		return frappe.utils.icon(name, size, "", "", "dlp-mes-navigation__line-icon", true);
@@ -464,7 +474,7 @@
 
 		const model = DeepLinkERPNavigation.buildNavigationModel({
 			desktopIcons: getIconsWithRoutes(),
-			workspaceSidebars: frappe.boot.workspace_sidebar_item || {},
+			workspaceSidebars: getAuthorizedWorkspaceSidebars(),
 			route: window.location.href,
 			currentSidebar: frappe.app.sidebar.sidebar_title || "",
 			nativeLeafSelected: Boolean(nativeItems.querySelector(".active-sidebar")),

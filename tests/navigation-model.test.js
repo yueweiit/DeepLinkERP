@@ -209,6 +209,29 @@ test("clones authorized workspace items before native nesting mutates them", () 
 	assert.notEqual(cloned[0], source[0]);
 });
 
+test("snapshots every authorized workspace before Frappe consumes the shared boot arrays", () => {
+	const cloneWorkspaceSidebars = productionFunction("cloneWorkspaceSidebars");
+	const source = {
+		Buying: {
+			label: "Buying",
+			items: [{ type: "Link", label: "Purchase Order" }],
+		},
+		Manufacturing: {
+			label: "Manufacturing",
+			items: [{ type: "Link", label: "Work Order" }],
+		},
+	};
+
+	const snapshot = cloneWorkspaceSidebars(source);
+	source.Buying.items.splice(0);
+	source.Manufacturing.items[0].label = "Mutated";
+
+	assert.equal(snapshot.Buying.items[0].label, "Purchase Order");
+	assert.equal(snapshot.Manufacturing.items[0].label, "Work Order");
+	assert.notEqual(snapshot.Buying, source.Buying);
+	assert.notEqual(snapshot.Buying.items, source.Buying.items);
+});
+
 test("projects stale runtime layout onto the boot authorization whitelist", () => {
 	const projectAuthorizedDesktopIcons = productionFunction("projectAuthorizedDesktopIcons");
 	const authorized = [
@@ -414,9 +437,9 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 	);
 	assert.ok(hooks.indexOf(modelAsset) < hooks.indexOf(interfaceModeAsset));
 	assert.ok(hooks.indexOf(interfaceModeAsset) < hooks.indexOf(lifecycleAsset));
-	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.7/);
+	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.8/);
 	assert.match(hooks, /deeplinkerp_interface_mode\.js\?v=0\.0\.1/);
-	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.13/);
+	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.14/);
 	assert.match(hooks, /web_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_branding\.css"/);
 });
 
@@ -678,6 +701,12 @@ test("integrates the executable lifecycle helpers through the existing single ro
 	assert.match(lifecycle, /resolveItemOpen\(/);
 	assert.match(lifecycle, /bindNavigationRowInteractions\(/);
 	assert.match(lifecycle, /restoreDesktopSidebarExpansion\(/);
+	assert.match(lifecycle, /function getAuthorizedWorkspaceSidebars\(/);
+	assert.match(
+		lifecycle,
+		/cloneWorkspaceSidebars\(\s*frappe\.boot\.workspace_sidebar_item/
+	);
+	assert.match(lifecycle, /workspaceSidebars:\s*getAuthorizedWorkspaceSidebars\(\)/);
 	assert.match(lifecycle, /matchMedia\("\(max-width: 767\.98px\)"\)\.matches/);
 	assert.match(
 		lifecycle,

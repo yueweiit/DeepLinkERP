@@ -271,6 +271,18 @@
 		return JSON.parse(JSON.stringify(source));
 	}
 
+	function cloneWorkspaceSidebars(sidebars) {
+		return Object.fromEntries(
+			Object.entries(sidebars || {}).map(([key, sidebar]) => [
+				key,
+				{
+					...(sidebar || {}),
+					items: cloneSidebarItems(sidebar?.items),
+				},
+			])
+		);
+	}
+
 	function findPath(items, predicate, ancestors) {
 		for (const item of items) {
 			const path = [...ancestors, item];
@@ -376,6 +388,7 @@
 		buildNavigationModel,
 		buildNavigationTree,
 		cloneSidebarItems,
+		cloneWorkspaceSidebars,
 		collectDisclosureState,
 		getNavigationIcon,
 		normalizeRoute,
