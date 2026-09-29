@@ -187,6 +187,12 @@
 	min-width: 240px;
 }
 
+.tree-link.china-account-search-hit {
+	background: var(--yellow-100, #fff3cd);
+	box-shadow: 0 0 0 2px var(--yellow-400, #f5c542);
+	border-radius: 4px;
+}
+
 .china-period-closing-entries__empty,
 .china-period-closing-entries__loading {
 	padding: 12px 0;

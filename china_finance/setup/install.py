@@ -56,6 +56,7 @@ ADMIN_NAVIGATION_GROUPS = (
 			("China Finance Settings", "中国财务设置", "DocType"),
 			("China Reconciliation Scope", "对账范围配置", "DocType"),
 			("China Tax Account Mapping", "税务科目映射", "DocType"),
+			("Account", "科目表", "DocType"),
 		),
 	),
 	(
@@ -91,6 +92,7 @@ ADMIN_NAVIGATION = tuple(link for _label, _icon, links in ADMIN_NAVIGATION_GROUP
 
 MAPPING_CONSOLE_LINK = ("china-statement-mapping", "科目映射控制台", "Page")
 MAPPING_CONSOLE_ICON = "list-tree"
+ACCOUNT_TABLE_LINK = ("Account", "科目表", "DocType")
 
 WORKSPACE_CONTENT = json.dumps([
 	*[
@@ -714,6 +716,11 @@ def _desired_sidebar_items(custom_links=None):
 			"child": 0,
 			"icon": MAPPING_CONSOLE_ICON,
 		},
+		{
+			**_sidebar_link(*ACCOUNT_TABLE_LINK, sidebar="China Finance"),
+			"child": 0,
+			"icon": "list-tree",
+		},
 	]
 	for label, icon, links in NAVIGATION_SECTIONS:
 		items.append(_sidebar_section(label, icon))
@@ -725,7 +732,7 @@ def _desired_sidebar_items(custom_links=None):
 		items.extend(
 			_sidebar_link(*link, sidebar="China Finance")
 			for link in links
-			if link[0] != MAPPING_CONSOLE_LINK[0]
+			if link[0] not in {MAPPING_CONSOLE_LINK[0], ACCOUNT_TABLE_LINK[0]}
 		)
 	if custom_links:
 		items.append(_sidebar_section("自定义", "folder", 1))

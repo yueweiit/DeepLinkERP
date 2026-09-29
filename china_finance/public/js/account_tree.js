@@ -178,6 +178,131 @@
 		);
 	};
 
+	const search_account = async (treeview, search_control) => {
+		const query = String(search_control?.get_value() || "").trim().toLocaleLowerCase();
+		if (!query) {
+			frappe.msgprint(__("请输入科目编码或名称"));
+			search_control?.$input?.focus();
+			return;
+		}
+
+		const company = treeview.page.fields_dict.company?.get_value();
+		if (!company) {
+			frappe.msgprint(__("请先选择公司"));
+			return;
+		}
+
+		const accounts = await frappe.db.get_list("Account", {
+			filters: { company, disabled: 0 },
+			fields: ["name", "account_name", "account_number", "parent_account", "lft"],
+			order_by: "lft asc",
+			limit: 0,
+		});
+		const matching_accounts = (accounts || [])
+			.filter((account) =>
+				[account.account_number, account.account_name, account.name]
+					.filter(Boolean)
+					.some((value) => String(value).toLocaleLowerCase().includes(query))
+			)
+			.sort((left, right) => {
+				const rank = (account) => {
+					if (String(account.account_number || "").toLocaleLowerCase() === query) return 0;
+					if (String(account.account_name || "").toLocaleLowerCase() === query) return 1;
+					if (String(account.name || "").toLocaleLowerCase() === query) return 2;
+					return 3;
+				};
+				return rank(left) - rank(right) || (left.lft || 0) - (right.lft || 0);
+			});
+
+		if (!matching_accounts.length) {
+			frappe.msgprint({
+				title: __("未找到科目"),
+				message: __("当前公司没有匹配“{0}”的科目。", [query]),
+				indicator: "orange",
+			});
+			return;
+		}
+
+		const account = matching_accounts[0];
+		const accounts_by_name = Object.fromEntries(accounts.map((row) => [row.name, row]));
+		const tree = treeview.tree;
+		if (!tree) return;
+
+		const ancestors = [];
+		const visited = new Set([account.name]);
+		let parent_name = account.parent_account;
+		while (parent_name && !visited.has(parent_name)) {
+			visited.add(parent_name);
+			const parent = accounts_by_name[parent_name];
+			if (!parent) break;
+			ancestors.unshift(parent);
+			parent_name = parent.parent_account;
+		}
+
+		const search_path = new Set([
+			tree.root_node.label,
+			...ancestors.map((ancestor) => ancestor.name),
+			account.name,
+		]);
+		for (const node of Object.values(tree.nodes)) {
+			if (!node.is_root && node.loaded && node.expanded && !search_path.has(node.label)) {
+				tree.expand_node(node);
+			}
+		}
+
+		if (!tree.root_node.loaded) await tree.load_children(tree.root_node);
+		for (const ancestor of ancestors) {
+			const node = tree.nodes[ancestor.name];
+			if (!node) break;
+			if (!node.loaded) await tree.load_children(node);
+			else if (!node.expanded) tree.expand_node(node);
+		}
+
+		const target = tree.nodes[account.name];
+		if (!target) {
+			frappe.msgprint(__("科目已找到，但当前科目树无法展开到该位置，请刷新后重试。"));
+			return;
+		}
+		if (target.expandable) {
+			if (!target.loaded) await tree.load_children(target);
+			else if (!target.expanded) tree.expand_node(target);
+		}
+
+		tree.set_selected_node(target);
+		tree.select_link(target);
+		target.$tree_link[0]?.scrollIntoView({ behavior: "smooth", block: "center" });
+		treeview.__china_account_search_hit?.removeClass("china-account-search-hit");
+		treeview.__china_account_search_hit = target.$tree_link.addClass("china-account-search-hit");
+		const display_name = account.account_number
+			? `${account.account_number} - ${account.account_name || account.name}`
+			: account.account_name || account.name;
+		frappe.show_alert({
+			message: __("已定位科目：{0}", [display_name]),
+			indicator: "green",
+		});
+	};
+
+	const native_onload = settings.onload;
+	settings.onload = function (treeview) {
+		native_onload && native_onload(treeview);
+		const search_control = treeview.page.add_field(
+			{
+				fieldtype: "Data",
+				fieldname: "china_account_search",
+				label: __("搜索科目"),
+				placeholder: __("输入科目编码或名称"),
+			},
+			treeview.page.filters
+		);
+		const run_search = () => search_account(treeview, search_control);
+		treeview.page.add_inner_button(__("搜索科目"), run_search, null, "primary");
+		search_control?.$input?.on("keydown", (event) => {
+			if (event.key !== "Enter") return;
+			event.preventDefault();
+			run_search();
+		});
+	};
+
 	const account_name_field = {
 		...field("account_name"),
 		label: __("下级科目名称/大类名称"),

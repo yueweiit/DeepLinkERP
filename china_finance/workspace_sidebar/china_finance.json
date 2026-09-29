@@ -34,6 +34,19 @@
   {
    "child": 0,
    "collapsible": 1,
+   "icon": "list-tree",
+   "indent": 0,
+   "keep_closed": 0,
+   "label": "\u79d1\u76ee\u8868",
+   "link_to": "Account",
+   "link_type": "DocType",
+   "route_options": "{\"sidebar\": \"China Finance\"}",
+   "show_arrow": 0,
+   "type": "Link"
+  },
+  {
+   "child": 0,
+   "collapsible": 1,
    "icon": "briefcase",
    "indent": 1,
    "keep_closed": 0,
@@ -502,7 +515,7 @@
    "type": "Link"
   }
  ],
- "modified": "2026-09-21 15:40:08.109837",
+ "modified": "2026-09-29 06:46:25.140029",
  "modified_by": "Administrator",
  "module": "China Finance",
  "name": "China Finance",

@@ -191,7 +191,7 @@
    "hidden": 0,
    "is_query_report": 0,
    "label": "\u542f\u7528\u4e0e\u57fa\u7840\u8bbe\u7f6e",
-   "link_count": 3,
+   "link_count": 4,
    "link_type": "DocType",
    "onboard": 0,
    "type": "Card Break"
@@ -222,6 +222,16 @@
    "label": "\u7a0e\u52a1\u79d1\u76ee\u6620\u5c04",
    "link_count": 0,
    "link_to": "China Tax Account Mapping",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "\u79d1\u76ee\u8868",
+   "link_count": 0,
+   "link_to": "Account",
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link"
