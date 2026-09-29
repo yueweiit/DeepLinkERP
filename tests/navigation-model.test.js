@@ -209,6 +209,24 @@ test("clones authorized workspace items before native nesting mutates them", () 
 	assert.notEqual(cloned[0], source[0]);
 });
 
+test("removes only Frappe runtime nesting fields from an already consumed sidebar", () => {
+	const cloneSidebarItems = productionFunction("cloneSidebarItems");
+	const section = { type: "Section Break", label: "Settings" };
+	const child = { type: "Link", label: "Buying Settings" };
+	section.nested_items = [child];
+	child.parent = section;
+
+	const cloned = cloneSidebarItems([section, child]);
+
+	assert.deepEqual(
+		cloned.map((item) => item.label),
+		["Settings", "Buying Settings"]
+	);
+	assert.equal(Object.hasOwn(cloned[0], "nested_items"), false);
+	assert.equal(Object.hasOwn(cloned[1], "parent"), false);
+	assert.equal(section.nested_items[0], child, "the live Frappe data remains untouched");
+});
+
 test("snapshots every authorized workspace before Frappe consumes the shared boot arrays", () => {
 	const cloneWorkspaceSidebars = productionFunction("cloneWorkspaceSidebars");
 	const source = {
@@ -437,7 +455,7 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 	);
 	assert.ok(hooks.indexOf(modelAsset) < hooks.indexOf(interfaceModeAsset));
 	assert.ok(hooks.indexOf(interfaceModeAsset) < hooks.indexOf(lifecycleAsset));
-	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.8/);
+	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.9/);
 	assert.match(hooks, /deeplinkerp_interface_mode\.js\?v=0\.0\.1/);
 	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.15/);
 	assert.match(hooks, /web_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_branding\.css"/);

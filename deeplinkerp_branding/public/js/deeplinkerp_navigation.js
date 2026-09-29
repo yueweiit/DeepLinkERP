@@ -261,14 +261,21 @@
 
 	function cloneSidebarItems(items) {
 		const source = Array.isArray(items) ? items : [];
+		const sanitized = source.map((item) =>
+			Object.fromEntries(
+				Object.entries(item || {}).filter(
+					([field]) => field !== "parent" && field !== "nested_items"
+				)
+			)
+		);
 		if (typeof structuredClone === "function") {
 			try {
-				return structuredClone(source);
+				return structuredClone(sanitized);
 			} catch (error) {
 				// Boot sidebar data is JSON-safe; fall back if a browser cannot clone it.
 			}
 		}
-		return JSON.parse(JSON.stringify(source));
+		return JSON.parse(JSON.stringify(sanitized));
 	}
 
 	function cloneWorkspaceSidebars(sidebars) {
