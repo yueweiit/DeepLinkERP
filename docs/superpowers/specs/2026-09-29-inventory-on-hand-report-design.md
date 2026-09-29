@@ -11,7 +11,7 @@
 - 库存数量直接读取 ERPNext `Bin.actual_qty`，不复制库存计算逻辑。
 - 物料、仓库、物料组、DPCI、外部编码直接复用 `Item`、`Warehouse` 及现有自定义字段。
 - ERP 标准 `Stock Projected Qty` 保留，继续承担计划库存分析。
-- `Bin.custom_original_location`、`Item.custom_original_identifier_alias` 和 Stock 工作区“可用数量”入口均属于 ERP 配置，直接在生产站点配置，不增加安装器、回填 API 或第二套配置流程。
+- `Bin.custom_original_location`、`Item.custom_original_identifier_alias` 和 Stock 工作区“可用数量”入口均属于 ERP 配置，直接在生产站点配置，不增加安装器或第二套配置流程。
 - 仅“同一数量列按单位逐行显示 0 或 2 位小数”无法通过现有报表静态精度配置完成，因此保留一个最小 Script Report。
 
 ## 数据与显示
@@ -33,13 +33,15 @@
 
 配置与回填不修改库存数量、单位、估值、Stock Ledger Entry 或已提交的 Stock Reconciliation。
 
+生产浏览器账号无权直接保存 `Bin`，因此本次迁移曾短暂部署一个仅限 System Manager、POST-only、冲突即整批停止的一次性回填入口。377 条 Bin 原始库位回填后再次 dry-run 为零待更新，入口及服务随即从代码删除；生产环境不保留可重复调用的平行写入接口。
+
 ## 代码边界
 
 仅新增标准 Script Report `Inventory On Hand`：
 
 - Python 查询 `Bin.actual_qty` 并返回约定的 10 列。
 - JavaScript 只处理行级 0/2 位小数显示和异常提示。
-- 不修改 ERPNext 核心报表，不新增自定义库存表，不新增写入接口。
+- 不修改 ERPNext 核心报表，不新增自定义库存表，最终版本不保留写入接口。
 
 ## 验收
 
