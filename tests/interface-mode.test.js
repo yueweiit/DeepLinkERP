@@ -223,6 +223,19 @@ test("mounts one accessible avatar menu and retains the profile action", () => {
 	const profile = first.menu.children.find((child) => child.dataset.action === "profile");
 	profile.dispatch("click");
 	assert.equal(profileCalls, 1);
+
+	const replacementButton = new FakeElement("a");
+	replacementButton.className = "sidebar-user-button";
+	replacementButton.parentElement = container;
+	container.children[container.children.indexOf(userButton)] = replacementButton;
+	const rebound = ensureUserMenu({ document, frappe, translate: (value) => value });
+
+	assert.equal(rebound, first);
+	assert.equal(rebound.userButton, replacementButton);
+	assert.equal((replacementButton.listeners.click || []).length, 1);
+	replacementButton.dispatch("click");
+	assert.equal(rebound.menu.hidden, false);
+	assert.equal(replacementButton.getAttribute("aria-expanded"), "true");
 });
 
 test("Escape and outside click close the avatar menu and synchronize aria-expanded", () => {

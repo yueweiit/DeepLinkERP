@@ -118,6 +118,21 @@
 		});
 	}
 
+	function bindUserButton(controller, userButton, document) {
+		userButton.removeAttribute("onclick");
+		userButton.dataset.dlpModeMenuBound = "true";
+		userButton.setAttribute("aria-haspopup", "menu");
+		userButton.setAttribute("aria-expanded", "false");
+		controller.userButton = userButton;
+		userButton.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			controller.menu.hidden = !controller.menu.hidden;
+			userButton.setAttribute("aria-expanded", String(!controller.menu.hidden));
+			if (!controller.menu.hidden) activeMenus.set(document, controller);
+		});
+	}
+
 	function ensureUserMenu({
 		document,
 		frappe,
@@ -129,9 +144,15 @@
 		if (!userButton || !container) return null;
 
 		const existing = findDirectChild(container, "dlp-interface-mode-menu");
-		if (existing?.__dlpController) return existing.__dlpController;
+		if (existing?.__dlpController) {
+			const controller = existing.__dlpController;
+			if (controller.userButton !== userButton) {
+				closeMenu(controller);
+				bindUserButton(controller, userButton, document);
+			}
+			return controller;
+		}
 
-		userButton.removeAttribute("onclick");
 		addClass(container, "dlp-interface-mode-menu-host");
 
 		const menu = document.createElement("div");
@@ -176,18 +197,9 @@
 		menu.appendChild(profile);
 		container.appendChild(menu);
 
-		const controller = { menu, userButton };
+		const controller = { menu, userButton: null };
 		menu.__dlpController = controller;
-		userButton.dataset.dlpModeMenuBound = "true";
-		userButton.setAttribute("aria-haspopup", "menu");
-		userButton.setAttribute("aria-expanded", "false");
-		userButton.addEventListener("click", (event) => {
-			event.preventDefault();
-			event.stopPropagation();
-			menu.hidden = !menu.hidden;
-			userButton.setAttribute("aria-expanded", String(!menu.hidden));
-			if (!menu.hidden) activeMenus.set(document, controller);
-		});
+		bindUserButton(controller, userButton, document);
 		bindDocumentDismissal(document);
 		return controller;
 	}
