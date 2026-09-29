@@ -28,7 +28,7 @@ app_include_css = "/assets/deeplinkerp_branding/css/deeplinkerp_navigation.css?v
 app_include_js = [
 	"/assets/deeplinkerp_branding/js/deeplinkerp_navigation.js?v=0.0.9",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_interface_mode.js?v=0.0.1",
-	"/assets/deeplinkerp_branding/js/deeplinkerp_branding.js?v=0.0.15",
+	"/assets/deeplinkerp_branding/js/deeplinkerp_branding.js?v=0.0.16",
 ]
 
 # include js, css files in header of web template

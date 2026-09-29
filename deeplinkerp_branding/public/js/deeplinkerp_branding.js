@@ -19,12 +19,7 @@
 			? window.matchMedia("(max-width: 767.98px)").matches
 			: window.innerWidth < 768;
 	let eventsBound = false;
-	let authorizedWorkspaceSidebarSnapshot =
-		window.frappe?.boot && window.DeepLinkERPNavigation
-			? DeepLinkERPNavigation.cloneWorkspaceSidebars(
-					frappe.boot.workspace_sidebar_item || {}
-				)
-			: null;
+	let authorizedWorkspaceSidebarSnapshot = null;
 
 	function setFavicon() {
 		document
