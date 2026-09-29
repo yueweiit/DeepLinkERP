@@ -19,6 +19,8 @@ WORKSPACE_HEADING = "海外采购综合成本核算"
 MODULE_NAME = "Overseas Costing"
 WORKBENCH_PAGE = "overseas-cost-workbench"
 COMPARISON_PAGE = "air-sea-cost-comparison"
+INVENTORY_LOCATION_PAGE = "inventory-location-detail"
+INVENTORY_LOCATION_LABEL = "库存库位明细"
 ACCESS_ROLE = "海外成本核算用户"
 ERP_SETTINGS_DOCTYPE = "Overseas Cost ERP Settings"
 HOME_WORKSPACE_LABEL = "Home"
@@ -49,6 +51,8 @@ def after_install() -> None:
     ensure_language_defaults()
     ensure_access_role()
     ensure_erpnext_standard_fields()
+    ensure_stock_sidebar_inventory_location()
+    retire_legacy_inventory_report()
     ensure_workspace()
     ensure_workspace_sidebar()
     ensure_desktop_icon()
@@ -112,6 +116,8 @@ def after_migrate() -> None:
     ensure_language_defaults()
     ensure_access_role()
     ensure_erpnext_standard_fields()
+    ensure_stock_sidebar_inventory_location()
+    retire_legacy_inventory_report()
     ensure_workspace()
     ensure_workspace_sidebar()
     ensure_desktop_icon()
@@ -553,14 +559,172 @@ def ensure_erpnext_standard_fields() -> dict:
             },
         ],
     }
-    for doctype, fields in build_erpnext_standard_field_spec().items():
-        existing = {field["fieldname"] for field in custom_fields.get(doctype, [])}
-        custom_fields.setdefault(doctype, []).extend(field for field in fields if field["fieldname"] not in existing)
+    supplemental_specs = (
+        build_erpnext_standard_field_spec(),
+        get_inventory_trace_custom_fields(),
+    )
+    for field_spec in supplemental_specs:
+        for doctype, fields in field_spec.items():
+            existing = {field["fieldname"] for field in custom_fields.get(doctype, [])}
+            custom_fields.setdefault(doctype, []).extend(
+                field for field in fields if field["fieldname"] not in existing
+            )
     try:
         create_custom_fields(custom_fields, ignore_validate=True)
     except TypeError:
         create_custom_fields(custom_fields)
     return {"ok": True, "message": "ERPNext 标准单据海外成本字段已确保存在。"}
+
+
+def get_inventory_trace_custom_fields() -> dict[str, list[dict]]:
+    """返回库存库位明细使用的物料追溯字段。"""
+
+    return {
+        "Item": [
+            {
+                "fieldname": "custom_dpci",
+                "label": "DPCI",
+                "fieldtype": "Data",
+                "insert_after": "item_group",
+            },
+            {
+                "fieldname": "custom_external_code",
+                "label": "外部编码",
+                "fieldtype": "Data",
+                "insert_after": "custom_dpci",
+            },
+            {
+                "fieldname": "custom_original_identifier_alias",
+                "label": "原始标识/别名",
+                "fieldtype": "Small Text",
+                "insert_after": "custom_external_code",
+            },
+        ]
+    }
+
+
+def ensure_stock_sidebar_inventory_location() -> dict:
+    """在库存侧边栏的标准“可用数量”之后增加独立页面。"""
+
+    try:
+        import frappe
+    except Exception:
+        return {"ok": False, "message": "当前未连接 Frappe。"}
+
+    if not frappe.db.exists("DocType", "Workspace Sidebar"):
+        return {"ok": False, "message": "当前站点没有 Workspace Sidebar，已跳过。"}
+    if not frappe.db.exists("Page", INVENTORY_LOCATION_PAGE):
+        return {"ok": False, "message": "库存库位明细页面尚未安装。"}
+
+    sidebar_name = (
+        frappe.db.exists("Workspace Sidebar", {"module": "Stock"})
+        or frappe.db.exists("Workspace Sidebar", "Stock")
+        or frappe.db.exists("Workspace Sidebar", {"title": "库存"})
+    )
+    if not sidebar_name:
+        return {"ok": False, "message": "未找到库存 Workspace Sidebar。"}
+
+    sidebar = frappe.get_doc("Workspace Sidebar", sidebar_name)
+    changed = _upsert_stock_sidebar_inventory_location(sidebar)
+    if changed:
+        sidebar.save(ignore_permissions=True)
+        frappe.db.commit()
+    return {
+        "ok": True,
+        "changed": changed,
+        "sidebar": sidebar.name,
+        "page": INVENTORY_LOCATION_PAGE,
+    }
+
+
+def _upsert_stock_sidebar_inventory_location(sidebar) -> bool:
+    items = list(sidebar.get("items") or [])
+    matches = [
+        row
+        for row in items
+        if getattr(row, "link_to", None) == INVENTORY_LOCATION_PAGE
+        or getattr(row, "label", None) == INVENTORY_LOCATION_LABEL
+    ]
+    changed = False
+    if matches:
+        target = matches[0]
+        for duplicate in matches[1:]:
+            items.remove(duplicate)
+            changed = True
+    else:
+        target = sidebar.append(
+            "items",
+            {
+                "label": INVENTORY_LOCATION_LABEL,
+                "type": "Link",
+                "link_type": "Page",
+                "link_to": INVENTORY_LOCATION_PAGE,
+                "icon": "warehouse",
+                "idx": len(items) + 1,
+            },
+        )
+        items = list(sidebar.get("items") or [])
+        changed = True
+
+    desired = {
+        "label": INVENTORY_LOCATION_LABEL,
+        "type": "Link",
+        "link_type": "Page",
+        "link_to": INVENTORY_LOCATION_PAGE,
+        "icon": "warehouse",
+    }
+    for fieldname, value in desired.items():
+        if getattr(target, fieldname, None) != value:
+            setattr(target, fieldname, value)
+            changed = True
+
+    anchor_index = next(
+        (
+            index
+            for index, row in enumerate(items)
+            if getattr(row, "link_to", None) == "Stock Projected Qty"
+            or getattr(row, "label", None) in {"可用数量", "Stock Projected Qty"}
+        ),
+        -1,
+    )
+    current_index = items.index(target)
+    desired_index = anchor_index + 1 if anchor_index >= 0 else len(items) - 1
+    if current_index != desired_index:
+        items.pop(current_index)
+        if current_index < desired_index:
+            desired_index -= 1
+        items.insert(desired_index, target)
+        changed = True
+
+    sidebar.items[:] = items
+    for index, row in enumerate(sidebar.items, start=1):
+        if getattr(row, "idx", None) != index:
+            row.idx = index
+            changed = True
+    return changed
+
+
+def retire_legacy_inventory_report() -> dict:
+    """新页面安装后移除已被替代的 Inventory On Hand 报表。"""
+
+    try:
+        import frappe
+    except Exception:
+        return {"ok": False, "removed": False, "message": "当前未连接 Frappe。"}
+
+    if not frappe.db.exists("Page", INVENTORY_LOCATION_PAGE):
+        return {"ok": False, "removed": False, "message": "新页面尚未安装。"}
+    report_name = "Inventory On Hand"
+    if not frappe.db.exists("Report", report_name):
+        return {"ok": True, "removed": False, "report": report_name}
+    frappe.delete_doc(
+        "Report",
+        report_name,
+        ignore_permissions=True,
+        force=True,
+    )
+    frappe.db.commit()
+    return {"ok": True, "removed": True, "report": report_name}
 
 
 def ensure_workspace() -> dict:

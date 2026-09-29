@@ -1,0 +1,95 @@
+.inventory-location-detail {
+  --ild-border: var(--border-color, #d1d8dd);
+  --ild-header: var(--subtle-fg, #f5f7fa);
+  --ild-merged: var(--control-bg, #f8fafc);
+  padding: 16px 0 32px;
+}
+
+.inventory-location-detail .ild-status {
+  color: var(--text-muted, #6b7280);
+  margin: 0 0 12px;
+}
+
+.inventory-location-detail .ild-table-wrap {
+  border: 1px solid var(--ild-border);
+  border-radius: 8px;
+  max-height: calc(100vh - 250px);
+  overflow: auto;
+}
+
+.inventory-location-detail table {
+  border-collapse: separate;
+  border-spacing: 0;
+  min-width: 1760px;
+  table-layout: fixed;
+  width: 100%;
+}
+
+.inventory-location-detail th,
+.inventory-location-detail td {
+  background: var(--card-bg, #fff);
+  border-bottom: 1px solid var(--ild-border);
+  border-right: 1px solid var(--ild-border);
+  padding: 10px 12px;
+  vertical-align: middle;
+  word-break: break-word;
+}
+
+.inventory-location-detail th {
+  background: var(--ild-header);
+  font-weight: 500;
+  position: sticky;
+  text-align: left;
+  top: 0;
+  z-index: 2;
+}
+
+.inventory-location-detail td[rowspan] {
+  background: var(--ild-merged);
+}
+
+.inventory-location-detail tr:last-child td {
+  border-bottom: 0;
+}
+
+.inventory-location-detail th:last-child,
+.inventory-location-detail td:last-child {
+  border-right: 0;
+}
+
+.inventory-location-detail .ild-quantity {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.inventory-location-detail .ild-total {
+  font-weight: 500;
+}
+
+.inventory-location-detail .ild-code a {
+  font-weight: 500;
+}
+
+.inventory-location-detail .ild-empty td {
+  color: var(--text-muted, #6b7280);
+  padding: 32px;
+  text-align: center;
+}
+
+.inventory-location-detail.is-loading .ild-table-wrap {
+  opacity: 0.65;
+}
+
+.inventory-location-detail .ild-col-code { width: 145px; }
+.inventory-location-detail .ild-col-name { width: 270px; }
+.inventory-location-detail .ild-col-warehouse { width: 210px; }
+.inventory-location-detail .ild-col-location { width: 145px; }
+.inventory-location-detail .ild-col-location-qty { width: 120px; }
+.inventory-location-detail .ild-col-total { width: 120px; }
+.inventory-location-detail .ild-col-uom { width: 120px; }
+.inventory-location-detail .ild-col-group { width: 220px; }
+.inventory-location-detail .ild-col-dpci { width: 140px; }
+.inventory-location-detail .ild-col-external { width: 160px; }
+.inventory-location-detail .ild-col-alias { width: 210px; }
+
