@@ -152,7 +152,7 @@ class TestEIMSOAuth(TestCase):
 		self.assertEqual(cache.set_value.call_args.kwargs["expires_in_sec"], oauth.EIMS_STATE_TTL_SECONDS)
 		stored_state = cache.set_value.call_args.args[1]
 		browser_nonce = local.cookie_manager.set_cookie.call_args.args[1]
-		self.assertEqual(stored_state["session_id"], "guest-session")
+		self.assertNotIn("session_id", stored_state)
 		self.assertIn("browser_nonce_digest", stored_state)
 		with patch.object(oauth.frappe, "conf", {"encryption_key": "test-key"}):
 			self.assertEqual(oauth._state_digest(browser_nonce), stored_state["browser_nonce_digest"])
@@ -185,7 +185,6 @@ class TestEIMSOAuth(TestCase):
 						"state_digest": state_digest,
 						"browser_nonce_digest": oauth._state_digest(browser_nonce),
 						"code_verifier": "pkce-verifier",
-						"session_id": "guest-session",
 					}
 				),
 				None,
@@ -243,7 +242,6 @@ class TestEIMSOAuth(TestCase):
 					"state_digest": state_digest,
 					"browser_nonce_digest": oauth._state_digest("browser-a"),
 					"code_verifier": "pkce-verifier",
-					"session_id": "Guest",
 				}
 			)
 			with self.assertRaisesRegex(RuntimeError, "浏览器不匹配"):
