@@ -93,6 +93,7 @@ ADMIN_NAVIGATION = tuple(link for _label, _icon, links in ADMIN_NAVIGATION_GROUP
 MAPPING_CONSOLE_LINK = ("china-statement-mapping", "科目映射控制台", "Page")
 MAPPING_CONSOLE_ICON = "list-tree"
 ACCOUNT_TABLE_LINK = ("Account", "科目表", "DocType")
+ACCOUNT_TABLE_URL = "/desk/account/view/tree?sidebar=China%20Finance"
 
 WORKSPACE_CONTENT = json.dumps([
 	*[
@@ -717,7 +718,7 @@ def _desired_sidebar_items(custom_links=None):
 			"icon": MAPPING_CONSOLE_ICON,
 		},
 		{
-			**_sidebar_link(*ACCOUNT_TABLE_LINK, sidebar="China Finance"),
+			**_sidebar_url(ACCOUNT_TABLE_URL, ACCOUNT_TABLE_LINK[1]),
 			"child": 0,
 			"icon": "list-tree",
 		},

@@ -38,11 +38,10 @@
    "indent": 0,
    "keep_closed": 0,
    "label": "\u79d1\u76ee\u8868",
-   "link_to": "Account",
-   "link_type": "DocType",
-   "route_options": "{\"sidebar\": \"China Finance\"}",
+   "link_type": "URL",
    "show_arrow": 0,
-   "type": "Link"
+   "type": "Link",
+   "url": "/desk/account/view/tree?sidebar=China%20Finance"
   },
   {
    "child": 0,
@@ -515,7 +514,7 @@
    "type": "Link"
   }
  ],
- "modified": "2026-09-29 06:46:25.140029",
+ "modified": "2026-09-29 11:45:28.061597",
  "modified_by": "Administrator",
  "module": "China Finance",
  "name": "China Finance",
