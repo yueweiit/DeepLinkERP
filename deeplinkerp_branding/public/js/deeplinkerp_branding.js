@@ -247,9 +247,17 @@
 	}
 
 	function getAuthorizedWorkspaceSidebars() {
-		if (!authorizedWorkspaceSidebarSnapshot) {
+		const currentSidebars = frappe.boot.workspace_sidebar_item || {};
+		const currentItemCount =
+			DeepLinkERPNavigation.countWorkspaceSidebarItems(currentSidebars);
+		const snapshotItemCount =
+			DeepLinkERPNavigation.countWorkspaceSidebarItems(
+				authorizedWorkspaceSidebarSnapshot
+			);
+
+		if (!authorizedWorkspaceSidebarSnapshot || currentItemCount > snapshotItemCount) {
 			authorizedWorkspaceSidebarSnapshot = DeepLinkERPNavigation.cloneWorkspaceSidebars(
-				frappe.boot.workspace_sidebar_item || {}
+				currentSidebars
 			);
 		}
 		return authorizedWorkspaceSidebarSnapshot;

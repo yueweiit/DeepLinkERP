@@ -250,6 +250,20 @@ test("snapshots every authorized workspace before Frappe consumes the shared boo
 	assert.notEqual(snapshot.Buying.items, source.Buying.items);
 });
 
+test("counts authorized workspace items so a late-populated boot snapshot can replace an empty one", () => {
+	const countWorkspaceSidebarItems = productionFunction("countWorkspaceSidebarItems");
+
+	assert.equal(countWorkspaceSidebarItems(null), 0);
+	assert.equal(
+		countWorkspaceSidebarItems({
+			Buying: { items: [{ label: "Home" }, { label: "Purchase Order" }] },
+			Manufacturing: { items: [{ label: "Work Order" }] },
+			Empty: {},
+		}),
+		3
+	);
+});
+
 test("projects stale runtime layout onto the boot authorization whitelist", () => {
 	const projectAuthorizedDesktopIcons = productionFunction("projectAuthorizedDesktopIcons");
 	const authorized = [
@@ -455,9 +469,9 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 	);
 	assert.ok(hooks.indexOf(modelAsset) < hooks.indexOf(interfaceModeAsset));
 	assert.ok(hooks.indexOf(interfaceModeAsset) < hooks.indexOf(lifecycleAsset));
-	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.9/);
+	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.10/);
 	assert.match(hooks, /deeplinkerp_interface_mode\.js\?v=0\.0\.1/);
-	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.16/);
+	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.17/);
 	assert.match(hooks, /web_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_branding\.css"/);
 });
 
@@ -721,9 +735,11 @@ test("integrates the executable lifecycle helpers through the existing single ro
 	assert.match(lifecycle, /restoreDesktopSidebarExpansion\(/);
 	assert.match(lifecycle, /function getAuthorizedWorkspaceSidebars\(/);
 	assert.match(lifecycle, /let authorizedWorkspaceSidebarSnapshot\s*=\s*null/);
+	assert.match(lifecycle, /countWorkspaceSidebarItems\(currentSidebars\)/);
+	assert.match(lifecycle, /currentItemCount\s*>\s*snapshotItemCount/);
 	assert.match(
 		lifecycle,
-		/cloneWorkspaceSidebars\(\s*frappe\.boot\.workspace_sidebar_item/
+		/cloneWorkspaceSidebars\(\s*currentSidebars/
 	);
 	assert.match(lifecycle, /workspaceSidebars:\s*getAuthorizedWorkspaceSidebars\(\)/);
 	assert.match(lifecycle, /matchMedia\("\(max-width: 767\.98px\)"\)\.matches/);

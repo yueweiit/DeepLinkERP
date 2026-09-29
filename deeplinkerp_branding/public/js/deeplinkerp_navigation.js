@@ -290,6 +290,13 @@
 		);
 	}
 
+	function countWorkspaceSidebarItems(sidebars) {
+		return Object.values(sidebars || {}).reduce(
+			(total, sidebar) => total + (Array.isArray(sidebar?.items) ? sidebar.items.length : 0),
+			0
+		);
+	}
+
 	function findPath(items, predicate, ancestors) {
 		for (const item of items) {
 			const path = [...ancestors, item];
@@ -396,6 +403,7 @@
 		buildNavigationTree,
 		cloneSidebarItems,
 		cloneWorkspaceSidebars,
+		countWorkspaceSidebarItems,
 		collectDisclosureState,
 		getNavigationIcon,
 		normalizeRoute,
