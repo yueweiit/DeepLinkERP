@@ -439,7 +439,7 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 	assert.ok(hooks.indexOf(interfaceModeAsset) < hooks.indexOf(lifecycleAsset));
 	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.8/);
 	assert.match(hooks, /deeplinkerp_interface_mode\.js\?v=0\.0\.1/);
-	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.14/);
+	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.15/);
 	assert.match(hooks, /web_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_branding\.css"/);
 });
 
@@ -702,6 +702,11 @@ test("integrates the executable lifecycle helpers through the existing single ro
 	assert.match(lifecycle, /bindNavigationRowInteractions\(/);
 	assert.match(lifecycle, /restoreDesktopSidebarExpansion\(/);
 	assert.match(lifecycle, /function getAuthorizedWorkspaceSidebars\(/);
+	assert.doesNotMatch(lifecycle, /let authorizedWorkspaceSidebarSnapshot\s*=\s*null/);
+	assert.match(
+		lifecycle,
+		/let authorizedWorkspaceSidebarSnapshot\s*=[\s\S]*cloneWorkspaceSidebars\(\s*frappe\.boot\.workspace_sidebar_item/
+	);
 	assert.match(
 		lifecycle,
 		/cloneWorkspaceSidebars\(\s*frappe\.boot\.workspace_sidebar_item/
