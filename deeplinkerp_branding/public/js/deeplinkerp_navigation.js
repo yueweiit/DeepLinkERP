@@ -207,6 +207,7 @@
 		workspaceSidebars = {},
 		route = "/desk",
 		currentSidebar = "",
+		nativeLeafSelected = false,
 	} = {}) {
 		const items = buildNavigationTree(desktopIcons);
 		const normalizedRoute = normalizeRoute(route);
@@ -232,7 +233,9 @@
 				const isActive = Boolean(activeLeaf && node.key === activeLeaf.key);
 				node.hasNativeChildren = hasNativeChildren;
 				node.isOpen = activeKeys.has(node.key) && (node.children.length > 0 || hasNativeChildren);
-				const hasSelectedNativeLeaf = Boolean(normalizedRoute.sidebar && hasNativeChildren);
+				const hasSelectedNativeLeaf = Boolean(
+					hasNativeChildren && (normalizedRoute.sidebar || nativeLeafSelected)
+				);
 				node.isSelfActive =
 					isActive &&
 					!hasSelectedNativeLeaf &&

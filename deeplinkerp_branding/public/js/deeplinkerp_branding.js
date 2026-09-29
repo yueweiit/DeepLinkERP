@@ -390,6 +390,7 @@
 			workspaceSidebars: frappe.boot.workspace_sidebar_item || {},
 			route: window.location.href,
 			currentSidebar: frappe.app.sidebar.sidebar_title || "",
+			nativeLeafSelected: Boolean(nativeItems.querySelector(".active-sidebar")),
 		});
 
 		// Keep Frappe's live node and its handlers while replacing only our shell.

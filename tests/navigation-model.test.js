@@ -246,6 +246,7 @@ test("resolves query, exact route, and native sidebar active states in authority
 		workspaceSidebars,
 		route: "/desk/accounting/",
 		currentSidebar: "Accounting",
+		nativeLeafSelected: false,
 	});
 	assert.deepEqual(exactModule.activePathLabels, ["Accounting"]);
 	assert.equal(exactModule.activeItem.isOpen, true);
@@ -263,6 +264,35 @@ test("resolves query, exact route, and native sidebar active states in authority
 		true,
 		"an exact module route overrides stale native sidebar state and is blue"
 	);
+});
+
+test("keeps an exact workspace parent open without blue when the native leaf is selected", () => {
+	const buildNavigationModel = productionFunction("buildNavigationModel");
+	const desktopIcons = [
+		{
+			label: "Organization",
+			navigation_route: "/desk/company",
+		},
+	];
+	const workspaceSidebars = {
+		organization: {
+			label: "Organization",
+			items: [{ type: "Link", link_to: "Company" }],
+		},
+	};
+
+	const model = buildNavigationModel({
+		desktopIcons,
+		workspaceSidebars,
+		route: "/desk/company",
+		currentSidebar: "Organization",
+		nativeLeafSelected: true,
+	});
+
+	assert.equal(model.activeItem.label, "Organization");
+	assert.equal(model.activeItem.isOpen, true);
+	assert.equal(model.activeItem.isSelfActive, false);
+	assert.equal(model.nativeHostKey, model.activeItem.key);
 });
 
 test("keeps a sidebar-qualified exact module route open without making its parent blue", () => {
@@ -302,8 +332,8 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 		/app_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_navigation\.css\?v=0\.0\.2"/
 	);
 	assert.ok(hooks.indexOf(modelAsset) < hooks.indexOf(lifecycleAsset));
-	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.3/);
-	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.9/);
+	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.4/);
+	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.10/);
 	assert.match(hooks, /web_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_branding\.css"/);
 });
 
@@ -377,6 +407,10 @@ test("integrates the executable lifecycle helpers through the existing single ro
 	assert.match(lifecycle, /projectAuthorizedDesktopIcons\(/);
 	assert.match(lifecycle, /replaceNavigationRoot\(/);
 	assert.match(lifecycle, /bindNativeSidebarClose\(/);
+	assert.match(
+		lifecycle,
+		/nativeLeafSelected:\s*Boolean\(nativeItems\.querySelector\("\.active-sidebar"\)\)/
+	);
 	assert.doesNotMatch(lifecycle, /cloneNode\(/);
 });
 
