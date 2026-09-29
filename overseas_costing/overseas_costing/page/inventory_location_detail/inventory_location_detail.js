@@ -111,7 +111,7 @@
           label: "公司",
           fieldtype: "Link",
           options: "Company",
-          default: frappe.defaults.get_user_default("Company") || DEFAULT_COMPANY,
+          default: DEFAULT_COMPANY,
           change: () => {
             if (this.fields.snapshot_key) this.fields.snapshot_key.set_value("");
             refresh();
@@ -177,7 +177,8 @@
           </div>
         </section>`
       );
-      $(this.page.body).empty().append(this.$root);
+      $(this.page.body).children(":not(.page-form)").remove();
+      $(this.page.body).append(this.$root);
     }
 
     bindEvents() {

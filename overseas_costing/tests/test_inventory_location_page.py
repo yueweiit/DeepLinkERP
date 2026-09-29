@@ -51,8 +51,8 @@ def test_single_location_omits_rowspan_and_escapes_untrusted_values() -> None:
     result = run_js(
         """
 const html = page.renderTableRows([{
-  item_code:'FL000164', item_name:'<script>alert(1)</script>', warehouse:'综合仓库 - YWFM',
-  total_qty:19.6, stock_uom:'kg', item_group:'FL 辅料', dpci:'FL000164',
+  item_code:'FL007979', item_name:'<script>alert(1)</script>', warehouse:'综合仓库 - YWFM',
+  total_qty:19.6, stock_uom:'kg', item_group:'FL 辅料', dpci:'',
   external_code:'', original_identifier_alias:'FL000164',
   locations:[{original_location:'AI-4-C01', location_qty:19.6}]
 }]);
@@ -77,6 +77,9 @@ def test_page_assets_are_scoped_mirrored_and_link_to_standard_item_form() -> Non
     assert "snapshot_options" in source
     assert "renderTableRows" in source
     assert "rowspan" in source
+    assert 'default: DEFAULT_COMPANY' in source
+    assert 'children(":not(.page-form)")' in source
+    assert "$(this.page.body).empty()" not in source
 
     css = (PAGE / "inventory_location_detail.css").read_text(encoding="utf-8")
     assert ".inventory-location-detail" in css

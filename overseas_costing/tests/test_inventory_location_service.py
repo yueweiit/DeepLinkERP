@@ -49,15 +49,15 @@ ROWS = [
         "snapshot_key": "YWFM-2026-09-29",
         "snapshot_date": "2026-09-29",
         "company": "YW Fabricación MX 核心制造",
-        "item_code": "FL000164",
+        "item_code": "FL007979",
         "item_name": "色母粒 / MASTERBATCH AZUL",
         "warehouse": "综合仓库 - YWFM",
         "original_location": "AI-4-C01",
         "location_qty": 19.6,
         "stock_uom": "kg",
         "item_group": "FL Suministros Auxiliares辅料",
-        "dpci": "FL000164",
-        "external_code": "",
+        "dpci": "",
+        "external_code": "FL000164",
         "original_identifier_alias": "FL000164",
     },
 ]
@@ -92,7 +92,7 @@ def test_payload_filters_keyword_warehouse_and_item_group_before_grouping() -> N
         },
     )
 
-    assert [row["item_code"] for row in payload["groups"]] == ["FL000164"]
+    assert [row["item_code"] for row in payload["groups"]] == ["FL007979"]
     assert payload["groups"][0]["total_qty"] == 19.6
 
 
