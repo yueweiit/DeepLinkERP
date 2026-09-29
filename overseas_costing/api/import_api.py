@@ -961,6 +961,20 @@ def sync_existing_oa_finished_times(limit: int | None = 200) -> dict:
 
 
 @frappe.whitelist()
+def backfill_oa_item_details(
+    batch_name: str | None = None,
+    dry_run: int | None = 0,
+) -> dict:
+    """从已保存 OA 快照回填明细行的物料、重量与货值，仅补空值。"""
+
+    frappe.only_for("System Manager")
+    return import_service.backfill_oa_item_details_from_raw(
+        batch_name=batch_name or None,
+        dry_run=str(dry_run or "").strip().lower() in ("1", "true", "yes", "y"),
+    )
+
+
+@frappe.whitelist()
 def refresh_missing_oa_finished_times(
     limit: int | None = 200,
     env_file: str | None = None,

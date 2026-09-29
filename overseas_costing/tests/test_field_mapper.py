@@ -87,6 +87,58 @@ def test_map_oa_row_to_item_repairs_shifted_dingtalk_columns() -> None:
     assert mapped["recipient"] == "Alfredo Garcia Cardenas"
 
 
+def test_map_oa_row_to_item_reads_weight_and_goods_value() -> None:
+    """OA 货物行的实际列名是「重量 Peso」「货值Valor de mercancía」，必须能读到。"""
+
+    row = {
+        "物料编码 Código de material": "FL004116",
+        "物料名称（中文）Nombre del material (chino)": "笔式万用表",
+        "规格型号Especificación / Modelo": "智能万用表+测电笔组合二合一",
+        "数量Cantidad": "50",
+        "重量 Peso": "12.85",
+        "单位Unidad": "个",
+        "货值Valor de mercancía": "1250",
+        "币种Moneda": "人民币RMB",
+    }
+
+    mapped = map_oa_row_to_item(row)
+
+    assert mapped["gross_weight_kg"] == "12.85"
+    assert mapped["goods_value"] == "1250"
+
+
+def test_map_oa_row_to_item_reads_goods_value_without_accent() -> None:
+    """重音缺失的写法同样要能命中，避免上游导出转码后丢字段。"""
+
+    row = {
+        "物料编码 Código de material": "FL000817",
+        "数量Cantidad": "210",
+        "重量 Peso": "6.8",
+        "货值Valor de mercancia": "130.00008",
+    }
+
+    mapped = map_oa_row_to_item(row)
+
+    assert mapped["gross_weight_kg"] == "6.8"
+    assert mapped["goods_value"] == "130.00008"
+
+
+def test_map_oa_row_to_item_keeps_empty_weight_and_goods_value_absent() -> None:
+    """列名缺失时保持空值，不得用别的字段顶替。"""
+
+    row = {
+        "物料编码 Código de material": "GJ001088",
+        "物料名称（中文）Nombre del material (chino)": "六角扳手",
+        "数量Cantidad": "7",
+        "单位Unidad": "个",
+    }
+
+    mapped = map_oa_row_to_item(row)
+
+    assert mapped.get("gross_weight_kg") is None
+    assert mapped.get("goods_value") is None
+
+
 def test_map_purchase_expense_row_to_item() -> None:
     row = {
         "物品编码Código": "FL004104",

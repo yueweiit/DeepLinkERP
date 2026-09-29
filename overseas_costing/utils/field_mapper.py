@@ -340,6 +340,15 @@ def map_oa_row_to_item(row: dict) -> dict:
             "Peso",
             "gross_weight_kg",
         ),
+        "goods_value": _first_value(
+            row,
+            "货值Valor de mercancía",
+            "货值Valor de mercancia",
+            "货值",
+            "Valor de mercancía",
+            "Valor de mercancia",
+            "goods_value",
+        ),
         "waybill_no": _first_value(
             row,
             "柜号/单号Número DE Logística",

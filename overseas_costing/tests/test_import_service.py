@@ -25,6 +25,7 @@ from overseas_costing.services.import_service import (
     _diagnose_ambiguous_source_row,
     _diagnose_unmatched_source_row,
     apply_linked_purchase_expense_fillable_fields,
+    backfill_oa_item_details_from_raw,
     confirm_oa_source_attachment_type,
     confirm_logistics_quote_candidate,
     delete_manual_document_attachment,
@@ -4300,3 +4301,194 @@ def test_apply_batch_excel_supplement_passes_explicit_batch_to_safe_updater(monk
     assert result["ok"] is True
     assert captured["batch_doc_name"] == "BATCH-DOC"
     assert captured["version_name"] == "VER-1"
+
+
+def test_backfill_oa_item_details_from_raw_reads_row_snapshot(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    row = {
+        "name": "ITEM-001",
+        "batch": "BATCH-001",
+        "row_no": 1,
+        "material_code": "FL004116",
+        "product_name": "",
+        "product_name_es": "",
+        "spec_model": "",
+        "recipient": "",
+        "quantity": 0.0,
+        "unit": "",
+        "gross_weight_kg": 0.0,
+        "goods_value": 0.0,
+        "raw_excel_json": json.dumps(
+            {
+                "物料编码 Código de material": "FL004116",
+                "物料名称（中文）Nombre del material (chino)": "笔式万用表",
+                "数量Cantidad": "50",
+                "重量 Peso": "12.85",
+                "单位Unidad": "个",
+                "货值Valor de mercancía": "1250",
+            },
+            ensure_ascii=False,
+        ),
+    }
+    written = {}
+
+    class FakeDB:
+        @staticmethod
+        def get_value(doctype, name, fields=None, **_kwargs):
+            return None
+
+        @staticmethod
+        def set_value(doctype, name, updates, **_kwargs):
+            written[name] = updates
+
+        @staticmethod
+        def commit():
+            return None
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        @staticmethod
+        def get_all(doctype, filters=None, fields=None, **_kwargs):
+            assert doctype == "Overseas Cost Item"
+            assert filters == {"source_type": "oa_logistics"}
+            return [row]
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+
+    result = backfill_oa_item_details_from_raw()
+
+    assert result["updated_count"] == 1
+    assert result["batch_fallback_count"] == 0
+    assert written["ITEM-001"]["gross_weight_kg"] == 12.85
+    assert written["ITEM-001"]["goods_value"] == 1250.0
+    assert written["ITEM-001"]["product_name"] == "笔式万用表"
+
+
+def test_backfill_oa_item_details_from_raw_falls_back_to_batch_form(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    row = {
+        "name": "ITEM-002",
+        "batch": "vno4sb614j",
+        "row_no": 1,
+        "material_code": "FL004116",
+        "product_name": "",
+        "product_name_es": "",
+        "spec_model": "",
+        "recipient": "",
+        "quantity": 50.0,
+        "unit": "个",
+        "gross_weight_kg": 0.0,
+        "goods_value": 0.0,
+        "raw_excel_json": "",
+    }
+    written = {}
+
+    batch_extra = {
+        "form_fields": {
+            "货物信息Bienes": [
+                {
+                    "rowValue": [
+                        {"label": "物料编码 Código de material", "value": "FL004116"},
+                        {"label": "物料名称（中文）Nombre del material (chino)", "value": "笔式万用表"},
+                        {"label": "数量Cantidad", "value": "50"},
+                        {"label": "重量 Peso", "value": "12.85"},
+                        {"label": "单位Unidad", "value": "个"},
+                        {"label": "货值Valor de mercancía", "value": "1250"},
+                    ]
+                }
+            ]
+        },
+        "transport_mode_raw": "DDP Marítimo海运DDP",
+    }
+
+    class FakeDB:
+        @staticmethod
+        def get_value(doctype, name, fields=None, **_kwargs):
+            assert doctype == "Overseas Cost Batch"
+            assert name == "vno4sb614j"
+            return json.dumps(batch_extra, ensure_ascii=False)
+
+        @staticmethod
+        def set_value(doctype, name, updates, **_kwargs):
+            written[name] = updates
+
+        @staticmethod
+        def commit():
+            return None
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        @staticmethod
+        def get_all(doctype, filters=None, fields=None, **_kwargs):
+            return [row]
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+
+    result = backfill_oa_item_details_from_raw()
+
+    assert result["updated_count"] == 1
+    assert result["batch_fallback_count"] == 1
+    assert written["ITEM-002"]["gross_weight_kg"] == 12.85
+    assert written["ITEM-002"]["goods_value"] == 1250.0
+
+
+def test_backfill_oa_item_details_from_raw_does_not_overwrite_existing(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    row = {
+        "name": "ITEM-003",
+        "batch": "BATCH-003",
+        "row_no": 1,
+        "material_code": "FL004116",
+        "product_name": "笔式万用表",
+        "product_name_es": "",
+        "spec_model": "",
+        "recipient": "",
+        "quantity": 99.0,
+        "unit": "个",
+        "gross_weight_kg": 8.8,
+        "goods_value": 999.0,
+        "raw_excel_json": json.dumps(
+            {
+                "物料编码 Código de material": "FL004116",
+                "物料名称（中文）Nombre del material (chino)": "笔式万用表",
+                "数量Cantidad": "50",
+                "重量 Peso": "12.85",
+                "货值Valor de mercancía": "1250",
+            },
+            ensure_ascii=False,
+        ),
+    }
+    written = {}
+
+    class FakeDB:
+        @staticmethod
+        def get_value(doctype, name, fields=None, **_kwargs):
+            return None
+
+        @staticmethod
+        def set_value(doctype, name, updates, **_kwargs):
+            written[name] = updates
+
+        @staticmethod
+        def commit():
+            return None
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        @staticmethod
+        def get_all(doctype, filters=None, fields=None, **_kwargs):
+            return [row]
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+
+    result = backfill_oa_item_details_from_raw()
+
+    # 所有字段都已填，回填不应覆盖任何值
+    assert result["updated_count"] == 0
+    assert "ITEM-003" not in written

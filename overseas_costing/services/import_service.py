@@ -229,6 +229,11 @@ NUMERIC_ITEM_FIELDS = {
     "total_cost_rmb",
     "total_unit_rmb",
 }
+# OA 原始行快照可补回的数值字段；0 视为未填，避免覆盖财务手工录入。
+NUMERIC_BACKFILL_FIELDS = (
+    "gross_weight_kg",
+    "goods_value",
+)
 
 
 def import_main_excel(
@@ -3137,17 +3142,30 @@ def normalize_existing_item_units() -> dict:
     }
 
 
-def backfill_oa_item_quantity_unit_from_raw() -> dict:
-    """从钉钉 OA 原始行快照补回历史明细漏掉的数量和单位。"""
+def backfill_oa_item_details_from_raw(batch_name: str | None = None, *, dry_run: bool = False) -> dict:
+    """从钉钉 OA 快照补回历史明细漏掉的物料、重量与货值字段。
+
+    数据源两级，按行优先：
+    1. 行级 `raw_excel_json`（精确到行，优先）；
+    2. 批次级 `extra_json.form_fields` 的货物信息表（老行快照为空时的回退，
+       复用 `import_oa_logistics.extract_oa_goods_rows` 的解析口径）。
+
+    只填空值：文本按空串判断，数量与物理属性按「非零才算已填」判断，
+    避免覆盖财务手工录入的数据。
+    """
 
     if frappe is None:
         return {"updated_count": 0, "scanned_count": 0, "changed_rows": []}
 
+    filters: dict = {"source_type": "oa_logistics"}
+    if batch_name:
+        filters["batch"] = batch_name
     rows = frappe.get_all(
         "Overseas Cost Item",
-        filters={"source_type": "oa_logistics"},
+        filters=filters,
         fields=[
             "name",
+            "batch",
             "row_no",
             "material_code",
             "product_name",
@@ -3156,14 +3174,51 @@ def backfill_oa_item_quantity_unit_from_raw() -> dict:
             "recipient",
             "quantity",
             "unit",
+            "gross_weight_kg",
+            "goods_value",
             "raw_excel_json",
         ],
         limit_page_length=0,
     )
+
+    batch_goods_rows: dict[str, dict[str, dict]] = {}
+
+    def _batch_goods_index(target_batch: str) -> dict[str, dict]:
+        """按物料编码索引批次级货物行，供行级快照缺失时回退。"""
+
+        if target_batch in batch_goods_rows:
+            return batch_goods_rows[target_batch]
+        index: dict[str, dict] = {}
+        batch_goods_rows[target_batch] = index
+        if not target_batch:
+            return index
+        try:
+            from overseas_costing.scripts.import_oa_logistics import extract_oa_goods_rows
+
+            extra = _json_loads_dict(
+                frappe.db.get_value("Overseas Cost Batch", target_batch, "extra_json")
+            )
+            if not isinstance(extra, dict):
+                return index
+            for goods_row in extract_oa_goods_rows(extra):
+                code = str(goods_row.get("物料编码 Código de material") or "").strip()
+                if code and code not in index:
+                    index[code] = goods_row
+        except Exception:
+            # 回退源不可用时保持行级结果，不影响主流程。
+            pass
+        return index
+
     changed_rows: list[dict] = []
+    fallback_count = 0
     for row in rows:
         raw_payload = _json_loads_dict(row.get("raw_excel_json"))
-        if not isinstance(raw_payload, dict):
+        used_fallback = False
+        if not isinstance(raw_payload, dict) or not raw_payload:
+            code = str(row.get("material_code") or "").strip()
+            raw_payload = _batch_goods_index(str(row.get("batch") or "")).get(code) or {}
+            used_fallback = bool(raw_payload)
+        if not raw_payload:
             continue
 
         mapped = map_oa_row_to_item(raw_payload)
@@ -3183,25 +3238,37 @@ def backfill_oa_item_quantity_unit_from_raw() -> dict:
             current_value = row.get(fieldname)
             if source_value not in (None, "") and str(source_value or "").strip() != str(current_value or "").strip():
                 updates[fieldname] = source_value
+        for fieldname in NUMERIC_BACKFILL_FIELDS:
+            source_value = _to_float(mapped.get(fieldname), default=0.0)
+            current_value = _to_float(row.get(fieldname), default=0.0)
+            if source_value and not current_value:
+                updates[fieldname] = source_value
 
         if not updates:
             continue
-        frappe.db.set_value("Overseas Cost Item", row["name"], updates, update_modified=True)
+        if used_fallback:
+            fallback_count += 1
+        if not dry_run:
+            frappe.db.set_value("Overseas Cost Item", row["name"], updates, update_modified=True)
         changed_rows.append(
             {
                 "name": row["name"],
+                "batch": row.get("batch"),
                 "row_no": row.get("row_no"),
                 "material_code": row.get("material_code"),
+                "used_batch_fallback": used_fallback,
                 "updates": updates,
             }
         )
 
-    if changed_rows:
+    if changed_rows and not dry_run:
         frappe.db.commit()
 
     return {
         "updated_count": len(changed_rows),
         "scanned_count": len(rows),
+        "batch_fallback_count": fallback_count,
+        "dry_run": dry_run,
         "changed_rows": changed_rows[:50],
     }
 
