@@ -302,12 +302,12 @@
 	function makeNavigationRow(item, isOpen = item.isOpen) {
 		const hasChildren = item.children.length > 0 || item.hasNativeChildren;
 		const route = item.navigation_route || item.route || item.link || item.url;
-		const row = document.createElement(route ? "a" : "button");
+		const row = document.createElement(hasChildren ? "button" : route ? "a" : "button");
 		row.className = "dlp-mes-navigation__row";
-		if (route) {
-			row.href = route;
-		} else {
+		if (hasChildren || !route) {
 			row.type = "button";
+		} else {
+			row.href = route;
 		}
 		if (hasChildren) row.setAttribute("aria-expanded", String(isOpen));
 		if (item.isSelfActive) row.setAttribute("aria-current", "page");
@@ -331,6 +331,43 @@
 		return row;
 	}
 
+	function prepareWorkspaceSidebarItems(items) {
+		const context = {
+			workspace_sidebar_items: DeepLinkERPNavigation.cloneSidebarItems(items),
+		};
+		frappe.ui.Sidebar.prototype.find_nested_items.call(context);
+		return context.workspace_sidebar_items;
+	}
+
+	function bindRenderedSidebarLinks(container) {
+		container.querySelectorAll(".item-anchor").forEach((link) => {
+			if (link.dataset.dlpNavigationBound === "true") return;
+			link.dataset.dlpNavigationBound = "true";
+			DeepLinkERPNavigation.bindNativeSidebarClose(link, {
+				isNarrowViewport: isNarrowNavigationViewport,
+				closeSidebar: () => frappe.app.sidebar.close(),
+				preserveDesktopExpansion: () =>
+					DeepLinkERPNavigation.rememberDesktopSidebarExpansion(
+						link.closest(".dlp-mes-navigation"),
+						link.closest(".body-sidebar-container")
+					),
+			});
+		});
+	}
+
+	function renderWorkspaceSidebarBranch(item, branch) {
+		const container = document.createElement("div");
+		container.className = "sidebar-items dlp-mes-navigation__workspace-items";
+		prepareWorkspaceSidebarItems(item.workspaceSidebar?.items || []).forEach((sidebarItem) => {
+			frappe.app.sidebar.make_sidebar_item({
+				container,
+				item: sidebarItem,
+			});
+		});
+		bindRenderedSidebarLinks(container);
+		branch.appendChild(container);
+	}
+
 	function renderNavigationItem(item, nativeItems, nativeHostKey, disclosureState, depth = 0) {
 		const group = document.createElement("div");
 		group.className = "dlp-mes-navigation__group";
@@ -344,7 +381,7 @@
 
 		const row = makeNavigationRow(item, isOpen);
 		group.appendChild(row);
-		const needsBranch = item.children.length > 0 || item.key === nativeHostKey;
+		const needsBranch = item.children.length > 0 || item.hasNativeChildren;
 		const route = item.navigation_route || item.route || item.link || item.url || "";
 		const interactionOptions = {
 			route,
@@ -377,6 +414,8 @@
 		});
 		if (item.key === nativeHostKey) {
 			branch.appendChild(nativeItems);
+		} else if (item.hasNativeChildren) {
+			renderWorkspaceSidebarBranch(item, branch);
 		}
 		group.appendChild(branch);
 

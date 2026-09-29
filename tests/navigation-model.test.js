@@ -192,6 +192,23 @@ test("builds the visible desktop tree in source order without mutating boot data
 	assert.deepEqual(icons, snapshot, "boot data must remain authoritative and unmodified");
 });
 
+test("clones authorized workspace items before native nesting mutates them", () => {
+	const cloneSidebarItems = productionFunction("cloneSidebarItems");
+	const source = [
+		{ type: "Section Break", label: "Reports", child: 0 },
+		{ type: "Link", label: "Purchase Order", child: 1, filters: '{"status":"Draft"}' },
+	];
+	const snapshot = structuredClone(source);
+
+	const cloned = cloneSidebarItems(source);
+	cloned[0].nested_items = [cloned[1]];
+	cloned[1].parent = cloned[0];
+
+	assert.deepEqual(source, snapshot);
+	assert.notEqual(cloned, source);
+	assert.notEqual(cloned[0], source[0]);
+});
+
 test("projects stale runtime layout onto the boot authorization whitelist", () => {
 	const projectAuthorizedDesktopIcons = productionFunction("projectAuthorizedDesktopIcons");
 	const authorized = [
@@ -664,6 +681,30 @@ test("integrates the executable lifecycle helpers through the existing single ro
 		/nativeLeafSelected:\s*Boolean\(nativeItems\.querySelector\("\.active-sidebar"\)\)/
 	);
 	assert.doesNotMatch(lifecycle, /cloneNode\(/);
+});
+
+test("renders every authorized workspace branch through Frappe's native sidebar renderer", () => {
+	const lifecycle = fs.readFileSync(
+		path.join(
+			__dirname,
+			"..",
+			"deeplinkerp_branding",
+			"public",
+			"js",
+			"deeplinkerp_branding.js"
+		),
+		"utf8"
+	);
+
+	assert.match(lifecycle, /item\.children\.length\s*>\s*0\s*\|\|\s*item\.hasNativeChildren/);
+	assert.match(lifecycle, /document\.createElement\(hasChildren\s*\?\s*"button"\s*:/);
+	assert.match(lifecycle, /row\.type\s*=\s*"button"/);
+	assert.match(lifecycle, /frappe\.ui\.Sidebar\.prototype\.find_nested_items\.call\(/);
+	assert.match(lifecycle, /frappe\.app\.sidebar\.make_sidebar_item\(\{/);
+	assert.match(lifecycle, /renderWorkspaceSidebarBranch\(item, branch\)/);
+	assert.doesNotMatch(lifecycle, /generate_route\(/);
+	assert.doesNotMatch(lifecycle, /switch\s*\([^)]*link_type/);
+	assert.doesNotMatch(lifecycle, /\.cloneNode\(/);
 });
 
 test("scopes the dark shell, full-row active state, focus ring, and mobile overflow protection", () => {

@@ -259,6 +259,18 @@
 		return roots;
 	}
 
+	function cloneSidebarItems(items) {
+		const source = Array.isArray(items) ? items : [];
+		if (typeof structuredClone === "function") {
+			try {
+				return structuredClone(source);
+			} catch (error) {
+				// Boot sidebar data is JSON-safe; fall back if a browser cannot clone it.
+			}
+		}
+		return JSON.parse(JSON.stringify(source));
+	}
+
 	function findPath(items, predicate, ancestors) {
 		for (const item of items) {
 			const path = [...ancestors, item];
@@ -363,6 +375,7 @@
 		bindNativeSidebarClose,
 		buildNavigationModel,
 		buildNavigationTree,
+		cloneSidebarItems,
 		collectDisclosureState,
 		getNavigationIcon,
 		normalizeRoute,
