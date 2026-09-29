@@ -329,7 +329,7 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 
 	assert.match(
 		hooks,
-		/app_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_navigation\.css\?v=0\.0\.3"/
+		/app_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_navigation\.css\?v=0\.0\.4"/
 	);
 	assert.ok(hooks.indexOf(modelAsset) < hooks.indexOf(lifecycleAsset));
 	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.4/);
@@ -446,4 +446,47 @@ test("scopes the dark shell, full-row active state, focus ring, and mobile overf
 		/body\.dlp-mes-navigation-enabled\s+\.custom-filters-right-sidebar-container\s*,\s*body\.dlp-mes-navigation-enabled\s+\.custom-filters-right-sidebar-flyout\s*\{([^}]*)\}/
 	)?.[1];
 	assert.match(supersededCustomFiltersSidebar || "", /display:\s*none\s*!important/);
+});
+
+test("expands the root Desktop grid and keeps enhanced entries compact and horizontal", () => {
+	const stylesheet = fs.readFileSync(
+		path.join(
+			__dirname,
+			"..",
+			"deeplinkerp_branding",
+			"public",
+			"css",
+			"deeplinkerp_navigation.css"
+		),
+		"utf8"
+	);
+	const rootContainer = stylesheet.match(
+		/body\.dlp-mes-navigation-enabled\s+\.desktop-container\s*>\s*\.icons-container\s*\{([^}]*)\}/
+	)?.[1];
+	const rootGrid = stylesheet.match(
+		/body\.dlp-mes-navigation-enabled\s+\.desktop-container\s*>\s*\.icons-container\s*>\s*\.icons\s*\{([^}]*)\}/
+	)?.[1];
+	const enhancedEntry = stylesheet.match(
+		/body\.dlp-mes-navigation-enabled\s+\.desktop-container\s*>\s*\.icons-container\s*>\s*\.icons\s*>\s*\.desktop-icon\.dlp-desktop-icon-enhanced\s*\{([^}]*)\}/
+	)?.[1];
+	const enhancedIcon = stylesheet.match(
+		/body\.dlp-mes-navigation-enabled\s+\.desktop-icon\.dlp-desktop-icon-enhanced\s+\.dlp-desktop-line-icon\s*\{([^}]*)\}/
+	)?.[1];
+
+	assert.match(rootContainer || "", /width:\s*100%\s*!important/);
+	assert.match(rootContainer || "", /flex:\s*1\s+1\s+auto/);
+	assert.match(rootGrid || "", /display:\s*grid\s*!important/);
+	assert.match(rootGrid || "", /grid-template-columns:\s*repeat\(auto-fill,\s*minmax\(180px,\s*1fr\)\)/);
+	assert.match(rootGrid || "", /width:\s*100%\s*!important/);
+	assert.match(enhancedEntry || "", /display:\s*flex\s*!important/);
+	assert.match(enhancedEntry || "", /flex-direction:\s*row\s*!important/);
+	assert.match(enhancedEntry || "", /width:\s*100%\s*!important/);
+	assert.match(enhancedEntry || "", /height:\s*44px\s*!important/);
+	assert.match(enhancedEntry || "", /min-height:\s*44px\s*!important/);
+	assert.match(enhancedIcon || "", /width:\s*32px\s*!important/);
+	assert.match(enhancedIcon || "", /height:\s*32px\s*!important/);
+	assert.doesNotMatch(
+		stylesheet,
+		/body\.dlp-mes-navigation-enabled\s+\.desktop-container\s+\.desktop-icon\s*\{/
+	);
 });
