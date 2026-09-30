@@ -1161,6 +1161,16 @@
       && state.materials?.packing_group_editable !== false && !this.detailState?.readOnly);
   }
 
+  materialRowSelectionKey(item) {
+    // 勾选身份：优先 stable_line_key，退回行 name（与 ERP 推送路由的行身份约定同源）。
+    // 它只决定「哪些行能被勾选」；批量写入的可行性仍由 materialRowIsSelectable 把守。
+    return String(item?.stable_line_key || item?.name || "");
+  }
+
+  materialPageSelectionRows() {
+    return this.materialFeeVisibleItems().filter((item) => this.materialRowSelectionKey(item));
+  }
+
   toggleMaterialSelection(stableLineKey, checked) {
     const state = this.ensureMaterialFeeState();
     state.packingGroupSelections = state.packingGroupSelections instanceof Set ? state.packingGroupSelections : new Set();
@@ -1178,14 +1188,14 @@
     const state = this.ensureMaterialFeeState();
     state.packingGroupSelections = state.packingGroupSelections instanceof Set ? state.packingGroupSelections : new Set();
     const selections = state.packingGroupSelections;
-    const keys = [...new Set(this.materialPageSelectableRows().map((item) => String(item.stable_line_key || "")).filter(Boolean))];
+    const keys = [...new Set(this.materialPageSelectionRows().map((item) => this.materialRowSelectionKey(item)).filter(Boolean))];
     const selected = keys.filter((key) => selections.has(key)).length;
     return { total:keys.length, selected, checked:Boolean(keys.length && selected === keys.length),
       indeterminate:Boolean(selected && selected < keys.length) };
   }
 
   toggleMaterialPageSelection(checked) {
-    const keys = [...new Set(this.materialPageSelectableRows().map((item) => String(item.stable_line_key || "")).filter(Boolean))];
+    const keys = [...new Set(this.materialPageSelectionRows().map((item) => this.materialRowSelectionKey(item)).filter(Boolean))];
     keys.forEach((key) => this.toggleMaterialSelection(key, checked));
   }
 
@@ -1248,8 +1258,10 @@
     // 表头那个复选框一直是本页全选的唯一入口，但它没有文字、贴在固定列最左边，
     // 用户找不到。这里把同一份状态显式接到工具栏上，复用既有 materialPageSelectionState
     // 与 toggleMaterialPageSelection，不新增选择逻辑。
+    // 全选本页永远可点（用户要求）：只看本页有没有可勾选的行，不再受只读门槛限制；
+    // 只读批次里勾选仅用于查看范围，批量写入仍被各自的 editable 门槛挡住。
     const pageSelection = this.materialPageSelectionState();
-    const pageSelectEnabled = editable && pageSelection.total > 0;
+    const pageSelectEnabled = pageSelection.total > 0;
     return {
       selectedKeys, selectedCount, crossPageCount, selectedGroupIds, incompleteGroupIds, ungroupedKeys, lockedPageKeys,
       actions: {
@@ -1267,8 +1279,8 @@
         supplier:{enabled:projectEnabled, reason:projectEnabled ? "" : !editable ? readonlyReason : "请先选择有效物料行"},
         selectPage:{enabled:pageSelectEnabled,
           label:pageSelection.checked ? "取消全选本页" : "全选本页",
-          // 只覆盖当前页可操作的物料行；跨页选择靠逐页累积（已选计数会标出跨页成员数）。
-          reason:pageSelectEnabled ? "" : !editable ? readonlyReason : "当前页没有可选择的物料行"},
+          // 只覆盖当前页可勾选的物料行；跨页选择靠逐页累积（已选计数会标出跨页成员数）。
+          reason:pageSelectEnabled ? "" : "当前页没有可选择的物料行"},
         clear:{enabled:selectedCount > 0, reason:selectedCount ? "" : "当前没有选中物料"},
       },
     };
@@ -1280,8 +1292,9 @@
       || this.detailState?.readOnly === true;
     if (!locked) return "";
     // 只读原因原来只在禁用按钮的 title 里，用户点了没反应却看不到为什么；
-    // 这里复用 ocw-mf-dialog-note 把原因亮出来。
-    return `<div class="ocw-mf-dialog-note"><strong>物料区只读</strong><span>历史、已确认、已回写或锁定的版本不可编辑；行复选框、全选本页与批量设置暂不可用。如需修改数据，请先走解锁/调整流程。</span></div>`;
+    // 这里复用 ocw-mf-dialog-note 把原因亮出来。勾选/全选现在只读批次也可用，
+    // 但那只是查看范围，真正拦住的是批量写入，所以文案要说清这层区别。
+    return `<div class="ocw-mf-dialog-note"><strong>物料区只读</strong><span>历史、已确认、已回写或锁定的版本不可修改；勾选与全选本页仅用于查看范围，批量设置等写入操作暂不可用。如需修改数据，请先走解锁/调整流程。</span></div>`;
   }
 
   renderMaterialSelectionToolbar() {
@@ -1711,7 +1724,7 @@
     const selectedValue = String(selection.value || "");
     // 「无供应商」是常驻一等选项：业务口径是"没有供应商就标 /"，与"未设置"（空）区分。
     // 写入仍走同一条 batch_update_items 链，由服务端 validate_canonical_supplier 归一。
-    const none = `<section class="ocw-mf-reference-group"><h6>无供应商</h6><label class="ocw-mf-reference-option is-none ${selectedKind === "none" ? "is-selected" : ""}"><input type="radio" name="ocw-supplier" data-mf-supplier-kind="none" data-mf-supplier-value="/" ${selectedKind === "none" ? "checked" : ""}><span><strong>标记为无供应商（/）</strong><small>该行确认暂无供应商；推送 ERP 前仍需补真实供应商。</small></span></label></section>`;
+    const none = `<section class="ocw-mf-reference-group"><h6>无供应商</h6><label class="ocw-mf-reference-option is-none ${selectedKind === "none" ? "is-selected" : ""}"><input type="radio" name="ocw-supplier" data-mf-supplier-kind="none" data-mf-supplier-value="/" ${selectedKind === "none" ? "checked" : ""}><span><strong>标记为无供应商（/）</strong><small>该行确认没有供应商；推送 ERP 时由站点默认供应商兜底。</small></span></label></section>`;
     const existing = options.length ? `<section class="ocw-mf-reference-group"><h6>ERP 供应商</h6>${options.map((row) => `<label class="ocw-mf-reference-option ${selectedKind === "existing" && String(row.name) === selectedValue ? "is-selected" : ""}"><input type="radio" name="ocw-supplier" data-mf-supplier-kind="existing" data-mf-supplier-value="${this.escape(row.name)}" ${selectedKind === "existing" && String(row.name) === selectedValue ? "checked" : ""}><span><strong>${this.escape(row.name)}</strong><small>${this.escape(row.supplier_name || row.name)}${row.score ? ` · ${Math.round(Number(row.score) * 100)}%` : ""}</small></span>${row.high_confidence ? `<em>高置信候选</em>` : ""}</label>`).join("")}</section>` : "";
     const warning = model.highConfidence ? `<small>存在高置信近似供应商 ${this.escape(model.highConfidence.name)}；创建前需确认“这是不同供应商”。</small>` : `<small>仅创建基础 Supplier，详细档案可稍后维护。</small>`;
     const create = model.canCreate ? `<section class="ocw-mf-reference-group"><h6>没有完全同名结果</h6><label class="ocw-mf-reference-option is-create ${selectedKind === "create" ? "is-selected" : ""}"><input type="radio" name="ocw-supplier" data-mf-supplier-kind="create" data-mf-supplier-value="${this.escape(model.query)}" ${selectedKind === "create" ? "checked" : ""}><span><strong>新建供应商：${this.escape(model.query)}</strong>${warning}</span></label></section>` : "";
@@ -1986,7 +1999,7 @@
           <div class="ocw-mf-grid-track"><table class="ocw-mf-grid-table">
             <colgroup>${columns.map((column) => `<col style="width:${Number(column.width || 130)}px">`).join("")}</colgroup>
             <thead><tr>${columns.map((column) => column.field === "__group_select"
-              ? `<th data-mf-grid-field="__group_select"><input type="checkbox" data-mf-page-select="1" aria-label="选择当前页可操作物料" ${this.materialPageSelectionState().checked ? "checked" : ""} ${this.materialPageSelectionState().total ? "" : "disabled"}></th>`
+              ? `<th data-mf-grid-field="__group_select"><input type="checkbox" data-mf-page-select="1" aria-label="选择本页物料" ${this.materialPageSelectionState().checked ? "checked" : ""} ${this.materialPageSelectionState().total ? "" : "disabled"}></th>`
               : `<th data-mf-grid-field="${column.field}">${this.escape(column.label)}</th>`).join("")}</tr></thead>
             <tbody>${items.length ? items.map((item, index) => item.__aiReplacement ? this.renderMaterialReplacementGridRow(item, columns, index) : this.renderMaterialFeeGridRow(item, columns, index)).join("") : `<tr><td class="ocw-mf-grid-empty" colspan="${columns.length}">${state.onlyMissing ? "当前页没有缺项" : "当前批次暂无物料行"}</td></tr>`}</tbody>
           </table></div>
@@ -2103,10 +2116,11 @@
 
   renderMaterialFeeGridCell(item, column, missingFields, columnIndex) {
     if (column.field === "__group_select") {
-      const key = String(item.stable_line_key || "");
+      const key = this.materialRowSelectionKey(item);
       const checked = this.ensureMaterialFeeState().packingGroupSelections.has(key);
-      const editable = this.ensureMaterialFeeState().materials?.packing_group_editable !== false && !this.detailState?.readOnly;
-      return `<td class="ocw-mf-cell ocw-mf-group-select" data-mf-column-index="${columnIndex}" data-mf-grid-field="__group_select"><input type="checkbox" data-mf-packing-group-select="${this.escape(key)}" ${checked ? "checked" : ""} ${item.__aiReplacement || !key || !editable ? "disabled" : ""} aria-label="选择物料行"></td>`;
+      // 勾选只要求行有身份（stable_line_key 或 name），只读批次也能勾选查看；
+      // AI 替换草稿行没有身份，保持禁用。
+      return `<td class="ocw-mf-cell ocw-mf-group-select" data-mf-column-index="${columnIndex}" data-mf-grid-field="__group_select"><input type="checkbox" data-mf-packing-group-select="${this.escape(key)}" ${checked ? "checked" : ""} ${item.__aiReplacement || !key ? "disabled" : ""} aria-label="选择物料行"></td>`;
     }
     const packingFields = new Set(["package_count", "packaging_type", "net_weight_kg", "gross_weight_kg", "volume_m3"]);
     if (item.packing_group_id && packingFields.has(column.field)) {

@@ -485,15 +485,10 @@ def _supplier_push_state(item: dict, active_supplier_names: set[str] | None) -> 
     state = supplier_provenance_state(item)
     item_key = _text(item.get("stable_line_key") or item.get("name") or item.get("row_no"))
     if state["supplier"] == NO_SUPPLIER_MARKER:
-        return {
-            "warning": None,
-            "blocking": {
-                "code": "ITEM_SUPPLIER_REQUIRED",
-                "raw_value": state["raw_value"],
-                "match_status": state["match_status"],
-                "message": f"物料行 {item_key}：已标记为无供应商（/），推送 ERP 前需设置真实供应商。",
-            },
-        }
+        # 「显式无供应商」是终态：标记行放行，不再要求补真实供应商，也不能掉进下面的
+        # 失效检查被误报成「供应商已失效」。采购订单的供应商由站点默认配置兜底
+        # （见 erp_client._resolve_supplier：标记在 ERP 报文边界视同空值）。
+        return {"warning": None, "blocking": None}
     if state["requires_explicit_supplier"]:
         return {
             "warning": None,

@@ -355,15 +355,25 @@ console.log(JSON.stringify({rendered,hidden,fields:physical.map(c=>c.field)}));
 
 
 def test_historical_material_grid_disables_packing_group_edits():
+    """历史/只读批次里编辑动作全部收口：没有行内操作列，勾选框只是选择控件
+    （有身份即可勾选查看，见「全选本页一直可点」契约），真正被禁的是写入。"""
+
     result = _fee_workspace_result(r"""
 const w=Object.create(Harness.prototype);w.detailState={readOnly:true};const state=w.ensureMaterialFeeState();
 state.materials={packing_group_editable:false};w.escape=v=>String(v??'');w.formatValue=v=>String(v??'');
 const item={name:'I1',stable_line_key:'L1',packing_group_id:'G1',packing_group_position:0,packing_group_size:2,packing_group:{group_id:'G1'}};
 const columns=w.materialFeeGridColumns();
 const select=w.renderMaterialFeeGridCell(item,columns.find(c=>c.field==='__group_select'),new Set(),3);
-console.log(JSON.stringify({select,fields:columns.map(column=>column.field)}));
+const context=w.materialSelectionContext();
+console.log(JSON.stringify({select,fields:columns.map(column=>column.field),
+  add:context.actions.add,merge:context.actions.merge,project:context.actions.project,supplier:context.actions.supplier}));
 """)
-    assert 'disabled' in result['select']
+    # 勾选控件在只读批次仍然可用（有身份的行），不再是编辑禁用的代理断言。
+    assert 'disabled' not in result['select']
+    assert result['add']['enabled'] is False
+    assert result['merge']['enabled'] is False
+    assert result['project']['enabled'] is False
+    assert result['supplier']['enabled'] is False
     assert '__actions' not in result['fields']
 
 
@@ -445,7 +455,11 @@ console.log(JSON.stringify({none,noneToolbar,all,allToolbar,selected:w.materialP
     assert '已选 2 行' in result['allToolbar'] and '取消全选本页' in result['allToolbar']
 
 
-def test_select_all_page_action_is_disabled_without_selectable_rows_or_edit_rights():
+def test_select_all_page_action_stays_clickable_and_selects_identity_rows_when_readonly():
+    """用户要求「全选本页」一直可点：只读批次不再禁用，有身份的行都能勾选查看；
+    只有空页（没有任何可勾选行）才没有可选项。批量写入动作仍被各自的
+    editable 门槛把守——选择放宽不弱化写保护。"""
+
     result = _fee_workspace_result(r"""
 const w=Object.create(Harness.prototype);w.detailState={readOnly:false};const state=w.ensureMaterialFeeState();
 w.escape=v=>String(v??'');
@@ -454,14 +468,29 @@ state.packingGroupSelections=new Set();
 const emptyPage=w.materialSelectionContext().actions.selectPage;
 const emptyToolbar=w.renderMaterialSelectionToolbar();
 w.detailState={readOnly:true};
-state.materials={packing_group_editable:true,items:[{stable_line_key:'L1',row_no:1}],packing_groups:[]};
+state.materials={packing_group_editable:false,items:[{stable_line_key:'L1',row_no:1}],packing_groups:[]};
 const readonly=w.materialSelectionContext().actions.selectPage;
-console.log(JSON.stringify({emptyPage,emptyToolbar,readonly}));
+w.toggleMaterialPageSelection(true);
+const readonlyToggled=w.materialSelectionContext().actions.selectPage;
+const selectedCount=w.materialPageSelectionState().selected;
+const readonlyToolbar=w.renderMaterialSelectionToolbar();
+const writeActions=w.materialSelectionContext().actions;
+console.log(JSON.stringify({emptyPage,emptyToolbar,readonly,readonlyToggled,selectedCount,readonlyToolbar,
+  project:writeActions.project,supplier:writeActions.supplier,remove:writeActions.remove}));
 """)
     assert result['emptyPage']['enabled'] is False
     assert result['emptyPage']['reason'] == '当前页没有可选择的物料行'
     assert 'disabled' in result['emptyToolbar']
-    assert result['readonly']['enabled'] is False
+    assert result['readonly']['enabled'] is True
+    assert result['readonly']['label'] == '全选本页'
+    assert result['readonlyToggled']['label'] == '取消全选本页'
+    assert result['selectedCount'] == 1
+    assert '已选 1 行' in result['readonlyToolbar']
+    # 选择放宽了，批量写入门槛没有：只读批次里批量动作依旧禁用并给出只读原因。
+    assert result['project']['enabled'] is False
+    assert result['project']['reason'] == '历史、已确认、已回写或锁定版本不可编辑'
+    assert result['supplier']['enabled'] is False
+    assert result['remove']['enabled'] is False
 
 
 def test_select_all_page_action_reuses_the_shared_page_toggle():

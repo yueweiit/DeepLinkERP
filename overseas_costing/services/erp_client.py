@@ -14,6 +14,10 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from overseas_costing.services.erp_routing_service import raw_item_uom, resolve_item_uom
+from overseas_costing.services.supplier_resolution_service import (
+    NO_SUPPLIER_MARKERS,
+    effective_push_supplier,
+)
 
 try:
     import frappe
@@ -726,9 +730,10 @@ def _metadata_config_errors(config: dict) -> list[str]:
 
 
 def _payload_has_supplier(payload: dict) -> bool:
-    if str(payload.get("supplier") or "").strip():
+    # 「显式无供应商」（/）不算报文里已有供应商：标记行由站点默认供应商兜底。
+    if effective_push_supplier(payload.get("supplier")):
         return True
-    return bool(_unique_item_value(payload.get("items") or [], "supplier"))
+    return bool(_unique_item_value(payload.get("items") or [], "supplier", ignore=NO_SUPPLIER_MARKERS))
 
 
 def _build_resource_url(config: dict) -> str:
@@ -963,7 +968,9 @@ def _build_item_body(
         "custom_overseas_batch_no": payload.get("batch_no") or payload.get("batch_name") or "",
         "custom_overseas_cost_version": payload.get("version_code") or payload.get("version_name") or "",
         "custom_overseas_business_entity": payload.get("subsidiary_code") or "",
-        "custom_overseas_supplier": item.get("supplier") or payload.get("supplier") or "",
+        "custom_overseas_supplier": effective_push_supplier(item.get("supplier"))
+        or effective_push_supplier(payload.get("supplier"))
+        or "",
         "custom_overseas_original_unit_price": item.get("original_unit_price") or formula.get("original_unit_price") or 0,
         "custom_overseas_comprehensive_unit_price": item.get("comprehensive_unit_price")
         or formula.get("comprehensive_unit_price")
@@ -1064,24 +1071,25 @@ def _build_purchase_order_item(item: dict, payload: dict, config: dict, schedule
 
 
 def _resolve_supplier(payload: dict, config: dict, items: list[dict]) -> tuple[str, str]:
+    # 每一层都先过 effective_push_supplier：显式无供应商标记（/）视同空值，
+    # 让下一层（最终是站点默认供应商配置）自然接管，绝不把标记发给 ERP。
     for source, value in (
-        ("batch", payload.get("supplier")),
-        ("item", _unique_item_value(items, "supplier")),
-        ("config", config.get("supplier")),
+        ("batch", effective_push_supplier(payload.get("supplier"))),
+        ("item", _unique_item_value(items, "supplier", ignore=NO_SUPPLIER_MARKERS)),
+        ("config", effective_push_supplier(config.get("supplier"))),
     ):
-        cleaned = str(value or "").strip()
-        if cleaned:
-            return cleaned, source
+        if value:
+            return value, source
     return "", "missing"
 
 
-def _unique_item_value(items: list[dict], fieldname: str):
+def _unique_item_value(items: list[dict], fieldname: str, *, ignore: frozenset[str] = frozenset()):
     values = []
     for item in items:
         if not isinstance(item, dict):
             continue
         value = str(item.get(fieldname) or "").strip()
-        if value and value not in values:
+        if value and value not in ignore and value not in values:
             values.append(value)
     return values[0] if len(values) == 1 else None
 

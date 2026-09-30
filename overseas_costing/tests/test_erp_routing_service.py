@@ -350,9 +350,11 @@ def test_new_template_inactive_supplier_is_not_sent_to_erp() -> None:
     assert preview["blocking"][0]["code"] == "ITEM_SUPPLIER_INACTIVE"
 
 
-def test_no_supplier_marker_blocks_with_an_accurate_message_not_inactive() -> None:
-    """标记为 ``/``（显式无供应商）的行推送 ERP 必须继续拦截，但提示要说人话：
-    是“标记无供应商、需补真实供应商”，而不是“供应商已失效”。"""
+def test_no_supplier_marker_rows_pass_through_without_blocking_or_inactive() -> None:
+    """「显式无供应商」是终态：标记为 ``/`` 的行推送放行——既不拦「需补供应商」，
+    也不能掉进失效检查被误报成「供应商已失效」；采购订单的供应商由站点默认配置
+    兜底（见 erp_client._resolve_supplier：标记在 ERP 报文边界视同空值）。
+    分组键保留 ``/`` 以维持账本身份稳定。"""
 
     preview = build_site_payload_preview(
         {
@@ -366,6 +368,7 @@ def test_no_supplier_marker_blocks_with_an_accurate_message_not_inactive() -> No
                     "purchase_currency": "CNY",
                     "purchase_uom": "件",
                     "erp_warehouse": "仓库 - A",
+                    "total_cost_rmb": "10",
                     "extra_json": '{"supplier_field_present":true,"supplier_match_status":"EXACT"}',
                 }
             ]
@@ -373,16 +376,11 @@ def test_no_supplier_marker_blocks_with_an_accurate_message_not_inactive() -> No
         active_supplier_names={"Supplier A"},
     )
 
-    assert preview["sites"] == []
-    assert preview["blocking"] == [
-        {
-            "code": "ITEM_SUPPLIER_REQUIRED",
-            "stable_line_key": "MARKED",
-            "raw_value": "",
-            "match_status": "EXACT",
-            "message": "物料行 MARKED：已标记为无供应商（/），推送 ERP 前需设置真实供应商。",
-        }
-    ]
+    assert preview["ready"] is True
+    assert preview["blocking"] == []
+    group = preview["sites"][0]["groups"][0]
+    assert [row["stable_line_key"] for row in group["items"]] == ["MARKED"]
+    assert group["supplier"] == "/"
 
 
 def test_legacy_item_without_supplier_column_keeps_default_supplier_fallback_warning() -> None:

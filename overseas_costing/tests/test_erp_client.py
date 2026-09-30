@@ -806,6 +806,53 @@ def test_validate_payload_for_push_accepts_payload_supplier_in_standard_mode(mon
     assert result["blocking_reasons"] == []
 
 
+def test_no_supplier_marker_payload_does_not_count_as_a_supplier(monkeypatch) -> None:
+    """标记 ``/`` 不算「报文里已有供应商」：全标记批次在站点默认供应商缺失时仍要如实报缺配置。"""
+
+    monkeypatch.setattr(
+        erp_client,
+        "get_erp_push_config",
+        lambda: {
+            "enabled": True,
+            "base_url": "https://erp.example.com/api/resource",
+            "authorization": "token abc:def",
+            "push_mode": "standard_purchase",
+            "supplier": "",
+            "item_group": "Products",
+            "stock_uom": "Nos",
+            "timeout": 30,
+            "target_doctype": "",
+            "method": "POST",
+            "field_map": {},
+            "payload_field": "payload_json",
+        },
+    )
+
+    result = erp_client.validate_payload_for_push({"supplier": "/", "items": [{"material_code": "A001", "supplier": "/"}]})
+
+    assert result["ok"] is False
+    assert result["config_ready"] is False
+    assert "缺少默认供应商配置" in result["blocking_reasons"]
+
+
+def test_no_supplier_marker_rows_fall_back_to_site_default_and_never_send_the_marker() -> None:
+    """全标记批次：采购订单供应商由站点默认供应商兜底（source=config），
+    Item 上的供应商标注也不携带 ``/``——标记在 ERP 报文边界视同空值。"""
+
+    payload = {"supplier": "/", "items": [{"material_code": "A001", "supplier": "/"}]}
+    config = {"supplier": "HUAFON"}
+
+    supplier, source = erp_client._resolve_supplier(payload, config, payload["items"])
+    assert (supplier, source) == ("HUAFON", "config")
+
+    po_body = erp_client._build_purchase_order_body(payload, config)
+    assert po_body["supplier"] == "HUAFON"
+    assert po_body["custom_overseas_supplier_source"] == "config"
+
+    item_body = erp_client._build_item_body(payload["items"][0], payload, config)
+    assert item_body["custom_overseas_supplier"] == ""
+
+
 def test_normalize_currency_accepts_historical_chinese_labels() -> None:
     assert erp_client._normalize_currency("人民币RMB") == "CNY"
     assert erp_client._normalize_currency("美元 USD") == "USD"

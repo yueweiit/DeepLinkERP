@@ -337,6 +337,20 @@ def validate_canonical_supplier(value: Any, *, suppliers: Iterable[Any] | None =
     raise ValueError("供应商必须从启用中的 ERP 供应商列表选择。")
 
 
+def effective_push_supplier(value: Any) -> str:
+    """ERP 推送边界的供应商归一：显式无供应商标记等价于空。
+
+    ``/`` 是「这行确认没有供应商」的终态（见 :func:`validate_canonical_supplier`）：
+    推送时既不拦截标记行，也绝不把标记当真实供应商名发给 ERP；采购订单的
+    供应商由站点默认供应商配置兜底（见 ``erp_client._resolve_supplier``）。
+    """
+
+    text = str(value or "").strip()
+    if not text or text in NO_SUPPLIER_MARKERS:
+        return ""
+    return text
+
+
 def _metadata(value: Any) -> dict:
     if isinstance(value, dict):
         return value

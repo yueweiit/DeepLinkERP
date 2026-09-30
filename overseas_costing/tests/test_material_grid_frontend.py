@@ -475,7 +475,7 @@ def test_supplier_picker_always_offers_the_no_supplier_marker_option():
     assert 'data-mf-supplier-kind="none"' in result["html"]
     assert 'data-mf-supplier-value="/"' in result["html"]
     assert '标记为无供应商（/）' in result["html"]
-    assert '推送 ERP 前仍需补真实供应商' in result["html"]
+    assert '推送 ERP 时由站点默认供应商兜底' in result["html"]
     assert result["updates"] == [{
         "item_name": "A",
         "fieldname": "supplier",
@@ -501,8 +501,42 @@ console.log(JSON.stringify({editableHtml,lockedHtml,leaseHtml}));
 """)
     assert result["editableHtml"] == ""
     assert '物料区只读' in result["lockedHtml"]
-    assert '全选本页与批量设置暂不可用' in result["lockedHtml"]
+    assert '勾选与全选本页仅用于查看范围' in result["lockedHtml"]
+    assert '批量设置等写入操作暂不可用' in result["lockedHtml"]
     assert '物料区只读' in result["leaseHtml"]
+
+
+def test_row_checkboxes_and_page_selection_cover_identity_rows_even_when_readonly():
+    """「全选本页一直可点」配套契约：勾选身份放宽为 stable_line_key||name（与推送路由
+    的行身份约定同源），只读批次也能勾选查看；AI 替换草稿行（无身份）仍不可勾选，
+    批量写入门槛不在此处放宽。"""
+
+    result = _fee_workspace_result(r"""
+const w=Object.create(Harness.prototype);w.escape=v=>String(v??'');w.detailState={readOnly:true};
+const state=w.ensureMaterialFeeState();
+state.materials={packing_group_editable:false,items:[
+  {name:'ROW-A',row_no:1},
+  {name:'ROW-B',stable_line_key:'L-B',row_no:2},
+  {__aiReplacement:true}],packing_groups:[]};
+state.packingGroupSelections=new Set();
+w.toggleMaterialPageSelection(true);
+const page=w.materialPageSelectionState();
+const cellA=w.renderMaterialFeeGridCell(state.materials.items[0],{field:'__group_select'},new Set(),0);
+const cellB=w.renderMaterialFeeGridCell(state.materials.items[1],{field:'__group_select'},new Set(),1);
+const cellAI=w.renderMaterialFeeGridCell(state.materials.items[2],{field:'__group_select'},new Set(),2);
+console.log(JSON.stringify({page,cellA,cellB,cellAI}));
+""")
+    assert result["page"]["total"] == 2
+    assert result["page"]["selected"] == 2
+    assert result["page"]["checked"] is True
+    # 只有 name 的行也能勾选（回退身份），勾选后复选框渲染为选中且可点。
+    assert 'data-mf-packing-group-select="ROW-A"' in result["cellA"]
+    assert "checked" in result["cellA"]
+    assert "disabled" not in result["cellA"]
+    assert 'data-mf-packing-group-select="L-B"' in result["cellB"]
+    assert "disabled" not in result["cellB"]
+    # AI 替换草稿行没有身份，保持禁用。
+    assert "disabled" in result["cellAI"]
 
 
 def test_supplier_exact_match_becomes_a_selectable_canonical_option():

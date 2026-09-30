@@ -86,6 +86,24 @@ def test_no_supplier_marker_never_resolves_to_a_real_supplier_document() -> None
         service.validate_canonical_supplier("Dash", suppliers=suppliers)
 
 
+def test_effective_push_supplier_treats_markers_as_empty_for_the_erp_boundary() -> None:
+    """推送边界契约：显式无供应商标记（/ 及等价输入）视同空值。
+
+    标记行不拦截也不把标记发给 ERP；采购订单供应商由站点默认配置兜底。
+    真实供应商名原样保留（去首尾空白）。
+    """
+
+    service = _service()
+
+    assert service.effective_push_supplier("/") == ""
+    assert service.effective_push_supplier("-") == ""
+    assert service.effective_push_supplier("—") == ""
+    assert service.effective_push_supplier("－") == ""
+    assert service.effective_push_supplier("") == ""
+    assert service.effective_push_supplier(None) == ""
+    assert service.effective_push_supplier(" HUAFON ") == "HUAFON"
+
+
 def test_duplicate_supplier_name_is_ambiguous_and_never_auto_canonicalized() -> None:
     service = _service()
     suppliers = [
