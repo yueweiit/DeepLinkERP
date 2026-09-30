@@ -82,7 +82,6 @@ def start_eims_login(redirect_to: str | None = None):
 			"code_verifier": code_verifier,
 			"browser_nonce_digest": _state_digest(browser_nonce),
 			"redirect_to": redirect_to,
-			"session_id": getattr(frappe.local.session, "sid", None),
 		},
 		expires_in_sec=EIMS_STATE_TTL_SECONDS,
 	)
@@ -618,14 +617,6 @@ def _consume_state(state: str) -> dict:
 	stored_digest = state_data.get("state_digest")
 	if not isinstance(stored_digest, str) or not hmac.compare_digest(state_digest, stored_digest):
 		raise RuntimeError("EIMS OAuth state 校验失败")
-
-	stored_session_id = state_data.get("session_id")
-	current_session_id = getattr(frappe.local.session, "sid", None)
-	if stored_session_id and (
-		not current_session_id
-		or not hmac.compare_digest(str(stored_session_id), str(current_session_id))
-	):
-		raise RuntimeError("EIMS OAuth state 与当前会话不匹配")
 
 	stored_browser_nonce_digest = state_data.get("browser_nonce_digest")
 	browser_nonce = _get_request_cookie(EIMS_BROWSER_NONCE_COOKIE)

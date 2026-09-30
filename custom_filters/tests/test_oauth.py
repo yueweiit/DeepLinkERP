@@ -152,7 +152,7 @@ class TestEIMSOAuth(TestCase):
 		self.assertEqual(cache.set_value.call_args.kwargs["expires_in_sec"], oauth.EIMS_STATE_TTL_SECONDS)
 		stored_state = cache.set_value.call_args.args[1]
 		browser_nonce = local.cookie_manager.set_cookie.call_args.args[1]
-		self.assertEqual(stored_state["session_id"], "guest-session")
+		self.assertNotIn("session_id", stored_state)
 		self.assertIn("browser_nonce_digest", stored_state)
 		with patch.object(oauth.frappe, "conf", {"encryption_key": "test-key"}):
 			self.assertEqual(oauth._state_digest(browser_nonce), stored_state["browser_nonce_digest"])
@@ -185,7 +185,6 @@ class TestEIMSOAuth(TestCase):
 						"state_digest": state_digest,
 						"browser_nonce_digest": oauth._state_digest(browser_nonce),
 						"code_verifier": "pkce-verifier",
-						"session_id": "guest-session",
 					}
 				),
 				None,
@@ -195,6 +194,34 @@ class TestEIMSOAuth(TestCase):
 				oauth._consume_state(state)
 
 		self.assertEqual(cache.getdel.call_count, 2)
+		local.cookie_manager.delete_cookie.assert_called_once_with(oauth.EIMS_BROWSER_NONCE_COOKIE)
+
+	@patch.object(oauth.frappe, "cache")
+	@patch.object(oauth, "sanitize_redirect", side_effect=lambda value: value)
+	def test_state_allows_guest_session_rotation_in_same_browser(self, _sanitize_redirect, cache):
+		state = "one-time-state"
+		browser_nonce = "browser-nonce"
+		cache.make_key.return_value = b"cache-key"
+		local = SimpleNamespace(
+			session=SimpleNamespace(sid="callback-guest-session"),
+			request=SimpleNamespace(cookies={oauth.EIMS_BROWSER_NONCE_COOKIE: browser_nonce}),
+			cookie_manager=Mock(),
+		)
+		with patch.object(oauth.frappe, "local", local), patch.object(
+			oauth.frappe, "conf", {"encryption_key": "test-key"}
+		):
+			state_digest = oauth._state_digest(state)
+			cache.getdel.return_value = pickle.dumps(
+				{
+					"state_digest": state_digest,
+					"browser_nonce_digest": oauth._state_digest(browser_nonce),
+					"code_verifier": "pkce-verifier",
+					"session_id": "start-guest-session",
+				}
+			)
+
+			self.assertEqual(oauth._consume_state(state)["code_verifier"], "pkce-verifier")
+
 		local.cookie_manager.delete_cookie.assert_called_once_with(oauth.EIMS_BROWSER_NONCE_COOKIE)
 
 	@patch.object(oauth.frappe, "cache")
@@ -215,7 +242,6 @@ class TestEIMSOAuth(TestCase):
 					"state_digest": state_digest,
 					"browser_nonce_digest": oauth._state_digest("browser-a"),
 					"code_verifier": "pkce-verifier",
-					"session_id": "Guest",
 				}
 			)
 			with self.assertRaisesRegex(RuntimeError, "浏览器不匹配"):
