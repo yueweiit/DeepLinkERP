@@ -730,6 +730,13 @@
       this.recordUsage("PUSH_ERP", { batch, remark: result.message || "推送 DeepLinkERP" });
       const indicator = String(result.writeback_status || "").toLowerCase().includes("success") ? "green" : "orange";
       frappe.show_alert({ message: result.message || "DeepLinkERP 推送已处理", indicator });
+      // 推送成功只说明"发出去了"，用户并不知道去 ERP 的哪里看；立刻把新建单据摆出来。
+      // 这一步失败不能反过来把已成功的推送说成失败。
+      try {
+        await this.announceErpPushDocuments?.(batch.name);
+      } catch (announceError) {
+        console.warn("[overseas-cost-workbench] 推送后跳转提示未完成", announceError);
+      }
     } finally {
       this.erpWritebackInFlight.delete(requestKey);
     }

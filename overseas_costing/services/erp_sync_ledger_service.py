@@ -94,6 +94,83 @@ def find_batch_request_name(batch: str, request_id: str) -> str:
     )
 
 
+def list_remote_documents(batch: str, *, business_keys=None) -> list[dict]:
+    """按站点列出本批次已经落到远端的单据，并给出可直接打开的 ERP 桌面端链接。
+
+    远端单号的真源是关联表（推送成功与「核对远端」两条路径都写它），这里不解析请求
+    响应里的 ``erp_target_doc`` —— 那是同一事实的第二份来源。
+
+    关联表没有 version 列，所以「本版计算结果对应哪些单据」只能靠 ``business_keys``
+    回到账本行上取：不限定就会把历史版本建的单当成这次的成果。
+    只做本地读取，不访问远端。
+    """
+
+    keys = {_text(key) for key in (business_keys or []) if _text(key)}
+    if not keys:
+        # 没有业务键就是「本版还没有任何请求」，不需要碰库，也不需要运行环境。
+        return []
+    if frappe is None:
+        raise RuntimeError("Frappe 运行环境不可用，无法读取远端单据关联。")
+
+    rows = frappe.get_all(
+        LINK_DOCTYPE,
+        filters={"batch": _text(batch)},
+        fields=["site_code", "business_key", "remote_doctype", "remote_document", "remote_docstatus"],
+        limit_page_length=500,
+    )
+
+    # 同一张远端单据有多行（每行一个物料），先按 (站点, 单据类型, 单号) 收敛成一张单。
+    collapsed: dict[tuple[str, str, str], dict] = {}
+    for row in rows:
+        if _text(row.get("business_key")) not in keys:
+            continue
+        site_code = _text(row.get("site_code"))
+        remote_document = _text(row.get("remote_document"))
+        if not site_code or not remote_document:
+            continue
+        key = (site_code, _text(row.get("remote_doctype")) or "Purchase Order", remote_document)
+        entry = collapsed.setdefault(key, {"docstatus": 0, "line_count": 0})
+        entry["line_count"] += 1
+        try:
+            entry["docstatus"] = max(entry["docstatus"], int(row.get("remote_docstatus") or 0))
+        except (TypeError, ValueError):
+            pass
+
+    documents: dict[str, list[dict]] = {}
+    for (site_code, remote_doctype, remote_document), entry in collapsed.items():
+        documents.setdefault(site_code, []).append(
+            {
+                "name": remote_document,
+                "doctype": remote_doctype,
+                "docstatus": entry["docstatus"],
+                "line_count": entry["line_count"],
+            }
+        )
+
+    result = []
+    for site_code in sorted(documents):
+        try:
+            config = _load_site_config(site_code)
+        except Exception:  # noqa: BLE001 - 站点配置缺失不该让「单号」也看不到
+            config = {}
+        group = sorted(documents[site_code], key=lambda row: row["name"])
+        for document in group:
+            document["url"] = _remote_document_url(config, document)
+        result.append({"site_code": site_code, "documents": group})
+    return result
+
+
+def _remote_document_url(config: dict, document: dict) -> str:
+    """单张远端单据的桌面端地址；站点配置不可用时留空（页面据此不给按钮）。"""
+
+    from overseas_costing.services.erp_client import build_remote_document_url
+
+    try:
+        return build_remote_document_url(config, document.get("doctype"), document.get("name"))
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def execute_saved_sync_requests(saved_requests: list[dict]) -> dict:
     """执行本次保存/复用的可重试请求；成功组不会重复发送。"""
 

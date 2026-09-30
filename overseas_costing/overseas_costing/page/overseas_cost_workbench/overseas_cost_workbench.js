@@ -1090,6 +1090,9 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='erp-site-reconcile']", (event) =>
       this.reconcileErpSiteRequest($(event.currentTarget).attr("data-request-id"))
     );
+    this.$root.on("click", "[data-action='erp-site-documents']", (event) =>
+      this.openErpSiteRemoteDocuments($(event.currentTarget).attr("data-site-code"))
+    );
     this.$root.on("click", "[data-action='erp-site-retry']", (event) =>
       this.retryErpSiteRequest($(event.currentTarget).attr("data-request-id"))
     );
@@ -2848,6 +2851,13 @@ class OverseasCostWorkbench {
       this.recordUsage("PUSH_ERP", { batch, remark: result.message || "推送 DeepLinkERP" });
       const indicator = String(result.writeback_status || "").toLowerCase().includes("success") ? "green" : "orange";
       frappe.show_alert({ message: result.message || "DeepLinkERP 推送已处理", indicator });
+      // 推送成功只说明"发出去了"，用户并不知道去 ERP 的哪里看；立刻把新建单据摆出来。
+      // 这一步失败不能反过来把已成功的推送说成失败。
+      try {
+        await this.announceErpPushDocuments?.(batch.name);
+      } catch (announceError) {
+        console.warn("[overseas-cost-workbench] 推送后跳转提示未完成", announceError);
+      }
     } finally {
       this.erpWritebackInFlight.delete(requestKey);
     }
@@ -18039,6 +18049,160 @@ class OverseasCostWorkbench {
     return `<span class="ocw-erp-sites-chip is-${this.escape(meta.tone)}">${this.escape(meta.label)}</span>`;
   }
 
+  /**
+   * 站点 → 远端单据（服务端投影，见 `list_remote_documents`）。
+   *
+   * 单号与打开地址都只在服务端算：单号在关联表里，地址要按站点自己的接口配置拼。
+   * 页面自己从账本行推一遍迟早会和「哪张单属于这一版」脱节。
+   */
+  erpSiteRemoteDocsByCode(remoteDocuments = null) {
+    const source = Array.isArray(remoteDocuments)
+      ? remoteDocuments
+      : this.erpSiteState?.ledger?.remote_documents;
+    const grouped = {};
+    (Array.isArray(source) ? source : []).forEach((entry) => {
+      const code = String(entry?.site_code || "");
+      if (code) grouped[code] = Array.isArray(entry?.documents) ? entry.documents : [];
+    });
+    return grouped;
+  }
+
+  erpSiteRemoteDocuments(siteCode = "", remoteDocuments = null) {
+    const code = String(siteCode || "");
+    if (!code) return [];
+    return this.erpSiteRemoteDocsByCode(remoteDocuments)[code] || [];
+  }
+
+  /**
+   * 远端单据投影是否已经读到。
+   *
+   * 账本读失败时 `remote_documents` 压根没来 —— 这时绝不能报「尚未建单」，
+   * 那会把「读不到」说成「没有」，与「认不出的状态一律落 muted」同一套纪律。
+   */
+  erpSiteRemoteDocsKnown() {
+    return Array.isArray(this.erpSiteState?.ledger?.remote_documents);
+  }
+
+  /** 站点行上的跳转入口：没有远端单据就不给按钮，绝不给一个点了没反应的东西。 */
+  renderErpSiteDocumentsCell(site = {}) {
+    if (!this.erpSiteRemoteDocsKnown()) return `<span class="ocw-erp-sites-hint">单据未读取</span>`;
+    const documents = this.erpSiteRemoteDocuments(site.site_code);
+    if (!documents.length) return `<span class="ocw-erp-sites-hint">尚未在 ERP 建单</span>`;
+    const title = documents.map((document) => String(document.name || "")).filter(Boolean).join("、");
+    return `<button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="erp-site-documents"
+      data-site-code="${this.escape(String(site.site_code || ""))}" title="${this.escape(title)}">在 ERP 查看（${this.escape(String(documents.length))}）</button>`;
+  }
+
+  erpRemoteDocstatusLabel(docstatus) {
+    const value = Number(docstatus);
+    if (value === 1) return "已提交";
+    if (value === 2) return "已作废";
+    return "草稿";
+  }
+
+  /**
+   * 打开某站点在 ERP 的单据：只有一张就直接跳，多张先列出来让人挑
+   * （一个站点可能推成好几张采购单）。链接用普通链接渲染，点不动是不可能的。
+   */
+  openErpSiteRemoteDocuments(siteCode = "") {
+    const code = String(siteCode || "");
+    if (!this.erpSiteRemoteDocsKnown()) {
+      this.showPendingFeature("还没有读到远端单据信息，请先刷新状态。");
+      return null;
+    }
+    const documents = this.erpSiteRemoteDocuments(code);
+    const usable = documents.filter((document) => String(document?.url || ""));
+    if (!usable.length) {
+      this.showPendingFeature(
+        documents.length
+          ? "远端单据号有，但打开地址拼不出来（站点未配置接口地址）。请在 ERP 里按单号手工查找。"
+          : "该站点还没有在 ERP 建立单据。"
+      );
+      return null;
+    }
+    if (usable.length === 1) {
+      this.openBrowserTab(usable[0].url, String(usable[0].name || "ERP 单据"));
+      return null;
+    }
+    const dialog = new frappe.ui.Dialog({
+      title: `${code || "站点"} 在 ERP 的单据（${usable.length} 张）`,
+      fields: [{ fieldtype: "HTML", fieldname: "documents", options: this.renderErpRemoteDocumentList(usable) }],
+    });
+    dialog.show();
+    dialog.$wrapper.addClass("ocw-erp-site-document-dialog");
+    return dialog;
+  }
+
+  renderErpRemoteDocumentList(documents = []) {
+    const rows = documents.map((document) => `
+      <tr>
+        <td>${this.escape(String(document.doctype || "单据"))}</td>
+        <td><strong>${this.escape(String(document.name || "--"))}</strong></td>
+        <td>${this.escape(this.erpRemoteDocstatusLabel(document.docstatus))}</td>
+        <td>${this.escape(String(document.line_count ?? 0))}</td>
+        <td><a class="ocw-link-btn" href="${this.escape(String(document.url || ""))}" target="_blank" rel="noopener noreferrer">打开</a></td>
+      </tr>`).join("");
+    return `
+      <div class="ocw-erp-site-documents">
+        <p class="ocw-erp-sites-note">单号取自本批次已保存的远端单据关联记录；打开的是 ERP 里的单据页，需要该 ERP 的登录状态。</p>
+        <table class="ocw-erp-sites-table">
+          <thead><tr><th>单据类型</th><th>单号</th><th>状态</th><th>物料行</th><th>跳转</th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="5" class="ocw-erp-sites-empty">没有可打开的单据</td></tr>`}</tbody>
+        </table>
+      </div>`;
+  }
+
+  /**
+   * 推送成功后把「去 ERP 看哪张单」直接摆出来 —— 否则用户只能猜。
+   *
+   * 读的是同一份服务端投影（账本 + 关联表），没有第二套单号来源；
+   * 一条都读不到时静默返回。这是善后动作，任何一步失败都只能安静收场，
+   * 绝不把异常甩回调用方 —— 推送已经成功了。
+   */
+  async announceErpPushDocuments(batchName = "") {
+    const batch = this.findBatch(batchName || this.drawerBatchName || this.activeBatchName || "");
+    if (!batch) return null;
+    try {
+      await this.loadErpSiteSync({ batchName: batch.name });
+    } catch (error) {
+      console.warn("[overseas-cost-workbench] 推送后读取远端单据失败", error);
+      return null;
+    }
+    const groups = Object.entries(this.erpSiteRemoteDocsByCode())
+      .map(([code, documents]) => ({
+        site_code: code,
+        documents: (Array.isArray(documents) ? documents : []).filter((document) => String(document?.url || "")),
+      }))
+      .filter((group) => group.documents.length);
+    if (!groups.length) return null;
+    const total = groups.reduce((sum, group) => sum + group.documents.length, 0);
+    try {
+      const dialog = new frappe.ui.Dialog({
+        title: `已在 ERP 建立 ${total} 张单据`,
+        fields: [
+          {
+            fieldtype: "HTML",
+            fieldname: "documents",
+            options: groups
+              .map(
+                (group) => `<section class="ocw-erp-site-documents">
+                  <h4>${this.escape(group.site_code)}</h4>
+                  ${this.renderErpRemoteDocumentList(group.documents)}
+                </section>`
+              )
+              .join(""),
+          },
+        ],
+      });
+      dialog.show();
+      dialog.$wrapper.addClass("ocw-erp-site-document-dialog");
+      return dialog;
+    } catch (error) {
+      console.warn("[overseas-cost-workbench] 推送后的 ERP 单据提示未能弹出", error);
+      return null;
+    }
+  }
+
   /** 把服务端站点预览归一成渲染用的形状，缺失字段一律兜空，别让模板崩。 */
   erpSitePlanPreview(plan = {}) {
     const preview = plan?.push_state?.preview || {};
@@ -18186,6 +18350,7 @@ class OverseasCostWorkbench {
           <td>${this.escape(this.formatMoney(site.total_cost_rmb))}</td>
           <td>${this.escape(this.formatMoney(site.allocated_fee_rmb))}</td>
           <td>${this.renderErpSiteStateChip(siteWork)}</td>
+          <td>${this.renderErpSiteDocumentsCell(site)}</td>
         </tr>`;
     }).join("");
     const overdueSites = (work?.sites || []).filter((site) => site.todo);
@@ -18207,8 +18372,8 @@ class OverseasCostWorkbench {
       </div>
       <div class="ocw-erp-sites-scroll">
         <table class="ocw-erp-sites-table">
-          <thead><tr><th>站点 / ERP 公司</th><th>目标单据</th><th>综合成本</th><th>分摊费用</th><th>同步状态</th></tr></thead>
-          <tbody>${rows || `<tr><td colspan="5" class="ocw-erp-sites-empty">当前没有可推送的站点分组</td></tr>`}</tbody>
+          <thead><tr><th>站点 / ERP 公司</th><th>目标单据</th><th>综合成本</th><th>分摊费用</th><th>同步状态</th><th>ERP 单据</th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="6" class="ocw-erp-sites-empty">当前没有可推送的站点分组</td></tr>`}</tbody>
         </table>
       </div>
       ${blockingNote}

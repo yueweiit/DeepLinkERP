@@ -516,6 +516,9 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='erp-site-reconcile']", (event) =>
       this.reconcileErpSiteRequest($(event.currentTarget).attr("data-request-id"))
     );
+    this.$root.on("click", "[data-action='erp-site-documents']", (event) =>
+      this.openErpSiteRemoteDocuments($(event.currentTarget).attr("data-site-code"))
+    );
     this.$root.on("click", "[data-action='erp-site-retry']", (event) =>
       this.retryErpSiteRequest($(event.currentTarget).attr("data-request-id"))
     );

@@ -734,3 +734,100 @@ def test_site_config_dispatches_the_default_site_to_settings_and_named_sites_to_
     assert ledger._load_site_config(DEFAULT_SITE_CODE) == {"site": "settings"}
     assert ledger._load_site_config("MXSITE") == {"site": "MXSITE"}
     assert calls == ["settings", "MXSITE"]
+
+
+# --- 远端单据：本批次到底建到了 ERP 的哪张单，点哪里看 --------------------------------
+
+_LINK_ROWS = [
+    {"name": "LINK-1", "batch": "B1", "site_code": "MX", "business_key": "BK1",
+     "remote_doctype": "Purchase Order", "remote_document": "PO-1", "remote_docstatus": 1},
+    # 同一张采购单的每一行物料都是一条关联记录：必须收敛成一张单。
+    {"name": "LINK-2", "batch": "B1", "site_code": "MX", "business_key": "BK1",
+     "remote_doctype": "Purchase Order", "remote_document": "PO-1", "remote_docstatus": 1},
+    {"name": "LINK-3", "batch": "B1", "site_code": "MX", "business_key": "BK1",
+     "remote_doctype": "Purchase Order", "remote_document": "PO-2", "remote_docstatus": 0},
+    {"name": "LINK-4", "batch": "B1", "site_code": "PROD", "business_key": "BK2",
+     "remote_doctype": "Purchase Order", "remote_document": "PO-3", "remote_docstatus": 1},
+    # 旧版本的业务键：不属于本次结果。
+    {"name": "LINK-5", "batch": "B1", "site_code": "MX", "business_key": "BK-OLD",
+     "remote_doctype": "Purchase Order", "remote_document": "PO-9", "remote_docstatus": 1},
+    # 没有远端单号的关联行（推送未成或只写了行键）不能变成一张"空单"。
+    {"name": "LINK-6", "batch": "B1", "site_code": "MX", "business_key": "BK1",
+     "remote_doctype": "Purchase Order", "remote_document": "", "remote_docstatus": 0},
+]
+
+
+def _site_config_by_code(site_code):
+    return {"base_url": "https://%s.example.com/api/resource" % str(site_code).lower()}
+
+
+def test_remote_documents_are_grouped_by_site_with_clickable_links(monkeypatch) -> None:
+    monkeypatch.setattr(ledger, "frappe", _FakeFrappe(list(_LINK_ROWS)))
+    monkeypatch.setattr(ledger, "_load_site_config", _site_config_by_code)
+
+    result = ledger.list_remote_documents("B1", business_keys=["BK1", "BK2"])
+
+    assert [group["site_code"] for group in result] == ["MX", "PROD"]
+    assert result[0]["documents"] == [
+        {"name": "PO-1", "doctype": "Purchase Order", "docstatus": 1, "line_count": 2,
+         "url": "https://mx.example.com/desk/purchase-order/PO-1"},
+        {"name": "PO-2", "doctype": "Purchase Order", "docstatus": 0, "line_count": 1,
+         "url": "https://mx.example.com/desk/purchase-order/PO-2"},
+    ]
+    assert result[1]["documents"][0]["url"] == "https://prod.example.com/desk/purchase-order/PO-3"
+
+
+def test_remote_documents_only_cover_the_business_keys_of_this_result(monkeypatch) -> None:
+    """关联表没有版本列：必须按本次账本行的业务键过滤，别把历史版本建的单当成这次的成果。"""
+
+    monkeypatch.setattr(ledger, "frappe", _FakeFrappe(list(_LINK_ROWS)))
+    monkeypatch.setattr(ledger, "_load_site_config", _site_config_by_code)
+
+    result = ledger.list_remote_documents("B1", business_keys=["BK1"])
+
+    names = [document["name"] for group in result for document in group["documents"]]
+    assert [group["site_code"] for group in result] == ["MX"]
+    assert names == ["PO-1", "PO-2"]
+    assert "PO-3" not in names and "PO-9" not in names
+
+
+def test_remote_documents_without_business_keys_never_touch_the_database(monkeypatch) -> None:
+    """没有任何账本请求时「一张单都没有」是确定结论，不该顺手查一次库。"""
+
+    class _Exploding:
+        def get_all(self, *args, **kwargs):
+            raise AssertionError("没有业务键时不该查询关联表")
+
+    monkeypatch.setattr(ledger, "frappe", _Exploding())
+
+    assert ledger.list_remote_documents("B1", business_keys=[]) == []
+    assert ledger.list_remote_documents("B1", business_keys=[None, ""]) == []
+    assert ledger.list_remote_documents("B1") == []
+
+
+def test_remote_documents_keep_the_document_number_when_the_link_cannot_be_built(monkeypatch) -> None:
+    """站点配置读不出来时单号照给、链接留空：页面据此说明"地址拼不出来"，而不是假装没有单。"""
+
+    monkeypatch.setattr(ledger, "frappe", _FakeFrappe(list(_LINK_ROWS)))
+
+    def _missing(site_code):
+        raise RuntimeError("站点配置不存在")
+
+    monkeypatch.setattr(ledger, "_load_site_config", _missing)
+
+    result = ledger.list_remote_documents("B1", business_keys=["BK1"])
+
+    documents = result[0]["documents"]
+    assert [document["name"] for document in documents] == ["PO-1", "PO-2"]
+    assert [document["url"] for document in documents] == ["", ""]
+
+
+def test_remote_documents_leave_out_links_the_target_site_cannot_resolve(monkeypatch) -> None:
+    """站点没配接口地址（或配的不是 http(s)）时不硬拼相对路径，链接留空。"""
+
+    monkeypatch.setattr(ledger, "frappe", _FakeFrappe(list(_LINK_ROWS)))
+    monkeypatch.setattr(ledger, "_load_site_config", lambda site_code: {"base_url": ""})
+
+    documents = ledger.list_remote_documents("B1", business_keys=["BK1"])[0]["documents"]
+
+    assert [document["url"] for document in documents] == ["", ""]

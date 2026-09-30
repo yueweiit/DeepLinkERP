@@ -40,15 +40,35 @@ const plan={ready:true,complete:true,cost_result_hash:'%s',batch_name:'B-1',vers
     ]}}};
 """ % (("a" * 64), ("a" * 64))
 
+#: 与 `get_site_sync_requests` 返回形状一致：账本行 + `erp_work` 投影 + 远端单据投影。
+#: `remote_documents` 里已经带好服务端拼出的打开地址（站点根由配置决定）。
+LEDGER_JS = """
+const ledger={ok:true,total:2,items:[{site_code:'DEEPLINKERP',status:'SUCCESS',business_key:'BK-1'}],
+  erp_work:{overall:'SYNCED',current_cost_result_hash:'%s',todo_count:0,
+    counts:{SYNCED:1,UPDATE_REQUIRED:0,IN_PROGRESS:0,ATTENTION_REQUIRED:0,NOT_PUSHED:0},
+    sites:[{site_code:'DEEPLINKERP',state:'SYNCED',cost_result_hash:'%s',request_id:'R-1',status:'SUCCESS',
+      attempt_count:1,error_code:'',error_message:'',todo:null}]},
+  remote_documents:[{site_code:'DEEPLINKERP',documents:[
+    {name:'PUR-ORD-2026-00043',doctype:'Purchase Order',docstatus:1,line_count:12,
+     url:'https://deeplinkerp.com/desk/purchase-order/PUR-ORD-2026-00043'},
+    {name:'PUR-ORD-2026-00044',doctype:'Purchase Order',docstatus:0,line_count:4,
+     url:'https://deeplinkerp.com/desk/purchase-order/PUR-ORD-2026-00044'}
+  ]}]};
+""" % (("a" * 64), ("a" * 64))
+
 
 def _erp_site_result(script: str) -> dict:
-    source = (PARTS / "79-erp-sites.js").read_text(encoding="utf-8")
+    # 源文件走 fs 读取，不塞进 argv：这个分片一旦长过 Windows 命令行上限（约 32KB），
+    # 整个文件所有用例都会以 WinError 206 死在启动子进程这一步。
+    # 与 `_fee_workspace_result` / `_detail_workspace_result` 同一套做法。
+    source_file = PARTS / "79-erp-sites.js"
     completed = subprocess.run(
         [
             "node",
             "-e",
             (
-                "const source=" + json.dumps(source) + ";"
+                "const fs=require('fs');"
+                f"const source=fs.readFileSync({json.dumps(str(source_file))},'utf8');"
                 "const Harness=Function(`return class ErpSiteHarness {${source}}`)();"
                 "global.alerts=[];"
                 "global.frappe={show_alert:(value)=>global.alerts.push(value),"
@@ -283,3 +303,160 @@ def test_writeback_button_opens_the_frozen_preview_instead_of_a_blind_confirm():
     assert "openErpSiteSyncDialog(batch.name)" in writeback
     # 执行入口没有被换掉：预览只是确认前的门，推送仍走同一条账本链路。
     assert "queueErpWriteback" in source.split("openErpSiteSyncDialog(batch.name)", 1)[1][:400]
+
+
+def test_site_row_offers_the_erp_jump_only_when_a_remote_document_exists():
+    """「不知道在 ERP 的哪看」的答案就挂在该站点行上：有单才有按钮，没单不留死按钮。"""
+
+    result = _erp_site_result(_harness() + PLAN_JS + LEDGER_JS + """
+    const st=w.ensureErpSiteState();st.plan=plan;st.ledger=ledger;
+    console.log(JSON.stringify({
+      cell:w.renderErpSiteDocumentsCell({site_code:'DEEPLINKERP'}),
+      empty:w.renderErpSiteDocumentsCell({site_code:'MXSITE'}),
+      docs:w.erpSiteRemoteDocuments('DEEPLINKERP'),
+      unknown:w.erpSiteRemoteDocuments('NOPE'),
+      blank:w.renderErpSiteDocumentsCell({}),
+      panel:w.renderErpSiteStatusPanel(),
+    }));
+    """)
+    cell = result["cell"]
+    assert 'data-action="erp-site-documents"' in cell
+    assert 'data-site-code="DEEPLINKERP"' in cell
+    assert "在 ERP 查看（2）" in cell
+    # 单号进 title：鼠标一停就知道点开的是哪几张。
+    assert "PUR-ORD-2026-00043" in cell and "PUR-ORD-2026-00044" in cell
+    assert "尚未在 ERP 建单" in result["empty"]
+    assert "erp-site-documents" not in result["empty"]
+    assert "尚未在 ERP 建单" in result["blank"]
+    assert [document["name"] for document in result["docs"]] == ["PUR-ORD-2026-00043", "PUR-ORD-2026-00044"]
+    assert result["unknown"] == []
+    # 面板里两行站点分别落「有按钮」和「没有单据」两态。
+    assert "在 ERP 查看（2）" in result["panel"]
+    assert "尚未在 ERP 建单" in result["panel"]
+    assert result["panel"].count("erp-site-documents") == 1
+
+
+def test_opening_erp_documents_jumps_for_one_and_lists_for_several():
+    """一张单直接跳；多张先列出来让人挑（一个站点会推成好几张采购单）。"""
+
+    result = _erp_site_result(_harness() + """
+    const opened=[];let dialogs=0,lastTitle='',lastHtml='';
+    w.showPendingFeature=(message)=>global.alerts.push({message});
+    w.openBrowserTab=(url,title)=>opened.push({url,title});
+    global.frappe.ui.Dialog=class{constructor(config){dialogs++;lastTitle=config.title;
+      lastHtml=config.fields[0].options;
+      this.$wrapper={classes:[],addClass(name){this.classes.push(name);}};}show(){}hide(){}};
+    const st=w.ensureErpSiteState();
+    st.ledger={remote_documents:[
+      {site_code:'ONE',documents:[{name:'PO-1',doctype:'Purchase Order',docstatus:1,line_count:1,
+        url:'https://erp.example.com/desk/purchase-order/PO-1'}]},
+      {site_code:'MANY',documents:[
+        {name:'PO-2',doctype:'Purchase Order',docstatus:1,line_count:12,url:'https://erp.example.com/desk/purchase-order/PO-2'},
+        {name:'PO-3',doctype:'Purchase Order',docstatus:0,line_count:4,url:'https://erp.example.com/desk/purchase-order/PO-3'}]},
+      {site_code:'NOLINK',documents:[{name:'PO-4',doctype:'Purchase Order',docstatus:1,line_count:2,url:''}]}
+    ]};
+    const one=w.openErpSiteRemoteDocuments('ONE');
+    const many=w.openErpSiteRemoteDocuments('MANY');
+    const noLink=w.openErpSiteRemoteDocuments('NOLINK');
+    const unknown=w.openErpSiteRemoteDocuments('UNKNOWN');
+    console.log(JSON.stringify({opened,dialogs,lastTitle,lastHtml,one,many:Boolean(many),
+      manyClasses:many?many.$wrapper.classes:[],noLink,unknown,alerts:global.alerts.map(a=>a.message)}));
+    """)
+    assert result["opened"] == [
+        {"url": "https://erp.example.com/desk/purchase-order/PO-1", "title": "PO-1"}
+    ]
+    assert result["one"] is None
+    assert result["dialogs"] == 1
+    assert result["lastTitle"] == "MANY 在 ERP 的单据（2 张）"
+    assert result["manyClasses"] == ["ocw-erp-site-document-dialog"]
+    # 多张单必须逐张给出可点的真实地址（普通链接，点了就能打开）。
+    assert 'href="https://erp.example.com/desk/purchase-order/PO-2"' in result["lastHtml"]
+    assert 'href="https://erp.example.com/desk/purchase-order/PO-3"' in result["lastHtml"]
+    assert "PO-2" in result["lastHtml"] and "PO-3" in result["lastHtml"]
+    assert "已提交" in result["lastHtml"] and "草稿" in result["lastHtml"]
+    assert "物料行" in result["lastHtml"]
+    # 单号在但地址拼不出来：说清楚原因，不假装没单、也不给一个点了没反应的按钮。
+    assert result["noLink"] is None
+    assert "打开地址拼不出来" in result["alerts"][0]
+    assert result["unknown"] is None
+    assert "还没有在 ERP 建立单据" in result["alerts"][1]
+
+
+def test_push_success_puts_the_new_erp_documents_in_front_of_the_user():
+    """推送完成后立刻把新建的单据摆出来 —— 否则「推成功」这句话等于没说去哪看。"""
+
+    result = _erp_site_result(_harness() + LEDGER_JS + """
+    let dialogs=0,lastTitle='',lastHtml='',lastClasses=[];
+    w.showPendingFeature=(message)=>global.alerts.push({message});
+    global.frappe.ui.Dialog=class{constructor(config){dialogs++;lastTitle=config.title;
+      lastHtml=config.fields[0].options;
+      this.$wrapper={classes:[],addClass(name){this.classes.push(name);}};}show(){}hide(){}};
+    w.loadErpSiteSync=async({batchName}={})=>{
+      const st=w.ensureErpSiteState();st.batchName=batchName;st.ledger=ledger;return {};
+    };
+    const dialog=await w.announceErpPushDocuments('B-1');
+    lastClasses=dialog.$wrapper.classes;
+    // 一张单都没有时必须安静返回：没有东西可看，就不要弹一个空窗。
+    w.loadErpSiteSync=async()=>{const st=w.ensureErpSiteState();st.ledger={remote_documents:[]};return {};};
+    const silent=await w.announceErpPushDocuments('B-1');
+    console.log(JSON.stringify({dialogs,lastTitle,lastHtml,lastClasses,hasDialog:Boolean(dialog),silent}));
+    """)
+    assert result["dialogs"] == 1
+    assert result["lastTitle"] == "已在 ERP 建立 2 张单据"
+    assert result["lastClasses"] == ["ocw-erp-site-document-dialog"]
+    assert "DEEPLINKERP" in result["lastHtml"]
+    assert 'href="https://deeplinkerp.com/desk/purchase-order/PUR-ORD-2026-00043"' in result["lastHtml"]
+    assert result["hasDialog"] is True
+    assert result["silent"] is None
+
+
+def test_missing_remote_document_projection_is_never_read_as_no_documents():
+    """账本没读到 ≠ 没建单：读不到时只能说「单据未读取」，不报按钮也不报没有单。"""
+
+    result = _erp_site_result(_harness() + PLAN_JS + """
+    w.showPendingFeature=(message)=>global.alerts.push({message});
+    const noLedger=(()=>{const st=w.ensureErpSiteState();st.plan=plan;st.ledger=null;
+      return {cell:w.renderErpSiteDocumentsCell({site_code:'DEEPLINKERP'}),
+        known:w.erpSiteRemoteDocsKnown(),open:w.openErpSiteRemoteDocuments('DEEPLINKERP')};})();
+    const emptyProjection=(()=>{const st=w.ensureErpSiteState();st.ledger={ok:true,items:[]};
+      return {cell:w.renderErpSiteDocumentsCell({site_code:'DEEPLINKERP'}),
+        known:w.erpSiteRemoteDocsKnown()};})();
+    console.log(JSON.stringify({noLedger,emptyProjection,alerts:global.alerts.map(a=>a.message)}));
+    """)
+    assert result["noLedger"]["known"] is False
+    assert "单据未读取" in result["noLedger"]["cell"]
+    assert "尚未在 ERP 建单" not in result["noLedger"]["cell"]
+    assert "erp-site-documents" not in result["noLedger"]["cell"]
+    assert result["noLedger"]["open"] is None
+    assert "还没有读到远端单据信息" in result["alerts"][0]
+    # 老服务端没有 remote_documents 这个键时同样按「未读取」处理。
+    assert result["emptyProjection"]["known"] is False
+    assert "单据未读取" in result["emptyProjection"]["cell"]
+
+
+def test_push_success_announcement_never_throws_when_it_cannot_be_built():
+    """跳转提示是善后动作：读不到、弹不出来都不许把异常抛回推送链路。"""
+
+    result = _erp_site_result(_harness() + LEDGER_JS + """
+    global.frappe.ui.Dialog=class{constructor(){throw new Error('弹窗起不来');}};
+    // 账本读失败（loadErpSiteSync 自己会抛的情况）不能变成向调用方抛异常。
+    w.loadErpSiteSync=async()=>{throw new Error('账本挂了');};
+    const readFailed=await w.announceErpPushDocuments('B-1');
+    // 读得到、但弹窗起不来时同样只能安静收场。
+    w.loadErpSiteSync=async()=>{const st=w.ensureErpSiteState();st.ledger=ledger;return {};};
+    const dialogFailed=await w.announceErpPushDocuments('B-1');
+    console.log(JSON.stringify({readFailed,dialogFailed}));
+    """)
+    assert result["readFailed"] is None
+    assert result["dialogFailed"] is None
+
+
+def test_writeback_success_asks_for_the_erp_jump_but_keeps_the_push_result_truthful():
+    source = (PARTS / "30-calculation-erp.js").read_text(encoding="utf-8")
+    queue = source.split("async queueErpWriteback", 1)[1]
+
+    assert "this.announceErpPushDocuments?.(batch.name)" in queue
+    # 提示失败不能连累推送结论：调用点必须在自己的 try/catch 里。
+    call_index = queue.index("this.announceErpPushDocuments?.(batch.name)")
+    guarded = queue[max(0, call_index - 220):call_index + 260]
+    assert "try {" in guarded and "catch (announceError)" in guarded

@@ -487,3 +487,74 @@ def test_grouped_push_rows_keep_the_cost_formula_used_by_the_purchase_order() ->
     assert row["custom_overseas_comprehensive_amount"] == 4795.57
     assert row["custom_overseas_clearance_alloc_amount"] >= 0
     assert row["custom_overseas_stable_line_key"] == "logistics:abc"
+
+
+def test_get_site_sync_requests_carries_the_remote_document_links(monkeypatch) -> None:
+    """站点账本同时要给出「这批建到了 ERP 的哪张单、点哪里看」。
+
+    远端单号在关联表里、打开地址要按站点接口配置拼，两件事都归服务端；
+    这里只守住「按本次账本行的业务键去取」这一个契约。
+    """
+
+    monkeypatch.setattr(
+        plans.batch_service,
+        "_load_erp_push_context",
+        lambda batch, version: {"ok": True, "batch_doc_name": "B-REAL", "version_name": "V-REAL"},
+    )
+    from overseas_costing.services import erp_sync_ledger_service
+
+    monkeypatch.setattr(
+        erp_sync_ledger_service,
+        "list_sync_requests",
+        lambda batch, version, limit: {
+            "ok": True,
+            "total": 2,
+            "items": [
+                {"site_code": "PROD", "status": "SUCCESS", "business_key": "BK-1", "creation": "2026-09-01 09:00:00.000000"},
+                {"site_code": "PROD", "status": "FAILED", "business_key": "BK-2", "creation": "2026-09-02 09:00:00.000000"},
+            ],
+        },
+    )
+    seen = []
+
+    def _remote_documents(batch, *, business_keys=None):
+        seen.append((batch, list(business_keys or [])))
+        return [
+            {
+                "site_code": "PROD",
+                "documents": [
+                    {"name": "PO-1", "doctype": "Purchase Order", "docstatus": 1, "line_count": 3,
+                     "url": "https://prod.example.com/desk/purchase-order/PO-1"}
+                ],
+            }
+        ]
+
+    monkeypatch.setattr(erp_sync_ledger_service, "list_remote_documents", _remote_documents)
+
+    result = plans.get_site_sync_requests("B-alias", "V-alias", limit=20)
+
+    assert seen == [("B-REAL", ["BK-1", "BK-2"])]
+    assert result["remote_documents"] == [
+        {
+            "site_code": "PROD",
+            "documents": [
+                {"name": "PO-1", "doctype": "Purchase Order", "docstatus": 1, "line_count": 3,
+                 "url": "https://prod.example.com/desk/purchase-order/PO-1"}
+            ],
+        }
+    ]
+
+
+def test_get_site_sync_requests_without_push_context_reports_no_remote_documents(monkeypatch) -> None:
+    """拿不到推送上下文时按「没有远端单据」返回，页面据此不显示跳转按钮。"""
+
+    monkeypatch.setattr(
+        plans.batch_service,
+        "_load_erp_push_context",
+        lambda batch, version: {"ok": False, "message": "批次不存在"},
+    )
+
+    result = plans.get_site_sync_requests("B1", "V1")
+
+    assert result["remote_documents"] == []
+    assert result["items"] == []

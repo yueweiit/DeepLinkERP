@@ -1275,3 +1275,56 @@ def test_read_remote_purchase_state_returns_docstatus_and_line_keys(monkeypatch)
     state = erp_client.read_remote_purchase_state("PO-1", _INSPECT_CONFIG)
 
     assert state == {"docstatus": 0, "lines": {"L1": "POI-1"}}
+
+
+# --- 远端单据桌面端链接（给人点的地址，不是接口地址） ---------------------------------
+
+def test_remote_desk_root_strips_the_configured_rest_suffix() -> None:
+    """`base_url` 存的是 REST 根，桌面端挂在站点根上：只剥接口后缀，不动子路径。"""
+
+    assert erp_client.remote_desk_root({"base_url": "https://erp.example.com/api/resource"}) == "https://erp.example.com"
+    assert erp_client.remote_desk_root({"base_url": "https://erp.example.com/api/resource/"}) == "https://erp.example.com"
+    assert erp_client.remote_desk_root({"base_url": "https://host/erp/api/resource"}) == "https://host/erp"
+    assert erp_client.remote_desk_root({"base_url": "https://host/api"}) == "https://host"
+    # 已经是站点根就原样用；不能把业务路径当接口后缀剥掉。
+    assert erp_client.remote_desk_root({"base_url": "https://erp.example.com"}) == "https://erp.example.com"
+    assert erp_client.remote_desk_root({"base_url": "https://host/erp"}) == "https://host/erp"
+
+
+def test_remote_desk_root_refuses_to_guess_a_link_it_cannot_build() -> None:
+    """拼不出可信地址就返回空串：宁可不给按钮，也不给一个相对路径的死链。"""
+
+    assert erp_client.remote_desk_root({"base_url": "erp.example.com/api/resource"}) == ""
+    assert erp_client.remote_desk_root({"base_url": "/api/resource"}) == ""
+    assert erp_client.remote_desk_root({}) == ""
+    assert erp_client.remote_desk_root({"base_url": None}) == ""
+
+
+def test_build_remote_document_url_matches_the_target_sites_own_form_route() -> None:
+    """路径形态与目标站点自己给出的 `get_url_to_form` 一致（Frappe 16：/desk/<slug>/<name>）。"""
+
+    config = {"base_url": "https://deeplinkerp.com/api/resource"}
+
+    assert (
+        erp_client.build_remote_document_url(config, "Purchase Order", "PUR-ORD-2026-00046")
+        == "https://deeplinkerp.com/desk/purchase-order/PUR-ORD-2026-00046"
+    )
+    # 通用单据模式下远端 DocType 不是采购订单，段名同样按 DocType 现算。
+    assert (
+        erp_client.build_remote_document_url({"base_url": "https://erp.example.com/api/resource"}, "Sales Invoice", "SINV-1")
+        == "https://erp.example.com/desk/sales-invoice/SINV-1"
+    )
+    # 单号里的特殊字符必须编码进路径，否则生成的链接指向别的单据。
+    assert (
+        erp_client.build_remote_document_url(config, "Purchase Order", "PO/2026#1")
+        == "https://deeplinkerp.com/desk/purchase-order/PO%2F2026%231"
+    )
+
+
+def test_build_remote_document_url_without_any_of_the_three_parts_is_empty() -> None:
+    config = {"base_url": "https://erp.example.com/api/resource"}
+
+    assert erp_client.build_remote_document_url(config, "Purchase Order", "") == ""
+    assert erp_client.build_remote_document_url(config, "", "PO-1") == ""
+    assert erp_client.build_remote_document_url({"base_url": ""}, "Purchase Order", "PO-1") == ""
+    assert erp_client.build_remote_document_url({"base_url": "erp.example.com"}, "Purchase Order", "PO-1") == ""

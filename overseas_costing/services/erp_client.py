@@ -741,11 +741,62 @@ def _build_resource_url(config: dict) -> str:
 
 
 def _build_doctype_url(config: dict, doctype: str, docname: str | None = None) -> str:
+    """接口地址（给程序用）。给人点的页面地址见 :func:`build_remote_document_url`。"""
+
     base_url = str(config.get("base_url") or "").rstrip("/")
     doctype = quote(str(doctype or "").strip(), safe="")
     if docname:
         return f"{base_url}/{doctype}/{quote(str(docname), safe='')}"
     return f"{base_url}/{doctype}"
+
+
+def remote_desk_root(config: dict) -> str:
+    """把配置里的接口地址换算成 ERP 站点根地址。
+
+    ``base_url`` 存的是 REST 根（``https://host/api/resource``），那是给程序用的；
+    桌面端页面挂在站点根上。拿不到 http(s) 地址就返回空串 —— 拼不出可信链接时宁可不给按钮，
+    也好过给出一个相对路径的死链。
+    """
+
+    base = str(config.get("base_url") or "").strip().rstrip("/")
+    if "://" not in base:
+        return ""
+    for suffix in ("/api/resource", "/api"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    return base.rstrip("/")
+
+
+def build_remote_document_url(config: dict, doctype: str, docname: str) -> str:
+    """远端 ERP 桌面端的单据页地址。
+
+    路径形态复刻目标站点自己的 ``frappe.utils.get_url_to_form``（``/desk/<slug>/<name>``），
+    只在「站点根」这一处与 Frappe 不同 —— 远端站点的根来自配置，不是本机 site_url。
+    """
+
+    root = remote_desk_root(config)
+    doctype = str(doctype or "").strip()
+    docname = str(docname or "").strip()
+    if not root or not doctype or not docname:
+        return ""
+    return f"{root}/desk/{_desk_doctype_segment(doctype)}/{quote(docname, safe='')}"
+
+
+def _desk_doctype_segment(doctype: str) -> str:
+    """桌面端路由里的 DocType 段，等价于 Frappe 的 ``quote(slug(doctype))``。
+
+    有 Frappe 时直接用它的实现；无 Frappe 的单测环境走下面的等价式（规则只此一份，
+    线上永远走 Frappe）。
+    """
+
+    if frappe is not None:
+        from frappe.utils import slug
+    else:  # pragma: no cover - 仅无 Frappe 的单测环境
+        def slug(value: str) -> str:
+            return str(value).lower().replace(" ", "-")
+
+    return quote(slug(str(doctype).strip()), safe="")
 
 
 def _build_request(config: dict, url: str, method: str, body: dict | None = None) -> Request:

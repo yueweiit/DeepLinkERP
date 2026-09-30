@@ -160,19 +160,26 @@ def execute_site_sync_plan(batch_name: str, version_name: str | None = None, cli
 def get_site_sync_requests(batch_name: str, version_name: str | None = None, limit: int = 100) -> dict:
     """读取当前批次的本地分站点同步请求账本。"""
 
-    from overseas_costing.services.erp_sync_ledger_service import list_sync_requests
+    from overseas_costing.services.erp_sync_ledger_service import list_remote_documents, list_sync_requests
 
     context = batch_service._load_erp_push_context(batch_name, version_name)
     if not context.get("ok"):
-        return {**context, "items": [], "total": 0, "erp_work": _empty_erp_work()}
+        return {**context, "items": [], "total": 0, "erp_work": _empty_erp_work(), "remote_documents": []}
     requests = list_sync_requests(context["batch_doc_name"], version=context["version_name"] or "", limit=limit)
+    items = requests.get("items") or []
     return {
         **requests,
         "batch_name": context["batch_doc_name"],
         "version_name": context["version_name"],
         # 站点级状态与待办由服务端算（见 fee_status_service.build_erp_work_state），
         # 页面只负责渲染，不再自己从账本行推一遍站点状态。
-        "erp_work": _build_erp_work(requests.get("items") or [], current_hash="", planned_sites=None),
+        "erp_work": _build_erp_work(items, current_hash="", planned_sites=None),
+        # 「这次建到了 ERP 的哪张单、点哪里看」同样由服务端给：远端单号在关联表里，
+        # 打开地址要按站点的接口配置拼，页面自己拼一定会漂。
+        "remote_documents": list_remote_documents(
+            context["batch_doc_name"],
+            business_keys=[row.get("business_key") for row in items],
+        ),
     }
 
 

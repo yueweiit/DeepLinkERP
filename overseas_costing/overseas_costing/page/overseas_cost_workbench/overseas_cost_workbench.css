@@ -9846,6 +9846,16 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
 .ocw-erp-site-dialog .modal-dialog { width: min(1180px, calc(100vw - 28px)); max-width: min(1180px, calc(100vw - 28px)); }
 .ocw-erp-site-dialog .modal-body { max-height: calc(100vh - 190px); overflow: auto; }
 
+/* 远端单据跳转：复用站点表的表格样式，只是这个弹窗不需要站点表那么宽。 */
+.ocw-erp-site-document-dialog .modal-dialog { width: min(780px, calc(100vw - 28px)); max-width: min(780px, calc(100vw - 28px)); }
+.ocw-erp-site-document-dialog .modal-body { max-height: calc(100vh - 190px); overflow: auto; }
+.ocw-erp-site-documents { display: grid; gap: 8px; }
+.ocw-erp-site-documents + .ocw-erp-site-documents { margin-top: 14px; }
+.ocw-erp-site-documents h4 { margin: 0; color: var(--ocw-ink); font-size: 12px; }
+.ocw-erp-site-documents .ocw-erp-sites-table { min-width: 0; }
+.ocw-erp-site-documents .ocw-erp-sites-table td { vertical-align: middle; }
+.ocw-erp-sites-table td .ocw-outline-btn { white-space: nowrap; }
+
 .ocw-review-return-btn {
   border: 1px solid #e79824;
   background: #fff8eb;
