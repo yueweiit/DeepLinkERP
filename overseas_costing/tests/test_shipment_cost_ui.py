@@ -356,7 +356,8 @@ console.log(JSON.stringify({rendered,hidden,fields:physical.map(c=>c.field)}));
 
 def test_historical_material_grid_disables_packing_group_edits():
     """历史/只读批次里编辑动作全部收口：没有行内操作列，勾选框只是选择控件
-    （有身份即可勾选查看，见「全选本页一直可点」契约），真正被禁的是写入。"""
+    （有身份即可勾选查看，见「全选本页一直可点」契约），真正被禁的是写入
+    —— 包括行内那个「选择供应商」入口，它和工具栏共用同一个可写判据。"""
 
     result = _fee_workspace_result(r"""
 const w=Object.create(Harness.prototype);w.detailState={readOnly:true};const state=w.ensureMaterialFeeState();
@@ -364,8 +365,13 @@ state.materials={packing_group_editable:false};w.escape=v=>String(v??'');w.forma
 const item={name:'I1',stable_line_key:'L1',packing_group_id:'G1',packing_group_position:0,packing_group_size:2,packing_group:{group_id:'G1'}};
 const columns=w.materialFeeGridColumns();
 const select=w.renderMaterialFeeGridCell(item,columns.find(c=>c.field==='__group_select'),new Set(),3);
+const row=Object.assign({},item,{supplier:''});
+const readonlyPicker=w.renderMaterialFeeGridCell(row,columns.find(c=>c.field==='supplier'),new Set(),4);
 const context=w.materialSelectionContext();
-console.log(JSON.stringify({select,fields:columns.map(column=>column.field),
+w.detailState={readOnly:false};
+w.ensureMaterialFeeState().materials={packing_group_editable:true};
+const writablePicker=w.renderMaterialFeeGridCell(row,columns.find(c=>c.field==='supplier'),new Set(),4);
+console.log(JSON.stringify({select,fields:columns.map(column=>column.field),readonlyPicker,writablePicker,
   add:context.actions.add,merge:context.actions.merge,project:context.actions.project,supplier:context.actions.supplier}));
 """)
     # 勾选控件在只读批次仍然可用（有身份的行），不再是编辑禁用的代理断言。
@@ -375,6 +381,10 @@ console.log(JSON.stringify({select,fields:columns.map(column=>column.field),
     assert result['project']['enabled'] is False
     assert result['supplier']['enabled'] is False
     assert '__actions' not in result['fields']
+    # 只读批次里点开选择器必然被服务端拒绝，所以入口本身就该是禁用的；可写批次照常可点。
+    assert 'disabled' in result['readonlyPicker']
+    assert '选择供应商' in result['readonlyPicker']
+    assert 'disabled' not in result['writablePicker']
 
 
 def test_material_selection_is_exact_and_toolbar_enforces_action_matrix():
@@ -491,6 +501,55 @@ console.log(JSON.stringify({emptyPage,emptyToolbar,readonly,readonlyToggled,sele
     assert result['project']['reason'] == '历史、已确认、已回写或锁定版本不可编辑'
     assert result['supplier']['enabled'] is False
     assert result['remove']['enabled'] is False
+
+
+def test_bulk_field_actions_follow_the_selection_identity_and_structure_actions_need_line_keys():
+    """「全选本页」勾的是行身份（stable_line_key 或 name），批量设置要跟着同一个身份放宽：
+    缺键行（OA 骨架行）能批量写项目归属/供应商（服务端按行 name 定位），但合并/解除合并/
+    软排除按 stable_line_key 匹配行，缺键行仍要挡住并说明原因，而不是整条工具栏一起变灰。"""
+
+    result = _fee_workspace_result(r"""
+const w=Object.create(Harness.prototype);w.detailState={readOnly:false};const state=w.ensureMaterialFeeState();
+w.escape=v=>String(v??'');
+state.materials={packing_group_editable:true,items:[
+  {name:'I1',row_no:1},{name:'I2',row_no:2},
+  {name:'I3',stable_line_key:'L3',row_no:3},{name:'I4',stable_line_key:'L4',row_no:4}],packing_groups:[]};
+state.packingGroupSelections=new Set();
+w.toggleMaterialPageSelection(true);
+const keyless=w.materialSelectionContext();
+const keylessToolbar=w.renderMaterialSelectionToolbar();
+state.packingGroupSelections=new Set(['L3','L4']);
+const keyed=w.materialSelectionContext();
+const keyedToolbar=w.renderMaterialSelectionToolbar();
+console.log(JSON.stringify({keyless:{selected:keyless.selectedCount,project:keyless.actions.project,
+  supplier:keyless.actions.supplier,merge:keyless.actions.merge,remove:keyless.actions.remove},
+  keylessToolbar,keyed:{project:keyed.actions.project,remove:keyed.actions.remove},keyedToolbar}));
+""")
+    assert result['keyless']['selected'] == 4
+    assert result['keyless']['project']['enabled'] is True
+    assert result['keyless']['supplier']['enabled'] is True
+    assert result['keyless']['merge']['enabled'] is False
+    assert result['keyless']['remove']['enabled'] is False
+    assert 'stable_line_key' in result['keyless']['remove']['reason']
+
+    def button(action, html):
+        head, tail = html.split(f'data-action="{action}"', 1)
+        return head.rsplit('<button', 1)[1] + tail.split('>', 1)[0]
+
+    # 用户看到的就是 disabled 属性：缺键批次里批量设置可点、删除所选禁用。
+    assert 'disabled' not in button('mf-set-project', result['keylessToolbar'])
+    assert 'disabled' not in button('mf-set-supplier', result['keylessToolbar'])
+    assert 'disabled' in button('mf-exclude-selected', result['keylessToolbar'])
+    # 全部带键时结构操作也放行（放宽的是分轨，不是取消门槛）。
+    assert result['keyed']['project']['enabled'] is True
+    assert result['keyed']['remove']['enabled'] is True
+    assert 'disabled' not in button('mf-exclude-selected', result['keyedToolbar'])
+
+    # 删除所选：可点时必须真的标红，而不是只挂一个没人渲染的 class。
+    assert 'is-danger' in button('mf-exclude-selected', result['keyedToolbar'])
+    css = MATERIAL_GRID_CSS.read_text(encoding='utf-8')
+    danger = css.split('.ocw-mf-selection-toolbar button.is-danger:not(:disabled) {', 1)[1].split('}', 1)[0]
+    assert '#c43232' in danger and '#fff5f4' in danger
 
 
 def test_select_all_page_action_reuses_the_shared_page_toggle():

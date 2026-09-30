@@ -683,6 +683,63 @@ def test_reference_write_failure_keeps_invalid_input_a_hint_without_resync_or_mo
     assert result["alerts"] == [{"message": "请从有效列表中选择，不能录入列表外的值。", "indicator": "orange"}]
 
 
+def test_reference_write_failure_names_the_row_and_cause_instead_of_the_generic_rollback():
+    """批量接口只回一句「已整体回滚」，真正的原因在 results 里。
+
+    回归背景：用户点保存只看到「批量字段更新存在错误，已整体回滚。；已同步最新数据，
+    请再点一次保存。」—— 既不知道哪一行、也不知道为什么，反复点还是同一句。
+    逐行原因必须还原出来，并且业务拒绝不再冒充乐观锁过期（不重同步、不劝重试）。
+    """
+
+    result = _fee_workspace_result(r'''
+    const w=Object.create(Harness.prototype);w.detailState={batchName:'B-1'};
+    w.normalizeErrorMessage=error=>String(error?.message||'操作失败');
+    const recovered=[];const shown=[];
+    w.recoverMaterialFeeReadonlyState=async name=>{recovered.push(name);return true;};
+    w.showError=error=>shown.push(String(error?.message||''));
+    const items=[{name:'I1',material_code:'GJ000145',product_name:'防滑手套'}];
+    const message=w.materialBatchWriteFailureMessage({ok:false,
+      message:'批量字段更新存在错误，已整体回滚。',
+      results:[{ok:false,item_name:'I1',message:'只能编辑当前未确认的活动版本，历史版本请创建调整草稿。'}]},items,'supplier');
+    const fallback=w.materialBatchWriteFailureMessage({ok:false,message:'批量字段更新存在错误，已整体回滚。',results:[]},items,'project_collection');
+    await w.reportMaterialReferenceWriteFailure(Object.assign(new Error(message),{materialRowWriteRejected:true}));
+    console.log(JSON.stringify({message,fallback,recovered,shown}));
+    ''')
+    assert result["message"] == ("供应商未保存（已整体回滚）：防滑手套（GJ000145）："
+                                 "只能编辑当前未确认的活动版本，历史版本请创建调整草稿。")
+    # 拿不到逐行结果时退回服务端原文，不编造原因。
+    assert result["fallback"] == "批量字段更新存在错误，已整体回滚。"
+    assert result["recovered"] == []
+    assert result["shown"] == [result["message"]]
+
+
+def test_actual_fee_amount_replaces_the_red_evidence_todo_badge():
+    """金额已选「实际」的行不再用红色「待补」显示成报错。
+
+    凭证要求、待办与计数一律不变（仍走 fee_status_service），这里只改展示口径。
+    """
+
+    result = _fee_workspace_result(r'''
+    const w=Object.create(Harness.prototype);
+    console.log(JSON.stringify({
+      actual:w.materialFeeEvidenceLabel('MISSING','ACTUAL'),
+      actualLowercase:w.materialFeeEvidenceLabel('missing','actual'),
+      estimated:w.materialFeeEvidenceLabel('MISSING','ESTIMATED'),
+      missingWithoutStatus:w.materialFeeEvidenceLabel('MISSING'),
+      invalid:w.materialFeeEvidenceLabel('INVALID','ACTUAL'),
+      pending:w.materialFeeEvidenceLabel('PENDING','ACTUAL'),
+      notRequired:w.materialFeeEvidenceLabel('NOT_REQUIRED','ACTUAL')}));
+    ''')
+    assert result["actual"] == {"label": "凭证可稍后补充", "tone": "neutral"}
+    assert result["actualLowercase"] == result["actual"]
+    # 只有「实际 + 缺凭证」这一格改口径，其余状态一字不动。
+    assert result["estimated"] == {"label": "待补", "tone": "danger"}
+    assert result["missingWithoutStatus"] == {"label": "待补", "tone": "danger"}
+    assert result["invalid"] == {"label": "需重补", "tone": "danger"}
+    assert result["pending"] == {"label": "已关联", "tone": "info"}
+    assert result["notRequired"] == {"label": "无需凭证", "tone": "neutral"}
+
+
 def test_batch_write_revision_is_advanced_through_one_helper_only():
     """两条会刷新写令牌的路径都必须走 acceptBatchWriteRevision（不回退规则只写一处）。"""
 

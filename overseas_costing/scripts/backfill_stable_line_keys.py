@@ -1,7 +1,8 @@
 """一次性修复：为缺失 ``stable_line_key`` 的物料行补生成身份键。
 
-背景：OA 骨架行（import_oa_logistics）此前不写 ``stable_line_key``，工作台
-「全选本页」与行复选框依赖该键（materialRowIsSelectable），缺键行永远不可选。
+背景：OA 骨架行（import_oa_logistics）此前不写 ``stable_line_key``，工作台按该键
+匹配行结构操作（装箱组合并/解除合并、批量软排除，materialRowIsStructurable），
+缺键行做不了这些动作；字段写入（项目归属、供应商）按行 name 定位，不受影响。
 2026-09-30 起新导入行已带键（见 import_oa_logistics 同日变更），本脚本只补存量。
 
 安全边界（照 repair_* 惯例）：

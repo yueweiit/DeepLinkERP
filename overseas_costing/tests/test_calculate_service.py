@@ -1214,6 +1214,48 @@ def test_batch_manual_aliases_restore_legacy_priors_after_clear(monkeypatch) -> 
     assert items["I1"].goods_value == 20 and items["I2"].goods_value == 30
 
 
+def test_batch_update_rollback_message_carries_the_per_row_cause(monkeypatch) -> None:
+    """整体回滚只说明结果，不说明为什么；原因必须随 message 一起回来。
+
+    回归背景：逐行失败被折叠成一句「批量字段更新存在错误，已整体回滚」，用户看到的
+    只有「失败了」三个字（哪一行、为什么都没有），于是只能反复点保存。
+    """
+
+    items = {"I1": {}, "I2": {}}
+    service, db = _install_item_edit_frappe(monkeypatch, items)
+    from overseas_costing.services import edit_session_service
+    monkeypatch.setattr(edit_session_service, "assert_batch_write", lambda *_args, **_kwargs: None)
+
+    result = service.batch_update_items("B1", json.dumps([
+        {"item_name": "I1", "fieldname": "derived_json", "value": "{}"},
+        {"item_name": "I2", "fieldname": "derived_json", "value": "{}"},
+    ]), version_name="V1", edit_token="TOKEN", expected_modified="OLD")
+
+    assert result["ok"] is False
+    assert result["changed_count"] == 0
+    assert db.rollbacks == 1
+    assert result["message"].startswith("批量字段更新存在错误，已整体回滚。")
+    assert "物料 I1" in result["message"]
+    assert "由重算服务生成，不能直接手工编辑" in result["message"]
+    assert "（共 2 行失败）" in result["message"]
+
+
+def test_batch_update_rollback_message_stays_short_without_a_row_reason(monkeypatch) -> None:
+    """逐行结果里没有原因时（缺 item_name/fieldname 这类参数错误）不再硬拼半句。"""
+
+    items = {"I1": {}}
+    service, _db = _install_item_edit_frappe(monkeypatch, items)
+    from overseas_costing.services import edit_session_service
+    monkeypatch.setattr(edit_session_service, "assert_batch_write", lambda *_args, **_kwargs: None)
+
+    result = service.batch_update_items("B1", json.dumps([
+        {"item_name": "I1", "value": "x"},
+    ]), version_name="V1", edit_token="TOKEN", expected_modified="OLD")
+
+    assert result["ok"] is False
+    assert "缺少 item_name/name 或 fieldname/field_name" in result["message"]
+
+
 def test_expense_physical_overlay_quantity_edit_stales_manual_value(monkeypatch) -> None:
     context = {"root_kind": "expense", "available": True, "approved": True, "invalid": False,
                "fingerprint": "CTX", "source_snapshot": "SOURCE"}

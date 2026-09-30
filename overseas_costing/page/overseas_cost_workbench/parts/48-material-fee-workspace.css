@@ -279,7 +279,8 @@
 
 .ocw-mf-selection-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid #e3eaf3; border-bottom: 1px solid #d8e2ef; background: #f7fbff; }
 .ocw-mf-selection-toolbar button { flex: 0 0 auto; white-space: nowrap; }
-.ocw-mf-selection-toolbar button.is-danger:not(:disabled) { border-color: #e6a7a2; color: #b42318; }
+.ocw-mf-selection-toolbar button.is-danger:not(:disabled) { border-color: #e04b45; color: #c43232; background: #fff5f4; }
+.ocw-mf-selection-toolbar button.is-danger:hover:not(:disabled) { border-color: #cf3b36; background: #ffedeb; }
 .ocw-mf-selection-count { display: inline-flex; align-items: center; gap: 7px; min-width: 76px; color: #344054; font-size: 12px; font-weight: 700; }
 .ocw-mf-selection-count small { border-radius: 999px; padding: 3px 7px; background: #e4f2fd; color: #076fbe; font-size: 10px; font-weight: 500; white-space: nowrap; }
 

@@ -707,14 +707,22 @@
     }[String(value || "MISSING").toUpperCase()] || { label: String(value || "待补"), tone: "danger" };
   }
 
-  materialFeeEvidenceLabel(value) {
+  /**
+   * 凭证徽标。第二个参数是金额状态：「实际」是已核实的终态，凭证仍然要在最终确认前补齐
+   * （凭证要求、待办与计数一律不变），但不再用红色「待补」把已核实的一行显示成报错。
+   */
+  materialFeeEvidenceLabel(value, amountStatus = "") {
+    const state = String(value || "MISSING").toUpperCase();
+    if (state === "MISSING" && String(amountStatus || "").toUpperCase() === "ACTUAL") {
+      return { label: "凭证可稍后补充", tone: "neutral" };
+    }
     return {
       VALID: { label: "已核对", tone: "ok" },
       PENDING: { label: "已关联", tone: "info" },
       INVALID: { label: "需重补", tone: "danger" },
       MISSING: { label: "待补", tone: "danger" },
       NOT_REQUIRED: { label: "无需凭证", tone: "neutral" },
-    }[String(value || "MISSING").toUpperCase()] || { label: String(value || "待补"), tone: "danger" };
+    }[state] || { label: String(value || "待补"), tone: "danger" };
   }
 
   materialFeeEvidenceFinalLabel(value) {
@@ -905,9 +913,10 @@
       </tr>`;
     }
     const amountInfo = this.materialFeeAmountStatus(fee.amount_state || fee.amount_status);
-    const evidenceInfo = this.materialFeeEvidenceLabel(fee.evidence_state);
     const scopeLabel = String(fee.scope_type || "ALL_ITEMS") === "ALL_ITEMS" ? "全批物料" : String(fee.scope_type) === "DIRECT_ITEM" ? "指定单行" : "指定物料";
     const amountStatus = String(fee.amount_state || fee.amount_status || "MISSING").toUpperCase();
+    // 凭证徽标要连金额状态一起判（「实际」不再用红色待补），所以排在 amountStatus 之后。
+    const evidenceInfo = this.materialFeeEvidenceLabel(fee.evidence_state, amountStatus);
     const feeKey = String(fee.logical_fee_key || fee.fee_key || "");
     const sourceOwned = Boolean(fee.source_binding_id);
     const aiFill = this.materialFeeState?.aiFill;
@@ -1155,20 +1164,38 @@
     return groups;
   }
 
-  materialRowIsSelectable(item) {
+  /** 物料区唯一的「可写」判据：历史、已确认、已回写、锁定版本与详情页只读都算不可写。 */
+  materialWriteAllowed() {
     const state = this.ensureMaterialFeeState();
-    return Boolean(item && !item.__aiReplacement && String(item.stable_line_key || "")
-      && state.materials?.packing_group_editable !== false && !this.detailState?.readOnly);
+    return state.materials?.packing_group_editable !== false && !this.detailState?.readOnly;
+  }
+
+  /** 字段写入（项目归属、供应商）服务端按 item.name 定位，不要求行有 stable_line_key。 */
+  materialRowIsWritable(item) {
+    return Boolean(item && !item.__aiReplacement && this.materialWriteAllowed());
+  }
+
+  /** 行结构写入（合并/解除合并/软排除）服务端按 stable_line_key 定位，缺键行一律做不了。 */
+  materialRowIsStructurable(item) {
+    return this.materialRowIsWritable(item) && Boolean(String(item?.stable_line_key || ""));
   }
 
   materialRowSelectionKey(item) {
-    // 勾选身份：优先 stable_line_key，退回行 name（与 ERP 推送路由的行身份约定同源）。
-    // 它只决定「哪些行能被勾选」；批量写入的可行性仍由 materialRowIsSelectable 把守。
+    // 勾选与字段写入共用的行身份：优先 stable_line_key，退回行 name（与 ERP 推送路由的
+    // 行身份约定同源）。只读批次也能勾选查看；能不能写由上面两个判据分轨把守。
     return String(item?.stable_line_key || item?.name || "");
   }
 
   materialPageSelectionRows() {
     return this.materialFeeVisibleItems().filter((item) => this.materialRowSelectionKey(item));
+  }
+
+  materialPageWritableRows() {
+    return this.materialFeeVisibleItems().filter((item) => this.materialRowIsWritable(item));
+  }
+
+  materialPageStructurableRows() {
+    return this.materialFeeVisibleItems().filter((item) => this.materialRowIsStructurable(item));
   }
 
   toggleMaterialSelection(stableLineKey, checked) {
@@ -1178,10 +1205,6 @@
     if (!key) return;
     if (checked) state.packingGroupSelections.add(key);
     else state.packingGroupSelections.delete(key);
-  }
-
-  materialPageSelectableRows() {
-    return this.materialFeeVisibleItems().filter((item) => this.materialRowIsSelectable(item));
   }
 
   materialPageSelectionState() {
@@ -1219,15 +1242,22 @@
     state.packingGroupSelections = state.packingGroupSelections instanceof Set ? state.packingGroupSelections : new Set();
     const selectedKeys = new Set([...state.packingGroupSelections].map(String));
     const pageRows = state.materials?.items || [];
-    const pageKeys = new Set(pageRows.map((row) => String(row.stable_line_key || "")).filter(Boolean));
-    const selectablePageKeys = new Set(this.materialPageSelectableRows()
-      .map((row) => String(row.stable_line_key || "")).filter(Boolean));
+    // 三个集合必须用同一个行身份（materialRowSelectionKey）拼装：勾选键放宽到「有身份即可」
+    // 之后，只按 stable_line_key 建集合会把 name 键全判成「未知行」，批量设置门槛集体失灵。
+    const pageKeys = new Set(pageRows.map((row) => this.materialRowSelectionKey(row)).filter(Boolean));
+    const writablePageKeys = new Set(this.materialPageWritableRows()
+      .map((row) => this.materialRowSelectionKey(row)).filter(Boolean));
+    const structurablePageKeys = new Set(this.materialPageStructurableRows()
+      .map((row) => this.materialRowSelectionKey(row)).filter(Boolean));
     const groups = this.materialPackingGroups();
     const groupByMember = new Map();
     groups.forEach((group, groupId) => (group.member_keys || []).forEach((key) => groupByMember.set(String(key), groupId)));
     const knownKeys = new Set([...pageKeys, ...groupByMember.keys()]);
     const unknownKeys = [...selectedKeys].filter((key) => !knownKeys.has(key));
-    const lockedPageKeys = [...selectedKeys].filter((key) => pageKeys.has(key) && !selectablePageKeys.has(key));
+    const lockedPageKeys = [...selectedKeys].filter((key) => pageKeys.has(key) && !writablePageKeys.has(key));
+    // 缺键行（OA 骨架行等）能写字段、不能做结构操作：服务端软排除/装箱组都按 stable_line_key
+    // 匹配行。单独一轨，免得「字段可写」把批量设置一起挡掉、或反过来放行必然失败的结构操作。
+    const keylessPageKeys = [...selectedKeys].filter((key) => writablePageKeys.has(key) && !structurablePageKeys.has(key));
     const selectedGroupIds = [];
     const incompleteGroupIds = [];
     groups.forEach((group, groupId) => {
@@ -1240,20 +1270,31 @@
     const selectedMemberKeys = [...selectedGroupIds].flatMap((groupId) => (groups.get(groupId)?.member_keys || []).map(String));
     const selectedCount = selectedKeys.size;
     const crossPageCount = [...selectedKeys].filter((key) => !pageKeys.has(key)).length;
-    const editable = state.materials?.packing_group_editable !== false && !this.detailState?.readOnly;
-    const orderedKeys = pageRows.map((row) => String(row.stable_line_key || ""));
+    const editable = this.materialWriteAllowed();
+    const orderedKeys = pageRows.map((row) => this.materialRowSelectionKey(row));
     const positions = ungroupedKeys.map((key) => orderedKeys.indexOf(key)).sort((a, b) => a - b);
     const contiguous = positions.length >= 2 && positions.every((position, index) =>
       position >= 0 && (index === 0 || position === positions[index - 1] + 1));
     const completeSelection = !unknownKeys.length && !lockedPageKeys.length && !incompleteGroupIds.length;
+    const structureReady = completeSelection && !keylessPageKeys.length;
     const readonlyReason = "历史、已确认、已回写或锁定版本不可编辑";
-    const mergeEnabled = editable && completeSelection && selectedGroupIds.length === 0
+    const lockedSelectionReason = "当前选择包含不可操作的 AI 替换草稿行";
+    const keylessStructureReason = "所选行缺少物料行标识（stable_line_key），暂不支持合并、解除合并与删除";
+    // 结构类动作失败原因的优先级：先讲清「为什么写不了」，再讲「选择不够」，最后才是各自动作的形状要求。
+    const structureReason = (shapeReason) => {
+      if (!editable) return readonlyReason;
+      if (lockedPageKeys.length) return lockedSelectionReason;
+      if (keylessPageKeys.length) return keylessStructureReason;
+      if (incompleteGroupIds.length) return "删除组员前请先解除合并";
+      return shapeReason;
+    };
+    const mergeEnabled = editable && structureReady && selectedGroupIds.length === 0
       && ungroupedKeys.length === selectedCount && contiguous;
-    const editEnabled = editable && completeSelection && selectedGroupIds.length === 1
+    const editEnabled = editable && structureReady && selectedGroupIds.length === 1
       && !ungroupedKeys.length && selectedMemberKeys.length === selectedCount;
-    const unmergeEnabled = editable && completeSelection && selectedGroupIds.length >= 1
+    const unmergeEnabled = editable && structureReady && selectedGroupIds.length >= 1
       && !ungroupedKeys.length && selectedMemberKeys.length === selectedCount;
-    const removeEnabled = editable && completeSelection && selectedCount > 0;
+    const removeEnabled = editable && structureReady && selectedCount > 0;
     const projectEnabled = editable && selectedCount > 0 && !unknownKeys.length && !lockedPageKeys.length;
     // 表头那个复选框一直是本页全选的唯一入口，但它没有文字、贴在固定列最左边，
     // 用户找不到。这里把同一份状态显式接到工具栏上，复用既有 materialPageSelectionState
@@ -1266,15 +1307,10 @@
       selectedKeys, selectedCount, crossPageCount, selectedGroupIds, incompleteGroupIds, ungroupedKeys, lockedPageKeys,
       actions: {
         add:{enabled:editable, reason:editable ? "" : readonlyReason},
-        merge:{enabled:mergeEnabled, reason:mergeEnabled ? "" : !editable ? readonlyReason
-          : "请选择至少两条连续、未分组的物料"},
-        edit:{enabled:editEnabled, reason:editEnabled ? "" : !editable ? readonlyReason
-          : "请只选择一个完整装箱组"},
-        unmerge:{enabled:unmergeEnabled, reason:unmergeEnabled ? "" : !editable ? readonlyReason
-          : "请选择一个或多个完整装箱组"},
-        remove:{enabled:removeEnabled, reason:removeEnabled ? "" : !editable ? readonlyReason
-          : lockedPageKeys.length ? "当前选择包含不可操作的 AI 替换草稿行"
-          : incompleteGroupIds.length ? "删除组员前请先解除合并" : "请先选择物料"},
+        merge:{enabled:mergeEnabled, reason:mergeEnabled ? "" : structureReason("请选择至少两条连续、未分组的物料")},
+        edit:{enabled:editEnabled, reason:editEnabled ? "" : structureReason("请只选择一个完整装箱组")},
+        unmerge:{enabled:unmergeEnabled, reason:unmergeEnabled ? "" : structureReason("请选择一个或多个完整装箱组")},
+        remove:{enabled:removeEnabled, reason:removeEnabled ? "" : structureReason("请先选择物料")},
         project:{enabled:projectEnabled, reason:projectEnabled ? "" : !editable ? readonlyReason : "请先选择有效物料行"},
         supplier:{enabled:projectEnabled, reason:projectEnabled ? "" : !editable ? readonlyReason : "请先选择有效物料行"},
         selectPage:{enabled:pageSelectEnabled,
@@ -1288,9 +1324,7 @@
 
   materialReadonlyNoteHtml() {
     const state = this.ensureMaterialFeeState();
-    const locked = (state.materials && state.materials.packing_group_editable === false)
-      || this.detailState?.readOnly === true;
-    if (!locked) return "";
+    if (!state.materials || this.materialWriteAllowed()) return "";
     // 只读原因原来只在禁用按钮的 title 里，用户点了没反应却看不到为什么；
     // 这里复用 ocw-mf-dialog-note 把原因亮出来。勾选/全选现在只读批次也可用，
     // 但那只是查看范围，真正拦住的是批量写入，所以文案要说清这层区别。
@@ -1558,7 +1592,13 @@
       edit_token:this.detailState.editToken,
       expected_modified:this.detailState.expectedModified,
     }, false);
-    if (!result?.ok) throw new Error(result?.message || `${fieldname === "project_collection" ? "项目归属" : "供应商"}未保存。`);
+    if (!result?.ok) {
+      // 批量接口只会回一句「已整体回滚」，真正的原因在 results 里：这里还原成「哪一行、为什么」，
+      // 否则用户反复点保存拿到的都是同一句无从下手的话。标记成业务拒绝，别再走乐观锁那套提示。
+      const error = new Error(this.materialBatchWriteFailureMessage(result, items, fieldname));
+      error.materialRowWriteRejected = true;
+      throw error;
+    }
     this.updateMaterialFeeExpectedModified(result);
     state.packingGroupSelections?.clear?.();
     if (fieldname === "project_collection") {
@@ -1581,11 +1621,45 @@
    * 这里复用单元格保存那条已有的恢复动作（recoverMaterialFeeReadonlyState 会强制重建
    * 资料页快照、把批次 revision 刷成最新），再把失败原因和下一步明确呈现出来。
    */
+  /**
+   * 批量写入失败时把逐行原因还原成人话。
+   *
+   * 服务端为了「要么全成功、要么全回滚」只回一句能力有限的总体文案，真正的原因在
+   * `results` 里；这里把它和本地行标签拼起来，用户才知道是哪一行、为什么没保存。
+   */
+  materialBatchWriteFailureMessage(result, items = [], fieldname = "") {
+    const label = { supplier: "供应商", project_collection: "项目归属" }[String(fieldname || "")] || "批量字段";
+    const byName = new Map((items || []).map((row) => [String(row?.name || ""), row]));
+    const failures = (result?.results || []).filter((row) => row && row.ok === false);
+    const details = failures.slice(0, 3).map((row) => {
+      const rowLabel = this.materialRowPlainLabel(byName.get(String(row.item_name || "")) || {}, row.item_name);
+      const reason = String(row.message || "").trim();
+      return reason ? `${rowLabel}：${reason}` : rowLabel;
+    }).filter(Boolean);
+    if (!details.length) return String(result?.message || `${label}未保存。`);
+    const rest = failures.length > details.length ? `；另有 ${failures.length - details.length} 行失败` : "";
+    return `${label}未保存（已整体回滚）：${details.join("；")}${rest}`;
+  }
+
+  /** 纯文本行标签：错误文案里不能塞给表格渲染用的 HTML。 */
+  materialRowPlainLabel(row = {}, fallback = "") {
+    const productName = String(row?.product_name || "").trim();
+    const materialCode = String(row?.material_code || "").trim();
+    if (productName && materialCode) return `${productName}（${materialCode}）`;
+    return productName || materialCode || String(fallback || "").trim() || "所选物料行";
+  }
+
   async reportMaterialReferenceWriteFailure(error) {
     if (error?.workbenchReleaseHandled || error?.workbenchReleaseBlocked) return;
     const reason = this.normalizeErrorMessage(error).replace(/^[A-Za-z_]*Error:\s*/, "");
     if (error?.materialReferenceInputInvalid) {
       frappe.show_alert({ message:reason, indicator:"orange" });
+      return;
+    }
+    if (error?.materialRowWriteRejected) {
+      // 业务拒绝（行不属于当前版本、缺行标识…）：一个字都没写进去，重同步和
+      //「已同步最新数据，请再点一次保存」都是误导 —— 直接把原因摊开。
+      this.showError(new Error(reason));
       return;
     }
     let recovered = false;
@@ -1611,7 +1685,7 @@
     const state = this.ensureMaterialFeeState();
     const context = this.materialSelectionContext();
     if (!context.actions.project.enabled) throw new Error(context.actions.project.reason);
-    const selected = (state.materials?.items || []).filter((row) => context.selectedKeys.has(String(row.stable_line_key || "")));
+    const selected = (state.materials?.items || []).filter((row) => context.selectedKeys.has(this.materialRowSelectionKey(row)));
     if (selected.length !== context.selectedCount || selected.some((row) => !row.name)) throw new Error("选中物料已变化，请刷新后重试。");
     return this.openProjectCollectionPicker({ items:selected, source:"bulk" });
   }
@@ -1765,7 +1839,7 @@
     const state = this.ensureMaterialFeeState();
     const context = this.materialSelectionContext();
     if (!context.actions.supplier.enabled) throw new Error(context.actions.supplier.reason);
-    const selected = (state.materials?.items || []).filter((row) => context.selectedKeys.has(String(row.stable_line_key || "")));
+    const selected = (state.materials?.items || []).filter((row) => context.selectedKeys.has(this.materialRowSelectionKey(row)));
     if (selected.length !== context.selectedCount || selected.some((row) => !row.name)) throw new Error("选中物料已变化，请刷新后重试。");
     return this.openSupplierPicker({ items:selected, source:"bulk" });
   }
@@ -2197,7 +2271,9 @@
     const action = project ? "mf-open-project-picker" : "mf-open-supplier-picker";
     const label = project ? "项目归属" : "供应商";
     const display = String(value ?? "").trim();
-    const disabled = this.detailState?.readOnly ? "disabled" : "";
+    // 只读批次里点开选择器必然被服务端拒绝（只回一句「已整体回滚」），所以用与工具栏同一个
+    // 可写判据把它禁掉：要么能写、要么按钮就说明原因，不提供必然失败的入口。
+    const disabled = this.materialWriteAllowed() ? "" : "disabled";
     return `<td class="ocw-mf-cell ocw-mf-reference-cell ${extraClasses}" data-mf-column-index="${columnIndex}" data-mf-grid-field="${this.escape(fieldname)}"><span>${this.escape(display || "未设置")}</span><button type="button" class="ocw-mf-reference-picker" data-action="${action}" data-item-name="${this.escape(item.name || "")}" ${disabled}>${display ? "修正" : `选择${label}`}</button></td>`;
   }
 

@@ -1673,6 +1673,27 @@ def update_item_field(
     }
 
 
+def _batch_rollback_message(results: list[dict]) -> str:
+    """整体回滚时的对外文案：必须带出逐行的真实原因。
+
+    「要么全成功要么全回滚」只说明结果，不说明为什么；原因全在 ``results`` 里。
+    只回一句「已整体回滚」会让用户和操作记录都拿到一句无法定位的话（哪一行、为什么
+    都没有），于是只能反复点保存。这里取第一行失败做主线，其余只报数量。
+    """
+
+    failures = [row for row in results or [] if not row.get("ok")]
+    first = failures[0] if failures else {}
+    item_name = str(first.get("item_name") or "").strip()
+    detail = str(first.get("message") or "").strip()
+    cause = "：".join(part for part in (f"物料 {item_name}" if item_name else "", detail) if part)
+    message = "批量字段更新存在错误，已整体回滚。"
+    if cause:
+        message = f"{message}原因：{cause}"
+    if len(failures) > 1:
+        message = f"{message}（共 {len(failures)} 行失败）"
+    return message
+
+
 def batch_update_items(
     batch_name: str,
     updates: str,
@@ -1794,7 +1815,7 @@ def batch_update_items(
             "skipped_count": skipped_count,
             "error_count": error_count,
             "results": results,
-            "message": "批量字段更新存在错误，已整体回滚。",
+            "message": _batch_rollback_message(results),
         }
 
     if changed_count or skipped_count:
