@@ -552,6 +552,24 @@ console.log(JSON.stringify({keyless:{selected:keyless.selectedCount,project:keyl
     assert '#c43232' in danger and '#fff5f4' in danger
 
 
+def test_toolbar_disabled_buttons_look_disabled():
+    """工具栏里的禁用按钮必须看得出来。
+
+    0-foundation 的 `.ocw-outline-btn` 没有 `:disabled` 样式，禁用和可用渲染完全一样；
+    工具栏里只有批量按钮带紫色禁用态。物料区整体只读时「新增物料／删除所选」其实都点不了，
+    用户却只看到批量按钮变灰，就把它归因成「勾选不够」。这条守住通用禁用态的存在。
+    """
+    css = MATERIAL_GRID_CSS.read_text(encoding='utf-8')
+    rule = css.split('.ocw-mf-selection-toolbar button:disabled {', 1)[1].split('}', 1)[0]
+    assert 'not-allowed' in rule
+    assert '#98a2b3' in rule
+    # 批量按钮的紫色禁用态仍要保留（选择器更具体，不会被上面这条覆盖）。
+    assert '.ocw-mf-selection-toolbar .ocw-mf-batch-btn:disabled {' in css
+    # 只读提示的胶囊样式与工具栏同处一个文件，不能只渲染没有样式。
+    lock = css.split('.ocw-mf-selection-lock {', 1)[1].split('}', 1)[0]
+    assert '#fff7e6' in lock and '#8a5a00' in lock
+
+
 def test_select_all_page_action_reuses_the_shared_page_toggle():
     """点击入口必须落在既有的 toggleMaterialPageSelection 上，且只覆盖当前页。"""
     source = MATERIAL_GRID_PART.read_text(encoding='utf-8')

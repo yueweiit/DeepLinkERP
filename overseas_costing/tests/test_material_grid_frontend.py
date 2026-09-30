@@ -485,25 +485,47 @@ def test_supplier_picker_always_offers_the_no_supplier_marker_option():
 
 
 def test_material_workspace_announces_the_readonly_reason_inline():
-    """只读原因原来只在禁用按钮的 title 里；现在要在物料区上方亮出来。"""
+    """只读原因原来只在禁用按钮的 title 里；现在要在物料区上方亮出来。
+
+    回归背景：`0-foundation` 的 `.ocw-outline-btn` 没有 `:disabled` 样式，禁用与可用长得一样，
+    工具栏里只有批量按钮带紫色禁用态 —— 物料区整体只读时，用户只看到这两个按钮灰着，
+    就误判成「没全选所以不能点」。所以原因还要贴到批量按钮旁边，且每个写入按钮都要真带 disabled。
+    """
 
     result = _fee_workspace_result(r"""
-const w=Object.create(Harness.prototype);w.detailState={readOnly:false};
+const w=Object.create(Harness.prototype);w.detailState={readOnly:false};w.escape=v=>String(v??'');
 const state=w.ensureMaterialFeeState();
-state.materials={packing_group_editable:true,items:[]};
+state.materials={packing_group_editable:true,packing_groups:[],items:[{name:'A',row_no:1}]};
+state.packingGroupSelections=new Set(['A']);
 const editableHtml=w.materialReadonlyNoteHtml();
-state.materials={packing_group_editable:false,items:[]};
+const editableToolbar=w.renderMaterialSelectionToolbar();
+state.materials={packing_group_editable:false,packing_groups:[],items:[{name:'A',row_no:1}]};
 const lockedHtml=w.materialReadonlyNoteHtml();
+const lockedToolbar=w.renderMaterialSelectionToolbar();
 w.detailState={readOnly:true};
-state.materials={packing_group_editable:true,items:[]};
+state.materials={packing_group_editable:true,packing_groups:[],items:[{name:'A',row_no:1}]};
 const leaseHtml=w.materialReadonlyNoteHtml();
-console.log(JSON.stringify({editableHtml,lockedHtml,leaseHtml}));
+console.log(JSON.stringify({editableHtml,lockedHtml,leaseHtml,editableToolbar,lockedToolbar}));
 """)
     assert result["editableHtml"] == ""
     assert '物料区只读' in result["lockedHtml"]
     assert '勾选与全选本页仅用于查看范围' in result["lockedHtml"]
     assert '批量设置等写入操作暂不可用' in result["lockedHtml"]
     assert '物料区只读' in result["leaseHtml"]
+
+    def button(action, html):
+        head, tail = html.split(f'data-action="{action}"', 1)
+        return head.rsplit('<button', 1)[1] + tail.split('>', 1)[0]
+
+    # 只读时每个写入按钮都真带 disabled，并把原因贴在批量按钮旁边（可写时不留这个提示）。
+    assert 'ocw-mf-selection-lock' not in result["editableToolbar"]
+    assert 'ocw-mf-selection-lock' in result["lockedToolbar"]
+    assert '物料区只读 · 批量设置不可用' in result["lockedToolbar"]
+    for action in ('mf-add-material', 'mf-set-project', 'mf-set-supplier'):
+        assert 'disabled' in button(action, result["lockedToolbar"])
+        assert 'disabled' not in button(action, result["editableToolbar"])
+    # 「全选本页」只用来圈查看范围，只读批次照旧可点，不能被这层提示连坐。
+    assert 'disabled' not in button('mf-select-page', result["lockedToolbar"])
 
 
 def test_row_checkboxes_and_page_selection_cover_identity_rows_even_when_readonly():
@@ -837,3 +859,31 @@ def test_older_workspace_snapshot_cannot_rewind_the_write_revision():
     assert result["afterNewer"] == "2026-09-24 15:02:00.000001"
     assert result["version"] == "V-1"
 
+
+
+def test_reference_cells_show_pending_state_until_a_value_is_set():
+    """项目归属／供应商空格子里的文案是「待设置」（待办），不是「未设置」（状态描述）。
+
+    用户口径：这两个格子等的是业务/采购去指定 ERP 路由与供应商，属于待办；
+    写着「未设置」和旁边那个可点的选择入口对不上。有值时仍显示真实值 + 修正，绝不能换成占位文案。
+    """
+
+    result = _fee_workspace_result(r'''
+    const w=Object.create(Harness.prototype);w.escape=v=>String(v??'');w.formatValue=v=>String(v??'');w.detailState={readOnly:false};
+    const state=w.ensureMaterialFeeState();state.materials={packing_group_editable:true,items:[]};
+    const columns=w.materialFeeGridColumns();
+    const cell=(item,field)=>w.renderMaterialFeeGridCell(item,columns.find(c=>c.field===field),new Set(),0);
+    console.log(JSON.stringify({
+      blankProject:cell({name:'I1',project_collection:''},'project_collection'),
+      blankSupplier:cell({name:'I1',supplier:''},'supplier'),
+      filledProject:cell({name:'I2',project_collection:'LatinGo拉丁购'},'project_collection')
+    }));
+    ''')
+    assert '<span>待设置</span>' in result["blankProject"]
+    assert '选择项目归属' in result["blankProject"]
+    assert '未设置' not in result["blankProject"]
+    assert '<span>待设置</span>' in result["blankSupplier"]
+    assert '选择供应商' in result["blankSupplier"]
+    assert '<span>LatinGo拉丁购</span>' in result["filledProject"]
+    assert '待设置' not in result["filledProject"]
+    assert '修正' in result["filledProject"]

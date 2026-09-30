@@ -279,10 +279,16 @@
 
 .ocw-mf-selection-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid #e3eaf3; border-bottom: 1px solid #d8e2ef; background: #f7fbff; }
 .ocw-mf-selection-toolbar button { flex: 0 0 auto; white-space: nowrap; }
+/* 0-foundation 的 .ocw-outline-btn 没有 :disabled 样式，禁用的描边按钮和可用的长得一模一样：
+   物料区只读时「新增物料/删除所选」其实都点不了，用户只看到带紫色样式的批量按钮变灰，
+   就误判成「只勾了几行所以不能点」。这里给工具栏所有禁用按钮统一可见的禁用态。 */
+.ocw-mf-selection-toolbar button:disabled { color: #98a2b3; border-color: #dfe3ea; background: #f2f4f7; cursor: not-allowed; }
 .ocw-mf-selection-toolbar button.is-danger:not(:disabled) { border-color: #e04b45; color: #c43232; background: #fff5f4; }
 .ocw-mf-selection-toolbar button.is-danger:hover:not(:disabled) { border-color: #cf3b36; background: #ffedeb; }
 .ocw-mf-selection-count { display: inline-flex; align-items: center; gap: 7px; min-width: 76px; color: #344054; font-size: 12px; font-weight: 700; }
 .ocw-mf-selection-count small { border-radius: 999px; padding: 3px 7px; background: #e4f2fd; color: #076fbe; font-size: 10px; font-weight: 500; white-space: nowrap; }
+/* 只读批次里「为什么灰」要挨着按钮说：上方那段说明容易被当成页面常态文案忽略掉。 */
+.ocw-mf-selection-lock { display: inline-flex; align-items: center; gap: 5px; border-radius: 999px; padding: 3px 9px; border: 1px solid #f0c36d; background: #fff7e6; color: #8a5a00; font-size: 11px; font-weight: 700; white-space: nowrap; }
 
 /* 右侧批量组：这三个按钮一按就成片影响物料行，单独靠右并用紫色区分，避免和左侧逐行操作混成一条看不出差别的按钮带。 */
 .ocw-mf-selection-toolbar .ocw-mf-toolbar-batch { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; padding-left: 10px; border-left: 1px solid #ded3f7; }

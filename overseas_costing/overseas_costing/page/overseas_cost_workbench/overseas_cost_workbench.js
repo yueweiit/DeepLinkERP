@@ -11963,6 +11963,9 @@ class OverseasCostWorkbench {
     const pageSelectEnabled = pageSelection.total > 0;
     return {
       selectedKeys, selectedCount, crossPageCount, selectedGroupIds, incompleteGroupIds, ungroupedKeys, lockedPageKeys,
+      // 物料区整体只读（历史／已确认／已回写／锁定版本）：工具栏据此把原因贴在批量按钮旁边，
+      // 免得只有带紫色 :disabled 样式的批量按钮看得出来「点不了」，被误判成勾选不够。
+      readonly: !editable,
       actions: {
         add:{enabled:editable, reason:editable ? "" : readonlyReason},
         merge:{enabled:mergeEnabled, reason:mergeEnabled ? "" : structureReason("请选择至少两条连续、未分组的物料")},
@@ -12005,6 +12008,7 @@ class OverseasCostWorkbench {
       ${button("删除所选", "mf-exclude-selected", context.actions.remove, "ocw-outline-btn is-danger")}
       ${button("清除选择", "mf-clear-selection", context.actions.clear)}
       <span class="ocw-mf-toolbar-batch" aria-label="批量设置">
+        ${context.readonly ? `<span class="ocw-mf-selection-lock" title="${this.escape(context.actions.project.reason)}">物料区只读 · 批量设置不可用</span>` : ""}
         ${batch(context.actions.selectPage.label, "mf-select-page", context.actions.selectPage)}
         ${batch("批量设置项目归属", "mf-set-project", context.actions.project)}
         ${batch("批量设置供应商", "mf-set-supplier", context.actions.supplier)}
@@ -12932,7 +12936,9 @@ class OverseasCostWorkbench {
     // 只读批次里点开选择器必然被服务端拒绝（只回一句「已整体回滚」），所以用与工具栏同一个
     // 可写判据把它禁掉：要么能写、要么按钮就说明原因，不提供必然失败的入口。
     const disabled = this.materialWriteAllowed() ? "" : "disabled";
-    return `<td class="ocw-mf-cell ocw-mf-reference-cell ${extraClasses}" data-mf-column-index="${columnIndex}" data-mf-grid-field="${this.escape(fieldname)}"><span>${this.escape(display || "未设置")}</span><button type="button" class="ocw-mf-reference-picker" data-action="${action}" data-item-name="${this.escape(item.name || "")}" ${disabled}>${display ? "修正" : `选择${label}`}</button></td>`;
+    // 空格子的文案是「待设置」：这是待办（等采购/业务指定 ERP 路由与供应商），不是缺项报错；
+    // 「未设置」读起来像状态描述，和旁边那个可点的选择入口对不上。
+    return `<td class="ocw-mf-cell ocw-mf-reference-cell ${extraClasses}" data-mf-column-index="${columnIndex}" data-mf-grid-field="${this.escape(fieldname)}"><span>${this.escape(display || "待设置")}</span><button type="button" class="ocw-mf-reference-picker" data-action="${action}" data-item-name="${this.escape(item.name || "")}" ${disabled}>${display ? "修正" : `选择${label}`}</button></td>`;
   }
 
   shipmentValuationStatus(valuation = {}) {
