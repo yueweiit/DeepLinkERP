@@ -233,6 +233,68 @@ def test_cost_hash_fee_projection_covers_the_declared_fee_input_contract():
     )
 
 
+# The AI-trial save hands the fingerprint an ``fx_context`` that already carries
+# the whole rate-resolution audit blob (``_apply_fx_resolution`` stores it under
+# ``fx_resolution``), while the read side rebuilds only the two rate columns from
+# the version row.  The audit blob is not a calculation input -- the allocation
+# reads only the two rates -- so hashing it verbatim pinned every AI-trial batch
+# on ``RESULT_STALE``.  ``COST_HASH_FX_FIELDS`` is the single owner of that
+# contract; both callers project through it inside ``cost_input_hash``.
+FX_AUDIT_RESOLUTION = {
+    "batch_name": "B1",
+    "version_name": "V1",
+    "ok": True,
+    "calculation_date": "2026-09-30",
+    "is_estimated": False,
+    "blocking_errors": [],
+    "rates": {
+        "USD": {"currency": "USD", "cny_per_unit": 6.72, "source": "version_snapshot"},
+        "MXN": {"currency": "MXN", "cny_per_unit": 0.38, "source": "version_snapshot"},
+    },
+}
+
+
+def test_fx_projection_is_the_declared_rate_contract():
+    projected = service.cost_hash_fx_projection(
+        {"fx_usd_to_rmb": 6.72, "fx_rmb_to_mxn": 2.631579, "fx_resolution": FX_AUDIT_RESOLUTION}
+    )
+    assert set(projected) == set(service.COST_HASH_FX_FIELDS)
+    assert projected == {"fx_usd_to_rmb": 6.72, "fx_rmb_to_mxn": 2.631579}
+    assert "fx_resolution" not in projected
+
+
+def test_cost_input_hash_ignores_the_fx_resolution_audit_blob():
+    """The regression this projection exists for, at the hash level."""
+
+    items, fees, fx = inputs()
+    trial_side = {**fx, "fx_resolution": FX_AUDIT_RESOLUTION}
+
+    assert service.cost_input_hash(items, fees, trial_side, "AIR") == service.cost_input_hash(
+        items, fees, fx, "AIR"
+    ), "the fx audit blob must not participate in the saved-result fingerprint"
+
+
+@pytest.mark.parametrize("mutation", ({"fx_usd_to_rmb": 6.9}, {"fx_rmb_to_mxn": 2.4}))
+def test_cost_input_hash_tracks_every_declared_fx_rate(mutation):
+    items, fees, fx = inputs()
+
+    assert service.cost_input_hash(items, fees, {**fx, **mutation}, "AIR") != service.cost_input_hash(
+        items, fees, fx, "AIR"
+    ), f"{sorted(mutation)} changes the valuation and must stale the saved result"
+
+
+def test_trial_loader_and_read_side_produce_the_same_fingerprint_with_fx_audit_blob():
+    """Both loaders, same business facts, different fx_context shapes."""
+
+    items, fees, fx = inputs()
+    read_side_fx = {key: fx.get(key) for key in ("fx_usd_to_rmb", "fx_rmb_to_mxn")}
+    trial_side_fx = {**read_side_fx, "fx_resolution": FX_AUDIT_RESOLUTION}
+
+    assert service.cost_input_hash(items, fees, trial_side_fx, "AIR") == service.cost_input_hash(
+        items, fees, read_side_fx, "AIR"
+    )
+
+
 def test_deactivated_fee_is_caught_by_selection_not_by_the_per_row_fingerprint():
     """Enabling is a *selection* concern; the composition layer drops the row.
 

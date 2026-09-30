@@ -111,6 +111,26 @@ COST_HASH_ITEM_SKIP_FIELDS = ("spec_model",)
 # save path and the read path disagreeing over a mere type difference.
 COST_HASH_JSON_ITEM_FIELDS = ("extra_json",)
 
+# The foreign-exchange inputs the calculation actually reads.  ``cost_input_hash``
+# hashed the whole ``fx_context`` mapping verbatim, but the two loaders do not
+# hand over the same mapping: ``cost_trial_ai_service._apply_fx_resolution``
+# stores the entire rate-resolution audit blob under ``fx_resolution`` before the
+# AI-trial save hashes it, while the read side rebuilds only the two rate columns
+# from the version row.  ``fx_resolution`` is an audit payload -- the allocation
+# never reads it (only ``fx_usd_to_rmb``/``fx_rmb_to_mxn`` are consumed, see
+# ``preview_comprehensive_cost_data`` and ``fee_policy``) -- so hashing it pinned
+# every AI-trial batch on ``RESULT_STALE`` even when both sides agreed on both
+# rates.  Projecting to this contract keeps the fingerprint dependent only on the
+# declared fx inputs, exactly like the item/fee projections above.
+COST_HASH_FX_FIELDS = ("fx_usd_to_rmb", "fx_rmb_to_mxn")
+
+
+def cost_hash_fx_projection(fx_context) -> dict:
+    """Return only the declared calculation inputs of the fx context."""
+
+    context = fx_context if isinstance(fx_context, dict) else {}
+    return {field: context.get(field) for field in COST_HASH_FX_FIELDS}
+
 
 def _canonical_item_value(field, value):
     """Normalise one item value so every loader fingerprints the same bytes."""
@@ -810,7 +830,8 @@ def _without_private_trial_fields(value):
 
 def cost_input_hash(items, fees, fx_context, transport_mode, fee_components=None) -> str:
     # Only declared calculation inputs, never audit labels or loader-specific
-    # columns: see COST_HASH_ITEM_SKIP_FIELDS and COST_HASH_FEE_FIELDS.
+    # columns: see COST_HASH_ITEM_SKIP_FIELDS, COST_HASH_FEE_FIELDS and
+    # COST_HASH_FX_FIELDS.
     hash_items = [cost_hash_item_projection(row) for row in (items or [])]
     hash_fees = [cost_hash_fee_projection(row) for row in (fees or [])]
     components = sorted(
@@ -825,7 +846,9 @@ def cost_input_hash(items, fees, fx_context, transport_mode, fee_components=None
         ),
     )
     return hashlib.sha256(
-        _json(_without_private_trial_fields([hash_items, hash_fees, fx_context, transport_mode, components])).encode()
+        _json(_without_private_trial_fields(
+            [hash_items, hash_fees, cost_hash_fx_projection(fx_context), transport_mode, components]
+        )).encode()
     ).hexdigest()
 
 
