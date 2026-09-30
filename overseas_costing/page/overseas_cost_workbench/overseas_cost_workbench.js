@@ -11822,15 +11822,34 @@ class OverseasCostWorkbench {
     return groups;
   }
 
-  /** 物料区唯一的「可写」判据：历史、已确认、已回写、锁定版本与详情页只读都算不可写。 */
+  /** 物料区「成本字段 + 结构操作」的可写判据：历史、已确认、已回写、锁定版本与详情页只读都算不可写。 */
   materialWriteAllowed() {
     const state = this.ensureMaterialFeeState();
     return state.materials?.packing_group_editable !== false && !this.detailState?.readOnly;
   }
 
-  /** 字段写入（项目归属、供应商）服务端按 item.name 定位，不要求行有 stable_line_key。 */
+  /**
+   * 参考字段（供应商 / 项目归属）的唯一可写判据，比成本字段宽一档。
+   *
+   * 这两项是 ERP 路由与采购的基础资料、不参与金额计算，采购往往在成本确认**之后**才补齐，
+   * 所以已确认 / 已锁定 / 已回写的**当前版本**仍可维护。服务端同一口径：写入门槛
+   * `_assert_current_item_version(..., reference_fields=True)`，载荷字段 `reference_editable`；
+   * 写入后服务端会把已存结果的输入指纹重新对齐（金额不变），不会把批次钉在「待重新计算」上。
+   * 历史与归档版本照旧只读。
+   */
+  materialReferenceWriteAllowed() {
+    const state = this.ensureMaterialFeeState();
+    return state.materials?.reference_editable !== false && !this.detailState?.readOnly;
+  }
+
+  /** 行级成本字段写入：整块可写，且不是 AI 替换草稿行（草稿行改的是另一份 payload）。 */
   materialRowIsWritable(item) {
     return Boolean(item && !item.__aiReplacement && this.materialWriteAllowed());
+  }
+
+  /** 行级参考字段写入：服务端按 item.name 定位，不要求行有 stable_line_key。 */
+  materialRowIsReferenceWritable(item) {
+    return Boolean(item && !item.__aiReplacement && this.materialReferenceWriteAllowed());
   }
 
   /** 行结构写入（合并/解除合并/软排除）服务端按 stable_line_key 定位，缺键行一律做不了。 */
@@ -11848,8 +11867,9 @@ class OverseasCostWorkbench {
     return this.materialFeeVisibleItems().filter((item) => this.materialRowSelectionKey(item));
   }
 
-  materialPageWritableRows() {
-    return this.materialFeeVisibleItems().filter((item) => this.materialRowIsWritable(item));
+  /** 本页「参考字段可写」的行 —— 勾选门槛用它：已确认批次上批量补归属/供应商也要能算进有效选择。 */
+  materialPageReferenceWritableRows() {
+    return this.materialFeeVisibleItems().filter((item) => this.materialRowIsReferenceWritable(item));
   }
 
   materialPageStructurableRows() {
@@ -11903,7 +11923,7 @@ class OverseasCostWorkbench {
     // 三个集合必须用同一个行身份（materialRowSelectionKey）拼装：勾选键放宽到「有身份即可」
     // 之后，只按 stable_line_key 建集合会把 name 键全判成「未知行」，批量设置门槛集体失灵。
     const pageKeys = new Set(pageRows.map((row) => this.materialRowSelectionKey(row)).filter(Boolean));
-    const writablePageKeys = new Set(this.materialPageWritableRows()
+    const writablePageKeys = new Set(this.materialPageReferenceWritableRows()
       .map((row) => this.materialRowSelectionKey(row)).filter(Boolean));
     const structurablePageKeys = new Set(this.materialPageStructurableRows()
       .map((row) => this.materialRowSelectionKey(row)).filter(Boolean));
@@ -11929,6 +11949,8 @@ class OverseasCostWorkbench {
     const selectedCount = selectedKeys.size;
     const crossPageCount = [...selectedKeys].filter((key) => !pageKeys.has(key)).length;
     const editable = this.materialWriteAllowed();
+    // 参考字段比成本字段宽一档：已确认 / 已锁定的当前版本也要能补供应商与项目归属。
+    const referenceEditable = this.materialReferenceWriteAllowed();
     const orderedKeys = pageRows.map((row) => this.materialRowSelectionKey(row));
     const positions = ungroupedKeys.map((key) => orderedKeys.indexOf(key)).sort((a, b) => a - b);
     const contiguous = positions.length >= 2 && positions.every((position, index) =>
@@ -11936,6 +11958,7 @@ class OverseasCostWorkbench {
     const completeSelection = !unknownKeys.length && !lockedPageKeys.length && !incompleteGroupIds.length;
     const structureReady = completeSelection && !keylessPageKeys.length;
     const readonlyReason = "历史、已确认、已回写或锁定版本不可编辑";
+    const referenceReadonlyReason = "历史或归档版本不可维护供应商与项目归属";
     const lockedSelectionReason = "当前选择包含不可操作的 AI 替换草稿行";
     const keylessStructureReason = "所选行缺少物料行标识（stable_line_key），暂不支持合并、解除合并与删除";
     // 结构类动作失败原因的优先级：先讲清「为什么写不了」，再讲「选择不够」，最后才是各自动作的形状要求。
@@ -11953,7 +11976,7 @@ class OverseasCostWorkbench {
     const unmergeEnabled = editable && structureReady && selectedGroupIds.length >= 1
       && !ungroupedKeys.length && selectedMemberKeys.length === selectedCount;
     const removeEnabled = editable && structureReady && selectedCount > 0;
-    const projectEnabled = editable && selectedCount > 0 && !unknownKeys.length && !lockedPageKeys.length;
+    const projectEnabled = referenceEditable && selectedCount > 0 && !unknownKeys.length && !lockedPageKeys.length;
     // 表头那个复选框一直是本页全选的唯一入口，但它没有文字、贴在固定列最左边，
     // 用户找不到。这里把同一份状态显式接到工具栏上，复用既有 materialPageSelectionState
     // 与 toggleMaterialPageSelection，不新增选择逻辑。
@@ -11966,14 +11989,17 @@ class OverseasCostWorkbench {
       // 物料区整体只读（历史／已确认／已回写／锁定版本）：工具栏据此把原因贴在批量按钮旁边，
       // 免得只有带紫色 :disabled 样式的批量按钮看得出来「点不了」，被误判成勾选不够。
       readonly: !editable,
+      // 只读批次里参考字段仍可能可写（已确认的当前版本要由采购补供应商 / 项目归属）：
+      // 工具栏的只读胶囊与那两颗批量按钮据此分开判断，不再一起连坐。
+      referenceReadonly: !referenceEditable,
       actions: {
         add:{enabled:editable, reason:editable ? "" : readonlyReason},
         merge:{enabled:mergeEnabled, reason:mergeEnabled ? "" : structureReason("请选择至少两条连续、未分组的物料")},
         edit:{enabled:editEnabled, reason:editEnabled ? "" : structureReason("请只选择一个完整装箱组")},
         unmerge:{enabled:unmergeEnabled, reason:unmergeEnabled ? "" : structureReason("请选择一个或多个完整装箱组")},
         remove:{enabled:removeEnabled, reason:removeEnabled ? "" : structureReason("请先选择物料")},
-        project:{enabled:projectEnabled, reason:projectEnabled ? "" : !editable ? readonlyReason : "请先选择有效物料行"},
-        supplier:{enabled:projectEnabled, reason:projectEnabled ? "" : !editable ? readonlyReason : "请先选择有效物料行"},
+        project:{enabled:projectEnabled, reason:projectEnabled ? "" : !referenceEditable ? referenceReadonlyReason : "请先选择有效物料行"},
+        supplier:{enabled:projectEnabled, reason:projectEnabled ? "" : !referenceEditable ? referenceReadonlyReason : "请先选择有效物料行"},
         selectPage:{enabled:pageSelectEnabled,
           label:pageSelection.checked ? "取消全选本页" : "全选本页",
           // 只覆盖当前页可勾选的物料行；跨页选择靠逐页累积（已选计数会标出跨页成员数）。
@@ -11989,7 +12015,12 @@ class OverseasCostWorkbench {
     // 只读原因原来只在禁用按钮的 title 里，用户点了没反应却看不到为什么；
     // 这里复用 ocw-mf-dialog-note 把原因亮出来。勾选/全选现在只读批次也可用，
     // 但那只是查看范围，真正拦住的是批量写入，所以文案要说清这层区别。
-    return `<div class="ocw-mf-dialog-note"><strong>物料区只读</strong><span>历史、已确认、已回写或锁定的版本不可修改；勾选与全选本页仅用于查看范围，批量设置等写入操作暂不可用。如需修改数据，请先走解锁/调整流程。</span></div>`;
+    if (this.materialReferenceWriteAllowed()) {
+      // 已确认 / 已锁定的当前版本：成本字段与装箱组结构冻结，但采购仍需补供应商与项目归属
+      // （服务端对这两项单独放行，并把已存结果的输入指纹重新对齐，不会变成「待重新计算」）。
+      return `<div class="ocw-mf-dialog-note"><strong>成本字段只读 · 基础资料可维护</strong><span>该版本已确认／锁定：数量、金额与装箱组结构不可修改；供应商与项目归属仍可按行维护，不影响已算出的成本结果。</span></div>`;
+    }
+    return `<div class="ocw-mf-dialog-note"><strong>物料区只读</strong><span>历史或归档版本仅供追溯，成本字段、供应商与项目归属都不可修改；勾选与全选本页仅用于查看范围。如需修改数据，请先走解锁/调整流程。</span></div>`;
   }
 
   renderMaterialSelectionToolbar() {
@@ -11999,6 +12030,15 @@ class OverseasCostWorkbench {
     // 左组是逐行／整组的编辑动作；右组这三个一按就成片影响物料行（选中本页、批量改归属、批量改供应商），
     // 靠右单独成组并用紫色区分，免得和左侧混成一条看不出差别的按钮带。
     const batch = (label, action, spec) => button(label, action, spec, "ocw-outline-btn ocw-mf-batch-btn");
+    // 只读胶囊只说真话：已确认／锁定的当前版本里，供应商与项目归属其实还能改（服务端专门放行），
+    // 写「批量设置不可用」会让采购以为资料补不了；真被禁的是左侧的成本字段与结构操作。
+    const lockNote = context.readonly
+      ? `<span class="ocw-mf-selection-lock" title="${this.escape(context.referenceReadonly
+          ? context.actions.project.reason
+          : "数量、金额与装箱组结构不可改；供应商与项目归属仍可维护")}">${context.referenceReadonly
+          ? "物料区只读 · 批量设置不可用"
+          : "成本字段只读 · 可补供应商/项目归属"}</span>`
+      : "";
     return `<div class="ocw-mf-selection-toolbar" aria-label="物料批量操作">
       <span class="ocw-mf-selection-count">已选 ${context.selectedCount} 行${context.crossPageCount ? `<small>含 ${context.crossPageCount} 个跨页成员</small>` : ""}</span>
       ${button("新增物料", "mf-add-material", context.actions.add)}
@@ -12008,7 +12048,7 @@ class OverseasCostWorkbench {
       ${button("删除所选", "mf-exclude-selected", context.actions.remove, "ocw-outline-btn is-danger")}
       ${button("清除选择", "mf-clear-selection", context.actions.clear)}
       <span class="ocw-mf-toolbar-batch" aria-label="批量设置">
-        ${context.readonly ? `<span class="ocw-mf-selection-lock" title="${this.escape(context.actions.project.reason)}">物料区只读 · 批量设置不可用</span>` : ""}
+        ${lockNote}
         ${batch(context.actions.selectPage.label, "mf-select-page", context.actions.selectPage)}
         ${batch("批量设置项目归属", "mf-set-project", context.actions.project)}
         ${batch("批量设置供应商", "mf-set-supplier", context.actions.supplier)}
@@ -12933,9 +12973,9 @@ class OverseasCostWorkbench {
     const action = project ? "mf-open-project-picker" : "mf-open-supplier-picker";
     const label = project ? "项目归属" : "供应商";
     const display = String(value ?? "").trim();
-    // 只读批次里点开选择器必然被服务端拒绝（只回一句「已整体回滚」），所以用与工具栏同一个
-    // 可写判据把它禁掉：要么能写、要么按钮就说明原因，不提供必然失败的入口。
-    const disabled = this.materialWriteAllowed() ? "" : "disabled";
+    // 用参考字段自己的可写判据（不是成本字段那个）：已确认 / 已锁定的当前版本服务端对这两项
+    // 单独放行。真正被禁掉的只剩历史与归档版本 —— 那时点开也只会被拒，所以按钮直接说明原因。
+    const disabled = this.materialReferenceWriteAllowed() ? "" : "disabled";
     // 空格子的文案是「待设置」：这是待办（等采购/业务指定 ERP 路由与供应商），不是缺项报错；
     // 「未设置」读起来像状态描述，和旁边那个可点的选择入口对不上。
     return `<td class="ocw-mf-cell ocw-mf-reference-cell ${extraClasses}" data-mf-column-index="${columnIndex}" data-mf-grid-field="${this.escape(fieldname)}"><span>${this.escape(display || "待设置")}</span><button type="button" class="ocw-mf-reference-picker" data-action="${action}" data-item-name="${this.escape(item.name || "")}" ${disabled}>${display ? "修正" : `选择${label}`}</button></td>`;

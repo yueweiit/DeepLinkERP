@@ -495,23 +495,33 @@ def test_material_workspace_announces_the_readonly_reason_inline():
     result = _fee_workspace_result(r"""
 const w=Object.create(Harness.prototype);w.detailState={readOnly:false};w.escape=v=>String(v??'');
 const state=w.ensureMaterialFeeState();
-state.materials={packing_group_editable:true,packing_groups:[],items:[{name:'A',row_no:1}]};
+state.materials={packing_group_editable:true,reference_editable:true,packing_groups:[],items:[{name:'A',row_no:1}]};
 state.packingGroupSelections=new Set(['A']);
 const editableHtml=w.materialReadonlyNoteHtml();
 const editableToolbar=w.renderMaterialSelectionToolbar();
-state.materials={packing_group_editable:false,packing_groups:[],items:[{name:'A',row_no:1}]};
+// 历史 / 归档版本：物料区整体只读。
+state.materials={packing_group_editable:false,reference_editable:false,packing_groups:[],items:[{name:'A',row_no:1}]};
 const lockedHtml=w.materialReadonlyNoteHtml();
 const lockedToolbar=w.renderMaterialSelectionToolbar();
+// 已确认 / 已锁定的当前版本：成本字段冻结，但供应商与项目归属仍要能维护。
+state.materials={packing_group_editable:false,reference_editable:true,packing_groups:[],items:[{name:'A',row_no:1}]};
+const confirmedHtml=w.materialReadonlyNoteHtml();
+const confirmedToolbar=w.renderMaterialSelectionToolbar();
 w.detailState={readOnly:true};
-state.materials={packing_group_editable:true,packing_groups:[],items:[{name:'A',row_no:1}]};
+state.materials={packing_group_editable:true,reference_editable:true,packing_groups:[],items:[{name:'A',row_no:1}]};
 const leaseHtml=w.materialReadonlyNoteHtml();
-console.log(JSON.stringify({editableHtml,lockedHtml,leaseHtml,editableToolbar,lockedToolbar}));
+console.log(JSON.stringify({editableHtml,lockedHtml,confirmedHtml,leaseHtml,
+  editableToolbar,lockedToolbar,confirmedToolbar}));
 """)
     assert result["editableHtml"] == ""
     assert '物料区只读' in result["lockedHtml"]
+    assert '历史或归档版本仅供追溯' in result["lockedHtml"]
     assert '勾选与全选本页仅用于查看范围' in result["lockedHtml"]
-    assert '批量设置等写入操作暂不可用' in result["lockedHtml"]
+    # 文档页只读（编辑租约/权限这一层）也要有说明，不能因为参考字段放宽就不提示。
     assert '物料区只读' in result["leaseHtml"]
+    # 已确认 / 锁定的当前版本：只读提示必须说清「什么不能改、什么还能补」。
+    assert '基础资料可维护' in result["confirmedHtml"]
+    assert '供应商与项目归属仍可按行维护' in result["confirmedHtml"]
 
     def button(action, html):
         head, tail = html.split(f'data-action="{action}"', 1)
@@ -524,6 +534,11 @@ console.log(JSON.stringify({editableHtml,lockedHtml,leaseHtml,editableToolbar,lo
     for action in ('mf-add-material', 'mf-set-project', 'mf-set-supplier'):
         assert 'disabled' in button(action, result["lockedToolbar"])
         assert 'disabled' not in button(action, result["editableToolbar"])
+    # 已确认 / 已锁定：成本按钮仍禁用，两颗批量设置按钮放行，胶囊改成说真话的那一句。
+    assert 'disabled' in button('mf-add-material', result["confirmedToolbar"])
+    assert 'disabled' not in button('mf-set-project', result["confirmedToolbar"])
+    assert 'disabled' not in button('mf-set-supplier', result["confirmedToolbar"])
+    assert '成本字段只读 · 可补供应商/项目归属' in result["confirmedToolbar"]
     # 「全选本页」只用来圈查看范围，只读批次照旧可点，不能被这层提示连坐。
     assert 'disabled' not in button('mf-select-page', result["lockedToolbar"])
 

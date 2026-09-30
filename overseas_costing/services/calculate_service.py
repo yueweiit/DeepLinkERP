@@ -52,6 +52,14 @@ REASON_REQUIRED_ITEM_FIELDS = PURCHASE_CORRECTION_FIELDS | frozenset({
     "project_collection",
     "supplier",
 })
+# 「参考字段」＝ERP 路由与采购的基础资料，唯一 owner。
+#
+# 这两项是采购/业务在成本确认**之后**才补齐的输入（站点默认供应商与 ERP 项目路由都靠它们），
+# 分摊计算却从不读它们：``cost_preview_service`` 里 ``project_collection`` 只在物料输出里
+# 透传（见 ``build_saved_cost_data`` 的 preview_items），``supplier`` 只出现在
+# ``COST_INPUT_FIELDS`` 的契约声明里。所以它们单开一档写入门槛：已确认 / 已锁定 / 已回写的
+# **当前版本**仍可维护，历史与归档版本照旧只读；数量金额与结构操作一字不放开。
+REFERENCE_ITEM_FIELDS = frozenset({"supplier", "project_collection"})
 SHIPMENT_VALUE_EDIT_FIELDS = frozenset({"shipment_value_rmb", "goods_value"})
 SHIPMENT_VALUE_INPUT_FIELDS = frozenset({
     "unit_price", "purchase_currency", "unit_price_uom", "purchase_uom",
@@ -1358,17 +1366,125 @@ def _insert_audit_log(
     ).insert(ignore_permissions=True)
 
 
-def _assert_current_item_version(batch_name, item_version, requested_version=None):
+def _item_version_context(batch_name, item_version, requested_version=None):
+    """锁定并返回「批次 + 版本」的写入上下文，供下面两档门槛共用（只查一次库）。"""
+
     if requested_version and requested_version != item_version:
         raise ValueError('物料不属于所选版本，请刷新当前调整草稿。')
     rows = _frappe.db.sql(
         "SELECT b.current_version, b.confirm_status, b.writeback_status, v.status AS version_status "
         "FROM `tabOverseas Cost Batch` b JOIN `tabOverseas Cost Version` v ON v.batch=b.name "
         "WHERE b.name=%s AND v.name=%s FOR UPDATE", (batch_name, item_version), as_dict=True)
-    context = rows[0] if rows else {}
-    if (context.get('current_version') != item_version or context.get('version_status') != 'Active'
-            or context.get('confirm_status') == 'Confirmed' or context.get('writeback_status') == 'Success'):
+    return rows[0] if rows else {}
+
+
+def _version_allows_cost_edits(context, item_version) -> bool:
+    """成本字段（数量、金额、装箱组结构）的门槛：必须是当前未确认、未回写的活动版本。"""
+
+    return bool(
+        context.get('current_version') == item_version
+        and context.get('version_status') == 'Active'
+        and context.get('confirm_status') != 'Confirmed'
+        and context.get('writeback_status') != 'Success'
+    )
+
+
+def _assert_current_item_version(batch_name, item_version, requested_version=None, *, reference_fields=False):
+    """物料写入门槛，两档。
+
+    ``reference_fields=True``：只写 :data:`REFERENCE_ITEM_FIELDS`（供应商 / 项目归属）时放宽为
+    「必须是本批次的当前版本、且版本未归档」。这两项是采购在成本确认后补的 ERP 基础资料、
+    不参与金额计算，所以已确认 / 已锁定 / 已回写的当前版本仍要能维护；同时
+    :func:`_refresh_saved_input_hash_for_reference_change` 会把已存结果的输入指纹重新对齐，
+    批次不会被钉在 RESULT_STALE 上。
+
+    默认档（历史版本、数量金额、结构操作）行为与放宽前逐字一致。
+    """
+
+    context = _item_version_context(batch_name, item_version, requested_version)
+    if reference_fields:
+        if (context.get('current_version') != item_version
+                or str(context.get('version_status') or '') in {'', 'Archived'}):
+            raise ValueError('只能维护当前版本的供应商与项目归属，历史或归档版本请创建调整草稿。')
+        return context
+    if not _version_allows_cost_edits(context, item_version):
         raise ValueError('只能编辑当前未确认的活动版本，历史版本请创建调整草稿。')
+    return context
+
+
+def _refresh_saved_input_hash_for_reference_change(batch_doc_name: str, version_name: str) -> None:
+    """把已存结果重新对齐到当前的参考字段（只用于 :data:`REFERENCE_ITEM_FIELDS` 的写入）。
+
+    两件事，都只碰参考字段，金额与分摊一个字节都不动：
+
+    1. 快照里的物料列表带了一份 ``project_collection`` 的透传副本（见
+       ``cost_preview_service.build_saved_cost_data`` 的 preview_items），
+       ``cost_review_service._saved_result_matches`` 会逐条比对它 —— 只刷指纹不刷它，
+       批次会从 ``RESULT_STALE`` 换成 ``SAVED_RESULT_INVALID``，还是「待重新计算」。
+       快照里没有的参考字段（``supplier``）自然不同步。
+    2. 重写 ``input_hash``。这两项按 ``COST_INPUT_FIELDS`` 契约在指纹里，但分摊计算从不读它们
+       （见常量注释）；而已确认版本不允许重算 ——
+       ``cost_preview_service.calculate_comprehensive_cost`` 对 Confirmed/Archived/is_locked
+       直接 ``PermissionError``，解锁只有物流结算链。所以不对齐，批次会被永久判成
+       ``RESULT_STALE`` 且无路可清。
+
+    现算走 ``cost_review_service.project_review_inputs`` —— 与判 RESULT_STALE 的是同一份实现，
+    不在这里另写一遍投影。
+    """
+
+    if _frappe is None:
+        return
+    from overseas_costing.services import batch_service, cost_review_service
+
+    try:
+        context = batch_service._load_erp_push_context(batch_doc_name, version_name)
+    except Exception:  # noqa: BLE001 - 读上下文失败不该把已经写成功的字段回报成失败
+        return
+    if not context or not context.get("ok"):
+        return
+    version = context.get("version") or {}
+    resolved_version = str(version.get("name") or "")
+    if not resolved_version:
+        return
+    snapshot = _load_json_dict(version.get("summary_snapshot_json"))
+    if not snapshot:
+        return
+    live_reference = {
+        str(row.get("name") or ""): {field: row.get(field) for field in REFERENCE_ITEM_FIELDS}
+        for row in (context.get("items") or [])
+    }
+    changed = False
+    for row in ((snapshot.get("comprehensive_cost") or {}).get("items") or []):
+        current = live_reference.get(str(row.get("name") or ""))
+        if not current:
+            continue
+        for field, value in current.items():
+            # 快照里没有的参考字段（supplier）不凭空加进去；有的就跟着当前值走。
+            if field in row and row.get(field) != value:
+                row[field] = value
+                changed = True
+    projection = cost_review_service.project_review_inputs(
+        batch=context.get("batch") or {},
+        version=version,
+        items=context.get("items") or [],
+        fees=context.get("rules") or [],
+        fee_components=context.get("fee_components") or [],
+        source_context=context.get("source_context") or {},
+    )
+    refreshed = str(projection.get("current_hash") or "")
+    if not refreshed or (not changed and snapshot.get("input_hash") == refreshed):
+        return
+    snapshot["input_hash"] = refreshed
+    _frappe.db.set_value(
+        "Overseas Cost Version", resolved_version, "summary_snapshot_json",
+        _json.dumps(snapshot, ensure_ascii=False, default=str), update_modified=False,
+    )
+    _insert_audit_log(
+        batch_doc_name=batch_doc_name,
+        version_name=resolved_version,
+        action_type="EDIT",
+        action_remark="已确认版本维护供应商 / 项目归属：已存结果的输入指纹已重新对齐（金额未变）",
+    )
 
 
 def update_item_field(
@@ -1383,7 +1499,13 @@ def update_item_field(
     _skip_edit_check: bool = False,
     _skip_commit: bool = False,
     _supplier_catalog=None,
+    _defer_reference_rebaseline: bool = False,
 ) -> dict:
+    """更新单行明细中的一个字段。
+
+    ``_defer_reference_rebaseline``：批量入口逐行调用本函数时置位，把「刷新已存结果的输入
+    指纹」推迟到整批写入之后做一次 —— 否则 N 行会各重算一遍全批哈希。
+    """
     is_shipment_value = fieldname in SHIPMENT_VALUE_EDIT_FIELDS
     edit_remark = _normalize_edit_remark(remark, manual_override_reason)
     is_allowed, validation_message, edit_mode = _validate_edit_field(fieldname, edit_remark)
@@ -1531,11 +1653,18 @@ def update_item_field(
             "message": "字段值未变化，已跳过保存。",
         }
 
+    reference_fields = fieldname in REFERENCE_ITEM_FIELDS
+    version_context = {}
     try:
-        _assert_current_item_version(item_doc.batch, item_doc.version, version_name)
+        version_context = _assert_current_item_version(
+            item_doc.batch, item_doc.version, version_name, reference_fields=reference_fields)
     except ValueError as exc:
         return {'ok': False, 'changed': False, 'item_name': item_name, 'fieldname': fieldname,
                 'version_name': version_name or item_doc.version, 'message': str(exc)}
+    # 「已确认 / 已锁定 / 已回写的当前版本上补基础资料」这一档：写入本身服务端放行，但它既不能
+    # 把批次标成 Dirty（那会让 cost_review_service 判 RESULT_STALE、列表显示成未确认），也不能
+    # 让已存快照的输入指纹就此对不上（已确认版本不允许重算，对不上就再也清不掉）。
+    reference_relaxed = reference_fields and not _version_allows_cost_edits(version_context, item_doc.version)
     valuation_result = None
     if is_shipment_value:
         from overseas_costing.services.shipment_cost_service import (
@@ -1641,7 +1770,12 @@ def update_item_field(
     if edit_remark and fieldname != "manual_override_reason":
         item_doc.manual_override_reason = edit_remark
     item_doc.save(ignore_permissions=True)
-    _frappe.db.set_value("Overseas Cost Batch", item_doc.batch, "status", "Dirty", update_modified=True)
+    if reference_relaxed:
+        # 已确认 / 锁定版本补基础资料：只推进并发版本号（乐观锁仍要前进），
+        # 绝不把 status 写成 Dirty —— 那等于把一个已确认批次说成未确认。
+        _frappe.db.set_value("Overseas Cost Batch", item_doc.batch, "modified", _now(), update_modified=False)
+    else:
+        _frappe.db.set_value("Overseas Cost Batch", item_doc.batch, "status", "Dirty", update_modified=True)
     _insert_audit_log(
         batch_doc_name=item_doc.batch,
         version_name=version_name or item_doc.version,
@@ -1650,8 +1784,15 @@ def update_item_field(
         row_no=getattr(item_doc, "row_no", None),
         old_value=old_value,
         new_value=coerced_value,
-        action_remark=f"单字段编辑：{edit_remark}" if edit_remark else "单字段编辑",
+        action_remark=(
+            f"已确认版本维护基础资料：{edit_remark}" if reference_relaxed and edit_remark
+            else "已确认版本维护基础资料" if reference_relaxed
+            else f"单字段编辑：{edit_remark}" if edit_remark
+            else "单字段编辑"
+        ),
     )
+    if reference_relaxed and not _defer_reference_rebaseline:
+        _refresh_saved_input_hash_for_reference_change(item_doc.batch, version_name or item_doc.version)
     if not _skip_commit:
         _frappe.db.commit()
     batch_modified = _frappe.db.get_value("Overseas Cost Batch", item_doc.batch, "modified")
@@ -1669,7 +1810,12 @@ def update_item_field(
         "batch_modified": batch_modified,
         "valuation": valuation_result,
         "goods_value": getattr(item_doc, "goods_value", None),
-        "message": "字段已更新，批次已标记为 Dirty。",
+        # 走「已确认/锁定版本补基础资料」这一档时为真：批量入口据此在整批写完后刷新一次指纹。
+        "reference_relaxed": reference_relaxed,
+        "message": (
+            "字段已更新（该版本已确认，仅维护供应商 / 项目归属，成本结果保持不变）。"
+            if reference_relaxed else "字段已更新，批次已标记为 Dirty。"
+        ),
     }
 
 
@@ -1795,6 +1941,7 @@ def batch_update_items(
             _skip_edit_check=True,
             _skip_commit=True,
             _supplier_catalog=supplier_catalog,
+            _defer_reference_rebaseline=True,
         )
         results.append(result)
         if not result.get("ok"):
@@ -1819,6 +1966,11 @@ def batch_update_items(
         }
 
     if changed_count or skipped_count:
+        if any(row.get("reference_relaxed") for row in results):
+            # 已确认 / 锁定版本上补基础资料：整批写完再刷新一次已存结果的输入指纹，
+            # 逐行做会把同一份全批哈希重算 N 遍。
+            _refresh_saved_input_hash_for_reference_change(
+                batch_doc_name, version_name or _resolve_version_name(batch_doc_name, version_name))
         _insert_audit_log(
             batch_doc_name=batch_doc_name,
             version_name=version_name,

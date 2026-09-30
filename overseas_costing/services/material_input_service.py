@@ -522,6 +522,14 @@ def get_material_grid(
             and str(batch_meta.get('writeback_status') or '') != 'Success'
             and not batch_meta.get('is_locked')
         ),
+        # 供应商 / 项目归属单开一档门槛，与 calculate_service._assert_current_item_version 的
+        # reference 档同一口径：只要求「是本批次的当前版本、且版本未归档」。这两项是采购在成本
+        # 确认后补的 ERP 基础资料、不参与金额计算，所以已确认 / 已锁定 / 已回写的当前版本仍可维护。
+        "reference_editable": bool(
+            isinstance(batch_meta, dict)
+            and str(batch_meta.get('current_version') or '') == str(resolved_version)
+            and str(version_meta.get('status') or '') not in {'', 'Archived'}
+        ),
     }
 
 

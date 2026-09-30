@@ -624,3 +624,71 @@ def test_remediation_projection_overrides_action_without_hiding_calculation_read
     })
     assert resolved["primary_action"] == "review"
     assert resolved["primary_issue"] == "ready"
+
+
+def test_reference_field_change_on_a_confirmed_batch_realigns_the_saved_result(monkeypatch):
+    """已确认批次补供应商 / 项目归属之后，批次不能停在「待重新计算」。
+
+    这两项按 ``COST_INPUT_FIELDS`` 契约在指纹里（所以补完指纹就变了），分摊计算却从不读它们；
+    已确认版本又不允许重算（``calculate_comprehensive_cost`` 直接 PermissionError）。所以服务端
+    写入后要把已存结果对齐回去：``calculate_service._refresh_saved_input_hash_for_reference_change``。
+
+    这里跑的是那份真实现，钉住三件事：对齐后 stale 类 blocker 全部消失；快照里带着的参考字段
+    透传副本跟着当前值走（只刷指纹不改副本会换成 SAVED_RESULT_INVALID，一样是「待重新计算」）；
+    金额与分摊一个字节都没被动过。
+    """
+
+    from types import SimpleNamespace
+
+    from overseas_costing.services import batch_service, calculate_service
+
+    context = saved_context()
+    context["batch"].update({"confirm_status": "Confirmed", "status": "Confirmed"})
+    context["version"]["status"] = "Confirmed"
+    confirmed = evaluate(context)
+    assert "RESULT_STALE" not in codes(confirmed)
+    assert confirmed["review_state"] == "confirmed"
+
+    # 确认之后采购才补上供应商与项目归属。
+    context["items"][0]["supplier"] = "SUP-1"
+    context["items"][0]["project_collection"] = "项目一"
+    assert "RESULT_STALE" in codes(evaluate(context))
+
+    stored = {}
+
+    def set_value(doctype, name, field, value, **kwargs):
+        stored[(doctype, name, field)] = value
+
+    monkeypatch.setattr(calculate_service, "_frappe", SimpleNamespace(
+        db=SimpleNamespace(set_value=set_value)))
+    monkeypatch.setattr(calculate_service, "_insert_audit_log", lambda **_kwargs: None)
+    monkeypatch.setattr(batch_service, "_load_erp_push_context", lambda batch_name, version_name: {
+        "ok": True,
+        "batch_doc_name": context["batch"]["name"],
+        "version_name": context["version"]["name"],
+        "batch": context["batch"],
+        "version": context["version"],
+        "items": context["items"],
+        "rules": context["fees"],
+        "evidence": context["evidence"],
+        "fee_components": [],
+        "source_context": {},
+    })
+
+    original = json.loads(context["version"]["summary_snapshot_json"])
+    calculate_service._refresh_saved_input_hash_for_reference_change("B-1", "V-1")
+
+    rewritten = json.loads(stored[("Overseas Cost Version", "V-1", "summary_snapshot_json")])
+    context["version"]["summary_snapshot_json"] = json.dumps(rewritten)
+    result = evaluate(context)
+
+    assert "RESULT_STALE" not in codes(result)
+    assert "SAVED_RESULT_INVALID" not in codes(result)
+    assert result["review_state"] == "confirmed"
+    assert rewritten["comprehensive_cost"]["items"][0]["project_collection"] == "项目一"
+    # 参考字段之外的东西不凭空加进快照（supplier 本来就不在 preview_items 里）。
+    assert "supplier" not in rewritten["comprehensive_cost"]["items"][0]
+    # 金额、分摊与汇总一个字都没动。
+    assert rewritten["comprehensive_cost"]["summary"] == original["comprehensive_cost"]["summary"]
+    assert (rewritten["comprehensive_cost"]["items"][0]["total_cost_rmb"]
+            == original["comprehensive_cost"]["items"][0]["total_cost_rmb"])

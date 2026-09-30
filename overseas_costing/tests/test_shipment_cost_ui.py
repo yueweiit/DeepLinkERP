@@ -361,7 +361,7 @@ def test_historical_material_grid_disables_packing_group_edits():
 
     result = _fee_workspace_result(r"""
 const w=Object.create(Harness.prototype);w.detailState={readOnly:true};const state=w.ensureMaterialFeeState();
-state.materials={packing_group_editable:false};w.escape=v=>String(v??'');w.formatValue=v=>String(v??'');
+state.materials={packing_group_editable:false,reference_editable:false};w.escape=v=>String(v??'');w.formatValue=v=>String(v??'');
 const item={name:'I1',stable_line_key:'L1',packing_group_id:'G1',packing_group_position:0,packing_group_size:2,packing_group:{group_id:'G1'}};
 const columns=w.materialFeeGridColumns();
 const select=w.renderMaterialFeeGridCell(item,columns.find(c=>c.field==='__group_select'),new Set(),3);
@@ -369,7 +369,7 @@ const row=Object.assign({},item,{supplier:''});
 const readonlyPicker=w.renderMaterialFeeGridCell(row,columns.find(c=>c.field==='supplier'),new Set(),4);
 const context=w.materialSelectionContext();
 w.detailState={readOnly:false};
-w.ensureMaterialFeeState().materials={packing_group_editable:true};
+w.ensureMaterialFeeState().materials={packing_group_editable:true,reference_editable:true};
 const writablePicker=w.renderMaterialFeeGridCell(row,columns.find(c=>c.field==='supplier'),new Set(),4);
 console.log(JSON.stringify({select,fields:columns.map(column=>column.field),readonlyPicker,writablePicker,
   add:context.actions.add,merge:context.actions.merge,project:context.actions.project,supplier:context.actions.supplier}));
@@ -385,6 +385,80 @@ console.log(JSON.stringify({select,fields:columns.map(column=>column.field),read
     assert 'disabled' in result['readonlyPicker']
     assert '选择供应商' in result['readonlyPicker']
     assert 'disabled' not in result['writablePicker']
+
+
+def test_confirmed_batch_still_maintains_supplier_and_project_attribution():
+    """已确认 / 已锁定的当前版本：成本字段与结构操作冻结，但供应商与项目归属仍可按行维护。
+
+    这两项是采购在成本确认**之后**才补的 ERP 基础资料、不参与金额计算，服务端单开一档放行
+    （`reference_editable` ≡ `_assert_current_item_version(..., reference_fields=True)`），
+    写入后还会把已存结果的输入指纹重新对齐。前端若拿成本字段那个判据把它们一起禁掉，
+    采购就再也补不了资料 —— 这正是用户报的「修正 / 选择供应商全灰」。
+    """
+
+    result = _fee_workspace_result(r"""
+const w=Object.create(Harness.prototype);w.detailState={readOnly:false};const state=w.ensureMaterialFeeState();
+state.materials={packing_group_editable:false,reference_editable:true,items:[
+  {name:'I1',stable_line_key:'L1',row_no:1,project_collection:'',supplier:''},
+  {name:'I2',stable_line_key:'L2',row_no:2,project_collection:'Guangzhou Lingxi',supplier:''}]};
+state.packingGroupSelections=new Set(['L1','L2']);
+w.escape=v=>String(v??'');w.formatValue=v=>String(v??'');
+const columns=w.materialFeeGridColumns();
+const cell=(item,field)=>w.renderMaterialFeeGridCell(item,columns.find(c=>c.field===field),new Set(),0);
+const context=w.materialSelectionContext();
+console.log(JSON.stringify({
+  projectPicker:cell(state.materials.items[1],'project_collection'),
+  supplierPicker:cell(state.materials.items[0],'supplier'),
+  project:context.actions.project,supplier:context.actions.supplier,
+  add:context.actions.add,remove:context.actions.remove,
+  readonly:context.readonly,referenceReadonly:context.referenceReadonly,
+  note:w.materialReadonlyNoteHtml(),toolbar:w.renderMaterialSelectionToolbar()
+}));
+""")
+    # 两个参考入口按行可点：有值给「修正」，空值给「选择供应商」。
+    assert 'disabled' not in result['projectPicker']
+    assert '修正' in result['projectPicker']
+    assert 'disabled' not in result['supplierPicker']
+    assert '选择供应商' in result['supplierPicker']
+    assert result['project']['enabled'] is True
+    assert result['supplier']['enabled'] is True
+    # 成本字段与结构操作仍然冻结 —— 放开只限这两项。
+    assert result['add']['enabled'] is False
+    assert result['remove']['enabled'] is False
+    assert result['readonly'] is True
+    assert result['referenceReadonly'] is False
+    # 只读提示必须说清「哪些不能改、哪些还能补」，否则采购会以为资料补不了。
+    assert '基础资料可维护' in result['note']
+    assert '成本字段只读 · 可补供应商/项目归属' in result['toolbar']
+    assert '批量设置不可用' not in result['toolbar']
+
+
+def test_reference_fields_stay_locked_on_archived_versions():
+    """历史 / 归档版本（reference_editable=false）照旧只读：这一档只放宽「当前版本」。"""
+
+    result = _fee_workspace_result(r"""
+const w=Object.create(Harness.prototype);w.detailState={readOnly:false};const state=w.ensureMaterialFeeState();
+state.materials={packing_group_editable:false,reference_editable:false,items:[
+  {name:'I1',stable_line_key:'L1',row_no:1,project_collection:'',supplier:''}]};
+state.packingGroupSelections=new Set(['L1']);
+w.escape=v=>String(v??'');w.formatValue=v=>String(v??'');
+const columns=w.materialFeeGridColumns();
+const cell=(item,field)=>w.renderMaterialFeeGridCell(item,columns.find(c=>c.field===field),new Set(),0);
+const context=w.materialSelectionContext();
+console.log(JSON.stringify({
+  projectPicker:cell(state.materials.items[0],'project_collection'),
+  supplierPicker:cell(state.materials.items[0],'supplier'),
+  project:context.actions.project,referenceReadonly:context.referenceReadonly,
+  note:w.materialReadonlyNoteHtml(),toolbar:w.renderMaterialSelectionToolbar()
+}));
+""")
+    assert 'disabled' in result['projectPicker']
+    assert 'disabled' in result['supplierPicker']
+    assert result['project']['enabled'] is False
+    assert '历史或归档版本' in result['project']['reason']
+    assert result['referenceReadonly'] is True
+    assert '历史或归档版本' in result['note']
+    assert '批量设置不可用' in result['toolbar']
 
 
 def test_material_selection_is_exact_and_toolbar_enforces_action_matrix():
@@ -478,7 +552,7 @@ state.packingGroupSelections=new Set();
 const emptyPage=w.materialSelectionContext().actions.selectPage;
 const emptyToolbar=w.renderMaterialSelectionToolbar();
 w.detailState={readOnly:true};
-state.materials={packing_group_editable:false,items:[{stable_line_key:'L1',row_no:1}],packing_groups:[]};
+state.materials={packing_group_editable:false,reference_editable:false,items:[{stable_line_key:'L1',row_no:1}],packing_groups:[]};
 const readonly=w.materialSelectionContext().actions.selectPage;
 w.toggleMaterialPageSelection(true);
 const readonlyToggled=w.materialSelectionContext().actions.selectPage;
@@ -497,8 +571,10 @@ console.log(JSON.stringify({emptyPage,emptyToolbar,readonly,readonlyToggled,sele
     assert result['selectedCount'] == 1
     assert '已选 1 行' in result['readonlyToolbar']
     # 选择放宽了，批量写入门槛没有：只读批次里批量动作依旧禁用并给出只读原因。
+    # 两颗批量「设置」按钮走的是参考字段那一档，所以原因是那一档的（历史 / 归档版本不可维护）；
+    # 已确认 / 已锁定的当前版本会在这一档上放行，见 test_confirmed_batch_still_maintains_...。
     assert result['project']['enabled'] is False
-    assert result['project']['reason'] == '历史、已确认、已回写或锁定版本不可编辑'
+    assert result['project']['reason'] == '历史或归档版本不可维护供应商与项目归属'
     assert result['supplier']['enabled'] is False
     assert result['remove']['enabled'] is False
 

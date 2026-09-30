@@ -139,6 +139,61 @@ def _saved_result_matches(snapshot: dict, expected: dict, items: list[dict]) -> 
     return True
 
 
+def project_review_inputs(*, batch: dict, version: dict, items: list[dict], fees: list[dict],
+                          fee_components: list[dict] | None = None,
+                          source_context: dict | None = None) -> dict:
+    """把「读路径 → 现算指纹」这一段收在一处，返回投影好的输入与 ``current_hash``。
+
+    两个调用方：``evaluate_review_readiness`` 用它判 ``RESULT_STALE``；
+    ``calculate_service._refresh_saved_input_hash_for_reference_change`` 用它把供应商 / 项目归属
+    这类非金额参考字段的变更对齐回已保存结果快照。**现算指纹只能有一个 owner** ——
+    两侧各写一份投影，就会像 ``COST_HASH_FX_FIELDS`` 注释里那次一样在同一个事实上各算各的。
+    """
+
+    mode = fee_service.resolve_transport_mode(batch.get("transport_mode"))
+    inputs = [{field: row.get(field) for field in cost_preview_service.COST_INPUT_FIELDS} for row in items]
+    from overseas_costing.services.effective_source_values import project_source_values
+    inputs = [project_source_values(row,source_context if source_context else None) for row in inputs]
+    from overseas_costing.services.material_packing_group_service import groups_from_version, project_packing_groups
+    inputs = project_packing_groups(inputs, groups_from_version(version))["items"]
+    inputs.sort(key=lambda row: (cost_preview_service._decimal(row.get("row_no")) or Decimal(0), str(row.get("name") or "")))
+    raw_fees = [{field: row.get(field) for field in fee_service._rule_fields()} for row in fees]
+    from overseas_costing.services.effective_source_values import source_context_from_items
+    composed = fee_service.compose_fee_worklist_rows(raw_fees, mode,source_context=source_context_from_items(inputs))
+    canonical_fees = fee_service._decorate_historical_rules(composed, mode)
+    fx = {key: version.get(key) for key in ("fx_usd_to_rmb", "fx_rmb_to_mxn")}
+    components = list(fee_components or [])
+    snapshot = _dict(version.get("summary_snapshot_json"))
+    trial_review = _dict(snapshot.get("ai_cost_trial"))
+    calculation_fees = composed
+    if trial_review.get("is_temporary"):
+        from overseas_costing.services.cost_trial_ai_service import project_fees_for_trial
+        temporary_choices = {
+            str(row.get("fee_key") or ""): row
+            for row in (trial_review.get("fee_choices") or [])
+            if row.get("fee_key") and row.get("temporary")
+        }
+        calculation_fees = project_fees_for_trial(composed, temporary_choices, for_save=True)
+    saved_items, saved_fees = cost_preview_service.normalize_saved_cost_inputs(
+        inputs,
+        calculation_fees,
+        fx,
+        mode,
+    )
+    return {
+        "mode": mode,
+        "inputs": inputs,
+        "canonical_fees": canonical_fees,
+        "fx": fx,
+        "components": components,
+        "snapshot": snapshot,
+        "trial_review": trial_review,
+        "calculation_fees": calculation_fees,
+        "cost_review_eligible": purchase_value_coverage(inputs)["complete"],
+        "current_hash": cost_preview_service.cost_input_hash(saved_items, saved_fees, fx, mode, components),
+    }
+
+
 def evaluate_review_readiness(*, batch: dict, version: dict, items: list[dict], fees: list[dict],
                               evidence: list[dict] | None = None,
                               fee_components: list[dict] | None = None,
@@ -168,21 +223,20 @@ def evaluate_review_readiness(*, batch: dict, version: dict, items: list[dict], 
         if not source_ready:
             block('SOURCE_ADOPTION_PENDING', '当前采购支出资料尚未有效采用，旧结果仅供追溯。')
 
-    mode = fee_service.resolve_transport_mode(batch.get("transport_mode"))
-    inputs = [{field: row.get(field) for field in cost_preview_service.COST_INPUT_FIELDS} for row in items]
-    from overseas_costing.services.effective_source_values import project_source_values
-    inputs = [project_source_values(row,source_context if source_context else None) for row in inputs]
-    from overseas_costing.services.material_packing_group_service import groups_from_version, project_packing_groups
-    inputs = project_packing_groups(inputs, groups_from_version(version))["items"]
-    inputs.sort(key=lambda row: (cost_preview_service._decimal(row.get("row_no")) or Decimal(0), str(row.get("name") or "")))
-    cost_review_eligible = purchase_value_coverage(inputs)["complete"]
-    raw_fees = [{field: row.get(field) for field in fee_service._rule_fields()} for row in fees]
-    from overseas_costing.services.effective_source_values import source_context_from_items
-    composed = fee_service.compose_fee_worklist_rows(raw_fees, mode,source_context=source_context_from_items(inputs))
-    canonical_fees = fee_service._decorate_historical_rules(composed, mode)
-    fx = {key: version.get(key) for key in ("fx_usd_to_rmb", "fx_rmb_to_mxn")}
-    components = list(fee_components or [])
-    snapshot = _dict(version.get("summary_snapshot_json"))
+    projection = project_review_inputs(
+        batch=batch, version=version, items=items, fees=fees,
+        fee_components=fee_components, source_context=source_context,
+    )
+    mode = projection["mode"]
+    inputs = projection["inputs"]
+    canonical_fees = projection["canonical_fees"]
+    fx = projection["fx"]
+    components = projection["components"]
+    snapshot = projection["snapshot"]
+    trial_review = projection["trial_review"]
+    calculation_fees = projection["calculation_fees"]
+    cost_review_eligible = projection["cost_review_eligible"]
+    current_hash = projection["current_hash"]
     cost_review_started = bool(
         snapshot.get("calculation_schema") == 2
         and snapshot.get("input_hash")
@@ -190,29 +244,6 @@ def evaluate_review_readiness(*, batch: dict, version: dict, items: list[dict], 
         and _saved_result_has_complete_purchase_values(snapshot)
         and version.get("calculated_at")
         and snapshot.get("calculated_at")
-    )
-    trial_review = _dict(snapshot.get("ai_cost_trial"))
-    calculation_fees = composed
-    if trial_review.get("is_temporary"):
-        from overseas_costing.services.cost_trial_ai_service import project_fees_for_trial
-        temporary_choices = {
-            str(row.get("fee_key") or ""): row
-            for row in (trial_review.get("fee_choices") or [])
-            if row.get("fee_key") and row.get("temporary")
-        }
-        calculation_fees = project_fees_for_trial(composed, temporary_choices, for_save=True)
-    saved_items, saved_fees = cost_preview_service.normalize_saved_cost_inputs(
-        inputs,
-        calculation_fees,
-        fx,
-        mode,
-    )
-    current_hash = cost_preview_service.cost_input_hash(
-        saved_items,
-        saved_fees,
-        fx,
-        mode,
-        components,
     )
     if any(fee.get("duplicate_rule_names") for fee in canonical_fees):
         # The saver rejects duplicates. The preview retains them as blockers so
