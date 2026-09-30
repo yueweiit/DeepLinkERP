@@ -457,6 +457,54 @@ def test_supplier_picker_offers_existing_and_create_without_reason_and_targets_e
     assert all(row["remark"] == "设置 ERP 供应商" for row in result["updates"])
 
 
+def test_supplier_picker_always_offers_the_no_supplier_marker_option():
+    """「没有供应商就选 /」：无供应商是常驻一等选项，写入走同一条批量更新链。"""
+
+    result = _fee_workspace_result(r'''
+    const w=Object.create(Harness.prototype);w.escape=value=>String(value??'');w.detailState={batchName:'B-1',versionName:'V',editToken:'T',expectedModified:'M'};
+    const state=w.ensureMaterialFeeState();state.materials={items:[]};
+    w.call=async()=>({raw_value:'',status:'EMPTY',canonical_supplier:'',candidates:[]});
+    const model=await w.loadSupplierResolution('');
+    const html=w.renderSupplierPickerOptions(model,{kind:'',value:''});
+    const rows=[{name:'A',stable_line_key:'L-A',material_code:'A',supplier:''}];
+    w.ensureEditSession=async()=>true;w.updateMaterialFeeExpectedModified=()=>{};w.loadMaterialFeeWorkspace=async()=>true;
+    let saved=null;w.call=async(endpoint,args)=>{saved={endpoint,args};return {ok:true,changed_count:1}};
+    await w.applySupplierSelection(rows,'/',{allowedValues:new Set(['/']),auditRemark:'标记为无供应商（/）'});
+    console.log(JSON.stringify({html,updates:JSON.parse(saved.args.updates)}));
+    ''')
+    assert 'data-mf-supplier-kind="none"' in result["html"]
+    assert 'data-mf-supplier-value="/"' in result["html"]
+    assert '标记为无供应商（/）' in result["html"]
+    assert '推送 ERP 前仍需补真实供应商' in result["html"]
+    assert result["updates"] == [{
+        "item_name": "A",
+        "fieldname": "supplier",
+        "value": "/",
+        "remark": "标记为无供应商（/）",
+    }]
+
+
+def test_material_workspace_announces_the_readonly_reason_inline():
+    """只读原因原来只在禁用按钮的 title 里；现在要在物料区上方亮出来。"""
+
+    result = _fee_workspace_result(r"""
+const w=Object.create(Harness.prototype);w.detailState={readOnly:false};
+const state=w.ensureMaterialFeeState();
+state.materials={packing_group_editable:true,items:[]};
+const editableHtml=w.materialReadonlyNoteHtml();
+state.materials={packing_group_editable:false,items:[]};
+const lockedHtml=w.materialReadonlyNoteHtml();
+w.detailState={readOnly:true};
+state.materials={packing_group_editable:true,items:[]};
+const leaseHtml=w.materialReadonlyNoteHtml();
+console.log(JSON.stringify({editableHtml,lockedHtml,leaseHtml}));
+""")
+    assert result["editableHtml"] == ""
+    assert '物料区只读' in result["lockedHtml"]
+    assert '全选本页与批量设置暂不可用' in result["lockedHtml"]
+    assert '物料区只读' in result["leaseHtml"]
+
+
 def test_supplier_exact_match_becomes_a_selectable_canonical_option():
     result = _fee_workspace_result(r'''
     const w=Object.create(Harness.prototype);w.detailState={batchName:'B-1'};w.ensureMaterialFeeState();

@@ -620,6 +620,64 @@ def test_logistics_approval_keeps_unmatched_supplier_only_in_metadata(monkeypatc
     assert metadata["dingtalk_goods_row_no"] == "TableField_9"
 
 
+def test_oa_goods_rows_carry_a_stable_line_key(monkeypatch) -> None:
+    """OA 骨架行此前不写 stable_line_key，工作台行复选框/全选本页因此永远禁用。
+
+    与装箱单导入（import_service）同口径：每行都必须有唯一的身份键。
+    """
+
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "resolve_supplier_reference",
+        lambda raw, suppliers=None: {
+            "raw_value": str(raw or "").strip(),
+            "status": "UNRESOLVED",
+            "canonical_supplier": "",
+            "candidates": [],
+        },
+    )
+    approval = {
+        "source_approval_no": "OA-KEY-1",
+        "source_instance_id": "PROC-KEY-1",
+        "form_fields": {
+            "货物信息Bienes": [
+                {
+                    "rowNumber": "TableField_1",
+                    "rowValue": [
+                        {"label": "物料编码 Código de material", "value": "M-1"},
+                        {"label": "数量Cantidad", "value": "1"},
+                    ],
+                },
+                {
+                    "rowNumber": "TableField_2",
+                    "rowValue": [
+                        {"label": "物料编码 Código de material", "value": "M-2"},
+                        {"label": "数量Cantidad", "value": "2"},
+                    ],
+                },
+            ],
+        },
+    }
+
+    items = build_oa_item_values_from_approval(approval)
+
+    keys = [item["stable_line_key"] for item in items]
+    assert all(keys)
+    assert len(set(keys)) == len(keys)
+
+
+def test_purchase_expense_item_values_carry_a_stable_line_key() -> None:
+    values = import_oa_logistics._build_purchase_expense_item_doc_values(
+        row={"material_code": "M-1", "product_name": "原料", "quantity": "2", "unit_price": "10"},
+        row_no=1,
+        batch_name="B",
+        version_name="V",
+        approval_item={},
+    )
+
+    assert values["stable_line_key"]
+
+
 def test_build_oa_items_loads_active_supplier_catalog_once_per_approval(monkeypatch) -> None:
     supplier_catalog = [
         {"name": "SUP-A", "supplier_name": "Supplier A", "disabled": 0},

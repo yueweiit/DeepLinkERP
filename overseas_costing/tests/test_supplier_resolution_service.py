@@ -57,6 +57,35 @@ def test_canonical_supplier_validation_uses_only_active_supplier_document_name()
         raise AssertionError("停用 Supplier 不得通过规范 ID 校验")
 
 
+def test_no_supplier_marker_is_the_canonical_explicit_none_value() -> None:
+    """「没有供应商就选 /」：``/`` 是显式无供应商标记，``-`` 等占位输入归一为 ``/``。
+
+    与空串（＝未设置）语义不同；标记也不依赖供应商目录，无目录时同样可写。
+    """
+
+    service = _service()
+
+    assert service.validate_canonical_supplier("/") == "/"
+    assert service.validate_canonical_supplier(" / ") == "/"
+    assert service.validate_canonical_supplier("-") == "/"
+    assert service.validate_canonical_supplier("—") == "/"
+    assert service.validate_canonical_supplier("－") == "/"
+    assert service.validate_canonical_supplier("") == ""
+    assert service.validate_canonical_supplier(None) == ""
+
+    suppliers = [{"name": "ACME", "supplier_name": "Acme Manufacturing", "disabled": 0}]
+    assert service.validate_canonical_supplier("/", suppliers=suppliers) == "/"
+
+
+def test_no_supplier_marker_never_resolves_to_a_real_supplier_document() -> None:
+    service = _service()
+    suppliers = [{"name": "-", "supplier_name": "Dash", "disabled": 0}]
+
+    assert service.validate_canonical_supplier("-", suppliers=suppliers) == "/"
+    with pytest.raises(ValueError):
+        service.validate_canonical_supplier("Dash", suppliers=suppliers)
+
+
 def test_duplicate_supplier_name_is_ambiguous_and_never_auto_canonicalized() -> None:
     service = _service()
     suppliers = [

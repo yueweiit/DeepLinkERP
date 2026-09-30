@@ -23,6 +23,10 @@ HIGH_CONFIDENCE_MARGIN = 0.08
 MAX_CANDIDATES = 5
 MAX_SUPPLIER_NAME_LENGTH = 140
 PLACEHOLDER_NAMES = {"-", "—", "－"}
+# 「显式无供应商」标记：写入物料 supplier 字段的规范值。``-``/``—``/``－`` 是等价输入，
+# 统一归一为 ``/`` 存储；与空串（＝未设置）语义不同。占位符供应商仍不能被创建成 Supplier。
+NO_SUPPLIER_MARKER = "/"
+NO_SUPPLIER_MARKERS = {"/", "-", "—", "－"}
 
 
 class SupplierCreationError(ValueError):
@@ -310,11 +314,17 @@ def create_supplier(
 
 
 def validate_canonical_supplier(value: Any, *, suppliers: Iterable[Any] | None = None) -> str:
-    """校验人工选中的规范 Supplier ID，不使用 supplier_name 别名解析。"""
+    """校验人工选中的规范 Supplier ID，不使用 supplier_name 别名解析。
+
+    ``/`` 是业务确认的「显式无供应商」标记（``-``/``—``/``－`` 是等价输入，统一归一为
+    ``/``），与「未设置」（空串）区分：标记过的行明确表达过"这行就是没有供应商"。
+    """
 
     text = str(value or "").strip()
     if not text:
         return ""
+    if text in NO_SUPPLIER_MARKERS:
+        return NO_SUPPLIER_MARKER
     normalized_value = normalize_supplier_text(text)
     rows = _active_supplier_rows(load_active_suppliers() if suppliers is None else suppliers)
     matches = [

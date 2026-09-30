@@ -477,10 +477,23 @@ def _decimal_text(value) -> str:
 def _supplier_push_state(item: dict, active_supplier_names: set[str] | None) -> dict:
     """Apply new-template supplier rules while retaining the documented legacy fallback."""
 
-    from overseas_costing.services.supplier_resolution_service import supplier_provenance_state
+    from overseas_costing.services.supplier_resolution_service import (
+        NO_SUPPLIER_MARKER,
+        supplier_provenance_state,
+    )
 
     state = supplier_provenance_state(item)
     item_key = _text(item.get("stable_line_key") or item.get("name") or item.get("row_no"))
+    if state["supplier"] == NO_SUPPLIER_MARKER:
+        return {
+            "warning": None,
+            "blocking": {
+                "code": "ITEM_SUPPLIER_REQUIRED",
+                "raw_value": state["raw_value"],
+                "match_status": state["match_status"],
+                "message": f"物料行 {item_key}：已标记为无供应商（/），推送 ERP 前需设置真实供应商。",
+            },
+        }
     if state["requires_explicit_supplier"]:
         return {
             "warning": None,

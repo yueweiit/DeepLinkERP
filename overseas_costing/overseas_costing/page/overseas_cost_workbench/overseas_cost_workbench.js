@@ -11429,6 +11429,7 @@ class OverseasCostWorkbench {
             </div>
           </div>
           ${blockingPackingGroups.length ? `<div class="ocw-mf-dialog-note"><strong>装箱组待重新确认</strong><span>组内物料曾被删除或恢复，试算已阻止。请勾选完整装箱组后从顶部操作条处理。</span></div>` : ""}
+          ${this.materialReadonlyNoteHtml()}
           ${this.renderMaterialAIClarification()}
           ${this.renderMaterialSelectionToolbar()}
           ${this.renderMaterialFeeGrid()}
@@ -11931,6 +11932,16 @@ class OverseasCostWorkbench {
     };
   }
 
+  materialReadonlyNoteHtml() {
+    const state = this.ensureMaterialFeeState();
+    const locked = (state.materials && state.materials.packing_group_editable === false)
+      || this.detailState?.readOnly === true;
+    if (!locked) return "";
+    // 只读原因原来只在禁用按钮的 title 里，用户点了没反应却看不到为什么；
+    // 这里复用 ocw-mf-dialog-note 把原因亮出来。
+    return `<div class="ocw-mf-dialog-note"><strong>物料区只读</strong><span>历史、已确认、已回写或锁定的版本不可编辑；行复选框、全选本页与批量设置暂不可用。如需修改数据，请先走解锁/调整流程。</span></div>`;
+  }
+
   renderMaterialSelectionToolbar() {
     const context = this.materialSelectionContext();
     const button = (label, action, spec, kind = "ocw-outline-btn") =>
@@ -12356,10 +12367,13 @@ class OverseasCostWorkbench {
     const options = model.options || [];
     const selectedKind = String(selection.kind || "");
     const selectedValue = String(selection.value || "");
+    // 「无供应商」是常驻一等选项：业务口径是"没有供应商就标 /"，与"未设置"（空）区分。
+    // 写入仍走同一条 batch_update_items 链，由服务端 validate_canonical_supplier 归一。
+    const none = `<section class="ocw-mf-reference-group"><h6>无供应商</h6><label class="ocw-mf-reference-option is-none ${selectedKind === "none" ? "is-selected" : ""}"><input type="radio" name="ocw-supplier" data-mf-supplier-kind="none" data-mf-supplier-value="/" ${selectedKind === "none" ? "checked" : ""}><span><strong>标记为无供应商（/）</strong><small>该行确认暂无供应商；推送 ERP 前仍需补真实供应商。</small></span></label></section>`;
     const existing = options.length ? `<section class="ocw-mf-reference-group"><h6>ERP 供应商</h6>${options.map((row) => `<label class="ocw-mf-reference-option ${selectedKind === "existing" && String(row.name) === selectedValue ? "is-selected" : ""}"><input type="radio" name="ocw-supplier" data-mf-supplier-kind="existing" data-mf-supplier-value="${this.escape(row.name)}" ${selectedKind === "existing" && String(row.name) === selectedValue ? "checked" : ""}><span><strong>${this.escape(row.name)}</strong><small>${this.escape(row.supplier_name || row.name)}${row.score ? ` · ${Math.round(Number(row.score) * 100)}%` : ""}</small></span>${row.high_confidence ? `<em>高置信候选</em>` : ""}</label>`).join("")}</section>` : "";
     const warning = model.highConfidence ? `<small>存在高置信近似供应商 ${this.escape(model.highConfidence.name)}；创建前需确认“这是不同供应商”。</small>` : `<small>仅创建基础 Supplier，详细档案可稍后维护。</small>`;
     const create = model.canCreate ? `<section class="ocw-mf-reference-group"><h6>没有完全同名结果</h6><label class="ocw-mf-reference-option is-create ${selectedKind === "create" ? "is-selected" : ""}"><input type="radio" name="ocw-supplier" data-mf-supplier-kind="create" data-mf-supplier-value="${this.escape(model.query)}" ${selectedKind === "create" ? "checked" : ""}><span><strong>新建供应商：${this.escape(model.query)}</strong>${warning}</span></label></section>` : "";
-    return existing || create ? `${existing}${create}` : `<p class="ocw-mf-reference-empty">请输入供应商名称，搜索已有供应商或快速新建。</p>`;
+    return `${none}${existing}${create}`;
   }
 
   async applySupplierSelection(items, value, options = {}) {
@@ -12423,7 +12437,13 @@ class OverseasCostWorkbench {
             error.materialReferenceInputInvalid = true;
             throw error;
           }
-          if (selection.kind === "existing") {
+          if (selection.kind === "none") {
+            const applied = await this.applySupplierSelection(items, "/", {
+              allowedValues:new Set(["/"]),
+              auditRemark:"标记为无供应商（/）",
+            });
+            if (!applied?.ok) return;
+          } else if (selection.kind === "existing") {
             const allowedValues = new Set(model.options.map((row) => row.name));
             const applied = await this.applySupplierSelection(items, selection.value, { allowedValues });
             if (!applied?.ok) return;

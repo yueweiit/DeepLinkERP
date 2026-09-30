@@ -350,6 +350,41 @@ def test_new_template_inactive_supplier_is_not_sent_to_erp() -> None:
     assert preview["blocking"][0]["code"] == "ITEM_SUPPLIER_INACTIVE"
 
 
+def test_no_supplier_marker_blocks_with_an_accurate_message_not_inactive() -> None:
+    """标记为 ``/``（显式无供应商）的行推送 ERP 必须继续拦截，但提示要说人话：
+    是“标记无供应商、需补真实供应商”，而不是“供应商已失效”。"""
+
+    preview = build_site_payload_preview(
+        {
+            "items": [
+                {
+                    "stable_line_key": "MARKED",
+                    "route_status": "RESOLVED",
+                    "erp_site_code": "DEEPLINKERP",
+                    "subsidiary_code": "Company A",
+                    "supplier": "/",
+                    "purchase_currency": "CNY",
+                    "purchase_uom": "件",
+                    "erp_warehouse": "仓库 - A",
+                    "extra_json": '{"supplier_field_present":true,"supplier_match_status":"EXACT"}',
+                }
+            ]
+        },
+        active_supplier_names={"Supplier A"},
+    )
+
+    assert preview["sites"] == []
+    assert preview["blocking"] == [
+        {
+            "code": "ITEM_SUPPLIER_REQUIRED",
+            "stable_line_key": "MARKED",
+            "raw_value": "",
+            "match_status": "EXACT",
+            "message": "物料行 MARKED：已标记为无供应商（/），推送 ERP 前需设置真实供应商。",
+        }
+    ]
+
+
 def test_legacy_item_without_supplier_column_keeps_default_supplier_fallback_warning() -> None:
     preview = build_site_payload_preview(
         {

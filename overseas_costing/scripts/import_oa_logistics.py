@@ -4109,6 +4109,8 @@ def pull_linked_purchase_approval_details(
 def build_oa_item_values_from_approval(item: dict) -> list[dict]:
     """把审批里的货物信息表格转成可写入 Overseas Cost Item 的基础行。"""
 
+    from overseas_costing.services.material_input_service import ensure_stable_line_key
+
     source_approval_no = _clean(item.get("source_approval_no"))
     source_instance_id = _clean(item.get("source_instance_id"))
     source_dingtalk_url = _clean(item.get("source_dingtalk_url"))
@@ -4133,6 +4135,9 @@ def build_oa_item_values_from_approval(item: dict) -> list[dict]:
         mapped.update(
             {
                 "row_no": index,
+                # 物料行身份键：装箱单导入（import_service）与手动新增都会生成，
+                # OA 骨架行此前漏了，导致工作台「全选本页」/行复选框永远禁用。
+                "stable_line_key": ensure_stable_line_key(mapped),
                 "quantity": _to_number_or_none(mapped.get("quantity")),
                 "gross_weight_kg": _to_number_or_none(mapped.get("gross_weight_kg")),
                 "actual_shipped_qty": _to_number_or_none(mapped.get("quantity")),
@@ -4533,6 +4538,8 @@ def _build_purchase_expense_item_doc_values(
     version_name: str,
     approval_item: dict,
 ) -> dict:
+    from overseas_costing.services.material_input_service import ensure_stable_line_key
+
     quantity = _to_number_or_none(row.get("quantity")) or 0
     goods_value = _to_number_or_none(row.get("goods_value"))
     unit_price = _to_number_or_none(row.get("unit_price"))
@@ -4543,6 +4550,8 @@ def _build_purchase_expense_item_doc_values(
         "batch": batch_name,
         "version": version_name,
         "row_no": row_no,
+        # 与 build_oa_item_values_from_approval 同口径：新行必须带身份键。
+        "stable_line_key": ensure_stable_line_key({}),
         "material_code": row.get("material_code") or "",
         "product_name": row.get("product_name") or "",
         "spec_model": row.get("spec_model") or "",
