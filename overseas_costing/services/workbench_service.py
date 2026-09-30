@@ -193,14 +193,13 @@ def filter_batches_for_task(rows: list[dict], task: str, review_status: str = "p
             and row.get("review_state") != "confirmed"
         ]
     if task == "erp":
+        # 队列保留待推送/失败，以及全部已确认批次（含已推送成功的 Success）——
+        # 已推送成功的批次也要留在队列里，才能在 ERP 队列直接看到推送结果并回访远端单据。
         return [
             row
             for row in rows
             if str(row.get("writeback_status") or "").lower() in {"pending", "failed"}
-            or (
-                str(row.get("confirm_status") or "").lower() == "confirmed"
-                and str(row.get("writeback_status") or "").lower() != "success"
-            )
+            or str(row.get("confirm_status") or "").lower() == "confirmed"
         ]
     return list(rows)
 
@@ -517,6 +516,17 @@ def get_batch_result_preview(batch_name: str, page=1, page_length=20) -> dict:
     )
 
 
+# ERP 状态筛选项 → writeback_status 取值域（Not Started / Pending / Failed / Success）的映射。
+# 「未推送」精确对应 Not Started；「待推送」按业务语义覆盖未开始与待推送两种未成功中间态，
+# 否则 Not Started 的批次在任一筛选项下都筛不出来（历史上就是精确等值导致的口径空洞）。
+ERP_WRITEBACK_STATUS_GROUPS = {
+    "not_started": {"not started"},
+    "pending": {"not started", "pending"},
+    "failed": {"failed"},
+    "success": {"success"},
+}
+
+
 def _matches_workbench_filters(row: dict, filters: dict) -> bool:
     subsidiary = str(filters.get("subsidiary_code") or "")
     if subsidiary and str(row.get("subsidiary_code") or "") != subsidiary:
@@ -524,9 +534,11 @@ def _matches_workbench_filters(row: dict, filters: dict) -> bool:
     calculation_status = str(filters.get("calculation_status") or "").lower()
     if calculation_status and str(row.get("status") or "").lower() != calculation_status:
         return False
-    erp_status = str(filters.get("erp_status") or "").lower()
-    if erp_status and str(row.get("writeback_status") or "").lower() != erp_status:
-        return False
+    erp_status = str(filters.get("erp_status") or "").strip().lower()
+    if erp_status:
+        allowed = ERP_WRITEBACK_STATUS_GROUPS.get(erp_status, {erp_status})
+        if str(row.get("writeback_status") or "").strip().lower() not in allowed:
+            return False
     return True
 
 

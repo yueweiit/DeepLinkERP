@@ -996,3 +996,28 @@ def test_remediation_audit_actions_have_human_readable_labels():
     assert 'REVIEW_REPLY: "整改回复"' in source
     assert 'REVIEW_RESUBMIT: "提交财务复核"' in source
     assert 'REVIEW_RESOLVE: "确认整改"' in source
+
+
+def test_erp_queue_offers_not_started_filter_and_links_pushed_rows_to_erp():
+    result = run_js("""
+const v=makeView('erp');
+v.filters={review_status:'pending',review_warning:'',issue:'',erp_status:''};
+v.renderWorkbenchSearch();
+const search=v.html["[data-area='search-panel']"]||'';
+const pushed=v.renderWorkbenchBatchRow({name:'S',batch_no:'202609221831000580722',writeback_status:'Success',confirm_status:'Confirmed',review_state:'confirmed',item_count:25});
+const fresh=v.renderWorkbenchBatchRow({name:'N',batch_no:'202609221831000581000',writeback_status:'Not Started',confirm_status:'Confirmed',review_state:'confirmed',item_count:3});
+console.log(JSON.stringify({
+ not_started_option: search.includes('value="not_started"'),
+ not_started_label: search.includes('未推送'),
+ pushed_uses_view_label: pushed.includes('查看 ERP'),
+ pushed_keeps_erp_entry: pushed.includes('data-primary-action="erp_retry"'),
+ fresh_uses_process_label: fresh.includes('处理 ERP'),
+}));
+""")
+    assert result == {
+        'not_started_option': True,
+        'not_started_label': True,
+        'pushed_uses_view_label': True,
+        'pushed_keeps_erp_entry': True,
+        'fresh_uses_process_label': True,
+    }

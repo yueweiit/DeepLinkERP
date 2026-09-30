@@ -146,14 +146,38 @@ def test_normalize_page_caps_page_length_and_handles_invalid_values() -> None:
     assert normalize_page("bad", "bad") == (1, 30)
 
 
-def test_erp_task_only_keeps_pending_or_failed_writeback() -> None:
+def test_erp_task_keeps_pending_failed_and_every_confirmed_batch() -> None:
     rows = [
         {"name": "PENDING", "writeback_status": "Pending", "confirm_status": "Pending"},
         {"name": "FAILED", "writeback_status": "Failed", "confirm_status": "Pending"},
         {"name": "READY", "writeback_status": "Not Started", "confirm_status": "Confirmed"},
         {"name": "DONE", "writeback_status": "Success", "confirm_status": "Confirmed"},
+        {"name": "SUCCESS-BUT-UNCONFIRMED", "writeback_status": "Success", "confirm_status": "Pending"},
     ]
-    assert [row["name"] for row in filter_batches_for_task(rows, "erp")] == ["PENDING", "FAILED", "READY"]
+    # 已确认批次全部留在 ERP 队列（含已推送成功的 Success），待推送/失败的非确认批次同样保留；
+    # 但「回写成功却未确认」的异常组合不进队列。
+    assert [row["name"] for row in filter_batches_for_task(rows, "erp")] == ["PENDING", "FAILED", "READY", "DONE"]
+
+
+def test_workbench_erp_status_filter_covers_not_started() -> None:
+    rows = [
+        {"name": "N", "writeback_status": "Not Started"},
+        {"name": "P", "writeback_status": "Pending"},
+        {"name": "F", "writeback_status": "Failed"},
+        {"name": "S", "writeback_status": "Success"},
+    ]
+
+    def matched(status: str) -> list[str]:
+        filters = {"erp_status": status} if status else {}
+        return [row["name"] for row in rows if workbench_service._matches_workbench_filters(row, filters)]
+
+    # 空值代表「全部 ERP 状态」。
+    assert matched("") == ["N", "P", "F", "S"]
+    # 未推送精确对应 Not Started；待推送按业务语义覆盖未开始与待推送两种未成功中间态。
+    assert matched("not_started") == ["N"]
+    assert matched("pending") == ["N", "P"]
+    assert matched("failed") == ["F"]
+    assert matched("success") == ["S"]
 
 
 def test_stale_saved_trial_stays_in_cost_review_not_pending() -> None:

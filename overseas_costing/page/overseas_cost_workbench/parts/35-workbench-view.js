@@ -517,6 +517,7 @@
         </select></label>
         <label><span>ERP 状态</span><select class="form-control" data-workbench-filter="erp_status">
           <option value="">全部 ERP 状态</option>
+          <option value="not_started" ${this.filters.erp_status === "not_started" ? "selected" : ""}>未推送</option>
           <option value="pending" ${this.filters.erp_status === "pending" ? "selected" : ""}>待推送</option>
           <option value="failed" ${this.filters.erp_status === "failed" ? "selected" : ""}>推送失败</option>
           <option value="success" ${this.filters.erp_status === "success" ? "selected" : ""}>推送成功</option>
@@ -893,7 +894,10 @@
     } else if (this.viewState.task === "cost") {
       action = {action: "review", label: "成本核算"};
     } else if (this.viewState.task === "erp") {
-      action = {action: "erp_retry", label: "处理 ERP"};
+      action = {
+        action: "erp_retry",
+        label: String(batch.writeback_status || "").toLowerCase().includes("success") ? "查看 ERP" : "处理 ERP",
+      };
     } else {
       action = {action: "supplement", label: "继续处理"};
     }
