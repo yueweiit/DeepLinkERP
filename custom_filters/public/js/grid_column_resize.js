@@ -2,7 +2,7 @@
 	if (window.__custom_filters_grid_column_resize_loaded) return;
 	window.__custom_filters_grid_column_resize_loaded = true;
 
-	const VERSION = "2026.08.31.2";
+	const VERSION = "2026.09.30.1";
 	const MAX_COLUMN_WIDTH = 420;
 	const MIN_COLUMN_WIDTH = 48;
 	const RESIZE_HANDLE_CLASS = "custom-filters-grid-column-resize-handle";
@@ -35,6 +35,9 @@
 			this.top_scrollbars = new WeakMap();
 			this.save_queue = Promise.resolve();
 			this.observer = null;
+			this.width_overrides = new Map();
+			this.settings_loads = new Map();
+			this.measure_context = document.createElement("canvas").getContext("2d");
 
 			this.handle_pointer_move = this.handle_pointer_move.bind(this);
 			this.handle_pointer_up = this.handle_pointer_up.bind(this);
@@ -60,7 +63,7 @@
 
 			window.addEventListener("resize", () => this.schedule_scan());
 			this.schedule_scan();
-			console.info(`[custom_filters grid_column_resize] version ${VERSION}`);
+			console.info(`[custom_filters ${this.feature_name || "grid_column_resize"}] version ${VERSION}`);
 		}
 
 		schedule_scan() {
@@ -76,6 +79,7 @@
 		}
 
 		scan() {
+			if (this.active_resize) return;
 			document.querySelectorAll(".grid-field .form-grid").forEach((form_grid) => {
 				this.enhance_grid(form_grid);
 			});
@@ -100,11 +104,19 @@
 
 		get_settings(context) {
 			if (!context.parent_doctype || !window.frappe?.get_user_settings) return {};
-			return frappe.get_user_settings(context.parent_doctype, SETTINGS_KEY) || {};
+			return frappe.get_user_settings(context.parent_doctype, context.settings_key || SETTINGS_KEY) || {};
+		}
+
+		get_width_overrides(context) {
+			const key = JSON.stringify([context.settings_key || SETTINGS_KEY, context.parent_doctype, context.table_fieldname]);
+			if (!this.width_overrides.has(key)) this.width_overrides.set(key, {});
+			return this.width_overrides.get(key);
 		}
 
 		get_saved_width(context, fieldname) {
 			if (!context.table_fieldname) return null;
+			const overrides = this.get_width_overrides(context);
+			if (Object.prototype.hasOwnProperty.call(overrides, fieldname)) return overrides[fieldname];
 			const table_settings = this.get_settings(context)[context.table_fieldname] || {};
 			const width = Number(table_settings[fieldname]);
 			return Number.isFinite(width) && width > 0 ? width : null;
@@ -115,31 +127,41 @@
 			if (frappe.model.user_settings[parent_doctype]) return Promise.resolve();
 			if (!frappe.model.user_settings.get) return Promise.resolve();
 
-			return frappe.model.user_settings.get(parent_doctype).then((settings) => {
-				frappe.model.user_settings[parent_doctype] = settings || {};
-			});
+			if (!this.settings_loads.has(parent_doctype)) {
+				this.settings_loads.set(parent_doctype, frappe.model.user_settings.get(parent_doctype)
+					.then((settings) => {
+						frappe.model.user_settings[parent_doctype] = settings || {};
+					})
+					.finally(() => this.settings_loads.delete(parent_doctype)));
+			}
+			return this.settings_loads.get(parent_doctype);
 		}
 
 		save_width(context, fieldname, width) {
 			if (!context.parent_doctype || !context.table_fieldname) return;
 
-			const value = {
-				[context.table_fieldname]: {
-					[fieldname]: width === null ? null : Math.round(width),
-				},
-			};
+			// Keep the latest drag visible while the asynchronous save is pending.
+			this.get_width_overrides(context)[fieldname] = width === null ? null : Math.round(width);
 
 			this.save_queue = this.save_queue
 				.catch(() => undefined)
 				.then(() => {
 					if (!frappe.model?.user_settings?.save) return undefined;
-					return this.ensure_settings_loaded(context.parent_doctype).then(() =>
-						frappe.model.user_settings.save(
-							context.parent_doctype,
-							SETTINGS_KEY,
-							value
-						)
-					);
+					return this.ensure_settings_loaded(context.parent_doctype).then(() => {
+						// Frappe shallow-merges this key: send the complete table's widths,
+						// otherwise resizing a second column discards the first column.
+						const widths = {
+							...(this.get_settings(context)[context.table_fieldname] || {}),
+							...this.get_width_overrides(context),
+						};
+						return frappe.model.user_settings.save(context.parent_doctype, context.settings_key || SETTINGS_KEY, {
+							[context.table_fieldname]: widths,
+						});
+					});
+				})
+				.catch((error) => {
+					console.warn("[custom_filters] Could not save column width", error);
+					frappe.show_alert?.({ message: get_text("Column width could not be saved. Please try again."), indicator: "orange" });
 				});
 		}
 
@@ -173,22 +195,10 @@
 			if (!text || !document.body) return MIN_COLUMN_WIDTH;
 
 			const style = window.getComputedStyle(label);
-			const measure = document.createElement("span");
-			Object.assign(measure.style, {
-				position: "fixed",
-				left: "-10000px",
-				top: "-10000px",
-				visibility: "hidden",
-				whiteSpace: "nowrap",
-				fontFamily: style.fontFamily,
-				fontSize: style.fontSize,
-				fontWeight: style.fontWeight,
-				letterSpacing: style.letterSpacing,
-			});
-			measure.textContent = text;
-			document.body.appendChild(measure);
-			const text_width = measure.getBoundingClientRect().width;
-			measure.remove();
+			// Measuring with temporary DOM nodes retriggers the global observer forever.
+			this.measure_context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+			const text_width = this.measure_context.measureText(text).width
+				+ (parseFloat(style.letterSpacing) || 0) * Math.max(0, text.length - 1);
 
 			// Include cell padding and enough room for the resize handle.
 			return Math.max(MIN_COLUMN_WIDTH, Math.ceil(text_width + 24));
@@ -319,6 +329,7 @@
 		create_resize_handle(header_column, context, fieldname, limits, width) {
 			const handle = document.createElement("span");
 			handle.className = RESIZE_HANDLE_CLASS;
+			handle.dataset.resizeField = fieldname;
 			handle.setAttribute("role", "separator");
 			handle.setAttribute("aria-orientation", "vertical");
 			handle.setAttribute("aria-label", get_text("Resize {0}", [fieldname]));
@@ -393,7 +404,6 @@
 			);
 			this.apply_width(state.context.form_grid, state.fieldname, state.width);
 			this.update_handle(state.handle, state.width, state.limits);
-			this.update_grid_scrollbar(state.context.form_grid);
 		}
 
 		handle_pointer_up(event) {
@@ -412,6 +422,7 @@
 			window.removeEventListener("pointerup", this.handle_pointer_up, true);
 			window.removeEventListener("pointercancel", this.handle_pointer_up, true);
 			if (clear_state) this.active_resize = null;
+			this.schedule_scan();
 		}
 
 		enhance_grid(form_grid) {
@@ -434,15 +445,18 @@
 
 				this.apply_width(form_grid, fieldname, width);
 				const handle = header_column.querySelector(`.${RESIZE_HANDLE_CLASS}`);
-					if (handle) {
-						this.update_handle(handle, width, limits);
-					} else {
-						this.create_resize_handle(header_column, context, fieldname, limits, width);
-					}
+				if (handle) {
+					this.update_handle(handle, width, limits);
+				} else {
+					this.create_resize_handle(header_column, context, fieldname, limits, width);
+				}
 			});
 			this.ensure_top_scrollbar(form_grid);
 		}
 	}
+
+	// ListView uses the same drag, reset, keyboard and per-user persistence logic.
+	window.CustomFiltersColumnResizeController = GridColumnResizeController;
 
 	function boot() {
 		if (!window.frappe || !frappe.ui || !frappe.model) {

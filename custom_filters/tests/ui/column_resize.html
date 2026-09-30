@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<meta charset="utf-8">
+<link rel="stylesheet" href="/native.css">
+<link rel="stylesheet" href="/css/grid_column_resize.css">
+<link rel="stylesheet" href="/css/list_column_resize.css">
+<link rel="stylesheet" href="/css/list_horizontal_scroll.css">
+<style>body { padding: 24px; } .fixture { width: 950px; max-width: 100%; } .grid-field { margin-top: 40px; } .grid-static-col { position: relative; }</style>
+<body>
+<div class="fixture layout-main-section-wrapper list-view" id="sales"><div class="frappe-list"><div class="result-container"><div class="result"></div></div></div></div>
+<div class="fixture layout-main-section-wrapper list-view" id="purchase" style="display:none"><div class="frappe-list"><div class="result-container"><div class="result"></div></div></div></div>
+<div class="fixture frappe-control grid-field" id="grid" data-fieldname="items">
+  <div class="form-grid-container"><div class="form-grid">
+    <div class="grid-heading-row"><div class="data-row row"><div class="grid-static-col col-xs-2" data-fieldname="qty"><div class="static-area">数量</div></div><div class="grid-static-col col-xs-2" data-fieldname="rate"><div class="static-area">单价</div></div></div></div>
+    <div class="grid-body"><div class="data-row row"><div class="grid-static-col col-xs-2" data-fieldname="qty">10</div><div class="grid-static-col col-xs-2" data-fieldname="rate">20</div></div></div>
+  </div></div>
+</div>
+<script src="/jquery.js"></script>
+<script>
+window.__ = (s, args = []) => (Array.isArray(args) ? args : []).reduce((out, arg, i) => out.replace(`{${i}}`, arg), s);
+window.frappe = {
+  ui: {}, model: {}, views: { BaseList: class {}, list_view: {} }, session: { user: 'test-user' },
+  is_mobile: () => window.innerWidth < 768, utils: { icon: () => '' },
+  provide(name) { let obj = window; for (const key of name.split('.')) obj = obj[key] ||= {}; },
+  call(options) {
+    return new Promise(resolve => setTimeout(() => {
+      const stored = JSON.parse(localStorage.getItem('user-settings') || '{}');
+      stored[options.args.doctype] = options.args.user_settings;
+      localStorage.setItem('user-settings', JSON.stringify(stored));
+      const response = { message: options.args.user_settings };
+      options.callback?.(response); resolve(response);
+    }, 100));
+  },
+};
+frappe.model.is_numeric_field = df => ['Int', 'Float', 'Currency'].includes(df?.fieldtype);
+</script>
+<script src="/user_settings.js"></script>
+<script src="/list_view.js"></script>
+<script>
+Object.assign(frappe.model.user_settings, JSON.parse(localStorage.getItem('user-settings') || '{}'));
+frappe.model.user_settings['Sales Order'] ||= { GridColumnWidths: { items: { qty: 160, rate: 180 }, taxes: { amount: 210 } }, List: { sort_by: 'modified' } };
+frappe.model.user_settings['Purchase Order'] ||= {};
+window.sort_clicks = 0;
+const definitions = [
+  { type: 'Subject', df: { fieldname: 'customer_name', label: '客户名称' } },
+  { type: 'Field', df: { fieldname: 'sales_person', label: '业务员' } },
+  { type: 'Status', df: { fieldname: 'status', label: '状态' } },
+  { type: 'Field', df: { fieldname: 'custom_process_status', label: '生产流程状态' } },
+  { type: 'Field', df: { fieldname: 'crm_sales_order_no', label: 'CRM销售订单号' } },
+  { type: 'Field', df: { fieldname: 'total_qty', label: '总数量', fieldtype: 'Float' } },
+  { type: 'Tag', df: { fieldname: '_user_tags', label: 'Tags' } },
+];
+window.render_list = (id, order = [0, 1, 2, 3, 4, 5, 6], count = 4) => {
+  const result = document.querySelector(`#${id} .result`);
+  const view = frappe.views.list_view[id] ||= Object.assign(Object.create(frappe.views.ListView.prototype), {
+    doctype: id === 'sales' ? 'Sales Order' : 'Purchase Order',
+    $result: $(result), settings: { button: {} }, tags_shown: false, column_max_widths: {},
+  });
+  view.columns = order.map(i => definitions[i]);
+  // Use the installed Frappe implementation for the header and row layout.
+  result.innerHTML = view.get_header_html() + Array.from({length: count}, (_, n) => {
+    const cells = view.columns.map(col => {
+      let classes = 'list-row-col ellipsis ';
+      if (col.type === 'Subject') classes += 'list-subject level ' + col.df.fieldname;
+      else if (col.type === 'Status') classes += 'hidden-xs';
+      else if (col.type === 'Tag') classes += 'hidden-xs tag-col hide';
+      else classes += 'hidden-xs ' + col.df.fieldname;
+      const value = col.type === 'Status' ? '<span class="indicator-pill green">已提交</span>' : col.df.fieldname + '-' + n;
+      return '<div class="' + classes + '" style="width:160px;flex:1 0 160px">' + (col.type === 'Subject' ? '<span class="level-item select-like"><input type="checkbox" class="list-row-checkbox"></span>' : '') + '<span class="ellipsis">' + value + '</span></div>';
+    }).join('') + '<div class="list-row-col hidden-xs"><button>Action</button></div>';
+    return view.get_list_row_html_skeleton(cells, '<span class="list-row-activity">1天　♡</span>');
+  }).join('');
+  result.onclick = e => { if (e.target.closest('[data-sort-by]')) sort_clicks++; };
+  return view;
+};
+window.cur_list = render_list('sales');
+render_list('purchase');
+document.querySelector('#grid').fieldobj = { grid: { frm: { doctype: 'Sales Order' }, df: { fieldname: 'items' }, doctype: 'Sales Order Item' } };
+</script>
+<script src="/js/grid_column_resize.js"></script>
+<script src="/js/list_column_resize.js"></script>
+<script src="/js/list_horizontal_scroll.js"></script>
+</body>
+</html>

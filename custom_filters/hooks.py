@@ -28,7 +28,8 @@ app_license = "mit"
 app_include_css = [
 	"/assets/custom_filters/css/desk_tabs.css",
 	"/assets/custom_filters/css/right_sidebar.css",
-	"/assets/custom_filters/css/grid_column_resize.css?v=2026.08.31.2",
+	"/assets/custom_filters/css/grid_column_resize.css?v=2026.09.30.1",
+	"/assets/custom_filters/css/list_column_resize.css?v=2026.09.30.1",
 	"/assets/custom_filters/css/list_horizontal_scroll.css?v=2026.09.18.1",
 ]
 app_include_js = [
@@ -36,7 +37,8 @@ app_include_js = [
 	"/assets/custom_filters/js/desk_tabs.js",
 	"/assets/custom_filters/js/desktop_user_menu.js",
 	"/assets/custom_filters/js/right_sidebar.js?v=2026.08.31.1",
-	"/assets/custom_filters/js/grid_column_resize.js?v=2026.08.31.2",
+	"/assets/custom_filters/js/grid_column_resize.js?v=2026.09.30.1",
+	"/assets/custom_filters/js/list_column_resize.js?v=2026.09.30.1",
 	"/assets/custom_filters/js/list_horizontal_scroll.js?v=2026.09.18.1",
 	"/assets/custom_filters/js/info_card_i18n.js",
 	"/assets/custom_filters/js/warehouse_query.js",

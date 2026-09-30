@@ -1,0 +1,66 @@
+/* Desktop ListView only. Reports/DataTable and mobile retain their own layouts. */
+@media (min-width: 768px) {
+	.list-view .frappe-list .result-container.custom-filters-resizable-list-container {
+		overflow-x: auto;
+	}
+
+	.list-view .frappe-list .result.custom-filters-resizable-list {
+		width: max-content !important;
+		min-width: 100%;
+	}
+
+	.list-view .frappe-list .result.custom-filters-resizable-list > .list-row-container {
+		width: max-content !important;
+		min-width: 100%;
+	}
+
+	.list-view .custom-filters-resizable-list .list-row > .level-left:not(.checkbox-actions),
+	.list-view .custom-filters-resizable-list .list-row-head > .list-header-subject {
+		flex: 1 0 auto !important;
+		min-width: 0 !important;
+	}
+
+	.list-view .custom-filters-resizable-list .list-row-col[data-cf-list-column] {
+		box-sizing: border-box;
+		width: var(--cf-list-column-width) !important;
+		min-width: var(--cf-list-column-width) !important;
+		max-width: var(--cf-list-column-width) !important;
+		flex: 0 0 var(--cf-list-column-width) !important;
+	}
+
+	.list-view .custom-filters-resizable-list .list-row-head .list-row-col[data-cf-list-column] {
+		position: relative;
+		overflow: visible;
+		padding-inline-end: 10px;
+	}
+
+	.list-view .custom-filters-resizable-list .list-row-head [data-sort-by] {
+		display: block;
+		min-width: 0;
+		overflow: hidden;
+		white-space: nowrap;
+		text-overflow: ellipsis;
+	}
+
+	.list-view .custom-filters-resizable-list .custom-filters-grid-column-resize-handle {
+		right: 0;
+		width: 10px;
+	}
+
+	.list-view .custom-filters-resizable-list .custom-filters-grid-column-resize-handle::after {
+		top: 1px;
+		bottom: 1px;
+		left: 5px;
+		background: var(--border-color);
+	}
+
+	.list-view .custom-filters-resizable-list .custom-filters-grid-column-resize-handle:hover::after,
+	.list-view .custom-filters-resizable-list .custom-filters-grid-column-resize-handle:focus-visible::after,
+	.list-view .custom-filters-resizable-list .custom-filters-grid-column-resize-handle.is-resizing::after {
+		background: var(--primary);
+	}
+}
+
+.result:not(.custom-filters-resizable-list) .custom-filters-grid-column-resize-handle {
+	display: none;
+}
