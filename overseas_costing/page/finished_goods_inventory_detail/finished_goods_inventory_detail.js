@@ -3,12 +3,9 @@
   const route = "finished-goods-inventory-detail";
   frappe.pages[route] = frappe.pages[route] || {};
   frappe.pages[route].on_page_load = function (wrapper) {
-    frappe.require([
-      "/assets/overseas_costing/js/categorized_inventory_detail.js",
-      "/assets/overseas_costing/css/categorized_inventory_detail.css",
-    ], () => globalThis.CategorizedInventoryDetail.bootstrap(wrapper, {
+    globalThis.CategorizedInventoryDetail.bootstrap(wrapper, {
       category: "finished_goods",
       title: "成品库存明细",
-    }));
+    });
   };
 })();

@@ -121,7 +121,7 @@ console.log(JSON.stringify({found, missing}));
     )
     assert material == {"found": "Yuewei", "missing": ""}
 
-    shared = ROOT / "overseas_costing/public/js/categorized_inventory_detail.js"
+    shared = ROOT / "overseas_costing/public/js/categorized_inventory_detail.bundle.js"
     script = (
         f"const page=require({json.dumps(str(shared))});"
         "const found=page.resolveDefaultCompany({defaults:{get_default:(key)=>key==='company'?'Yuewei':''}});"
@@ -158,9 +158,30 @@ def test_three_category_pages_are_thin_wrappers_over_one_shared_component() -> N
             ).read_bytes()
 
 
+def test_category_shared_runtime_is_bundled_before_thin_pages_execute() -> None:
+    """分类页面不能依赖生产环境中不可访问的裸 public 资源路径。"""
+
+    hooks = (ROOT / "overseas_costing/hooks.py").read_text(encoding="utf-8")
+    assert 'app_include_js = "categorized_inventory_detail.bundle.js"' in hooks
+    assert 'app_include_css = "categorized_inventory_detail.bundle.css"' in hooks
+    assert (ROOT / "overseas_costing/public/js/categorized_inventory_detail.bundle.js").is_file()
+    assert (ROOT / "overseas_costing/public/css/categorized_inventory_detail.bundle.css").is_file()
+
+    for folder in (
+        "semi_finished_inventory_detail",
+        "finished_goods_inventory_detail",
+        "mold_inventory_detail",
+    ):
+        source = (
+            ROOT / "overseas_costing/page" / folder / f"{folder}.js"
+        ).read_text(encoding="utf-8")
+        assert "frappe.require(" not in source
+        assert "CategorizedInventoryDetail.bootstrap" in source
+
+
 def test_shared_category_asset_renders_status_location_and_pagination_controls() -> None:
-    shared = ROOT / "overseas_costing/public/js/categorized_inventory_detail.js"
-    mirror = ROOT / "overseas_costing/overseas_costing/public/js/categorized_inventory_detail.js"
+    shared = ROOT / "overseas_costing/public/js/categorized_inventory_detail.bundle.js"
+    mirror = ROOT / "overseas_costing/overseas_costing/public/js/categorized_inventory_detail.bundle.js"
     assert shared.read_bytes() == mirror.read_bytes()
     source = shared.read_text(encoding="utf-8")
     assert "get_categorized_inventory_detail" in source
@@ -194,7 +215,7 @@ def test_shared_category_asset_renders_status_location_and_pagination_controls()
 
 
 def test_shared_category_rows_match_header_column_order() -> None:
-    shared = ROOT / "overseas_costing/public/js/categorized_inventory_detail.js"
+    shared = ROOT / "overseas_costing/public/js/categorized_inventory_detail.bundle.js"
     script = (
         f"const page=require({json.dumps(str(shared))});"
         "const html=page.renderTableRows([{item_code:'N1',item_name:'半成品',warehouse:'W1',actual_qty:12,"

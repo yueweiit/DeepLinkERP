@@ -36,7 +36,7 @@ def test_ci_rebuilds_and_syntax_checks_inventory_page_assets() -> None:
     assert "python overseas_costing/scripts/build_inventory_assets.py" in test_job
     assert "git diff --exit-code -- overseas_costing/page/inventory_location_detail" in test_job
     assert "overseas_costing/overseas_costing/page/mold_inventory_detail" in test_job
-    assert "node --check overseas_costing/public/js/categorized_inventory_detail.js" in test_job
+    assert "node --check overseas_costing/public/js/categorized_inventory_detail.bundle.js" in test_job
 
 
 def test_deploy_prewarms_packing_cache_before_switching_frontend_assets() -> None:

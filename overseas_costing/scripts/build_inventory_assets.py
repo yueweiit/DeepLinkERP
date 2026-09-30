@@ -14,8 +14,8 @@ PAGE_NAMES = (
     "mold_inventory_detail",
 )
 PUBLIC_ASSETS = (
-    "js/categorized_inventory_detail.js",
-    "css/categorized_inventory_detail.css",
+    "js/categorized_inventory_detail.bundle.js",
+    "css/categorized_inventory_detail.bundle.css",
 )
 
 

@@ -16,15 +16,15 @@ def test_inventory_asset_builder_copies_pages_and_shared_assets_repeatably(tmp_p
 
     (material / "inventory_location_detail.js").write_text("material", encoding="utf-8")
     (category / "semi_finished_inventory_detail.js").write_text("category", encoding="utf-8")
-    (public_js / "categorized_inventory_detail.js").write_text("shared", encoding="utf-8")
-    (public_css / "categorized_inventory_detail.css").write_text("style", encoding="utf-8")
+    (public_js / "categorized_inventory_detail.bundle.js").write_text("shared", encoding="utf-8")
+    (public_css / "categorized_inventory_detail.bundle.css").write_text("style", encoding="utf-8")
 
     first = build_inventory_assets(package_root)
     deployed = package_root / "overseas_costing"
     assert (deployed / "page/inventory_location_detail/inventory_location_detail.js").read_text() == "material"
     assert (deployed / "page/semi_finished_inventory_detail/semi_finished_inventory_detail.js").read_text() == "category"
-    assert (deployed / "public/js/categorized_inventory_detail.js").read_text() == "shared"
-    assert (deployed / "public/css/categorized_inventory_detail.css").read_text() == "style"
+    assert (deployed / "public/js/categorized_inventory_detail.bundle.js").read_text() == "shared"
+    assert (deployed / "public/css/categorized_inventory_detail.bundle.css").read_text() == "style"
     assert first["changed"]
 
     assert build_inventory_assets(package_root)["changed"] == []
