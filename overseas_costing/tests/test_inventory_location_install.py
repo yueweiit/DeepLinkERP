@@ -49,8 +49,11 @@ def test_stock_sidebar_adds_independent_page_after_available_quantity_without_re
     assert install._upsert_stock_sidebar_inventory_location(sidebar) is True
     assert [(row.label, row.link_type, row.link_to, row.idx) for row in sidebar.items] == [
         ("可用数量", "Report", "Stock Projected Qty", 1),
-        ("库存库位明细", "Page", "inventory-location-detail", 2),
-        ("储位", "DocType", "Bin", 3),
+        ("物料库存明细", "Page", "inventory-location-detail", 2),
+        ("半成品库存明细", "Page", "semi-finished-inventory-detail", 3),
+        ("成品库存明细", "Page", "finished-goods-inventory-detail", 4),
+        ("模具库存明细", "Page", "mold-inventory-detail", 5),
+        ("储位", "DocType", "Bin", 6),
     ]
     assert install._upsert_stock_sidebar_inventory_location(sidebar) is False
 

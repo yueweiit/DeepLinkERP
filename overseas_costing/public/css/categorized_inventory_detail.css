@@ -1,0 +1,126 @@
+.categorized-inventory-detail {
+  --cid-border: #dfe3e8;
+  --cid-muted: #6b7280;
+  color: var(--text-color, #1f2937);
+  padding: 12px 15px 24px;
+}
+
+.categorized-inventory-detail .cid-summary {
+  color: var(--cid-muted);
+  min-height: 28px;
+  padding: 4px 0 10px;
+}
+
+.categorized-inventory-detail .cid-table-wrap {
+  border: 1px solid var(--cid-border);
+  max-height: calc(100vh - 250px);
+  overflow: auto;
+}
+
+.categorized-inventory-detail table {
+  border-collapse: separate;
+  border-spacing: 0;
+  min-width: 1780px;
+  width: 100%;
+}
+
+.categorized-inventory-detail th,
+.categorized-inventory-detail td {
+  background: var(--card-bg, #fff);
+  border-bottom: 1px solid var(--cid-border);
+  border-right: 1px solid var(--cid-border);
+  padding: 8px 10px;
+  vertical-align: middle;
+  white-space: normal;
+}
+
+.categorized-inventory-detail th {
+  background: var(--subtle-fg, #f5f7fa);
+  font-weight: 600;
+  position: sticky;
+  text-align: left;
+  top: 0;
+  z-index: 2;
+}
+
+.categorized-inventory-detail .cid-code,
+.categorized-inventory-detail .cid-name {
+  font-weight: 600;
+}
+
+.categorized-inventory-detail .cid-quantity {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.categorized-inventory-detail .cid-negative {
+  color: #b42318;
+  font-weight: 600;
+}
+
+.categorized-inventory-detail .cid-status {
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 12px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+.categorized-inventory-detail .cid-status.is-balanced {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.categorized-inventory-detail .cid-status.is-difference {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.categorized-inventory-detail .cid-status.is-pending {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.categorized-inventory-detail .cid-empty {
+  color: var(--cid-muted);
+  text-align: center;
+}
+
+.categorized-inventory-detail .cid-pager {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  padding-top: 12px;
+}
+
+.categorized-inventory-detail.is-loading .cid-table-wrap {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.categorized-inventory-detail .cid-col-code { width: 170px; }
+.categorized-inventory-detail .cid-col-name { width: 260px; }
+.categorized-inventory-detail .cid-col-warehouse { width: 210px; }
+.categorized-inventory-detail .cid-col-location { width: 150px; }
+.categorized-inventory-detail .cid-col-snapshot,
+.categorized-inventory-detail .cid-col-actual,
+.categorized-inventory-detail .cid-col-difference { width: 120px; }
+.categorized-inventory-detail .cid-col-status { width: 110px; }
+.categorized-inventory-detail .cid-col-date { width: 120px; }
+.categorized-inventory-detail .cid-col-uom { width: 110px; }
+.categorized-inventory-detail .cid-col-group { width: 230px; }
+.categorized-inventory-detail .cid-col-dpci,
+.categorized-inventory-detail .cid-col-external { width: 150px; }
+.categorized-inventory-detail .cid-col-alias { width: 220px; }
+
+@media (max-width: 767px) {
+  .categorized-inventory-detail {
+    padding: 8px;
+  }
+
+  .categorized-inventory-detail .cid-table-wrap {
+    max-height: calc(100vh - 230px);
+  }
+}

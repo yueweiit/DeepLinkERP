@@ -92,9 +92,96 @@ def test_page_assets_are_scoped_mirrored_and_link_to_standard_item_form() -> Non
         ).read_bytes()
 
     definition = json.loads((PAGE / "inventory_location_detail.json").read_text())
-    assert definition["title"] == "库存库位明细"
+    assert definition["title"] == "物料库存明细"
     assert {row["role"] for row in definition["roles"]} >= {
         "System Manager",
         "Stock Manager",
         "Stock User",
     }
+
+
+def test_material_page_is_renamed_without_changing_its_route_or_snapshot_contract() -> None:
+    source = JS.read_text(encoding="utf-8")
+
+    assert 'const PAGE_NAME = "inventory-location-detail"' in source
+    assert 'title: "物料库存明细"' in source
+    assert "库存库位明细" not in source
+    assert "get_inventory_location_detail" in source
+    assert "export_inventory_location_detail" in source
+
+
+def test_three_category_pages_are_thin_wrappers_over_one_shared_component() -> None:
+    definitions = {
+        "semi_finished": ("semi_finished_inventory_detail", "半成品库存明细"),
+        "finished_goods": ("finished_goods_inventory_detail", "成品库存明细"),
+        "mold": ("mold_inventory_detail", "模具库存明细"),
+    }
+    for category, (folder, title) in definitions.items():
+        page = ROOT / "overseas_costing/page" / folder
+        script = (page / f"{folder}.js").read_text(encoding="utf-8")
+        definition = json.loads((page / f"{folder}.json").read_text(encoding="utf-8"))
+        assert title == definition["title"]
+        assert f'category: "{category}"' in script
+        assert "CategorizedInventoryDetail.bootstrap" in script
+        assert "renderTableRows" not in script
+
+        mirror = ROOT / "overseas_costing/overseas_costing/page" / folder
+        for extension in ("js", "json", "py"):
+            assert (page / f"{folder}.{extension}").read_bytes() == (
+                mirror / f"{folder}.{extension}"
+            ).read_bytes()
+
+
+def test_shared_category_asset_renders_status_location_and_pagination_controls() -> None:
+    shared = ROOT / "overseas_costing/public/js/categorized_inventory_detail.js"
+    mirror = ROOT / "overseas_costing/overseas_costing/public/js/categorized_inventory_detail.js"
+    assert shared.read_bytes() == mirror.read_bytes()
+    source = shared.read_text(encoding="utf-8")
+    assert "get_categorized_inventory_detail" in source
+    assert "export_categorized_inventory_detail" in source
+    assert 'fieldname: "only_with_stock"' in source
+    assert "100, 500, 2500" in source
+    assert "库位待维护" in source
+    assert "库存差异" in source
+    assert 'frappe.set_route("Form", "Item"' in source
+    assert "set_value(current)" not in source
+
+    result = subprocess.run(
+        [
+            "node",
+            "-e",
+            f"const page=require({json.dumps(str(shared))});"
+            "const html=page.renderTableRows([{item_code:'N1',item_name:'<b>x</b>',warehouse:'',actual_qty:0,"
+            "stock_uom:'个：pieza',item_group:'半成品',dpci:'',external_code:'',original_identifier_alias:'',"
+            "snapshot_qty:null,difference_qty:null,inventory_status:'库位待维护',"
+            "locations:[{reference_location:'库位待维护',snapshot_location_qty:null,snapshot_date:''}]}]);"
+            "console.log(JSON.stringify({html}));",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    html = json.loads(result.stdout)["html"]
+    assert "&lt;b&gt;x&lt;/b&gt;" in html
+    assert "库位待维护" in html
+    assert ">—<" in html
+
+
+def test_shared_category_rows_match_header_column_order() -> None:
+    shared = ROOT / "overseas_costing/public/js/categorized_inventory_detail.js"
+    script = (
+        f"const page=require({json.dumps(str(shared))});"
+        "const html=page.renderTableRows([{item_code:'N1',item_name:'半成品',warehouse:'W1',actual_qty:12,"
+        "stock_uom:'个：pieza',item_group:'半成品',dpci:'DPCI-MARK',external_code:'EXT-MARK',"
+        "original_identifier_alias:'ALIAS-MARK',snapshot_qty:10,difference_qty:2,inventory_status:'库存差异',"
+        "locations:[{reference_location:'LOC-MARK',snapshot_location_qty:10,snapshot_date:'DATE-MARK'}]}]);"
+        "console.log(JSON.stringify({html}));"
+    )
+    result = subprocess.run(["node", "-e", script], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    html = json.loads(result.stdout)["html"]
+
+    assert html.index("LOC-MARK") < html.index("库存差异")
+    assert html.index("库存差异") < html.index("DATE-MARK")
+    assert html.index("DATE-MARK") < html.index("个：pieza")
+    assert html.index("个：pieza") < html.index("DPCI-MARK") < html.index("EXT-MARK")

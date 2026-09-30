@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 from io import BytesIO
+from types import SimpleNamespace
 
 from openpyxl import load_workbook
 
 from overseas_costing.services import inventory_location_service as service
 from overseas_costing.services.inventory_location_service import (
+    CATEGORY_DEFINITIONS,
+    build_categorized_inventory_payload,
+    build_categorized_inventory_xlsx,
     build_inventory_location_payload,
     build_inventory_location_xlsx,
     format_quantity,
+    get_category_definition,
 )
 
 
@@ -131,7 +136,7 @@ def test_xlsx_export_merges_group_fields_but_keeps_location_rows_separate() -> N
     workbook = load_workbook(BytesIO(build_inventory_location_xlsx(payload)))
     sheet = workbook.active
 
-    assert sheet.title == "库存库位明细"
+    assert sheet.title == "物料库存明细"
     assert [sheet.cell(1, column).value for column in range(1, 12)] == [
         "正式物料编码",
         "物料名称（双语）",
@@ -156,3 +161,267 @@ def test_xlsx_export_merges_group_fields_but_keeps_location_rows_separate() -> N
     assert sheet["F2"].value == 2560
     assert sheet["E2"].number_format == "#,##0"
     assert sheet["E4"].number_format == "#,##0.00"
+
+
+CATEGORY_STOCK_ROWS = [
+    {
+        "item_code": "NSEMI-001",
+        "item_name": "注塑半成品",
+        "warehouse": "半成品仓 - YWFM",
+        "actual_qty": 12,
+        "stock_uom": "个：pieza",
+        "item_group": "注塑半成品",
+        "dpci": "D-001",
+        "external_code": "EXT-S1",
+        "original_identifier_alias": "SEMI-1",
+    },
+    {
+        "item_code": "NSEMI-001",
+        "item_name": "注塑半成品",
+        "warehouse": "待检仓 - YWFM",
+        "actual_qty": -2,
+        "stock_uom": "个：pieza",
+        "item_group": "注塑半成品",
+        "dpci": "D-001",
+        "external_code": "EXT-S1",
+        "original_identifier_alias": "SEMI-1",
+    },
+    {
+        "item_code": "NSEMI-002",
+        "item_name": "喷油半成品",
+        "warehouse": "",
+        "actual_qty": 0,
+        "stock_uom": "个：pieza",
+        "item_group": "喷油半成品",
+        "dpci": "",
+        "external_code": "",
+        "original_identifier_alias": "",
+    },
+]
+
+CATEGORY_SNAPSHOT_ROWS = [
+    {
+        **CATEGORY_STOCK_ROWS[0],
+        "snapshot_key": "YWFM-2026-09-29",
+        "snapshot_date": "2026-09-29",
+        "original_location": "A-01",
+        "location_qty": 5,
+    },
+    {
+        **CATEGORY_STOCK_ROWS[0],
+        "snapshot_key": "YWFM-2026-09-29",
+        "snapshot_date": "2026-09-29",
+        "original_location": "A-02",
+        "location_qty": 5,
+    },
+]
+
+
+def test_category_definitions_are_server_whitelisted_and_use_erp_item_group_roots() -> None:
+    assert set(CATEGORY_DEFINITIONS) == {"semi_finished", "finished_goods", "mold"}
+    assert get_category_definition("semi_finished")["root_item_group"] == "半成品Semiterminado"
+    assert get_category_definition("finished_goods")["root_item_group"] == "成品Producto terminado"
+    assert get_category_definition("mold")["root_item_group"] == "模具Moldes"
+
+    try:
+        get_category_definition("N-prefix")
+    except ValueError as error:
+        assert "不支持的库存分类" in str(error)
+    else:  # pragma: no cover - invalid category must never be accepted
+        raise AssertionError("invalid category was accepted")
+
+
+def test_categorized_payload_keeps_real_time_qty_and_marks_snapshot_difference_and_missing_location() -> None:
+    payload = build_categorized_inventory_payload(
+        CATEGORY_STOCK_ROWS,
+        CATEGORY_SNAPSHOT_ROWS,
+        category="semi_finished",
+        filters={},
+        start=0,
+        page_length=100,
+    )
+
+    assert payload["total_count"] == 3
+    assert payload["page_count"] == 3
+    assert payload["has_next"] is False
+    groups = {(row["item_code"], row["warehouse"]): row for row in payload["groups"]}
+
+    current = groups[("NSEMI-001", "半成品仓 - YWFM")]
+    assert current["actual_qty"] == 12
+    assert current["snapshot_qty"] == 10
+    assert current["difference_qty"] == 2
+    assert current["inventory_status"] == "库存差异"
+    assert current["locations"] == [
+        {"reference_location": "A-01", "snapshot_location_qty": 5, "snapshot_date": "2026-09-29"},
+        {"reference_location": "A-02", "snapshot_location_qty": 5, "snapshot_date": "2026-09-29"},
+    ]
+
+    missing = groups[("NSEMI-002", "")]
+    assert missing["actual_qty"] == 0
+    assert missing["snapshot_qty"] is None
+    assert missing["difference_qty"] is None
+    assert missing["inventory_status"] == "库位待维护"
+    assert missing["locations"][0]["reference_location"] == "库位待维护"
+
+
+def test_categorized_payload_filters_locations_stock_and_paginates_groups() -> None:
+    location_payload = build_categorized_inventory_payload(
+        CATEGORY_STOCK_ROWS,
+        CATEGORY_SNAPSHOT_ROWS,
+        category="semi_finished",
+        filters={"reference_location": "A-02"},
+        start=0,
+        page_length=100,
+    )
+    assert location_payload["total_count"] == 1
+    assert location_payload["groups"][0]["actual_qty"] == 12
+    assert location_payload["groups"][0]["locations"] == [
+        {"reference_location": "A-02", "snapshot_location_qty": 5, "snapshot_date": "2026-09-29"}
+    ]
+
+    stock_payload = build_categorized_inventory_payload(
+        CATEGORY_STOCK_ROWS,
+        CATEGORY_SNAPSHOT_ROWS,
+        category="semi_finished",
+        filters={"only_with_stock": 1},
+        start=1,
+        page_length=1,
+    )
+    assert stock_payload["total_count"] == 2
+    assert stock_payload["page_count"] == 1
+    assert stock_payload["has_previous"] is True
+    assert stock_payload["has_next"] is False
+    assert stock_payload["groups"][0]["actual_qty"] == -2
+
+
+def test_selected_parent_item_group_keeps_rows_already_limited_to_its_descendants() -> None:
+    payload = build_categorized_inventory_payload(
+        CATEGORY_STOCK_ROWS,
+        CATEGORY_SNAPSHOT_ROWS,
+        category="semi_finished",
+        filters={"item_group": "半成品Semiterminado"},
+        start=0,
+        page_length=100,
+    )
+
+    assert payload["total_count"] == 3
+
+
+def test_category_pagination_parsing_falls_back_safely() -> None:
+    assert service._parse_category_start("not-a-number") == 0
+    assert service._parse_category_start(-10) == 0
+    assert service._parse_category_start("200") == 200
+    assert service._parse_category_page_length("invalid") == 100
+    assert service._parse_category_page_length(500) == 500
+    assert service._parse_category_page_length(999) == 100
+
+
+def test_categorized_inventory_checks_snapshot_item_bin_and_warehouse_permissions(monkeypatch) -> None:
+    checked: list[tuple[str, str]] = []
+
+    class FakeFrappe:
+        PermissionError = PermissionError
+
+        @staticmethod
+        def has_permission(doctype: str, permission_type: str) -> bool:
+            checked.append((doctype, permission_type))
+            return True
+
+    monkeypatch.setattr(service, "frappe", FakeFrappe())
+    service._require_categorized_inventory_read_permission()
+
+    assert checked == [
+        (service.SNAPSHOT_DOCTYPE, "read"),
+        ("Item", "read"),
+        ("Bin", "read"),
+        ("Warehouse", "read"),
+    ]
+
+
+def test_real_time_query_uses_bin_and_item_group_bounds_not_code_prefixes(monkeypatch) -> None:
+    captured: list[tuple[str, dict]] = []
+
+    class FakeDB:
+        @staticmethod
+        def sql(query: str, params: dict, as_dict: bool):
+            assert as_dict is True
+            captured.append((query, params))
+            return []
+
+    monkeypatch.setattr(service, "frappe", SimpleNamespace(db=FakeDB()))
+    context = {
+        "company": "YW Fabricación MX 核心制造",
+        "group_lft": 10,
+        "group_rgt": 20,
+        "warehouses": ("半成品仓 - YWFM",),
+        "snapshot_key": "YWFM-2026-09-29",
+    }
+    service._load_category_stock_rows(context)
+
+    query, params = captured[0]
+    assert "`tabBin`" in query and "bin.actual_qty" in query
+    assert "item.disabled = 0" in query and "item.is_stock_item = 1" in query
+    assert "item_group.lft >= %(group_lft)s" in query
+    assert "item_group.rgt <= %(group_rgt)s" in query
+    assert "LIKE 'M%'" not in query and "LIKE 'N%'" not in query
+    assert params["warehouses"] == ("半成品仓 - YWFM",)
+
+
+def test_snapshot_only_warehouse_replaces_synthetic_zero_warehouse() -> None:
+    snapshot = {
+        **CATEGORY_STOCK_ROWS[2],
+        "warehouse": "半成品仓 - YWFM",
+        "snapshot_key": "YWFM-2026-09-29",
+        "snapshot_date": "2026-09-29",
+        "original_location": "B-01",
+        "location_qty": 0,
+    }
+    payload = build_categorized_inventory_payload(
+        [CATEGORY_STOCK_ROWS[2]],
+        [snapshot],
+        category="semi_finished",
+        filters={},
+        start=0,
+        page_length=100,
+    )
+
+    assert [(row["warehouse"], row["actual_qty"]) for row in payload["groups"]] == [
+        ("半成品仓 - YWFM", 0)
+    ]
+    assert payload["groups"][0]["inventory_status"] == "库存一致"
+
+
+def test_categorized_xlsx_exports_all_reference_locations_and_real_time_status() -> None:
+    payload = build_categorized_inventory_payload(
+        CATEGORY_STOCK_ROWS,
+        CATEGORY_SNAPSHOT_ROWS,
+        category="semi_finished",
+        filters={},
+        start=0,
+        page_length=0,
+    )
+    workbook = load_workbook(BytesIO(build_categorized_inventory_xlsx(payload)))
+    sheet = workbook.active
+
+    assert sheet.title == "半成品库存明细"
+    assert [sheet.cell(1, column).value for column in range(1, 15)] == [
+        "正式物料编码",
+        "物料名称（双语）",
+        "仓库",
+        "参考库位",
+        "快照库位数量",
+        "实时库存",
+        "库存差异",
+        "库存状态",
+        "快照日期",
+        "库存单位",
+        "物料组",
+        "DPCI",
+        "外部编码",
+        "原始标识/别名",
+    ]
+    assert sheet["D2"].value == "A-01"
+    assert sheet["D3"].value == "A-02"
+    assert sheet["F2"].value == 12
+    assert sheet["G2"].value == 2
+    assert sheet["H2"].value == "库存差异"

@@ -1,8 +1,8 @@
 {
   "doctype": "Page",
-  "name": "inventory-location-detail",
+  "name": "mold-inventory-detail",
   "module": "Overseas Costing",
-  "title": "物料库存明细",
+  "title": "模具库存明细",
   "standard": "Yes",
   "roles": [
     {"role": "System Manager"},

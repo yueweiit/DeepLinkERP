@@ -1,4 +1,4 @@
-"""库存原始库位快照查询、分组与导出服务。"""
+"""物料库位快照及半成品、成品、模具实时库存查询与导出服务。"""
 
 from __future__ import annotations
 
@@ -53,6 +53,44 @@ EXPORT_HEADERS = (
     "外部编码",
     "原始标识/别名",
 )
+CATEGORY_DEFINITIONS = {
+    "semi_finished": {
+        "title": "半成品库存明细",
+        "root_item_group": "半成品Semiterminado",
+        "route": "semi-finished-inventory-detail",
+        "file_prefix": "semi-finished-inventory-detail",
+    },
+    "finished_goods": {
+        "title": "成品库存明细",
+        "root_item_group": "成品Producto terminado",
+        "route": "finished-goods-inventory-detail",
+        "file_prefix": "finished-goods-inventory-detail",
+    },
+    "mold": {
+        "title": "模具库存明细",
+        "root_item_group": "模具Moldes",
+        "route": "mold-inventory-detail",
+        "file_prefix": "mold-inventory-detail",
+    },
+}
+CATEGORY_EXPORT_HEADERS = (
+    "正式物料编码",
+    "物料名称（双语）",
+    "仓库",
+    "参考库位",
+    "快照库位数量",
+    "实时库存",
+    "库存差异",
+    "库存状态",
+    "快照日期",
+    "库存单位",
+    "物料组",
+    "DPCI",
+    "外部编码",
+    "原始标识/别名",
+)
+CATEGORY_EXPORT_MERGE_COLUMNS = (1, 2, 3, 6, 7, 8, 10, 11, 12, 13, 14)
+ALLOWED_PAGE_LENGTHS = (100, 500, 2500)
 
 
 def _whitelist(function):
@@ -76,6 +114,14 @@ def quantity_precision(value: Any, stock_uom: str | None) -> int:
 def format_quantity(value: Any, stock_uom: str | None) -> str:
     precision = quantity_precision(value, stock_uom)
     return f"{float(value or 0):,.{precision}f}"
+
+
+def get_category_definition(category: Any) -> dict[str, str]:
+    key = _text(category)
+    definition = CATEGORY_DEFINITIONS.get(key)
+    if not definition:
+        raise ValueError(f"不支持的库存分类：{key or '空'}")
+    return dict(definition)
 
 
 def _text(value: Any) -> str:
@@ -192,7 +238,7 @@ def _number_format(stock_uom: str | None, value: Any) -> str:
 def build_inventory_location_xlsx(payload: dict[str, Any]) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
-    sheet.title = "库存库位明细"
+    sheet.title = "物料库存明细"
     sheet.freeze_panes = "A2"
     sheet.append(EXPORT_HEADERS)
 
@@ -269,6 +315,279 @@ def build_inventory_location_xlsx(payload: dict[str, Any]) -> bytes:
     return output.getvalue()
 
 
+def _category_group_metadata(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        fieldname: row.get(fieldname) or ""
+        for fieldname in (
+            "item_code",
+            "item_name",
+            "warehouse",
+            "stock_uom",
+            "item_group",
+            "dpci",
+            "external_code",
+            "original_identifier_alias",
+        )
+    } | {"actual_qty": float(row.get("actual_qty") or 0), "_snapshot_locations": []}
+
+
+def _truthy(value: Any) -> bool:
+    return _text(value).casefold() in {"1", "true", "yes", "on"}
+
+
+def _parse_category_start(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _matches_category_filters(group: dict[str, Any], filters: dict[str, Any]) -> bool:
+    warehouse = _text(filters.get("warehouse"))
+    if warehouse and _text(group.get("warehouse")) != warehouse:
+        return False
+    if _truthy(filters.get("only_with_stock")) and abs(float(group.get("actual_qty") or 0)) <= 1e-9:
+        return False
+    keyword = _text(filters.get("keyword") or filters.get("item_code"))
+    if keyword and not any(
+        _contains(group.get(fieldname), keyword)
+        for fieldname in (
+            "item_code",
+            "item_name",
+            "dpci",
+            "external_code",
+            "original_identifier_alias",
+        )
+    ):
+        return False
+    return True
+
+
+def build_categorized_inventory_payload(
+    stock_rows: Iterable[dict[str, Any]],
+    snapshot_rows: Iterable[dict[str, Any]],
+    *,
+    category: str,
+    filters: dict[str, Any] | None = None,
+    start: int = 0,
+    page_length: int = 100,
+) -> dict[str, Any]:
+    """合并实时 Bin 与最新库位快照；快照只作参考，不覆盖实时库存。"""
+
+    definition = get_category_definition(category)
+    filters = dict(filters or {})
+    groups: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()
+    item_metadata: dict[str, dict[str, Any]] = {}
+
+    for source in stock_rows:
+        row = dict(source)
+        item_code = _text(row.get("item_code"))
+        if not item_code:
+            continue
+        key = (item_code, _text(row.get("warehouse")))
+        group = _category_group_metadata(row)
+        groups[key] = group
+        item_metadata.setdefault(item_code, group)
+
+    snapshot_source: dict[str, Any] = {}
+    for source in sorted(
+        (dict(row) for row in snapshot_rows),
+        key=lambda value: (
+            _text(value.get("item_code")),
+            _text(value.get("warehouse")),
+            _text(value.get("original_location")),
+        ),
+    ):
+        item_code = _text(source.get("item_code"))
+        if not item_code or item_code not in item_metadata:
+            continue
+        warehouse = _text(source.get("warehouse"))
+        key = (item_code, warehouse)
+        if key not in groups:
+            metadata = dict(item_metadata[item_code])
+            metadata["warehouse"] = warehouse
+            metadata["actual_qty"] = 0.0
+            metadata["_snapshot_locations"] = []
+            groups[key] = metadata
+        groups[key]["_snapshot_locations"].append(
+            {
+                "reference_location": source.get("original_location") or "库位待维护",
+                "snapshot_location_qty": float(source.get("location_qty") or 0),
+                "snapshot_date": source.get("snapshot_date") or "",
+            }
+        )
+        if source.get("snapshot_key"):
+            snapshot_source = source
+
+    # Item 的空仓库行只是“从未产生 Bin”的占位；一旦快照提供仓库就不再保留占位行。
+    item_has_warehouse = {
+        item_code for item_code, warehouse in groups if warehouse
+    }
+    for key in list(groups):
+        if not key[1] and key[0] in item_has_warehouse:
+            del groups[key]
+
+    location_filter = _text(filters.get("reference_location") or filters.get("original_location"))
+    visible: list[dict[str, Any]] = []
+    for group in groups.values():
+        if not _matches_category_filters(group, filters):
+            continue
+        all_locations = list(group.pop("_snapshot_locations", []))
+        snapshot_qty = (
+            sum(float(location.get("snapshot_location_qty") or 0) for location in all_locations)
+            if all_locations
+            else None
+        )
+        if location_filter:
+            locations = [
+                location
+                for location in all_locations
+                if _contains(location.get("reference_location"), location_filter)
+            ]
+            if not locations:
+                continue
+        else:
+            locations = all_locations
+
+        actual_qty = float(group.get("actual_qty") or 0)
+        has_reference_location = any(
+            _text(location.get("reference_location")) not in {"", "库位待维护"}
+            for location in all_locations
+        )
+        difference_qty = actual_qty - snapshot_qty if snapshot_qty is not None else None
+        if not has_reference_location:
+            inventory_status = "库位待维护"
+        elif abs(float(difference_qty or 0)) <= 1e-9:
+            inventory_status = "库存一致"
+        else:
+            inventory_status = "库存差异"
+        group.update(
+            {
+                "snapshot_qty": snapshot_qty,
+                "difference_qty": difference_qty,
+                "inventory_status": inventory_status,
+                "locations": locations
+                or [
+                    {
+                        "reference_location": "库位待维护",
+                        "snapshot_location_qty": None,
+                        "snapshot_date": "",
+                    }
+                ],
+            }
+        )
+        visible.append(group)
+
+    visible.sort(
+        key=lambda row: (
+            abs(float(row.get("actual_qty") or 0)) <= 1e-9,
+            _text(row.get("item_code")),
+            _text(row.get("warehouse")),
+        )
+    )
+    total_count = len(visible)
+    start = _parse_category_start(start)
+    try:
+        page_length = max(0, int(page_length or 0))
+    except (TypeError, ValueError):
+        page_length = ALLOWED_PAGE_LENGTHS[0]
+    page_groups = visible[start : start + page_length] if page_length else visible[start:]
+    return {
+        "category": category,
+        "title": definition["title"],
+        "root_item_group": definition["root_item_group"],
+        "snapshot_key": snapshot_source.get("snapshot_key") or "",
+        "snapshot_date": snapshot_source.get("snapshot_date") or "",
+        "groups": page_groups,
+        "total_count": total_count,
+        "page_count": len(page_groups),
+        "location_count": sum(len(row["locations"]) for row in page_groups),
+        "start": start,
+        "page_length": page_length,
+        "has_previous": start > 0,
+        "has_next": bool(page_length and start + len(page_groups) < total_count),
+    }
+
+
+def build_categorized_inventory_xlsx(payload: dict[str, Any]) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = _text(payload.get("title")) or "分类库存明细"
+    sheet.freeze_panes = "A2"
+    sheet.append(CATEGORY_EXPORT_HEADERS)
+
+    header_fill = PatternFill("solid", fgColor="075985")
+    for cell in sheet[1]:
+        cell.fill = header_fill
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    current_row = 2
+    for group in payload.get("groups") or []:
+        locations = list(group.get("locations") or []) or [
+            {
+                "reference_location": "库位待维护",
+                "snapshot_location_qty": None,
+                "snapshot_date": "",
+            }
+        ]
+        start_row = current_row
+        for index, location in enumerate(locations):
+            shared = index == 0
+            sheet.append(
+                [
+                    group.get("item_code") or "" if shared else "",
+                    group.get("item_name") or "" if shared else "",
+                    group.get("warehouse") or "" if shared else "",
+                    location.get("reference_location") or "库位待维护",
+                    location.get("snapshot_location_qty"),
+                    float(group.get("actual_qty") or 0) if shared else "",
+                    group.get("difference_qty") if shared else "",
+                    group.get("inventory_status") or "" if shared else "",
+                    location.get("snapshot_date") or "",
+                    group.get("stock_uom") or "" if shared else "",
+                    group.get("item_group") or "" if shared else "",
+                    group.get("dpci") or "" if shared else "",
+                    group.get("external_code") or "" if shared else "",
+                    group.get("original_identifier_alias") or "" if shared else "",
+                ]
+            )
+            if location.get("snapshot_location_qty") is not None:
+                sheet.cell(current_row, 5).number_format = _number_format(
+                    group.get("stock_uom"), location.get("snapshot_location_qty")
+                )
+            if shared:
+                sheet.cell(current_row, 6).number_format = _number_format(
+                    group.get("stock_uom"), group.get("actual_qty")
+                )
+                if group.get("difference_qty") is not None:
+                    sheet.cell(current_row, 7).number_format = _number_format(
+                        group.get("stock_uom"), group.get("difference_qty")
+                    )
+            current_row += 1
+
+        end_row = current_row - 1
+        if end_row > start_row:
+            for column in CATEGORY_EXPORT_MERGE_COLUMNS:
+                sheet.merge_cells(
+                    start_row=start_row,
+                    start_column=column,
+                    end_row=end_row,
+                    end_column=column,
+                )
+        for row_number in range(start_row, end_row + 1):
+            for cell in sheet[row_number]:
+                cell.alignment = Alignment(vertical="center", wrap_text=True)
+
+    widths = (18, 32, 24, 18, 15, 15, 15, 14, 14, 15, 28, 18, 20, 28)
+    for index, width in enumerate(widths, start=1):
+        sheet.column_dimensions[chr(64 + index)].width = width
+
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
 def _parse_filters(filters: Any = None, **kwargs: Any) -> dict[str, Any]:
     if isinstance(filters, str):
         filters = json.loads(filters or "{}")
@@ -282,6 +601,15 @@ def _require_read_permission() -> None:
         return
     if not frappe.has_permission(SNAPSHOT_DOCTYPE, "read"):
         frappe.throw("没有权限查看库存库位快照。", frappe.PermissionError)
+
+
+def _require_categorized_inventory_read_permission() -> None:
+    if frappe is None:
+        return
+    _require_read_permission()
+    for doctype in ("Item", "Bin", "Warehouse"):
+        if not frappe.has_permission(doctype, "read"):
+            frappe.throw(f"没有权限查看{doctype}。", frappe.PermissionError)
 
 
 def _require_company_permission(company: str) -> None:
@@ -355,6 +683,176 @@ def _list_snapshot_options(company: str) -> list[dict[str, Any]]:
     )
 
 
+def _category_group_bounds(category: str, selected_group: str = "") -> tuple[int, int]:
+    definition = get_category_definition(category)
+    root_name = definition["root_item_group"]
+    root = frappe.db.get_value("Item Group", root_name, ["lft", "rgt"], as_dict=True)
+    if not root:
+        raise ValueError(f"ERP 缺少库存分类物料组：{root_name}")
+    frappe.get_doc("Item Group", root_name).check_permission("read")
+    selected_group = _text(selected_group)
+    if not selected_group:
+        return int(root["lft"]), int(root["rgt"])
+
+    selected = frappe.db.get_value(
+        "Item Group", selected_group, ["lft", "rgt"], as_dict=True
+    )
+    if not selected:
+        raise ValueError(f"物料组不存在：{selected_group}")
+    if int(selected["lft"]) < int(root["lft"]) or int(selected["rgt"]) > int(root["rgt"]):
+        raise ValueError(f"物料组不属于{root_name}：{selected_group}")
+    frappe.get_doc("Item Group", selected_group).check_permission("read")
+    return int(selected["lft"]), int(selected["rgt"])
+
+
+def _accessible_warehouses(company: str) -> tuple[str, ...]:
+    rows = frappe.get_list(
+        "Warehouse",
+        filters={"company": company, "is_group": 0},
+        fields=["name"],
+        limit_page_length=0,
+    )
+    return tuple(
+        _text(row.get("name") if isinstance(row, dict) else getattr(row, "name", row))
+        for row in rows
+        if _text(row.get("name") if isinstance(row, dict) else getattr(row, "name", row))
+    )
+
+
+def _category_query_context(category: str, filters: dict[str, Any]) -> dict[str, Any]:
+    company = _text(filters.get("company")) or DEFAULT_COMPANY
+    group_lft, group_rgt = _category_group_bounds(category, _text(filters.get("item_group")))
+    warehouses = _accessible_warehouses(company)
+    selected_warehouse = _text(filters.get("warehouse"))
+    if selected_warehouse and selected_warehouse not in warehouses:
+        if frappe is not None:
+            frappe.throw("没有权限查看所选仓库。", frappe.PermissionError)
+        raise PermissionError("没有权限查看所选仓库。")
+    return {
+        "company": company,
+        "group_lft": group_lft,
+        "group_rgt": group_rgt,
+        "warehouses": warehouses,
+        "snapshot_key": _latest_snapshot_key(company),
+    }
+
+
+def _load_category_stock_rows(context: dict[str, Any]) -> list[dict[str, Any]]:
+    warehouses = context["warehouses"]
+    if warehouses:
+        stock_join = """
+        LEFT JOIN (
+            SELECT bin.item_code, bin.warehouse, bin.actual_qty
+            FROM `tabBin` bin
+            INNER JOIN `tabWarehouse` warehouse ON warehouse.name = bin.warehouse
+            WHERE warehouse.company = %(company)s
+              AND warehouse.is_group = 0
+              AND warehouse.name IN %(warehouses)s
+        ) stock ON stock.item_code = item.name
+        """
+    else:
+        stock_join = """
+        LEFT JOIN (
+            SELECT NULL AS item_code, NULL AS warehouse, 0 AS actual_qty
+            WHERE 1 = 0
+        ) stock ON stock.item_code = item.name
+        """
+    return frappe.db.sql(
+        f"""
+        SELECT
+            item.name AS item_code,
+            item.item_name,
+            COALESCE(stock.warehouse, '') AS warehouse,
+            COALESCE(stock.actual_qty, 0) AS actual_qty,
+            item.stock_uom,
+            item.item_group,
+            COALESCE(item.custom_dpci, '') AS dpci,
+            COALESCE(item.custom_external_code, '') AS external_code,
+            COALESCE(item.custom_original_identifier_alias, '') AS original_identifier_alias
+        FROM `tabItem` item
+        INNER JOIN `tabItem Group` item_group ON item_group.name = item.item_group
+        {stock_join}
+        WHERE item.disabled = 0
+          AND item.is_stock_item = 1
+          AND item_group.lft >= %(group_lft)s
+          AND item_group.rgt <= %(group_rgt)s
+        ORDER BY item.name, stock.warehouse
+        """,
+        {
+            "company": context["company"],
+            "warehouses": warehouses or ("",),
+            "group_lft": context["group_lft"],
+            "group_rgt": context["group_rgt"],
+        },
+        as_dict=True,
+    )
+
+
+def _load_category_snapshot_rows(context: dict[str, Any]) -> list[dict[str, Any]]:
+    if not context["snapshot_key"] or not context["warehouses"]:
+        return []
+    return frappe.db.sql(
+        f"""
+        SELECT
+            snapshot.snapshot_key,
+            snapshot.snapshot_date,
+            snapshot.item_code,
+            item.item_name,
+            snapshot.warehouse,
+            snapshot.original_location,
+            snapshot.location_qty,
+            snapshot.stock_uom,
+            item.item_group,
+            COALESCE(item.custom_dpci, '') AS dpci,
+            COALESCE(item.custom_external_code, '') AS external_code,
+            COALESCE(item.custom_original_identifier_alias, '') AS original_identifier_alias
+        FROM `tab{SNAPSHOT_DOCTYPE}` snapshot
+        INNER JOIN `tabItem` item ON item.name = snapshot.item_code
+        INNER JOIN `tabItem Group` item_group ON item_group.name = item.item_group
+        WHERE snapshot.snapshot_key = %(snapshot_key)s
+          AND snapshot.company = %(company)s
+          AND snapshot.warehouse IN %(warehouses)s
+          AND item_group.lft >= %(group_lft)s
+          AND item_group.rgt <= %(group_rgt)s
+        ORDER BY snapshot.item_code, snapshot.warehouse, snapshot.original_location
+        """,
+        {
+            "snapshot_key": context["snapshot_key"],
+            "company": context["company"],
+            "warehouses": context["warehouses"],
+            "group_lft": context["group_lft"],
+            "group_rgt": context["group_rgt"],
+        },
+        as_dict=True,
+    )
+
+
+def _list_category_item_groups(context: dict[str, Any]) -> list[str]:
+    rows = frappe.db.sql(
+        """
+        SELECT name
+        FROM `tabItem Group`
+        WHERE lft >= %(group_lft)s
+          AND rgt <= %(group_rgt)s
+        ORDER BY lft
+        """,
+        {
+            "group_lft": context["group_lft"],
+            "group_rgt": context["group_rgt"],
+        },
+        as_dict=True,
+    )
+    return [_text(row.get("name")) for row in rows if _text(row.get("name"))]
+
+
+def _parse_category_page_length(value: Any) -> int:
+    try:
+        parsed = int(value or ALLOWED_PAGE_LENGTHS[0])
+    except (TypeError, ValueError):
+        parsed = ALLOWED_PAGE_LENGTHS[0]
+    return parsed if parsed in ALLOWED_PAGE_LENGTHS else ALLOWED_PAGE_LENGTHS[0]
+
+
 @_whitelist
 def get_inventory_location_detail(filters: Any = None, **kwargs: Any) -> dict[str, Any]:
     _require_read_permission()
@@ -378,7 +876,62 @@ def export_inventory_location_detail(filters: Any = None, **kwargs: Any) -> dict
     content = build_inventory_location_xlsx(payload)
     snapshot = payload.get("snapshot_date") or "latest"
     return {
-        "file_name": f"inventory-location-detail-{snapshot}.xlsx",
+        "file_name": f"material-inventory-detail-{snapshot}.xlsx",
+        "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "content_base64": base64.b64encode(content).decode("ascii"),
+    }
+
+
+@_whitelist
+def get_categorized_inventory_detail(
+    category: str,
+    filters: Any = None,
+    start: Any = 0,
+    page_length: Any = 100,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    _require_categorized_inventory_read_permission()
+    parsed = _parse_filters(filters, **kwargs)
+    company = _text(parsed.get("company")) or DEFAULT_COMPANY
+    parsed["company"] = company
+    _require_company_permission(company)
+    get_category_definition(category)
+    context = _category_query_context(category, parsed)
+    payload = build_categorized_inventory_payload(
+        _load_category_stock_rows(context),
+        _load_category_snapshot_rows(context),
+        category=category,
+        filters=parsed,
+        start=_parse_category_start(start),
+        page_length=_parse_category_page_length(page_length),
+    )
+    payload["company"] = company
+    payload["item_group_options"] = _list_category_item_groups(context)
+    return payload
+
+
+@_whitelist
+def export_categorized_inventory_detail(
+    category: str, filters: Any = None, **kwargs: Any
+) -> dict[str, Any]:
+    _require_categorized_inventory_read_permission()
+    parsed = _parse_filters(filters, **kwargs)
+    company = _text(parsed.get("company")) or DEFAULT_COMPANY
+    parsed["company"] = company
+    _require_company_permission(company)
+    definition = get_category_definition(category)
+    context = _category_query_context(category, parsed)
+    payload = build_categorized_inventory_payload(
+        _load_category_stock_rows(context),
+        _load_category_snapshot_rows(context),
+        category=category,
+        filters=parsed,
+        start=0,
+        page_length=0,
+    )
+    content = build_categorized_inventory_xlsx(payload)
+    return {
+        "file_name": f"{definition['file_prefix']}.xlsx",
         "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "content_base64": base64.b64encode(content).decode("ascii"),
     }

@@ -20,7 +20,29 @@ MODULE_NAME = "Overseas Costing"
 WORKBENCH_PAGE = "overseas-cost-workbench"
 COMPARISON_PAGE = "air-sea-cost-comparison"
 INVENTORY_LOCATION_PAGE = "inventory-location-detail"
-INVENTORY_LOCATION_LABEL = "库存库位明细"
+INVENTORY_LOCATION_LABEL = "物料库存明细"
+INVENTORY_DETAIL_PAGES = (
+    {
+        "label": INVENTORY_LOCATION_LABEL,
+        "link_to": INVENTORY_LOCATION_PAGE,
+        "legacy_labels": ("库存库位明细",),
+    },
+    {
+        "label": "半成品库存明细",
+        "link_to": "semi-finished-inventory-detail",
+        "legacy_labels": (),
+    },
+    {
+        "label": "成品库存明细",
+        "link_to": "finished-goods-inventory-detail",
+        "legacy_labels": (),
+    },
+    {
+        "label": "模具库存明细",
+        "link_to": "mold-inventory-detail",
+        "legacy_labels": (),
+    },
+)
 ACCESS_ROLE = "海外成本核算用户"
 ERP_SETTINGS_DOCTYPE = "Overseas Cost ERP Settings"
 HOME_WORKSPACE_LABEL = "Home"
@@ -577,7 +599,7 @@ def ensure_erpnext_standard_fields() -> dict:
 
 
 def get_inventory_trace_custom_fields() -> dict[str, list[dict]]:
-    """返回库存库位明细使用的物料追溯字段。"""
+    """返回库存明细页面使用的物料追溯字段。"""
 
     return {
         "Item": [
@@ -604,7 +626,7 @@ def get_inventory_trace_custom_fields() -> dict[str, list[dict]]:
 
 
 def ensure_stock_sidebar_inventory_location() -> dict:
-    """在库存侧边栏的标准“可用数量”之后增加独立页面。"""
+    """在库存侧边栏的标准“可用数量”之后确保四个库存明细入口。"""
 
     try:
         import frappe
@@ -613,8 +635,13 @@ def ensure_stock_sidebar_inventory_location() -> dict:
 
     if not frappe.db.exists("DocType", "Workspace Sidebar"):
         return {"ok": False, "message": "当前站点没有 Workspace Sidebar，已跳过。"}
-    if not frappe.db.exists("Page", INVENTORY_LOCATION_PAGE):
-        return {"ok": False, "message": "库存库位明细页面尚未安装。"}
+    missing_pages = [
+        page["link_to"]
+        for page in INVENTORY_DETAIL_PAGES
+        if not frappe.db.exists("Page", page["link_to"])
+    ]
+    if missing_pages:
+        return {"ok": False, "message": f"库存明细页面尚未安装：{', '.join(missing_pages)}"}
 
     sidebar_name = (
         frappe.db.exists("Workspace Sidebar", {"module": "Stock"})
@@ -633,50 +660,57 @@ def ensure_stock_sidebar_inventory_location() -> dict:
         "ok": True,
         "changed": changed,
         "sidebar": sidebar.name,
-        "page": INVENTORY_LOCATION_PAGE,
+        "pages": [page["link_to"] for page in INVENTORY_DETAIL_PAGES],
     }
 
 
 def _upsert_stock_sidebar_inventory_location(sidebar) -> bool:
     items = list(sidebar.get("items") or [])
-    matches = [
-        row
-        for row in items
-        if getattr(row, "link_to", None) == INVENTORY_LOCATION_PAGE
-        or getattr(row, "label", None) == INVENTORY_LOCATION_LABEL
-    ]
     changed = False
-    if matches:
-        target = matches[0]
-        for duplicate in matches[1:]:
-            items.remove(duplicate)
+    targets = []
+    for page in INVENTORY_DETAIL_PAGES:
+        labels = {page["label"], *page["legacy_labels"]}
+        matches = [
+            row
+            for row in items
+            if getattr(row, "link_to", None) == page["link_to"]
+            or getattr(row, "label", None) in labels
+        ]
+        if matches:
+            target = matches[0]
+            for duplicate in matches[1:]:
+                items.remove(duplicate)
+                changed = True
+        else:
+            target = sidebar.append(
+                "items",
+                {
+                    "label": page["label"],
+                    "type": "Link",
+                    "link_type": "Page",
+                    "link_to": page["link_to"],
+                    "icon": "warehouse",
+                    "idx": len(items) + 1,
+                },
+            )
+            items = list(sidebar.get("items") or [])
             changed = True
-    else:
-        target = sidebar.append(
-            "items",
-            {
-                "label": INVENTORY_LOCATION_LABEL,
-                "type": "Link",
-                "link_type": "Page",
-                "link_to": INVENTORY_LOCATION_PAGE,
-                "icon": "warehouse",
-                "idx": len(items) + 1,
-            },
-        )
-        items = list(sidebar.get("items") or [])
-        changed = True
 
-    desired = {
-        "label": INVENTORY_LOCATION_LABEL,
-        "type": "Link",
-        "link_type": "Page",
-        "link_to": INVENTORY_LOCATION_PAGE,
-        "icon": "warehouse",
-    }
-    for fieldname, value in desired.items():
-        if getattr(target, fieldname, None) != value:
-            setattr(target, fieldname, value)
-            changed = True
+        desired = {
+            "label": page["label"],
+            "type": "Link",
+            "link_type": "Page",
+            "link_to": page["link_to"],
+            "icon": "warehouse",
+        }
+        for fieldname, value in desired.items():
+            if getattr(target, fieldname, None) != value:
+                setattr(target, fieldname, value)
+                changed = True
+        targets.append(target)
+
+    for target in targets:
+        items.remove(target)
 
     anchor_index = next(
         (
@@ -687,13 +721,11 @@ def _upsert_stock_sidebar_inventory_location(sidebar) -> bool:
         ),
         -1,
     )
-    current_index = items.index(target)
-    desired_index = anchor_index + 1 if anchor_index >= 0 else len(items) - 1
-    if current_index != desired_index:
-        items.pop(current_index)
-        if current_index < desired_index:
-            desired_index -= 1
-        items.insert(desired_index, target)
+    desired_index = anchor_index + 1 if anchor_index >= 0 else len(items)
+    original_order = list(sidebar.get("items") or [])
+    for offset, target in enumerate(targets):
+        items.insert(desired_index + offset, target)
+    if items != original_order:
         changed = True
 
     sidebar.items[:] = items

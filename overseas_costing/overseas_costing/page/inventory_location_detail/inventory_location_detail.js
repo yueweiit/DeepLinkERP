@@ -81,7 +81,7 @@
     const url = URL.createObjectURL(new Blob([data], { type: result.mime_type }));
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = result.file_name || "inventory-location-detail.xlsx";
+    anchor.download = result.file_name || "material-inventory-detail.xlsx";
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
@@ -93,7 +93,7 @@
       this.wrapper = wrapper;
       this.page = frappe.ui.make_app_page({
         parent: wrapper,
-        title: "库存库位明细",
+        title: "物料库存明细",
         single_column: true,
       });
       this.requestId = 0;
@@ -157,10 +157,10 @@
 
     renderShell() {
       this.$root = $(
-        `<section class="inventory-location-detail" aria-label="库存库位明细">
+        `<section class="inventory-location-detail" aria-label="物料库存明细">
           <div class="ild-status" role="status">正在读取库存库位快照…</div>
           <div class="ild-table-wrap">
-            <table aria-label="库存库位明细表">
+            <table aria-label="物料库存明细表">
               <colgroup>
                 <col class="ild-col-code"><col class="ild-col-name"><col class="ild-col-warehouse">
                 <col class="ild-col-location"><col class="ild-col-location-qty"><col class="ild-col-total">
@@ -221,8 +221,8 @@
         );
       } catch (error) {
         if (requestId !== this.requestId) return;
-        this.$root.find("tbody").html('<tr class="ild-empty"><td colspan="11">库存库位明细读取失败。</td></tr>');
-        this.$root.find(".ild-status").text(error.message || "库存库位明细读取失败。");
+        this.$root.find("tbody").html('<tr class="ild-empty"><td colspan="11">物料库存明细读取失败。</td></tr>');
+        this.$root.find(".ild-status").text(error.message || "物料库存明细读取失败。");
       } finally {
         if (requestId === this.requestId) this.$root.removeClass("is-loading");
       }

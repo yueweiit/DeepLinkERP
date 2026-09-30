@@ -2,7 +2,7 @@
   "doctype": "Page",
   "name": "inventory-location-detail",
   "module": "Overseas Costing",
-  "title": "库存库位明细",
+  "title": "物料库存明细",
   "standard": "Yes",
   "roles": [
     {"role": "System Manager"},
