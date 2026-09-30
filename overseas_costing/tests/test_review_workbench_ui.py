@@ -7,7 +7,18 @@ import pytest
 PARTS = Path(__file__).resolve().parents[1] / 'page/overseas_cost_workbench/parts'
 
 
-def run_js(script):
+def run_js(script, with_erp_sites=False):
+    """在 Node 里组装工作台 View 并执行断言脚本。
+
+    ``with_erp_sites`` 才装载 ``79-erp-sites.js``：该分片的方法名都以
+    ``erpSite``/``renderErpSite`` 开头，与其它分片无交集，但按需装载能保证
+    既有用例的 View 组成一字不变。
+    """
+    erp_sites = (
+        "fs.readFileSync(%s,'utf8')+" % json.dumps(str(PARTS / '79-erp-sites.js'))
+        if with_erp_sites
+        else ""
+    )
     source = f"""
 const fs=require('fs');
 global.OverseasCostWorkbenchState=require({json.dumps(str(PARTS / '05-workbench-state.js'))});
@@ -15,7 +26,7 @@ const calculation=fs.readFileSync({json.dumps(str(PARTS / '30-calculation-erp.js
 const vouchers=fs.readFileSync({json.dumps(str(PARTS / '40-vouchers.js'))},'utf8');
 const drawer=fs.readFileSync({json.dumps(str(PARTS / '80-drawer-profit.js'))},'utf8');
 const review=fs.readFileSync({json.dumps(str(PARTS / '88-review-communication.js'))},'utf8');
-const View=Function('return class View {{'+calculation+vouchers+fs.readFileSync({json.dumps(str(PARTS / '35-workbench-view.js'))},'utf8')+drawer+fs.readFileSync({json.dumps(str(PARTS / '82-detail-page.js'))},'utf8')+review+'}}')();
+const View=Function('return class View {{'+calculation+vouchers+fs.readFileSync({json.dumps(str(PARTS / '35-workbench-view.js'))},'utf8')+drawer+fs.readFileSync({json.dumps(str(PARTS / '82-detail-page.js'))},'utf8')+review+{erp_sites}'}}')();
 function makeView(task='cost') {{
  const v=new View(); v.viewState={{task,page:1,q:'',screen:'workbench'}};
  v.filters={{review_status:'pending',review_warning:'',issue:''}};
@@ -1021,3 +1032,60 @@ console.log(JSON.stringify({
         'pushed_keeps_erp_entry': True,
         'fresh_uses_process_label': True,
     }
+
+
+def test_detail_erp_panel_lists_local_sync_queue_with_per_request_status():
+    """账本逐条请求要摊开：站点级「还欠处理」看不出这一票欠了哪几条。"""
+
+    result = run_js("""
+const v=makeView('erp');
+v.erpSiteState={batchName:'B',plan:null,ledger:{items:[
+ {request_id:'aaaaaaaaaaaa1111',site_code:'S1',operation:'CREATE',status:'PENDING',attempt_count:0,cost_result_hash:'h1'},
+ {request_id:'bbbbbbbbbbbb2222',site_code:'DEEPLINKERP',operation:'CREATE',status:'FAILED',attempt_count:3,error_code:'ERP_PUSH_FAILED',error_message:'远端拒绝建单',cost_result_hash:''},
+ {request_id:'cccccccccccc3333',site_code:'DEEPLINKERP',operation:'CREATE',status:'SUCCESS',attempt_count:1,cost_result_hash:'h2'},
+ {request_id:'dddddddddddd4444',site_code:'DEEPLINKERP',operation:'CREATE',status:'UNCERTAIN',attempt_count:1,cost_result_hash:'h2'},
+]},work:null,failure:'',loading:false,requestId:0,inFlight:new Set()};
+const html=v.renderErpSiteQueueBlock();
+const unknown=v.erpSiteRequestStatusMeta('WEIRD').label;
+v.erpSiteState.ledger=null;
+const noLedger=v.renderErpSiteQueueBlock();
+v.erpSiteState.ledger={items:[]};
+const empty=v.renderErpSiteQueueBlock();
+console.log(JSON.stringify({
+ has_area: html.includes('data-area="erp-sync-queue"'),
+ counted: html.includes('本地同步队列（4 条）'),
+ pending: html.includes('待推送'),
+ failed: html.includes('推送失败'),
+ success: html.includes('已推送'),
+ uncertain: html.includes('结果待核对'),
+ retries: html.includes('已尝试 3 次'),
+ reason: html.includes('远端拒绝建单'),
+ row_keyed: html.includes('data-request-id="bbbbbbbbbbbb2222"'),
+ unknown_falls_back: unknown==='WEIRD',
+ hidden_without_ledger: noLedger==='',
+ empty_message: empty.includes('尚未生成同步请求'),
+}));
+""", with_erp_sites=True)
+    assert result == {
+        'has_area': True,
+        'counted': True,
+        'pending': True,
+        'failed': True,
+        'success': True,
+        'uncertain': True,
+        'retries': True,
+        'reason': True,
+        'row_keyed': True,
+        'unknown_falls_back': True,
+        'hidden_without_ledger': True,
+        'empty_message': True,
+    }
+
+
+def test_detail_erp_status_panel_mounts_sync_queue_block():
+    """方法写了不等于挂上去了：站点面板必须真的渲染队列块。"""
+
+    source = (PARTS / '79-erp-sites.js').read_text(encoding='utf-8')
+    assert 'renderErpSiteStatusPanel() {' in source
+    body = source.split('renderErpSiteStatusPanel() {', 1)[1].split('\n  }', 1)[0]
+    assert 'renderErpSiteQueueBlock()' in body

@@ -18033,6 +18033,28 @@ class OverseasCostWorkbench {
     return table[key] || { label: key || "状态未知", tone: "muted" };
   }
 
+  /**
+   * 账本行（单条同步请求）的状态标签。
+   *
+   * 与站点级 `erpSiteStateMeta` 分开：站点状态是 `build_erp_work_state` 按站点聚合出来的
+   * 结论（SYNCED / UPDATE_REQUIRED…），账本行是 `Overseas Cost ERP Sync Request` 的
+   * `status` 原值（PENDING / SUCCESS / FAILED / UNCERTAIN…）。两者词表不同，不能互相套用
+   * —— 把 `FAILED` 丢进站点词表只会得到「未知状态」。
+   */
+  erpSiteRequestStatusMeta(status) {
+    const table = {
+      PENDING: { label: "待推送", tone: "muted" },
+      RUNNING: { label: "推送中", tone: "pending" },
+      SUCCESS: { label: "已推送", tone: "done" },
+      FAILED: { label: "推送失败", tone: "error" },
+      UNCERTAIN: { label: "结果待核对", tone: "warn" },
+      SUPERSEDED: { label: "已被替代", tone: "muted" },
+      MANUAL_REQUIRED: { label: "需人工处理", tone: "error" },
+    };
+    const key = String(status || "").trim().toUpperCase();
+    return table[key] || { label: key || "未知状态", tone: "muted" };
+  }
+
   /** 站点级投影：优先用分站点计划里那份（它才知道当前哈希与本次会推到哪些站点）。 */
   erpSiteWork(plan = null, ledger = null) {
     return plan?.erp_work || ledger?.erp_work || null;
@@ -18386,6 +18408,7 @@ class OverseasCostWorkbench {
           <h4>还欠处理的站点（${this.escape(String(overdueSites.length))} 个）</h4>
           <ul>${overdueSites.map((site) => this.renderErpSiteTodoRow(site)).join("")}</ul>
         </div>` : ""}
+      ${this.renderErpSiteQueueBlock()}
     `;
   }
 
@@ -18418,6 +18441,54 @@ class OverseasCostWorkbench {
         </div>
         <div class="ocw-erp-sites-ledger-actions">${actions}</div>
       </li>`;
+  }
+
+  /**
+   * 本地同步队列：账本里逐条请求。
+   *
+   * 「还欠处理的站点」是按站点聚合的结论，看不出这一票到底欠了哪几条；这里把账本行
+   * 原样摊开，站点、操作、状态、尝试次数、失败原因一条一条对得上，重试/核对按钮也能
+   * 照 `request_id` 精确落到某一条。
+   *
+   * 账本没读到时返回 `null`（而不是空数组），此时整块不渲染：把「读不到」画成
+   * 「没有队列」等于告诉用户"没欠东西"，与远端单据那条同一条纪律。
+   */
+  erpSiteLedgerQueue() {
+    const items = this.erpSiteState?.ledger?.items;
+    return Array.isArray(items) ? items : null;
+  }
+
+  renderErpSiteQueueRow(item = {}) {
+    const meta = this.erpSiteRequestStatusMeta(item.status);
+    const requestId = String(item.request_id || "");
+    const reason = String(item.error_message || item.error_code || "").trim();
+    const retries = Number(item.attempt_count || 0);
+    const operation = String(item.operation || "CREATE").trim() || "CREATE";
+    return `
+      <li class="ocw-erp-sites-ledger-row" data-request-id="${this.escape(requestId)}">
+        <div>
+          <strong>${this.escape(String(item.site_code || "--"))}</strong>
+          <span class="ocw-erp-sites-state is-${this.escape(meta.tone)}">${this.escape(meta.label)}</span>
+          ${retries ? `<em>已尝试 ${this.escape(String(retries))} 次</em>` : ""}
+          <small>${this.escape(operation)} · ${this.renderErpSiteHash(item.cost_result_hash)}</small>
+          ${requestId ? `<small>请求 ${this.escape(requestId.slice(0, 12))}</small>` : ""}
+          ${reason ? `<p>${this.escape(reason)}</p>` : ""}
+        </div>
+      </li>`;
+  }
+
+  renderErpSiteQueueBlock() {
+    const items = this.erpSiteLedgerQueue();
+    if (items === null) return "";
+    const head = `<h4>本地同步队列（${this.escape(String(items.length))} 条）</h4>`;
+    if (!items.length) {
+      return `<div class="ocw-erp-sites-ledger" data-area="erp-sync-queue">${head}<p class="ocw-erp-sites-note">尚未生成同步请求。</p></div>`;
+    }
+    return `
+      <div class="ocw-erp-sites-ledger" data-area="erp-sync-queue">
+        ${head}
+        <ul>${items.map((item) => this.renderErpSiteQueueRow(item)).join("")}</ul>
+      </div>`;
   }
 
   /** 冻结预览：推送前把要发到哪些站点/公司、多少钱、哪些行被拦，一次摊开。 */
