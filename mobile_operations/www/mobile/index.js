@@ -2589,6 +2589,31 @@ function inventory_status_tone(status) {
 	return "";
 }
 
+function mobile_api_call(method, args = {}, type) {
+	return new Promise((resolve, reject) => frappe.call({
+		method, args, type, freeze: false,
+		callback: (response) => response.exc ? reject(response) : resolve(response.message),
+		error: reject,
+	}));
+}
+
+function mobile_server_error_message(error) {
+	const raw = error?._server_messages || error?.responseJSON?._server_messages;
+	if (!raw) return "";
+	try {
+		const messages = JSON.parse(raw).map((entry) => {
+			try {
+				const parsed = JSON.parse(entry);
+				return parsed.message || parsed.title || "";
+			} catch { return entry; }
+		}).filter(Boolean);
+		if (!messages.length) return "";
+		const template = document.createElement("template");
+		template.innerHTML = messages.join("；");
+		return template.content.textContent || "";
+	} catch { return ""; }
+}
+
 function escape_html(value) {
 	return frappe.utils.escape_html(String(value ?? ""));
 }

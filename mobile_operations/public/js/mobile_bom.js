@@ -21,11 +21,7 @@ class MobileBOMView {
 	}
 
 	async call(method, args = {}) {
-		return new Promise((resolve, reject) => frappe.call({
-			method: `mobile_operations.bom.${method}`, args, freeze: false,
-			callback: (response) => response.exc ? reject(response) : resolve(response.message),
-			error: reject,
-		}));
+		return mobile_api_call(`mobile_operations.bom.${method}`, args);
 	}
 
 	async refresh() {
@@ -354,15 +350,5 @@ function mobile_bom_number(value) {
 }
 
 function mobile_bom_error(error) {
-	try {
-		const response = error.responseJSON || error;
-		const messages = JSON.parse(response._server_messages || "[]");
-		if (messages.length) {
-			const text = messages.map((message) => JSON.parse(message).message).join("；");
-			const element = document.createElement("div");
-			element.innerHTML = text;
-			return element.textContent;
-		}
-	} catch { /* Use a concise fallback when the response is not structured. */ }
-	return __("操作失败，请检查权限或稍后重试");
+	return mobile_server_error_message(error) || __("操作失败，请检查权限或稍后重试");
 }

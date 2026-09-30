@@ -19,14 +19,7 @@ class MobileItemsView {
 	}
 
 	async call(method, args = {}, type) {
-		return new Promise((resolve, reject) => frappe.call({
-			method: `mobile_operations.items.${method}`,
-			args,
-			type,
-			freeze: false,
-			callback: (response) => response.exc ? reject(response) : resolve(response.message),
-			error: reject,
-		}));
+		return mobile_api_call(`mobile_operations.items.${method}`, args, type);
 	}
 
 	async refresh() {
@@ -168,7 +161,7 @@ class MobileItemsView {
 				</details>
 			</section>
 			<div class="mobile-items-message" data-item-message role="alert"></div>
-			<div class="mobile-items-actions"><button class="mobile-items-button" data-item-action="back">${__("取消")}</button><button class="mobile-items-button primary" data-item-action="save">${__("保存物料")}</button></div>
+			<div class="mobile-items-actions"><button class="mobile-items-button" data-item-action="back">${__("取消")}</button><button class="mobile-items-button" data-item-action="check-save" hidden>${__("核实保存结果")}</button><button class="mobile-items-button primary" data-item-action="save">${__("保存物料")}</button></div>
 		</div>`;
 	}
 
@@ -187,6 +180,7 @@ class MobileItemsView {
 		if (action === "load-more") this.load_list({ append: true });
 		if (action === "inventory") this.app.go(`/mobile/inventory/query?item_code=${encodeURIComponent(this.name)}`);
 		if (action === "save") this.save();
+		if (action === "check-save") this.check_save_result();
 	}
 
 	on_input(event) {
@@ -202,8 +196,10 @@ class MobileItemsView {
 		const reference = event.target.dataset.itemReference;
 		if (reference) {
 			if (reference === "list_group") {
+				const had_group = Boolean(this.filters.item_group);
 				this.filters.item_group = "";
 				this.app.item_filters = { ...this.filters };
+				if (had_group) this.load_list();
 			} else if (this.form) {
 				this.form[reference] = "";
 			}
@@ -230,7 +226,7 @@ class MobileItemsView {
 	search_reference(reference, search) {
 		clearTimeout(this.reference_timer);
 		const sequence = ++this.reference_sequence;
-		const kind = reference === "stock_uom" ? "uom" : "item_group";
+		const kind = reference === "stock_uom" ? "uom" : reference === "list_group" ? "list_item_group" : "item_group";
 		const container = this.parent.querySelector(`[data-item-suggestions="${reference}"]`);
 		if (!container) return;
 		container.textContent = __("正在搜索...");
@@ -258,6 +254,8 @@ class MobileItemsView {
 		} else if (this.form) {
 			this.form[reference] = value;
 		}
+		clearTimeout(this.reference_timer);
+		this.reference_sequence += 1;
 		this.hide_suggestions();
 	}
 
@@ -273,6 +271,7 @@ class MobileItemsView {
 			return this.set_message(__("请填写物料编码并从下拉列表选择物料组和库存单位"), "error");
 		}
 		this.busy = true;
+		const submitted_code = this.form.item_code.trim();
 		const button = this.parent.querySelector('[data-item-action="save"]');
 		button.disabled = true;
 		this.set_message(__("正在保存物料..."));
@@ -281,11 +280,49 @@ class MobileItemsView {
 			if (this.parent.isConnected) this.app.go(`/mobile/inventory/items/${encodeURIComponent(result.name)}`);
 		} catch (error) {
 			if (this.parent.isConnected) {
-				this.set_message(mobile_item_error(error), "error");
-				button.disabled = false;
+				if (mobile_item_save_is_uncertain(error)) {
+					this.pending_item_code = submitted_code;
+					await this.verify_save_result(submitted_code);
+				} else {
+					this.set_message(mobile_item_error(error), "error");
+					button.disabled = false;
+				}
 			}
 		} finally {
 			this.busy = false;
+		}
+	}
+
+	async check_save_result() {
+		if (this.busy || !this.pending_item_code) return;
+		this.busy = true;
+		try {
+			await this.verify_save_result(this.pending_item_code);
+		} finally {
+			this.busy = false;
+		}
+	}
+
+	async verify_save_result(item_code) {
+		const save_button = this.parent.querySelector('[data-item-action="save"]');
+		const check_button = this.parent.querySelector('[data-item-action="check-save"]');
+		check_button.hidden = false;
+		check_button.disabled = true;
+		save_button.disabled = true;
+		this.set_message(__("正在核实保存结果..."));
+		try {
+			const result = await this.call("get_mobile_item_creation_status", { item_code });
+			if (!this.parent.isConnected) return;
+			if (result.name) {
+				this.app.go(`/mobile/inventory/items/${encodeURIComponent(result.name)}`);
+				return;
+			}
+			this.set_message(__("暂未查到编码 {0}，保存可能仍在处理中。请稍后再次核实或重试。", [item_code]), "error");
+			save_button.disabled = false;
+		} catch (error) {
+			if (this.parent.isConnected) this.set_message(__("无法核实编码 {0} 的保存结果，请稍后再次核实。", [item_code]), "error");
+		} finally {
+			if (check_button.isConnected) check_button.disabled = false;
 		}
 	}
 
@@ -298,14 +335,11 @@ class MobileItemsView {
 }
 
 function mobile_item_error(error) {
-	let message = error?._server_messages || error?.responseJSON?._server_messages;
-	if (message) {
-		try {
-			const messages = JSON.parse(message).map((entry) => {
-				try { return JSON.parse(entry).message || JSON.parse(entry).title; } catch (exception) { return entry; }
-			}).filter(Boolean);
-			if (messages.length) return messages.join("；");
-		} catch (exception) { /* fall through */ }
-	}
-	return error?.message || error?.responseJSON?.exception || __("操作失败，请重试");
+	return mobile_server_error_message(error)
+		|| error?.message || error?.responseJSON?.exception || __("操作失败，请重试");
+}
+
+function mobile_item_save_is_uncertain(error) {
+	return !error?._server_messages && !error?.responseJSON?._server_messages
+		&& !error?.exc && !error?.responseJSON?.exception;
 }

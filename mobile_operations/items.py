@@ -30,9 +30,23 @@ def _item_meta():
     return frappe.get_meta("Item")
 
 
-def _existing_fields(fieldnames):
-    meta = _item_meta()
+def _existing_fields(fieldnames, meta=None):
+    meta = meta or _item_meta()
     return [fieldname for fieldname in fieldnames if meta.has_field(fieldname)]
+
+
+def _editable_custom_fields(meta):
+    writable_levels = set(meta.get_permlevel_access("write"))
+    fields = []
+    for fieldname in _existing_fields(ITEM_EDITABLE_CUSTOM_FIELDS, meta):
+        field = meta.get_field(fieldname)
+        if not field.read_only and (not field.permlevel or field.permlevel in writable_levels):
+            fields.append(fieldname)
+    return fields
+
+
+def _readable_item_fields():
+    return set(_item_meta().get_permitted_fieldnames(permission_type="read"))
 
 
 def _item_row(row):
@@ -82,6 +96,7 @@ def get_mobile_item_list(search=None, status="enabled", stock_kind="all", item_g
     offset = max(cint(offset), 0)
 
     item = frappe.qb.DocType("Item")
+    readable_fields = _readable_item_fields()
     filters = item.name.isnotnull()
     if status == "enabled":
         filters &= item.disabled == 0
@@ -100,19 +115,19 @@ def get_mobile_item_list(search=None, status="enabled", stock_kind="all", item_g
         literal = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         prefix = f"{literal}%"
         contains = f"%{literal}%"
-        matches = item.name.like(contains) | item.item_name.like(contains) | item.description.like(contains)
+        matches = item.name.like(contains)
+        if "item_name" in readable_fields:
+            matches |= item.item_name.like(contains)
+        if "description" in readable_fields:
+            matches |= item.description.like(contains)
         for fieldname in _existing_fields(ITEM_SEARCH_FIELDS):
-            matches |= item[fieldname].like(contains)
+            if fieldname in readable_fields:
+                matches |= item[fieldname].like(contains)
         filters &= matches
-        rank = (
-            Case()
-            .when(item.name == search, 0)
-            .when(item.name.like(prefix), 1)
-            .when(item.name.like(contains), 2)
-            .when(item.item_name.like(prefix), 3)
-            .when(item.item_name.like(contains), 4)
-            .else_(5)
-        )
+        rank = Case().when(item.name == search, 0).when(item.name.like(prefix), 1).when(item.name.like(contains), 2)
+        if "item_name" in readable_fields:
+            rank = rank.when(item.item_name.like(prefix), 3).when(item.item_name.like(contains), 4)
+        rank = rank.else_(5)
 
     total = (
         frappe.qb.get_query(
@@ -164,10 +179,11 @@ def get_mobile_item_detail(name=None):
         frappe.throw(_("缺少物料编码"))
     doc = frappe.get_doc("Item", name)
     doc.check_permission("read")
+    doc.apply_fieldlevel_read_permissions()
     result = _item_row(doc)
     result.update(
         {
-            "description": strip_html(doc.description or ""),
+            "description": strip_html(doc.get("description") or ""),
             "can_view_inventory": bool(frappe.has_permission("Bin", "read")),
         }
     )
@@ -189,23 +205,27 @@ def get_mobile_item_form_options():
         defaults[fieldname] = cint(field.default) if field else 1
     return {
         "defaults": defaults,
-        "custom_fields": _existing_fields(ITEM_EDITABLE_CUSTOM_FIELDS),
+        "custom_fields": _editable_custom_fields(meta),
     }
 
 
 @frappe.whitelist()
 def search_mobile_item_references(kind=None, search=None, limit=20):
-    _check_create_permission()
     kind = (kind or "").strip()
     search = (search or "").strip()
     limit = max(1, min(cint(limit) or 20, 50))
-    if kind not in {"item_group", "uom"}:
+    if kind not in {"list_item_group", "item_group", "uom"}:
         return []
+    if kind == "list_item_group":
+        if not frappe.has_permission("Item", "read"):
+            frappe.throw(_("当前账号没有物料读取权限"), frappe.PermissionError)
+    else:
+        _check_create_permission()
     search_value = f"%{search}%"
-    if kind == "item_group":
+    if kind in {"list_item_group", "item_group"}:
         rows = frappe.get_list(
             "Item Group",
-            filters={"is_group": 0},
+            filters={"is_group": 0} if kind == "item_group" else None,
             or_filters=[
                 ["Item Group", "name", "like", search_value],
                 ["Item Group", "parent_item_group", "like", search_value],
@@ -232,6 +252,15 @@ def search_mobile_item_references(kind=None, search=None, limit=20):
         {"value": row.name, "label": row.name, "description": row.uom_name if row.uom_name != row.name else ""}
         for row in rows
     ]
+
+
+@frappe.whitelist()
+def get_mobile_item_creation_status(item_code=None):
+    _check_create_permission()
+    item_code = (item_code or "").strip()
+    if not item_code:
+        frappe.throw(_("缺少物料编码"))
+    return {"name": frappe.db.exists("Item", {"item_code": item_code})}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -266,9 +295,7 @@ def create_mobile_item(data=None):
         field = doc.meta.get_field(fieldname)
         default = cint(field.default) if field else 1
         doc.set(fieldname, cint(data[fieldname]) if fieldname in data else default)
-    for fieldname in _existing_fields(ITEM_EDITABLE_CUSTOM_FIELDS):
-        field = doc.meta.get_field(fieldname)
-        if field and not field.read_only:
-            doc.set(fieldname, (data.get(fieldname) or "").strip())
+    for fieldname in _editable_custom_fields(doc.meta):
+        doc.set(fieldname, (data.get(fieldname) or "").strip())
     doc.insert()
     return {"name": doc.name}
