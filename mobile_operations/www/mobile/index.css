@@ -518,8 +518,6 @@ body {
 	text-align: left;
 }
 
-.mobile-inventory-card:nth-child(3) { grid-column: span 2; min-height: 94px; }
-
 .mobile-inventory-card > i {
 	color: var(--mobile-primary);
 	font-size: 18px;
@@ -2254,7 +2252,6 @@ body {
 	.mobile-home-reminder-card:last-child,
 	.mobile-inventory-summary-card:last-child { grid-column: span 2; }
 	.mobile-inventory-grid { grid-template-columns: 1fr; }
-	.mobile-inventory-card:nth-child(3) { grid-column: auto; }
 }
 
 /* Mobile inventory query */

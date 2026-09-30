@@ -830,6 +830,7 @@ def get_mobile_inventory_suggestions(kind=None, search_text=None, company=None, 
 @frappe.whitelist()
 def get_mobile_inventory_dashboard(
     item_search=None,
+    item_code=None,
     warehouse_name=None,
     location_code=None,
     company=None,
@@ -842,6 +843,7 @@ def get_mobile_inventory_dashboard(
         frappe.throw(_("当前用户没有库存读取权限"), frappe.PermissionError)
 
     item_search = (item_search or "").strip()
+    item_code = (item_code or "").strip()
     warehouse_name = (warehouse_name or "").strip()
     location_code = (location_code or "").strip()
     company = (company or "").strip()
@@ -851,7 +853,7 @@ def get_mobile_inventory_dashboard(
     limit = max(1, min(cint(limit) or 40, 100))
     offset = max(cint(offset), 0)
 
-    if not any((item_search, warehouse_name, location_code)):
+    if not any((item_search, item_code, warehouse_name, location_code)):
         return {
             "items": [],
             "total": 0,
@@ -861,8 +863,11 @@ def get_mobile_inventory_dashboard(
             "summary": {"total": 0, "positive": 0, "insufficient": 0, "negative": 0, "zero": 0},
         }
 
-    item_codes = None
-    if item_search:
+    item_codes = [item_code] if item_code else None
+    if item_code:
+        item_doc = frappe.get_doc("Item", item_code)
+        item_doc.check_permission("read")
+    elif item_search:
         search_value = f"%{item_search}%"
         item_rows = frappe.get_list(
             "Item",

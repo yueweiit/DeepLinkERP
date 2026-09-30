@@ -18,4 +18,8 @@ def get_context(context):
 		Path(frappe.get_app_path("mobile_operations", "public", folder, filename)).stat().st_mtime_ns
 		for folder, filename in (("js", "mobile_bom.js"), ("css", "mobile_bom.css"))
 	)
+	context.mobile_item_asset_version = max(
+		Path(frappe.get_app_path("mobile_operations", "public", folder, filename)).stat().st_mtime_ns
+		for folder, filename in (("js", "mobile_items.js"), ("css", "mobile_items.css"))
+	)
 	return context

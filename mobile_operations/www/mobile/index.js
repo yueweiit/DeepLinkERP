@@ -59,12 +59,14 @@ class MobileOperationsApp {
 	}
 
 	go(route) {
-		const normalized = normalize_mobile_route(route);
-		if (normalized === this.route && window.location.pathname === normalized) {
+		const target = new URL(route, window.location.origin);
+		const normalized = normalize_mobile_route(target.pathname);
+		const target_url = `${normalized}${target.search}`;
+		if (normalized === this.route && `${window.location.pathname}${window.location.search}` === target_url) {
 			this.close_drawer();
 			return;
 		}
-		window.history.pushState({}, "", normalized);
+		window.history.pushState({}, "", target_url);
 		this.route = normalized;
 		this.close_drawer();
 		this.render_route();
@@ -116,6 +118,12 @@ class MobileOperationsApp {
 			return;
 		}
 
+		if (this.route === "/mobile/inventory/items" || this.route.startsWith("/mobile/inventory/items/")) {
+			title.textContent = __("物料档案");
+			this.items = new MobileItemsView(main, this);
+			return;
+		}
+
 		if (this.route === "/mobile/more") {
 			title.textContent = __("更多");
 			this.more = new MobileMoreView(main, this);
@@ -157,6 +165,7 @@ class MobileOperationsApp {
 						<button class="mobile-home-module-card" data-route="/mobile/material-request"><i class="fa fa-list-alt"></i><strong>${__("物料需求")}</strong><small>${__("查看和创建物料需求")}</small></button>
 						<button class="mobile-home-module-card" data-route="/mobile/stock-entry"><i class="fa fa-exchange"></i><strong>${__("物料移动")}</strong><small>${__("提交和处理物料移动")}</small></button>
 						<button class="mobile-home-module-card" data-route="/mobile/inventory/query"><i class="fa fa-search"></i><strong>${__("库存查询")}</strong><small>${__("按物料或仓库查询")}</small></button>
+						<button class="mobile-home-module-card" data-route="/mobile/inventory/items"><i class="fa fa-cubes"></i><strong>${__("物料档案")}</strong><small>${__("查找、查看和新增物料")}</small></button>
 					</div>
 				</section>
 				<section class="mobile-home-section">
@@ -231,6 +240,7 @@ class MobileOperationsApp {
 					<button class="mobile-app-drawer-link mobile-app-drawer-child" data-route="/mobile/material-request"><i class="fa fa-list-alt"></i>${__("物料需求")}</button>
 					<button class="mobile-app-drawer-link mobile-app-drawer-child" data-route="/mobile/stock-entry"><i class="fa fa-exchange"></i>${__("物料移动")}</button>
 					<button class="mobile-app-drawer-link mobile-app-drawer-child" data-route="/mobile/inventory/query"><i class="fa fa-search"></i>${__("库存查询")}</button>
+					<button class="mobile-app-drawer-link mobile-app-drawer-child" data-route="/mobile/inventory/items"><i class="fa fa-cubes"></i>${__("物料档案")}</button>
 					<button class="mobile-app-drawer-link" data-route="/mobile/production"><i class="fa fa-gears"></i>${__("生产作业")}</button>
 					<button class="mobile-app-drawer-link" data-route="/mobile/more"><i class="fa fa-ellipsis-h"></i>${__("更多")}</button>
 					<div class="mobile-app-drawer-divider"></div>
@@ -257,6 +267,8 @@ class MobileOperationsApp {
 			this.inventory.refresh();
 		} else if (this.inventory_query && this.route === "/mobile/inventory/query") {
 			this.inventory_query.refresh();
+		} else if (this.items && (this.route === "/mobile/inventory/items" || this.route.startsWith("/mobile/inventory/items/"))) {
+			this.items.refresh();
 		} else if (this.production && this.route.startsWith("/mobile/production")) {
 			this.production.refresh();
 		} else {
@@ -289,6 +301,7 @@ class MobileInventoryView {
 					<button class="mobile-inventory-card" data-route="/mobile/material-request"><i class="fa fa-list-alt"></i><strong>${__("物料需求")}</strong><small>${__("查看、创建和处理物料需求")}</small><span>${__("进入")} <i class="fa fa-angle-right"></i></span></button>
 					<button class="mobile-inventory-card" data-route="/mobile/stock-entry"><i class="fa fa-exchange"></i><strong>${__("物料移动")}</strong><small>${__("提交单据和处理 MES 推送")}</small><span>${__("进入") } <i class="fa fa-angle-right"></i></span></button>
 					<button class="mobile-inventory-card" data-route="/mobile/inventory/query"><i class="fa fa-search"></i><strong>${__("库存查询")}</strong><small>${__("按物料或仓库查询库存")}</small><span>${__("进入") } <i class="fa fa-angle-right"></i></span></button>
+					<button class="mobile-inventory-card" data-route="/mobile/inventory/items"><i class="fa fa-cubes"></i><strong>${__("物料档案")}</strong><small>${__("查找、查看和新增物料")}</small><span>${__("进入") } <i class="fa fa-angle-right"></i></span></button>
 				</div>
 			</div>
 		`;
@@ -343,7 +356,11 @@ class MobileInventoryQueryView {
 		};
 		this.input_timer = null;
 		this.suggestion_sequence = 0;
+		this.item_code = new URLSearchParams(window.location.search).get("item_code") || "";
 		this.render_shell();
+		if (this.item_code) {
+			this.parent.querySelector("[data-field='inventory-item-search']").value = this.item_code;
+		}
 		this.bind_events();
 		this.load_options();
 	}
@@ -420,7 +437,8 @@ class MobileInventoryQueryView {
 					(this.options.companies || []).map((item) => ({ value: item.name, label: item.name }))
 				);
 				this.render_select_options("company");
-				this.set_select_value("inventory-company", this.options.default_company || "", false);
+				this.set_select_value("inventory-company", this.item_code ? "" : (this.options.default_company || ""), false);
+				if (this.item_code) this.query();
 			},
 		});
 	}
@@ -487,6 +505,7 @@ class MobileInventoryQueryView {
 	get_query() {
 		return {
 			item_search: this.parent.querySelector("[data-field='inventory-item-search']")?.value.trim() || "",
+			item_code: this.item_code,
 			warehouse_name: this.parent.querySelector("[data-field='inventory-warehouse-name']")?.value.trim() || "",
 			location_code: this.parent.querySelector("[data-field='inventory-location-code']")?.value.trim() || "",
 			company: this.get_select_wrapper("inventory-company")?.dataset.selectValue || "",
@@ -502,6 +521,7 @@ class MobileInventoryQueryView {
 	schedule_input(field_name) {
 		this.hide_suggestions();
 		this.hide_selects();
+		if (field_name === "inventory-item-search") this.item_code = "";
 		window.clearTimeout(this.input_timer);
 		this.input_timer = window.setTimeout(() => {
 			const field = this.parent.querySelector(`[data-field='${field_name}']`);
@@ -562,6 +582,7 @@ class MobileInventoryQueryView {
 		const field = this.parent.querySelector(`[data-field='${field_name}']`);
 		if (!field) return;
 		field.value = suggestion.dataset.value || "";
+		if (field_name === "inventory-item-search") this.item_code = field.value;
 		this.hide_suggestions();
 		this.query();
 	}
@@ -614,6 +635,7 @@ class MobileInventoryQueryView {
 		window.clearTimeout(this.input_timer);
 		this.request_sequence += 1;
 		this.suggestion_sequence += 1;
+		this.item_code = "";
 		this.hide_suggestions();
 		this.hide_selects();
 		this.parent.querySelectorAll("[data-field^='inventory-']").forEach((field) => {

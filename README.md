@@ -33,3 +33,19 @@ Implementation: `mobile_operations/bom.py`, `public/js/mobile_bom.js` and
 `public/css/mobile_bom.css`. Run `bench build --app mobile_operations` after
 installation to link assets and compile translations. Regression tests are
 in `mobile_operations/test_bom.py`.
+
+## Mobile Item master
+
+The Inventory tab also includes the Item master at `/mobile/inventory/items`.
+Users with Item read permission can search the complete Item table by code,
+name, specification and auxiliary codes, filter by status, stock type and
+Item Group, open a read-only detail page, and jump to an exact-item inventory
+query. Users with Item create permission can add an Item from the phone. The
+form requires a unique item code, leaf Item Group and UOM, uses searchable
+reference suggestions, and delegates validation and installed document hooks
+to the standard ERPNext Item insert flow. Creating an Item does not create
+stock; stock is still produced by receipt, transfer or stock reconciliation
+documents.
+
+Implementation: `items.py`, `public/js/mobile_items.js` and
+`public/css/mobile_items.css`. Regression tests are in `test_items.py`.

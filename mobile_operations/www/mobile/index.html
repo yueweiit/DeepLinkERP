@@ -10,6 +10,7 @@
 {% block head_include %}
 <link rel="stylesheet" href="/assets/frappe/css/fonts/fontawesome/font-awesome.min.css">
 {{ include_style('/assets/mobile_operations/css/mobile_bom.css?v=' ~ mobile_bom_asset_version) }}
+{{ include_style('/assets/mobile_operations/css/mobile_items.css?v=' ~ mobile_item_asset_version) }}
 {% endblock %}
 
 {% block content %}
@@ -19,4 +20,5 @@
 {% block body_include %}
 {{ super() }}
 {{ include_script('/assets/mobile_operations/js/mobile_bom.js?v=' ~ mobile_bom_asset_version) }}
+{{ include_script('/assets/mobile_operations/js/mobile_items.js?v=' ~ mobile_item_asset_version) }}
 {% endblock %}
