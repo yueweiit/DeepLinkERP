@@ -1,6 +1,7 @@
 from typing import Any
 
 import frappe
+from erpnext.stock.get_item_details import get_item_details
 from frappe import _
 from frappe.utils import flt
 
@@ -29,6 +30,71 @@ SALES_ORDER_UPDATE_ALLOWED_FIELDS = {
 	"po_date",
 	"po_no",
 }
+SALES_ORDER_ITEM_UPDATE_ALLOWED_FIELDS = {
+	"qty",
+	"rate",
+	"new_item_code",
+	"custom_product",
+	"custom_specifications",
+	"custom_version",
+}
+SALES_ORDER_ITEM_CORRECTION_FIELDS = {
+	"new_item_code",
+	"custom_product",
+	"custom_specifications",
+	"custom_version",
+}
+SALES_ORDER_ITEM_CORRECTION_ALLOWED_STATUSES = {
+	PENDING_CONFIRMATION,
+	PENDING_DEPOSIT_CONFIRMATION,
+}
+SALES_ORDER_ITEM_DOWNSTREAM_QTY_FIELDS = (
+	"delivered_qty",
+	"work_order_qty",
+	"produced_qty",
+	"picked_qty",
+	"planned_qty",
+	"production_plan_qty",
+	"requested_qty",
+	"stock_reserved_qty",
+)
+SALES_ORDER_ITEM_REFRESH_FIELDS = (
+	"item_name",
+	"description",
+	"image",
+	"customer_item_code",
+	"item_group",
+	"brand",
+	"stock_uom",
+	"uom",
+	"conversion_factor",
+	"price_list_rate",
+	"base_price_list_rate",
+	"rate",
+	"base_rate",
+	"amount",
+	"base_amount",
+	"net_rate",
+	"base_net_rate",
+	"net_amount",
+	"base_net_amount",
+	"margin_type",
+	"margin_rate_or_amount",
+	"rate_with_margin",
+	"discount_percentage",
+	"discount_amount",
+	"pricing_rules",
+	"item_tax_template",
+	"item_tax_rate",
+	"weight_per_unit",
+	"total_weight",
+	"weight_uom",
+	"valuation_rate",
+	"gross_profit",
+	"grant_commission",
+	"is_stock_item",
+	"bom_no",
+)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -208,26 +274,113 @@ def update_sales_order_items(doc, items):
 
 	rows_by_name = {row.name: row for row in doc.items}
 	rows_by_item_code = {row.item_code: row for row in doc.items if row.item_code}
-	allowed_fields = {"qty", "rate"}
 
 	for item in items:
 		if not isinstance(item, dict):
 			frappe.throw(_("items 中的每一项必须是对象。"))
 
-		row = rows_by_name.get(item.get("name")) or rows_by_item_code.get(item.get("item_code"))
+		if item.get("name"):
+			row = rows_by_name.get(item.get("name"))
+		else:
+			row = rows_by_item_code.get(item.get("item_code"))
 		if not row:
 			identifier = item.get("name") or item.get("item_code") or _("未提供")
 			frappe.throw(_("销售订单中未找到明细 {0}。").format(identifier))
 
+		if item.get("name") and item.get("item_code") and item.get("item_code") != row.item_code:
+			frappe.throw(
+				_("明细 {0} 当前物料为 {1}，与请求中的 item_code {2} 不一致。").format(
+					row.name, row.item_code, item.get("item_code")
+				)
+			)
+
 		fields = set(item) - {"name", "item_code"}
-		unsupported_fields = fields - allowed_fields
+		unsupported_fields = fields - SALES_ORDER_ITEM_UPDATE_ALLOWED_FIELDS
 		if unsupported_fields:
 			frappe.throw(_("不支持修改销售订单明细字段：{0}。").format(", ".join(sorted(unsupported_fields))))
 		if not fields:
 			frappe.throw(_("明细 {0} 未提供需要修改的字段。").format(row.item_code or row.name))
 
-		for field in fields:
+		correction_fields = fields & SALES_ORDER_ITEM_CORRECTION_FIELDS
+		if correction_fields:
+			validate_sales_order_item_correction(doc, row, item)
+
+		if "new_item_code" in fields:
+			replace_sales_order_item(doc, row, item.get("new_item_code"))
+
+		for field in fields - {"new_item_code"}:
 			row.set(field, item[field])
+
+		if "rate" in fields and flt(item.get("rate")) == 0:
+			row.price_list_rate = 0
+			row.discount_amount = 0
+			row.pricing_rules = None
+
+
+def validate_sales_order_item_correction(doc, row, item):
+	if not item.get("name"):
+		frappe.throw(_("更正销售订单物料或版本时必须传明细 name，不能只按 item_code 定位。"))
+
+	process_status = doc.get("custom_process_status")
+	if process_status not in SALES_ORDER_ITEM_CORRECTION_ALLOWED_STATUSES:
+		frappe.throw(
+			_("销售订单 {0} 当前状态为 {1}，物料或版本只能在推送 MES 前更正。").format(
+				doc.name, process_status or _("未设置")
+			)
+		)
+
+	linked_qty_fields = [
+		fieldname
+		for fieldname in SALES_ORDER_ITEM_DOWNSTREAM_QTY_FIELDS
+		if flt(row.get(fieldname)) != 0
+	]
+	if linked_qty_fields:
+		frappe.throw(
+			_("销售订单明细 {0} 已产生下游数量，不能替换物料或版本：{1}。").format(
+				row.name, ", ".join(linked_qty_fields)
+			)
+		)
+
+	if "new_item_code" in item and not item.get("new_item_code"):
+		frappe.throw(_("new_item_code 不能为空。"))
+	if "custom_version" in item and len(str(item.get("custom_version") or "")) > 64:
+		frappe.throw(_("custom_version 最长为 64 个字符。"))
+
+
+def replace_sales_order_item(doc, row, new_item_code):
+	if new_item_code == row.item_code:
+		return
+
+	preserved_values = {
+		"qty": row.get("qty"),
+		"delivery_date": row.get("delivery_date"),
+		"warehouse": row.get("warehouse"),
+	}
+	row.item_code = new_item_code
+	for fieldname in SALES_ORDER_ITEM_REFRESH_FIELDS:
+		if row.meta.get_field(fieldname):
+			row.set(fieldname, None)
+
+	parent_values = {fieldname: doc.get(fieldname) for fieldname in doc.meta.get_valid_columns()}
+	parent_values["document_type"] = row.doctype
+	ctx = frappe._dict(parent_values)
+	ctx.update(row.as_dict())
+	ctx.update(
+		{
+			"doctype": doc.doctype,
+			"name": doc.name,
+			"child_doctype": row.doctype,
+			"child_docname": row.name,
+			"ignore_pricing_rule": doc.get("ignore_pricing_rule") or 0,
+		}
+	)
+	details = get_item_details(ctx, doc, for_validate=True, overwrite_warehouse=False)
+	for fieldname, value in details.items():
+		if row.meta.get_field(fieldname) and value is not None:
+			row.set(fieldname, value)
+
+	for fieldname, value in preserved_values.items():
+		row.set(fieldname, value)
 
 
 def validate_sales_order_update_status(doc):
