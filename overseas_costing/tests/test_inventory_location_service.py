@@ -231,6 +231,44 @@ def test_category_definitions_are_server_whitelisted_and_use_erp_item_group_root
         raise AssertionError("invalid category was accepted")
 
 
+def test_missing_category_root_returns_an_empty_page_instead_of_a_server_error(monkeypatch) -> None:
+    missing_group = "半成品Semiterminado"
+    monkeypatch.setattr(service, "_require_categorized_inventory_read_permission", lambda: None)
+    monkeypatch.setattr(service, "_require_company_permission", lambda _company: None)
+    monkeypatch.setattr(
+        service,
+        "_category_query_context",
+        lambda _category, _filters: {
+            "company": "Yuewei",
+            "missing_item_group": missing_group,
+            "warehouses": (),
+            "snapshot_key": "",
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "_load_category_stock_rows",
+        lambda _context: (_ for _ in ()).throw(AssertionError("stock query should be skipped")),
+    )
+    monkeypatch.setattr(
+        service,
+        "_load_category_snapshot_rows",
+        lambda _context: (_ for _ in ()).throw(AssertionError("snapshot query should be skipped")),
+    )
+
+    payload = service.get_categorized_inventory_detail(
+        "semi_finished",
+        filters={"company": "Yuewei"},
+        start=0,
+        page_length=100,
+    )
+
+    assert payload["total_count"] == 0
+    assert payload["groups"] == []
+    assert payload["item_group_options"] == []
+    assert payload["warning"] == f"ERP 未维护分类物料组：{missing_group}"
+
+
 def test_categorized_payload_keeps_real_time_qty_and_marks_snapshot_difference_and_missing_location() -> None:
     payload = build_categorized_inventory_payload(
         CATEGORY_STOCK_ROWS,

@@ -683,12 +683,12 @@ def _list_snapshot_options(company: str) -> list[dict[str, Any]]:
     )
 
 
-def _category_group_bounds(category: str, selected_group: str = "") -> tuple[int, int]:
+def _category_group_bounds(category: str, selected_group: str = "") -> tuple[int, int] | None:
     definition = get_category_definition(category)
     root_name = definition["root_item_group"]
     root = frappe.db.get_value("Item Group", root_name, ["lft", "rgt"], as_dict=True)
     if not root:
-        raise ValueError(f"ERP 缺少库存分类物料组：{root_name}")
+        return None
     frappe.get_doc("Item Group", root_name).check_permission("read")
     selected_group = _text(selected_group)
     if not selected_group:
@@ -721,7 +721,15 @@ def _accessible_warehouses(company: str) -> tuple[str, ...]:
 
 def _category_query_context(category: str, filters: dict[str, Any]) -> dict[str, Any]:
     company = _text(filters.get("company")) or DEFAULT_COMPANY
-    group_lft, group_rgt = _category_group_bounds(category, _text(filters.get("item_group")))
+    bounds = _category_group_bounds(category, _text(filters.get("item_group")))
+    if bounds is None:
+        return {
+            "company": company,
+            "missing_item_group": get_category_definition(category)["root_item_group"],
+            "warehouses": (),
+            "snapshot_key": "",
+        }
+    group_lft, group_rgt = bounds
     warehouses = _accessible_warehouses(company)
     selected_warehouse = _text(filters.get("warehouse"))
     if selected_warehouse and selected_warehouse not in warehouses:
@@ -897,16 +905,21 @@ def get_categorized_inventory_detail(
     _require_company_permission(company)
     get_category_definition(category)
     context = _category_query_context(category, parsed)
+    missing_item_group = _text(context.get("missing_item_group"))
     payload = build_categorized_inventory_payload(
-        _load_category_stock_rows(context),
-        _load_category_snapshot_rows(context),
+        [] if missing_item_group else _load_category_stock_rows(context),
+        [] if missing_item_group else _load_category_snapshot_rows(context),
         category=category,
         filters=parsed,
         start=_parse_category_start(start),
         page_length=_parse_category_page_length(page_length),
     )
     payload["company"] = company
-    payload["item_group_options"] = _list_category_item_groups(context)
+    payload["item_group_options"] = (
+        [] if missing_item_group else _list_category_item_groups(context)
+    )
+    if missing_item_group:
+        payload["warning"] = f"ERP 未维护分类物料组：{missing_item_group}"
     return payload
 
 
@@ -921,9 +934,10 @@ def export_categorized_inventory_detail(
     _require_company_permission(company)
     definition = get_category_definition(category)
     context = _category_query_context(category, parsed)
+    missing_item_group = _text(context.get("missing_item_group"))
     payload = build_categorized_inventory_payload(
-        _load_category_stock_rows(context),
-        _load_category_snapshot_rows(context),
+        [] if missing_item_group else _load_category_stock_rows(context),
+        [] if missing_item_group else _load_category_snapshot_rows(context),
         category=category,
         filters=parsed,
         start=0,

@@ -1,12 +1,18 @@
 (function (globalThis) {
   "use strict";
 
-  const DEFAULT_COMPANY = "YW Fabricación MX 核心制造";
   const PAGE_LENGTHS = [100, 500, 2500];
   const COUNT_UOM_TOKENS = [
     "个", "件", "套", "卷", "包", "张", "片", "支", "条", "台",
     "pieza", "conjunto", "rollo", "paquete", "hoja", "ramo", "barra", "unidad",
   ];
+
+  function resolveDefaultCompany(framework) {
+    const getter = framework?.defaults?.get_default;
+    return typeof getter === "function"
+      ? String(getter.call(framework.defaults, "company") || "").trim()
+      : "";
+  }
 
   function escapeHtml(value) {
     return String(value ?? "").replace(/[&<>"']/g, (character) => ({
@@ -120,13 +126,14 @@
 
     makeFilters() {
       const resetAndRefresh = () => this.refresh(true);
+      const defaultCompany = resolveDefaultCompany(frappe);
       this.fields = {
         company: this.page.add_field({
           fieldname: "company",
           label: "公司",
           fieldtype: "Link",
           options: "Company",
-          default: DEFAULT_COMPANY,
+          default: defaultCompany,
           change: () => {
             if (this.fields.warehouse) this.fields.warehouse.set_value("");
             if (this.fields.item_group) this.fields.item_group.set_value("");
@@ -138,9 +145,12 @@
           label: "仓库",
           fieldtype: "Link",
           options: "Warehouse",
-          get_query: () => ({
-            filters: { company: this.fields.company.get_value() || DEFAULT_COMPANY, is_group: 0 },
-          }),
+          get_query: () => {
+            const company = this.fields.company.get_value() || defaultCompany;
+            const filters = { is_group: 0 };
+            if (company) filters.company = company;
+            return { filters };
+          },
           change: resetAndRefresh,
         }),
         item_group: this.page.add_field({
@@ -270,9 +280,9 @@
         this.setItemGroupOptions(payload.item_group_options || []);
         this.$root.find("tbody").html(renderTableRows(payload.groups || []));
         const snapshot = payload.snapshot_date || "暂无库位快照";
-        this.$root.find(".cid-summary").text(
-          `ERP 实时库存 · ${Number(payload.total_count || 0)} 个物料仓库组 · 当前 ${Number(payload.page_count || 0)} 条 · 参考快照 ${snapshot}`
-        );
+        const summary = payload.warning
+          || `ERP 实时库存 · ${Number(payload.total_count || 0)} 个物料仓库组 · 当前 ${Number(payload.page_count || 0)} 条 · 参考快照 ${snapshot}`;
+        this.$root.find(".cid-summary").text(summary);
         this.renderPager(payload);
       } catch (error) {
         if (requestId !== this.requestId) return;
@@ -324,7 +334,14 @@
     return new CategorizedInventoryDetailPage(wrapper, config);
   }
 
-  const api = { escapeHtml, formatQuantity, renderTableRows, CategorizedInventoryDetailPage, bootstrap };
+  const api = {
+    escapeHtml,
+    formatQuantity,
+    renderTableRows,
+    resolveDefaultCompany,
+    CategorizedInventoryDetailPage,
+    bootstrap,
+  };
   globalThis.CategorizedInventoryDetail = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : window);

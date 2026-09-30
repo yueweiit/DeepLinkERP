@@ -2,11 +2,17 @@
   "use strict";
 
   const PAGE_NAME = "inventory-location-detail";
-  const DEFAULT_COMPANY = "YW Fabricación MX 核心制造";
   const COUNT_UOM_TOKENS = [
     "个", "件", "套", "卷", "包", "张", "片", "支", "条", "台",
     "pieza", "conjunto", "rollo", "paquete", "hoja", "ramo", "barra", "unidad",
   ];
+
+  function resolveDefaultCompany(framework) {
+    const getter = framework?.defaults?.get_default;
+    return typeof getter === "function"
+      ? String(getter.call(framework.defaults, "company") || "").trim()
+      : "";
+  }
 
   function escapeHtml(value) {
     return String(value ?? "").replace(/[&<>"']/g, (character) => ({
@@ -105,13 +111,14 @@
 
     makeFilters() {
       const refresh = () => this.refresh();
+      const defaultCompany = resolveDefaultCompany(frappe);
       this.fields = {
         company: this.page.add_field({
           fieldname: "company",
           label: "公司",
           fieldtype: "Link",
           options: "Company",
-          default: DEFAULT_COMPANY,
+          default: defaultCompany,
           change: () => {
             if (this.fields.snapshot_key) this.fields.snapshot_key.set_value("");
             refresh();
@@ -129,7 +136,10 @@
           label: "仓库",
           fieldtype: "Link",
           options: "Warehouse",
-          get_query: () => ({ filters: { company: this.fields.company.get_value() || DEFAULT_COMPANY } }),
+          get_query: () => {
+            const company = this.fields.company.get_value() || defaultCompany;
+            return company ? { filters: { company } } : {};
+          },
           change: refresh,
         }),
         original_location: this.page.add_field({
@@ -257,7 +267,13 @@
     }
   }
 
-  const api = { escapeHtml, formatQuantity, renderTableRows, InventoryLocationDetailPage };
+  const api = {
+    escapeHtml,
+    formatQuantity,
+    renderTableRows,
+    resolveDefaultCompany,
+    InventoryLocationDetailPage,
+  };
   globalThis.InventoryLocationDetail = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 

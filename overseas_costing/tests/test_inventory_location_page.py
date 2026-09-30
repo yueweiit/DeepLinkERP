@@ -77,7 +77,8 @@ def test_page_assets_are_scoped_mirrored_and_link_to_standard_item_form() -> Non
     assert "snapshot_options" in source
     assert "renderTableRows" in source
     assert "rowspan" in source
-    assert 'default: DEFAULT_COMPANY' in source
+    assert 'default: defaultCompany' in source
+    assert "resolveDefaultCompany(frappe)" in source
     assert 'children(":not(.page-form)")' in source
     assert "$(this.page.body).empty()" not in source
 
@@ -108,6 +109,31 @@ def test_material_page_is_renamed_without_changing_its_route_or_snapshot_contrac
     assert "库存库位明细" not in source
     assert "get_inventory_location_detail" in source
     assert "export_inventory_location_detail" in source
+
+
+def test_inventory_pages_use_the_erp_default_company_without_a_hard_coded_fallback() -> None:
+    material = run_js(
+        """
+const found = page.resolveDefaultCompany({defaults:{get_default:(key)=>key === 'company' ? 'Yuewei' : ''}});
+const missing = page.resolveDefaultCompany({defaults:{get_default:()=>''}});
+console.log(JSON.stringify({found, missing}));
+"""
+    )
+    assert material == {"found": "Yuewei", "missing": ""}
+
+    shared = ROOT / "overseas_costing/public/js/categorized_inventory_detail.js"
+    script = (
+        f"const page=require({json.dumps(str(shared))});"
+        "const found=page.resolveDefaultCompany({defaults:{get_default:(key)=>key==='company'?'Yuewei':''}});"
+        "const missing=page.resolveDefaultCompany({defaults:{get_default:()=>''}});"
+        "console.log(JSON.stringify({found,missing}));"
+    )
+    result = subprocess.run(["node", "-e", script], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"found": "Yuewei", "missing": ""}
+
+    for source in (JS.read_text(encoding="utf-8"), shared.read_text(encoding="utf-8")):
+        assert '"YW Fabricación MX 核心制造"' not in source
 
 
 def test_three_category_pages_are_thin_wrappers_over_one_shared_component() -> None:
