@@ -2,6 +2,7 @@ from overseas_costing.services import company_route_provision_service as service
 from overseas_costing.services.company_route_provision_service import (
     EXISTING_COMPANY_ROUTES,
     MEXICO_COMPANIES,
+    MEXICO_PROJECT_ROUTES,
     build_provision_plan,
 )
 
@@ -28,7 +29,7 @@ def test_preflight_repeated_run_skips_everything() -> None:
     companies = _existing_core_companies() + [_mexico_company(name, abbr) for name, abbr in MEXICO_COMPANIES]
     routes = [
         {"project_collection": project, "subsidiary_code": company, "erp_site": "", "enabled": 1}
-        for project, company in {**EXISTING_COMPANY_ROUTES, **{name: name for name, _ in MEXICO_COMPANIES}}.items()
+        for project, company in {**EXISTING_COMPANY_ROUTES, **MEXICO_PROJECT_ROUTES}.items()
     ]
 
     plan = build_provision_plan(companies, routes)
@@ -42,7 +43,7 @@ def test_preflight_repeated_run_skips_everything() -> None:
 def test_preflight_company_conflict_blocks_entire_plan() -> None:
     companies = _existing_core_companies() + [
         {"name": "OTHER", "abbr": "LEMO"},
-        _mexico_company("YW MOLDES MX模具", "WRONG"),
+        _mexico_company("YW MOLDES", "WRONG"),
     ]
 
     plan = build_provision_plan(companies, [])
@@ -51,11 +52,16 @@ def test_preflight_company_conflict_blocks_entire_plan() -> None:
     assert {row["type"] for row in plan["conflicts"]} == {"COMPANY_FIELD_CONFLICT", "COMPANY_ABBR_CONFLICT"}
 
 
-def test_preflight_never_maps_lemos_to_shenzhen_company() -> None:
+def test_preflight_preserves_source_project_label_and_targets_renamed_lemos_company() -> None:
     plan = build_provision_plan(_existing_core_companies(), [])
-    route = next(row for row in plan["create_routes"] if row["project_collection"] == "LEMOS MX供应链开发及管理")
+    route = next(
+        row
+        for row in plan["create_routes"]
+        if row["project_collection"] == "LEMOS MX供应链开发及管理"
+    )
 
-    assert route["subsidiary_code"] == "LEMOS MX供应链开发及管理"
+    assert MEXICO_PROJECT_ROUTES["LEMOS MX供应链开发及管理"] == "LEMOS MX"
+    assert route["subsidiary_code"] == "LEMOS MX"
     assert "深圳柠檬树" not in route["subsidiary_code"]
 
 

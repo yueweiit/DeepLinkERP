@@ -10,6 +10,7 @@ from openpyxl import load_workbook
 from overseas_costing.services import inventory_location_service as service
 from overseas_costing.services.inventory_location_service import (
     CATEGORY_DEFINITIONS,
+    DEFAULT_COMPANY,
     build_categorized_inventory_payload,
     build_categorized_inventory_xlsx,
     build_inventory_location_payload,
@@ -19,11 +20,15 @@ from overseas_costing.services.inventory_location_service import (
 )
 
 
+def test_inventory_reports_default_to_the_renamed_manufacturing_company() -> None:
+    assert DEFAULT_COMPANY == "YUEWEI MX"
+
+
 ROWS = [
     {
         "snapshot_key": "YWFM-2026-09-29",
         "snapshot_date": "2026-09-29",
-        "company": "YW Fabricación MX 核心制造",
+        "company": "YUEWEI MX",
         "item_code": "FL002917",
         "item_name": "PET片材 / PET SHEET",
         "warehouse": "IML 仓库 - YWFM",
@@ -38,7 +43,7 @@ ROWS = [
     {
         "snapshot_key": "YWFM-2026-09-29",
         "snapshot_date": "2026-09-29",
-        "company": "YW Fabricación MX 核心制造",
+        "company": "YUEWEI MX",
         "item_code": "FL002917",
         "item_name": "PET片材 / PET SHEET",
         "warehouse": "IML 仓库 - YWFM",
@@ -53,7 +58,7 @@ ROWS = [
     {
         "snapshot_key": "YWFM-2026-09-29",
         "snapshot_date": "2026-09-29",
-        "company": "YW Fabricación MX 核心制造",
+        "company": "YUEWEI MX",
         "item_code": "FL007979",
         "item_name": "色母粒 / MASTERBATCH AZUL",
         "warehouse": "综合仓库 - YWFM",
@@ -72,7 +77,7 @@ def test_payload_groups_locations_and_keeps_complete_warehouse_total_when_locati
     payload = build_inventory_location_payload(
         ROWS,
         {
-            "company": "YW Fabricación MX 核心制造",
+            "company": "YUEWEI MX",
             "original_location": "AI-11-A02",
         },
     )
@@ -121,12 +126,12 @@ def test_company_document_permission_is_checked_before_raw_snapshot_queries(monk
         def get_doc(doctype: str, name: str):
             assert (doctype, name) == (
                 "Company",
-                "YW Fabricación MX 核心制造",
+                "YUEWEI MX",
             )
             return FakeCompany()
 
     monkeypatch.setattr(service, "frappe", FakeFrappe())
-    service._require_company_permission("YW Fabricación MX 核心制造")
+    service._require_company_permission("YUEWEI MX")
 
     assert checked == ["read"]
 
@@ -388,7 +393,7 @@ def test_real_time_query_uses_bin_and_item_group_bounds_not_code_prefixes(monkey
 
     monkeypatch.setattr(service, "frappe", SimpleNamespace(db=FakeDB()))
     context = {
-        "company": "YW Fabricación MX 核心制造",
+        "company": "YUEWEI MX",
         "group_lft": 10,
         "group_rgt": 20,
         "warehouses": ("半成品仓 - YWFM",),

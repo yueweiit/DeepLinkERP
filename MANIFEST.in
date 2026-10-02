@@ -1,6 +1,7 @@
 include README.md
 include requirements.txt
 include license.txt
+include overseas_costing/patches.txt
 recursive-include overseas_costing *.json
 recursive-include overseas_costing *.md
 recursive-include overseas_costing *.js *.css *.html

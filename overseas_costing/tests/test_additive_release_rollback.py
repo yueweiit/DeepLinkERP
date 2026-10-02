@@ -93,16 +93,30 @@ def test_code_rollback_with_missing_backup_image_stops_before_service_changes(tm
     assert len(commands) == 1 and commands[0][:2] == ["image", "inspect"]
 
 
-def test_additive_workflow_uses_code_rollback_and_retains_legacy_recovery_mode():
+def test_migrating_workflow_uses_state_aware_rollback_and_retains_recovery_modes():
     workflow = (ROOT / ".github/workflows/deploy-overseas-costing.yml").read_text()
-    rollback = workflow.split("- name: Rollback failed material AI release", 1)[1].split("\n      - name:", 1)[0]
-    assert "' rollback-code " in rollback
+    rollback = workflow.split("- name: Rollback failed ERP release", 1)[1].split("\n      - name:", 1)[0]
+    assert "' rollback-safe " in rollback
     assert "' rollback " not in rollback
+    assert "' rollback-code " not in rollback
     script = SCRIPT.read_text()
     assert "prepare) prepare_release" in script
+    assert "rollback-safe) rollback_safe_release" in script
     assert "rollback) rollback_release" in script
     assert "rollback-code) rollback_code_release" in script
     assert 'restore "$remote_dir/' in script
+
+
+def test_finish_marks_database_as_committed_before_reopening_the_site():
+    script = SCRIPT.read_text()
+    finish = script.split("finish_release()", 1)[1].split("rollback_release()", 1)[0]
+    assert finish.index("mark_database_committed") < finish.index("restore_maintenance_mode")
+
+    safe_rollback = script.split("rollback_safe_release()", 1)[1].split("rollback_code_release()", 1)[0]
+    assert "database_is_committed" in safe_rollback
+    committed_branch = safe_rollback.split("database_is_committed", 1)[1].split("fi", 1)[0]
+    assert "restore_maintenance_mode" in committed_branch
+    assert "rollback_release" not in committed_branch
 
 
 def _resolve(tmp_path, compose_body):
@@ -141,7 +155,7 @@ def test_deploy_scripts_take_the_base_image_from_compose_not_a_literal():
         assert 'base_image="$(resolve_base_image "$compose_file"' in body
     workflow = (ROOT / ".github/workflows/deploy-overseas-costing.yml").read_text()
     assert ".github/scripts/resolve_base_image.sh" in workflow
-    assert workflow.count("BASE_IMAGE_SCRIPT=") == 5
+    assert workflow.count("BASE_IMAGE_SCRIPT=") == 6
 
 
 def test_install_script_explains_a_base_image_that_was_reclaimed():

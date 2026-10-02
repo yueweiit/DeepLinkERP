@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-mode="${1:?prepare, rollback or rollback-code is required}"
+mode="${1:?prepare, finish, rollback-safe, rollback or rollback-code is required}"
 compose_root="${2:-/home/yuewei/ERPNext-Docker/frappe_docker}"
 site_name="${3:-deeplinkerp.com}"
 release_id="${4:?release id is required}"
@@ -12,6 +12,7 @@ compose_file="$compose_root/compose.custom.yaml"
 backup_image="deeplinkerp-custom:pre-material-ai-release-$release_id"
 backup_archive="$compose_root/backups/material-ai-release-$release_id.tar.gz"
 release_marker_backup="$compose_root/backups/workbench-release-$release_id.json"
+release_state_file="$compose_root/backups/release-state-$release_id.json"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 asset_sync_script="${ASSET_SYNC_SCRIPT:-}"
 if [ -z "$asset_sync_script" ] && [ -f "$script_dir/sync_and_verify_assets.sh" ]; then
@@ -40,6 +41,7 @@ sync_and_verify_assets_only() {
 
 prepare_release() {
   mkdir -p "$compose_root/backups"
+  rm -f "$release_state_file"
   backend_id=$(docker compose -f "$compose_file" ps -q backend)
   test -n "$backend_id"
   marker_config=$(mktemp)
@@ -53,10 +55,43 @@ with open(source, encoding="utf-8") as handle:
     config = json.load(handle)
 key = "overseas_costing_release_id"
 with open(target, "w", encoding="utf-8") as handle:
-    json.dump({"present": key in config, "value": config.get(key) or ""}, handle)
+    json.dump(
+        {
+            "present": key in config,
+            "value": config.get(key) or "",
+            "maintenance_mode": {
+                "present": "maintenance_mode" in config,
+                "value": config.get("maintenance_mode", 0),
+            },
+        },
+        handle,
+    )
 PY
   rm -f "$marker_config"
   test -s "$release_marker_backup"
+  maintenance_armed=0
+  restore_on_prepare_error() {
+    status=$?
+    if [ "$maintenance_armed" -eq 1 ]; then
+      restore_maintenance_mode || true
+    fi
+    exit "$status"
+  }
+  trap restore_on_prepare_error ERR
+  docker compose -f "$compose_file" exec -T -w /home/frappe/frappe-bench backend \
+    bench --site "$site_name" set-maintenance-mode on
+  maintenance_armed=1
+  for attempt in $(seq 1 10); do
+    if docker compose -f "$compose_file" exec -T -w /home/frappe/frappe-bench backend \
+      bench --site "$site_name" ready-for-migration; then
+      break
+    fi
+    if [ "$attempt" -eq 10 ]; then
+      echo "Site still has pending background jobs after entering maintenance mode" >&2
+      return 1
+    fi
+    sleep 3
+  done
   docker image inspect "$base_image" >/dev/null
   docker image tag "$base_image" "$backup_image"
   docker compose -f "$compose_file" exec -T -w /home/frappe/frappe-bench backend \
@@ -75,6 +110,89 @@ PY
     tar -czf - "$@"
   ' > "$backup_archive"
   test -s "$backup_archive"
+  trap - ERR
+}
+
+restore_maintenance_mode() {
+  test -s "$release_marker_backup"
+  previous_state=$(python3 - "$release_marker_backup" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    marker = json.load(handle)
+value = (marker.get("maintenance_mode") or {}).get("value", 0)
+print("on" if str(value).strip().lower() in {"1", "true", "yes", "on"} else "off")
+PY
+  )
+  docker compose -f "$compose_file" exec -T -w /home/frappe/frappe-bench backend \
+    bench --site "$site_name" clear-cache
+  # Restoring the site's previous write state is intentionally the final
+  # fallible command.  Nothing may fail after writes are admitted again.
+  docker compose -f "$compose_file" exec -T -w /home/frappe/frappe-bench backend \
+    bench --site "$site_name" set-maintenance-mode "$previous_state"
+}
+
+finish_release() {
+  mark_database_committed
+  restore_maintenance_mode
+}
+
+mark_database_committed() {
+  python3 - "$release_state_file" <<'PY'
+import json
+import os
+import sys
+
+target = os.path.abspath(sys.argv[1])
+temporary = f"{target}.tmp-{os.getpid()}"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump({"state": "database_committed"}, handle)
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(temporary, target)
+directory = os.open(os.path.dirname(target), os.O_RDONLY)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+PY
+}
+
+database_is_committed() {
+  test -s "$release_state_file" || return 1
+  python3 - "$release_state_file" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    state = json.load(handle)
+raise SystemExit(0 if state.get("state") == "database_committed" else 1)
+PY
+}
+
+current_maintenance_state() {
+  local backend_id current_config status
+  backend_id=$(docker compose -f "$compose_file" ps -q backend)
+  test -n "$backend_id"
+  current_config=$(mktemp)
+  if ! docker cp "$backend_id:/home/frappe/frappe-bench/sites/$site_name/site_config.json" "$current_config"; then
+    rm -f "$current_config"
+    return 1
+  fi
+  set +e
+  python3 - "$current_config" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    value = json.load(handle).get("maintenance_mode", 0)
+print("on" if str(value).strip().lower() in {"1", "true", "yes", "on"} else "off")
+PY
+  status=$?
+  set -e
+  rm -f "$current_config"
+  return "$status"
 }
 
 rollback_release() {
@@ -112,6 +230,25 @@ rollback_release() {
   docker compose -f "$compose_file" exec -T -w /home/frappe/frappe-bench backend \
     bench --site "$site_name" clear-cache
   sync_and_verify_assets_only
+  restore_maintenance_mode
+}
+
+rollback_safe_release() {
+  if database_is_committed; then
+    echo "Release database is committed; retry maintenance restoration without database rollback"
+    restore_maintenance_mode
+    return
+  fi
+
+  state=$(current_maintenance_state) || {
+    echo "Cannot prove the site is still in maintenance mode; refusing database rollback" >&2
+    return 1
+  }
+  if [ "$state" != "on" ]; then
+    echo "Site accepts writes and release is not committed; refusing database rollback" >&2
+    return 1
+  fi
+  rollback_release
 }
 
 rollback_code_release() {
@@ -181,12 +318,13 @@ PY
   )
   docker compose -f "$compose_file" exec -T -w /home/frappe/frappe-bench backend \
     bench --site "$site_name" set-config overseas_costing_release_id "$previous_release_id"
-  docker compose -f "$compose_file" exec -T -w /home/frappe/frappe-bench backend \
-    bench --site "$site_name" clear-cache
+  restore_maintenance_mode
 }
 
 case "$mode" in
   prepare) prepare_release ;;
+  finish) finish_release ;;
+  rollback-safe) rollback_safe_release ;;
   rollback) rollback_release ;;
   rollback-code) rollback_code_release ;;
   *) echo "Unknown mode: $mode" >&2; exit 2 ;;

@@ -49,6 +49,18 @@ def test_deploy_prewarms_packing_cache_before_switching_frontend_assets() -> Non
     assert deploy.index("Upgrade and migrate ERP") < deploy.index(prewarm) < deploy.index(assets)
 
 
+def test_deploy_rechecks_company_rename_integrity_after_migrate() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    deploy = workflow.split("\n  deploy:\n", maxsplit=1)[1]
+    verification = (
+        "overseas_costing.services.company_rename_service."
+        "verify_company_renames_complete"
+    )
+
+    assert verification in deploy
+    assert deploy.index("Upgrade and migrate ERP") < deploy.index(verification)
+
+
 def test_deploy_cleans_legacy_route_revision_before_migrate() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
     deploy = workflow.split("\n  deploy:\n", maxsplit=1)[1]
@@ -93,7 +105,7 @@ def test_production_deploy_requires_deepseek_and_installs_document_runtime() -> 
     assert "verify_material_ai_runtime" in deploy
     assert "Preflight DeepSeek connection" in deploy
     assert deploy.index("Preflight DeepSeek connection") < deploy.index("Upgrade and migrate ERP")
-    assert "Rollback failed material AI release" in deploy
+    assert "Rollback failed ERP release" in deploy
     assert "if: failure()" in deploy
     assert "--kwargs '\"'\"'{\"check_connection\": True}'\"'\"'" in deploy
     assert "--kwargs '\"'\"'{\"check_connection\": true}'\"'\"'" not in deploy
@@ -141,6 +153,26 @@ def test_failed_release_can_restore_image_database_files_and_site_config() -> No
     assert "site_config.json" in release
     assert "docker image tag \"$backup_image\" \"$base_image\"" in release
     assert "backend websocket queue-short queue-long scheduler frontend" in release
+
+
+def test_database_migration_is_covered_by_a_full_maintenance_window() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    deploy = workflow.split("\n  deploy:\n", maxsplit=1)[1]
+    release = (WORKFLOW_PATH.parents[1] / "scripts" / "manage_material_ai_release.sh").read_text(
+        encoding="utf-8"
+    )
+
+    prepare = release.split("prepare_release()", 1)[1].split("rollback_release()", 1)[0]
+    assert prepare.index("set-maintenance-mode on") < prepare.index("backup --with-files")
+    assert "ready-for-migration" in prepare
+    assert "finish) finish_release" in release
+    assert "restore_maintenance_mode" in release.split("rollback_release()", 1)[1]
+
+    assert deploy.index("Prepare production rollback point") < deploy.index("Upgrade and migrate ERP")
+    assert deploy.index("Check online maintenance response") < deploy.index("Finalize production release")
+    assert deploy.index("Finalize production release") < deploy.index("Rollback failed ERP release")
+    finalize = deploy.split("- name: Finalize production release", 1)[1].split("\n      - name:", 1)[0]
+    assert "' finish " in finalize
 
 
 def test_login_smoke_waits_for_restarted_backend() -> None:
@@ -218,8 +250,9 @@ def test_release_marker_switches_only_after_asset_verification() -> None:
 
     assets = deploy.index("Synchronize and verify frontend assets")
     marker = deploy.index("Publish workbench release marker")
-    health = deploy.index("Check online login page")
-    assert assets < marker < health
+    health = deploy.index("Check online maintenance response")
+    finalize = deploy.index("Finalize production release")
+    assert assets < marker < health < finalize
     assert "overseas_costing_release_id" in deploy
     assert "${GITHUB_SHA}" in deploy
 

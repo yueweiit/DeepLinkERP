@@ -18,7 +18,7 @@ except Exception:  # pragma: no cover - 本地单测环境不安装 Frappe
 
 
 SNAPSHOT_DOCTYPE = "Inventory Original Location Snapshot"
-DEFAULT_COMPANY = "YW Fabricación MX 核心制造"
+DEFAULT_COMPANY = "YUEWEI MX"
 COUNT_UOM_TOKENS = (
     "个",
     "件",

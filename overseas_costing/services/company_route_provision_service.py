@@ -16,17 +16,28 @@ EXISTING_COMPANY_ROUTES = {
 }
 
 MEXICO_COMPANIES = (
-    ("YW MOLDES MX模具", "MOLD"),
-    ("LEMOS MX供应链开发及管理", "LEMO"),
-    ("UV IMPRESION MX彩印", "UVIM"),
-    ("YW Fabricación MX 核心制造", "YWFM"),
+    ("YW MOLDES", "MOLD"),
+    ("LEMOS MX", "LEMO"),
+    ("UV IMPRESION", "UVIM"),
+    ("YUEWEI MX", "YWFM"),
     ("AmigoMart", "AMIG"),
-    ("YW Centro MX 共享中心 YUEWEI Grupo", "YWCM"),
+    ("YW GRUPO MX", "YWCM"),
 )
+
+# ``project_collection`` is the external OA/DingTalk source label.  Keep those
+# historical labels stable while routing them to the renamed ERP Companies.
+MEXICO_PROJECT_ROUTES = {
+    "YW MOLDES MX模具": "YW MOLDES",
+    "LEMOS MX供应链开发及管理": "LEMOS MX",
+    "UV IMPRESION MX彩印": "UV IMPRESION",
+    "YW Fabricación MX 核心制造": "YUEWEI MX",
+    "AmigoMart": "AmigoMart",
+    "YW Centro MX 共享中心 YUEWEI Grupo": "YW GRUPO MX",
+}
 
 ALL_PROJECT_ROUTES = {
     **EXISTING_COMPANY_ROUTES,
-    **{name: name for name, _abbr in MEXICO_COMPANIES},
+    **MEXICO_PROJECT_ROUTES,
 }
 DEFAULT_ROUTE_AI_HINTS = {"LatinGo拉丁购": "宠物用品"}
 # ErpNext 的仓库自动命名为“<仓库名> - <公司缩写>”；收货仓只认这两个仓库名。

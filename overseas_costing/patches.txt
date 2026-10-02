@@ -1,0 +1,2 @@
+# Frappe reads patch registrations from the Python app package directory.
+overseas_costing.patches.v0_1.rename_operating_companies
