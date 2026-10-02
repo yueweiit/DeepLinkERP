@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import subprocess
 from pathlib import Path
@@ -162,7 +163,12 @@ def test_category_shared_runtime_is_bundled_before_thin_pages_execute() -> None:
     """分类页面不能依赖生产环境中不可访问的裸 public 资源路径。"""
 
     hooks = (ROOT / "overseas_costing/hooks.py").read_text(encoding="utf-8")
-    assert 'app_include_js = "categorized_inventory_detail.bundle.js"' in hooks
+    tree = ast.parse(hooks)
+    assignment = next(node for node in tree.body if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == "app_include_js"
+                              for target in node.targets))
+    assets = ast.literal_eval(assignment.value)
+    assert "categorized_inventory_detail.bundle.js" in ([assets] if isinstance(assets, str) else assets)
     assert 'app_include_css = "categorized_inventory_detail.bundle.css"' in hooks
     assert (ROOT / "overseas_costing/public/js/categorized_inventory_detail.bundle.js").is_file()
     assert (ROOT / "overseas_costing/public/css/categorized_inventory_detail.bundle.css").is_file()
