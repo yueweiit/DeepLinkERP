@@ -230,10 +230,17 @@ assert.equal(c.value,'SAVED');assert.equal(c.$input.val(),mapped?'Saved Label':'
 
 
 @pytest.mark.parametrize("display", ["SAVED,NE", "NE"])
-def test_standalone_multiselect_browse_cancel_does_not_bypass_native_validation_of_typed_tail(display):
-    run_js(f"""const c=makeControl('MultiSelect',{{standalone:true,query:true}});c.set_data([]);
-await c.set_value('SAVED');c.input.value={json.dumps(display)};c.$input.trigger('click');
-await reply(0,[{{label:'NEW',value:'NEW'}}]);c.awesomplete.close();c.$input.trigger('blur');await flush();
+@pytest.mark.parametrize("mapped_label", [False, True])
+def test_standalone_multiselect_browse_cancel_does_not_bypass_native_validation_of_typed_tail(display, mapped_label):
+    run_js(f"""const mapped={str(mapped_label).lower()};
+const options=[{{label:'Saved Label',value:'SAVED'}},{{label:'New Label',value:'NEW'}}];
+const c=makeControl('MultiSelect',{{standalone:true,query:true,df:{{options:mapped?options:[]}}}});
+c.set_data(mapped?options:[]);await c.set_value('SAVED');
+inputEvent(c,mapped?{json.dumps(display)}.replace('SAVED','Saved Label'):{json.dumps(display)});
+if(mapped&&{json.dumps(display)}==='SAVED,NE')assert.deepEqual(c.get_values(),['SAVED']);
+c.$input.trigger('click');
+await reply(requests.length-1,[{{label:mapped?'New Label':'NEW',value:'NEW'}}]);
+c.awesomplete.close();c.$input.trigger('blur');await flush();
 assert.equal(c.value,'','the unconfirmed search token bypassed native validation');
 assert.equal(c.last_value,'SAVED');assert(!c.awesomplete._list.some(item=>item.value==='NE'));""")
 

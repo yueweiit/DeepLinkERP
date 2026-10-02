@@ -195,9 +195,12 @@
         state.debouncedInput?.cancel();
         if (state.kind === "autocomplete") {
             const source = storedValue(control);
+            const values = control.df.fieldtype === "MultiSelect" ? control.get_values() : null;
+            // Native option mapping can silently drop an unknown search token.
+            // Require every raw token to be represented before accepting that mapping.
             const unchanged = control.get_input_value() === source ||
-                (control.df.fieldtype === "MultiSelect" &&
-                    fingerprint(control.get_values()) === fingerprint(storedTokens(source)));
+                (values && values.length === state.$input.val().replace(/,\s*$/, "").split(",").length &&
+                    fingerprint(values) === fingerprint(storedTokens(source)));
             state.cancelSnapshot = unchanged
                 ? {input: state.$input.val(), source} : null;
         }
