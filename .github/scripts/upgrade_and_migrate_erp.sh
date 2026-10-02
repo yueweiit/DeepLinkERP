@@ -3,6 +3,7 @@ set -euo pipefail
 
 compose_root="${1:?compose root is required}"
 site_name="${2:?site name is required}"
+required_inventory_branding_sha="${3:?required inventory branding sha is required}"
 
 cd "$compose_root"
 
@@ -36,6 +37,35 @@ if ! git pull --ff-only; then
 fi
 
 ./upgrade_bench.sh
+
+echo "== Verify paired inventory ownership before migrate =="
+docker compose -f "$compose_root/compose.custom.yaml" exec -T \
+  -e REQUIRED_INVENTORY_BRANDING_SHA="$required_inventory_branding_sha" \
+  -w /home/frappe/frappe-bench backend bash -lc '
+set -euo pipefail
+branding_app="/home/frappe/frappe-bench/apps/deeplinkerp_branding"
+overseas_app="/home/frappe/frappe-bench/apps/overseas_costing"
+
+test "$(git -C "$branding_app" rev-parse HEAD)" = "$REQUIRED_INVENTORY_BRANDING_SHA"
+
+for required_path in \
+  "deeplinkerp_branding/services/inventory_detail_service.py" \
+  "deeplinkerp_branding/public/js/inventory_detail.bundle.js" \
+  "deeplinkerp_branding/public/css/inventory_detail.bundle.css" \
+  "deeplinkerp_branding/deeplinkerp_branding/page/inventory_location_detail/inventory_location_detail.json" \
+  "deeplinkerp_branding/deeplinkerp_branding/page/semi_finished_inventory_detail/semi_finished_inventory_detail.json" \
+  "deeplinkerp_branding/deeplinkerp_branding/page/finished_goods_inventory_detail/finished_goods_inventory_detail.json" \
+  "deeplinkerp_branding/deeplinkerp_branding/page/mold_inventory_detail/mold_inventory_detail.json" \
+  "deeplinkerp_branding/deeplinkerp_branding/doctype/inventory_original_location_snapshot/inventory_original_location_snapshot.json"
+do
+  test -f "$branding_app/$required_path"
+done
+
+test ! -e "$overseas_app/overseas_costing/services/inventory_location_service.py"
+test ! -e "$overseas_app/overseas_costing/overseas_costing/page/inventory_location_detail"
+test ! -e "$overseas_app/overseas_costing/overseas_costing/doctype/inventory_original_location_snapshot"
+'
+
 docker compose -f "$compose_root/compose.custom.yaml" exec -T -w /home/frappe/frappe-bench backend \
   bench --site "$site_name" execute overseas_costing.install.before_migrate
 ./migrate_site.sh "$site_name"

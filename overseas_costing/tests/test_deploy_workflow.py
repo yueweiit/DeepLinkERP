@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import re
 import subprocess
 import textwrap
 
@@ -41,6 +42,61 @@ def test_overseas_costing_ci_no_longer_owns_inventory_page_assets() -> None:
     assert "build_inventory_assets.py" not in test_job
     assert "categorized_inventory_detail.bundle.js" not in test_job
     assert "inventory_location_detail" not in test_job
+
+
+def test_inventory_ownership_cutover_requires_the_paired_branding_commit() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    test_job, deploy = workflow.split("\n  deploy:\n", maxsplit=1)
+    match = re.search(
+        r"REQUIRED_INVENTORY_BRANDING_SHA:\s*([0-9a-f]{40})",
+        workflow,
+    )
+
+    assert match, "deployment must pin the branding ownership commit"
+    required_sha = match.group(1)
+    assert f'git fetch --no-tags origin deeplinkerp_branding' in test_job
+    assert 'test "$(git rev-parse origin/deeplinkerp_branding)" = "$REQUIRED_INVENTORY_BRANDING_SHA"' in test_job
+    assert test_job.index("Verify paired inventory owner branch") < test_job.index(
+        "Run tests affected by this update"
+    )
+    assert f"REQUIRED_INVENTORY_BRANDING_SHA='{required_sha}'" in deploy
+
+
+def test_upgrade_blocks_migration_until_inventory_ownership_is_present() -> None:
+    script = (
+        WORKFLOW_PATH.parent.parent / "scripts" / "upgrade_and_migrate_erp.sh"
+    ).read_text(encoding="utf-8")
+
+    ownership_gate = "Verify paired inventory ownership before migrate"
+    migrate = './migrate_site.sh "$site_name"'
+    assert 'required_inventory_branding_sha="${3:?required inventory branding sha is required}"' in script
+    assert ownership_gate in script
+    assert 'test "$(git -C "$branding_app" rev-parse HEAD)" = "$REQUIRED_INVENTORY_BRANDING_SHA"' in script
+    assert "deeplinkerp_branding/services/inventory_detail_service.py" in script
+    assert "inventory_original_location_snapshot/inventory_original_location_snapshot.json" in script
+    assert "overseas_costing/services/inventory_location_service.py" in script
+    assert script.index(ownership_gate) < script.index(migrate)
+
+
+def test_release_verifier_checks_transferred_pages_doctype_service_and_assets() -> None:
+    script = (
+        WORKFLOW_PATH.parent.parent / "scripts" / "sync_and_verify_assets.sh"
+    ).read_text(encoding="utf-8")
+
+    for marker in (
+        "deeplinkerp_branding.services.inventory_detail_service",
+        "inventory-location-detail",
+        "semi-finished-inventory-detail",
+        "finished-goods-inventory-detail",
+        "mold-inventory-detail",
+        "Inventory Original Location Snapshot",
+        "Deeplinkerp Branding",
+        "/assets/deeplinkerp_branding/js/inventory_detail.bundle.js",
+        "/assets/deeplinkerp_branding/css/inventory_detail.bundle.css",
+    ):
+        assert marker in script
+    assert "get_inventory_movement_context" in script
+    assert "prepare_inventory_stock_entry" in script
 
 
 def test_deploy_prewarms_packing_cache_before_switching_frontend_assets() -> None:

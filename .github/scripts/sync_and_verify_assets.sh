@@ -44,6 +44,7 @@ from overseas_costing.api import packing_api
 from overseas_costing.api import workbench
 from overseas_costing.api import air_sea_comparison
 from overseas_costing.integrations.dingtalk_packing_source import get_packing_runtime_clients
+import deeplinkerp_branding.services.inventory_detail_service as inventory_detail_service
 
 if not hasattr(workbench, "get_batch_dingtalk_approval_detail"):
     raise SystemExit("backend is missing get_batch_dingtalk_approval_detail")
@@ -52,6 +53,16 @@ if not hasattr(packing_api, "preview_freight_comparison"):
 for method in ("search_batches", "preview_batch", "list_records", "get_record", "save_record", "delete_record"):
     if not hasattr(air_sea_comparison, method):
         raise SystemExit(f"air/sea comparison API missing: {method}")
+for method in ("get_inventory_movement_context", "prepare_inventory_stock_entry"):
+    if not hasattr(inventory_detail_service, method):
+        raise SystemExit(f"inventory detail API missing: {method}")
+
+inventory_source = Path(
+    "/home/frappe/frappe-bench/apps/deeplinkerp_branding/deeplinkerp_branding/"
+    "services/inventory_detail_service.py"
+)
+if not inventory_source.is_file():
+    raise SystemExit(f"inventory detail service is missing: {inventory_source}")
 
 page_script = Path(
     "/home/frappe/frappe-bench/apps/overseas_costing/overseas_costing/"
@@ -78,6 +89,38 @@ try:
             raise SystemExit(f"missing DocType after migrate: {doctype}")
     if not frappe.db.exists("Page", "air-sea-cost-comparison"):
         raise SystemExit("air/sea comparison Page missing after migrate")
+
+    inventory_pages = (
+        "inventory-location-detail",
+        "semi-finished-inventory-detail",
+        "finished-goods-inventory-detail",
+        "mold-inventory-detail",
+    )
+    for page in inventory_pages:
+        module = frappe.db.get_value("Page", page, "module")
+        if module != "Deeplinkerp Branding":
+            raise SystemExit(f"inventory Page ownership is incorrect: {page} -> {module!r}")
+    snapshot_module = frappe.db.get_value(
+        "DocType", "Inventory Original Location Snapshot", "module"
+    )
+    if snapshot_module != "Deeplinkerp Branding":
+        raise SystemExit(
+            "Inventory Original Location Snapshot ownership is incorrect: "
+            f"{snapshot_module!r}"
+        )
+
+    stock_sidebar_name = (
+        frappe.db.exists("Workspace Sidebar", {"module": "Stock"})
+        or frappe.db.exists("Workspace Sidebar", "Stock")
+        or frappe.db.exists("Workspace Sidebar", {"title": "库存"})
+    )
+    if not stock_sidebar_name:
+        raise SystemExit("Stock Workspace Sidebar is missing")
+    stock_sidebar = frappe.get_doc("Workspace Sidebar", stock_sidebar_name)
+    sidebar_links = {item.link_to for item in stock_sidebar.items}
+    if not set(inventory_pages).issubset(sidebar_links):
+        raise SystemExit("Stock Workspace Sidebar is missing inventory detail pages")
+
     sidebar = frappe.get_doc("Workspace Sidebar", "海外成本核算")
     if [item.link_to for item in sidebar.items[:2]] != ["overseas-cost-workbench", "air-sea-cost-comparison"]:
         raise SystemExit("air/sea comparison sidebar position is incorrect")
@@ -194,6 +237,15 @@ for key in required:
     if not os.path.isfile(path):
         raise SystemExit(f"frontend asset file missing: {key} -> {path}")
     print(f"OK {key}: {url}")
+
+for relative_path in (
+    "deeplinkerp_branding/js/inventory_detail.bundle.js",
+    "deeplinkerp_branding/css/inventory_detail.bundle.css",
+):
+    path = os.path.join(assets_dir, relative_path)
+    if not os.path.isfile(path):
+        raise SystemExit(f"frontend inventory asset file missing: {path}")
+    print(f"OK inventory asset: /assets/{relative_path}")
 PY
 
 echo "== Verify frontend HTTP responses =="
@@ -207,16 +259,22 @@ import sys
 with open("/home/frappe/frappe-bench/assets/assets.json", encoding="utf-8") as handle:
     assets = json.load(handle)
 
-for key in ("desk.bundle.css", "desk.bundle.js", "website.bundle.css"):
-    url = assets[key]
+urls = [assets[key] for key in ("desk.bundle.css", "desk.bundle.js", "website.bundle.css")]
+urls.extend(
+    (
+        "/assets/deeplinkerp_branding/js/inventory_detail.bundle.js",
+        "/assets/deeplinkerp_branding/css/inventory_detail.bundle.css",
+    )
+)
+for url in urls:
     result = subprocess.run(
         ["curl", "--fail", "--silent", "--show-error", "-H", f"Host: {os.environ['SITE_NAME']}", f"http://127.0.0.1:8080{url}"],
         check=False,
         stdout=subprocess.DEVNULL,
     )
     if result.returncode:
-        raise SystemExit(f"frontend returned HTTP failure for {key}: {url}")
-    print(f"HTTP OK {key}: {url}")
+        raise SystemExit(f"frontend returned HTTP failure: {url}")
+    print(f"HTTP OK: {url}")
 PY
 
 echo "== Asset verification passed =="
