@@ -74,17 +74,31 @@ class Base {
         this.df={fieldname:'warehouse',options:'Warehouse',ignore_user_permissions:1,only_select:1,...options.df};
         this.disp_status='Write';this.changed=0;this.nativeSelections=0;this.hrefUpdates=0;
         this.initial=options.value||'';this.modelValue=this.last_value=options.modelValue??this.initial;
+        if(options.standalone){delete this.doc;delete this.frm;delete this.doctype;delete this.docname;
+            delete this.modelValue;delete this.last_value;}
         this.query=Boolean(options.query);this.make_input();
     }
     make_input(){this.input=new Input(this.initial);this.$input=jq(this.input);this.awesomplete=new Awesome(this,this.df.fieldtype==='MultiSelect');}
-    parse_validate_and_set_in_model(value){const result=this.validate?this.validate(value):value;
+    parse_validate_and_set_in_model(value){
+        if(!this.frm&&!this.doc){this.changed++;this.nativeSelections++;return this.validate_and_set_in_model(value);}
+        const result=this.validate?this.validate(value):value;
         this.changed++;this.nativeSelections++;this.selectedValue=this.modelValue=this.last_value=result;}
+    // Native BaseControl/Data standalone lifecycle: set_input remembers the
+    // previous value in last_value, not the newly initialized control value.
+    set_value(value){return this.validate_and_set_in_model(value);}
+    validate_and_set_in_model(value){if(this.inside_change_event||this.get_model_value()===value)return Promise.resolve();
+        this.inside_change_event=true;const validated=this.validate(value);
+        return Promise.resolve(validated).then(value=>{this.inside_change_event=false;return this.set_model_value(value);});}
+    set_model_value(value){if(this.frm){this.modelValue=this.last_value=value;return Promise.resolve();}
+        if(this.doc)this.doc[this.df.fieldname]=value;this.set_input(value);return Promise.resolve();}
+    set_input(value){this.last_value=this.value;this.value=value;this.set_formatted_input(value);}
+    set_formatted_input(value){this.$input.val(value==null?'':value);}
     get_input_value(){return this.$input.val();}
     get_label_value(){return this.$input.val();}
     get_translated(value){return value;}
     get_options(){return this.df.options;}
     get_reference_doctype(){return this.doctype;}
-    get_model_value(){return this.modelValue;}
+    get_model_value(){return this.doc?this.modelValue:undefined;}
 }
 class NativeLink extends Base {
     make_input(){super.make_input();this.awesomplete.filter=()=>true;

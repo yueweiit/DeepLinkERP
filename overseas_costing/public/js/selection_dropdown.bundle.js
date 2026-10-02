@@ -51,6 +51,14 @@
         restore(state);
     }
 
+    function storedValue(control) {
+        return control.get_model_value?.() ?? control.value ?? control.last_value;
+    }
+
+    function storedTokens(value) {
+        return String(value ?? "").split(",").map(value => value.trim()).filter(Boolean);
+    }
+
     function autocompleteQuery(control) {
         const source = control.get_query || control.df.get_query;
         // Frappe deliberately calls function queries as raw functions, not methods.
@@ -185,6 +193,14 @@
     function browse(control, state, nativeSearch) {
         if (!editable(control, state) || !state.$input.is(":focus")) return;
         state.debouncedInput?.cancel();
+        if (state.kind === "autocomplete") {
+            const source = storedValue(control);
+            const unchanged = control.df.fieldtype === "MultiSelect"
+                ? fingerprint(control.get_values()) === fingerprint(storedTokens(source))
+                : control.get_input_value() === source;
+            state.cancelSnapshot = unchanged
+                ? {input: state.$input.val(), source} : null;
+        }
         const context = queryContext(control, state.kind, "");
         clearObsoleteDisplay(control, state, "");
         const request = state.request;
@@ -239,6 +255,7 @@
         };
         // Run before Awesomplete's earlier input listener and Frappe's jQuery handler.
         state.input.addEventListener("input", () => {
+            state.cancelSnapshot = null;
             state.pendingSelection = null;
             state.browseCandidates = null;
             invalidate(state);
@@ -249,6 +266,17 @@
             clearObsoleteDisplay(control, state, "");
         }, true);
         if (kind === "autocomplete") {
+            state.input.addEventListener("blur", () => {
+                const snapshot = state.cancelSnapshot;
+                state.cancelSnapshot = null;
+                // Standalone Data remembers the previous value in last_value.
+                // Skip only the redundant validation of unchanged stored input;
+                // typed search tokens and changed sources retain native validation.
+                if (snapshot && editable(control, state) &&
+                    state.$input.val() === snapshot.input && storedValue(control) === snapshot.source) {
+                    control.last_value = control.get_input_value();
+                }
+            }, true);
             state.input.addEventListener("awesomplete-select", event => {
                 const value = event.text?.value;
                 state.pendingSelection = state.browse && state.request?.current() &&
@@ -256,10 +284,10 @@
                     ? {value, data: state.browseCandidates, key: state.request.key,
                         term: state.request.term,
                         stored: control.df.fieldtype === "MultiSelect"
-                            ? String(control.get_model_value?.() ?? control.last_value ?? "")
-                                .split(",").map(value => value.trim()).filter(Boolean) : null} : null;
+                            ? storedTokens(storedValue(control)) : null} : null;
             }, true);
             state.input.addEventListener("awesomplete-selectcomplete", event => {
+                state.cancelSnapshot = null;
                 const selected = state.pendingSelection;
                 state.pendingSelection = null;
                 if (!selected || event.text?.value !== selected.value || !editable(control, state)) return;
@@ -277,7 +305,9 @@
                     const separator = control.df.ignore_validation ? ", " : ",";
                     state.$input.val(tokens.join(separator) + ", ");
                 }
-                const merged = new Map((control._data || []).map(item => [item.value, item]));
+                const merged = new Map((control._data || [])
+                    .filter(item => selected.stored?.includes(item.value))
+                    .map(item => [item.value, item]));
                 selected.data.forEach(item => merged.set(item.value, item));
                 // A remote page may omit already stored selections. Preserve
                 // only those model values in the native validation backing list.

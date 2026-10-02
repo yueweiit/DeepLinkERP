@@ -183,6 +183,64 @@ assert.deepEqual(c.modelValue.split(',').map(value=>value.trim()).filter(Boolean
 assert(!c.awesomplete._list.some(item=>item.value==='NE'));""")
 
 
+@pytest.mark.parametrize("previous", [None, "PREVIOUS"])
+@pytest.mark.parametrize("display", ["SAVED", "SAVED,NE", "NE"])
+def test_standalone_multiselect_retains_native_set_value_not_previous_value_or_typed_tail(previous, display):
+    run_js(f"""const c=makeControl('MultiSelect',{{standalone:true,query:true}});c.set_data([]);
+const previous={json.dumps(previous)};if(previous!==null)await c.set_value(previous);
+await c.set_value('SAVED');assert.equal(c.value,'SAVED');assert.equal(c.get_model_value(),undefined);
+assert.equal(c.last_value,previous===null?undefined:previous);assert.equal(c.$input.val(),'SAVED');
+c.input.value={json.dumps(display)};c.input.writes=[];c.$input.trigger('click');
+await reply(0,[{{label:'NEW',value:'NEW'}}]);assert.deepEqual(c.input.writes,[]);
+assert.equal(c.value,'SAVED');assert(c.awesomplete.select('NEW'));await flush();
+assert.deepEqual(c.get_values(),['SAVED','NEW']);
+assert.deepEqual(c.value.split(',').map(value=>value.trim()).filter(Boolean),['SAVED','NEW']);
+assert(!c.awesomplete._list.some(item=>['NE','PREVIOUS'].includes(item.value)));""")
+
+
+@pytest.mark.parametrize("kind", ["Autocomplete", "MultiSelect"])
+def test_explicit_selection_does_not_restore_unselected_candidates_from_previous_context(kind):
+    run_js(f"""const c=makeControl('{kind}',{{value:'A-SAVED',query:true}});
+c.set_data([{{label:'A-SAVED',value:'A-SAVED'}},{{label:'A-OTHER',value:'A-OTHER'}}]);
+c.doc.company='B';c.$input.trigger('click');await reply(0,[{{label:'B-NEW',value:'B-NEW'}}]);
+assert(c.awesomplete.select('B-NEW'));assert(!c.awesomplete.opened);
+assert(!c._data.some(item=>item.value==='A-OTHER'),'promotion restored an unselected stale candidate');
+assert.deepEqual(Array.from(c._data,item=>item.value),{json.dumps(['A-SAVED', 'B-NEW'] if kind == 'MultiSelect' else ['B-NEW'])});
+inputEvent(c,'A-OTHER',{{defer:true}});
+assert(!c.awesomplete.visible.some(item=>item.value==='A-OTHER'));
+assert(!c.awesomplete._list.some(item=>item.value==='A-OTHER'));""")
+
+
+@pytest.mark.parametrize("previous", [None, "PREVIOUS"])
+@pytest.mark.parametrize("cancel", ["close", "timeout", "canceled_selection", "blur"])
+def test_standalone_multiselect_browse_cancel_then_native_blur_keeps_initialized_value(previous, cancel):
+    run_js(f"""const c=makeControl('MultiSelect',{{standalone:true,query:true}});c.set_data([]);
+const previous={json.dumps(previous)};if(previous!==null)await c.set_value(previous);
+await c.set_value('SAVED');c.input.writes=[];c.$input.trigger('click');
+const cancel='{cancel}';if(cancel==='timeout')clock.expire();else await reply(0,[{{label:'NEW',value:'NEW'}}]);
+if(cancel==='close')c.awesomplete.close();if(cancel==='canceled_selection'){{
+c.$input.on('awesomplete-select',event=>event.preventDefault());assert(!c.awesomplete.select('NEW'));}}
+c.$input.trigger('blur');await flush();
+assert.equal(c.value,'SAVED');assert.equal(c.$input.val(),'SAVED');assert.deepEqual(c.input.writes,[]);""")
+
+
+@pytest.mark.parametrize("display", ["SAVED,NE", "NE"])
+def test_standalone_multiselect_browse_cancel_does_not_bypass_native_validation_of_typed_tail(display):
+    run_js(f"""const c=makeControl('MultiSelect',{{standalone:true,query:true}});c.set_data([]);
+await c.set_value('SAVED');c.input.value={json.dumps(display)};c.$input.trigger('click');
+await reply(0,[{{label:'NEW',value:'NEW'}}]);c.awesomplete.close();c.$input.trigger('blur');await flush();
+assert.equal(c.value,'','the unconfirmed search token bypassed native validation');
+assert.equal(c.last_value,'SAVED');assert(!c.awesomplete._list.some(item=>item.value==='NE'));""")
+
+
+@pytest.mark.parametrize("change", ["input", "source"])
+def test_standalone_cancel_protection_is_invalidated_by_input_or_stored_source_change(change):
+    run_js(f"""const c=makeControl('MultiSelect',{{standalone:true,query:true}});c.set_data([]);
+await c.set_value('SAVED');c.$input.trigger('click');await reply(0,[{{label:'NEW',value:'NEW'}}]);
+if('{change}'==='input')inputEvent(c,'NE');else{{await c.set_value('NEW');await c.set_value('NEW');c.input.value='SAVED';}}
+c.$input.trigger('blur');await flush();assert.equal(c.value,'','changed input/source skipped native validation');""")
+
+
 @pytest.mark.parametrize("change", ["close", "recreate", "browse"])
 def test_native_link_debounce_cannot_start_request_after_close_or_recreation(change):
     run_js(f"""const c=makeControl('Link',{{value:'ALPHA',query:true}});
