@@ -125,6 +125,82 @@ assert(!c.awesomplete.visible.some(x=>x.value==='A-WH'),'native focus reopened o
 assert.equal(c.$input.val(),'ALPHA');""")
 
 
+@pytest.mark.parametrize("kind", ["Link", "Autocomplete"])
+def test_typing_after_dependency_change_clears_options_before_native_input_listener(kind):
+    run_js(f"""const c=makeControl('{kind}',{{value:'ALPHA',query:true}});
+c.$input.trigger('click');await reply(0,[{{value:'A-WH'}}]);c.doc.company='B';
+inputEvent(c,'A',{{defer:true}});
+assert(!c.awesomplete.visible.some(item=>item.value==='A-WH'),'old context remains selectable while typing');
+assert(!c.awesomplete._list.some(item=>item.value==='A-WH'));""")
+
+
+@pytest.mark.parametrize("cancel", ["blur", "escape", "requery", "canceled_selection"])
+def test_autocomplete_browse_cancellation_preserves_native_label_mapping_and_model(cancel):
+    run_js(f"""const c=makeControl('Autocomplete',{{value:'Company A',modelValue:'A',query:true}});
+c.set_data([{{label:'Company A',value:'A'}}]);const original=c._data;
+c.$input.trigger('click');await reply(0,[{{label:'Company B',value:'B'}}]);
+assert.equal(c._data,original,'browse replaced the current label-to-value mapping');
+const cancel='{cancel}';if(cancel==='escape')c.awesomplete.close();
+if(cancel==='requery'){{c.awesomplete.close();c.$input.trigger('click');await reply(1,[{{label:'Company C',value:'C'}}]);}}
+if(cancel==='canceled_selection'){{c.$input.on('awesomplete-select',event=>event.preventDefault());assert(!c.awesomplete.select('B'));}}
+c.$input.trigger('blur');assert.equal(c.modelValue,'A');assert.equal(c.last_value,'A');
+assert.equal(c.$input.val(),'Company A');assert.equal(c.changed,0);""")
+
+
+def test_autocomplete_explicit_selection_promotes_mapping_before_native_change_without_reopening():
+    run_js("""const c=makeControl('Autocomplete',{value:'Company A',modelValue:'A',query:true});
+c.set_data([{label:'Company A',value:'A'}]);c.$input.trigger('click');
+await reply(0,[{label:'Company B',value:'B'}]);assert(c.awesomplete.select('B'));
+assert.equal(c.modelValue,'B');assert.equal(c.$input.val(),'Company B');
+assert.equal(c.get_input_value(),'B');assert.equal(c.changed,1);assert(!c.awesomplete.opened);
+c.$input.trigger('blur');assert.equal(c.changed,1);""")
+
+
+@pytest.mark.parametrize("value,ignore_validation", [
+    ("SAVED", False), ("A,X", False), ("A, X", True),
+    ("A,X,", False), ("A, X, ", True), ("甲公司, 乙公司", True),
+])
+@pytest.mark.parametrize("current_page", ["all", "empty", "missing_selected"])
+def test_multiselect_browse_keeps_all_existing_values_on_cancel_and_selection(value, ignore_validation, current_page):
+    run_js(f"""const c=makeControl('MultiSelect',{{value:{json.dumps(value)},query:true,df:{{ignore_validation:{str(ignore_validation).lower()}}}}});
+const values={json.dumps([part.strip() for part in value.split(',') if part.strip()])};
+const page='{current_page}';c.set_data(page==='all'?values.map(value=>({{label:value,value}})):
+page==='empty'?[]:[{{label:'UNRELATED',value:'UNRELATED'}}]);const original=c._data;
+c.$input.trigger('click');await reply(0,[{{label:'B',value:'B'}}]);
+assert.equal(c._data,original);c.awesomplete.close();c.$input.trigger('blur');
+assert.equal(c.modelValue,{json.dumps(value)});assert.equal(c.changed,0);c.$input.trigger('focus');
+c.$input.trigger('click');await reply(1,[{{label:'B',value:'B'}}]);assert(c.awesomplete.select('B'));
+assert.deepEqual(c.modelValue.split(',').map(value=>value.trim()).filter(Boolean),[...values,'B']);
+assert.deepEqual(c.get_values(),[...values,'B']);assert(!c.awesomplete.opened);""")
+
+
+@pytest.mark.parametrize("display", ["SAVED,NE", "NE", "SAVED,"])
+def test_multiselect_only_retains_stored_values_and_explicit_choice_not_typed_search_token(display):
+    run_js(f"""const c=makeControl('MultiSelect',{{value:{json.dumps(display)},modelValue:'SAVED',query:true}});
+c.set_data([]);c.$input.trigger('click');await reply(0,[{{label:'NEW',value:'NEW'}}]);
+assert(c.awesomplete.select('NEW'));assert.deepEqual(c.get_values(),['SAVED','NEW']);
+assert.deepEqual(c.modelValue.split(',').map(value=>value.trim()).filter(Boolean),['SAVED','NEW']);
+assert(!c.awesomplete._list.some(item=>item.value==='NE'));""")
+
+
+@pytest.mark.parametrize("change", ["close", "recreate", "browse"])
+def test_native_link_debounce_cannot_start_request_after_close_or_recreation(change):
+    run_js(f"""const c=makeControl('Link',{{value:'ALPHA',query:true}});
+inputEvent(c,'BE',{{defer:true}});assert.equal(requests.length,0);
+if('{change}'==='close')c.awesomplete.close();else if('{change}'==='recreate')c.make_input();
+else c.$input.trigger('click');clock.tick(500);
+assert.equal(requests.length,{'1' if change == 'browse' else '0'},'obsolete native debounce started a new request');
+if('{change}'==='browse')assert.equal(requests[0].args.txt,'');
+assert(!c.awesomplete.opened);""")
+
+
+def test_native_empty_cache_does_not_cancel_its_refresh_request():
+    run_js("""const c=makeControl('Link',{value:'ALPHA',query:true});
+c.$input.trigger('click');await reply(0,[]);c.$input.trigger('click');
+await reply(1,[{value:'NEW'}]);assert(c.awesomplete.opened);
+assert.equal(c.awesomplete.visible[0].value,'NEW');assert.equal(c.awesomplete.tabSelect,false);""")
+
+
 @pytest.mark.parametrize("kind", ["Autocomplete", "MultiSelect"])
 def test_local_browse_preserves_options_filter_and_multiselect_replace(kind):
     run_js(f"""const c=makeControl('{kind}',{{value:'ALPHA, ',query:false}});
@@ -132,7 +208,7 @@ const replace=c.awesomplete.replace;c.$input.trigger('click');
 assert.equal(c.awesomplete.replace,replace);assert.equal(requests.length,0);
 assert.deepEqual(c.awesomplete.visible.map(x=>x.value),{json.dumps(['BETA'] if kind == 'MultiSelect' else ['ALPHA', 'BETA'])});
 assert.equal(c.$input.val(),'ALPHA, ');assert(c.awesomplete.select('BETA'));
-assert.equal(c.$input.val(),'{"ALPHA, BETA, " if kind == "MultiSelect" else "BETA"}');
+assert.equal(c.$input.val(),'{"ALPHA,BETA, " if kind == "MultiSelect" else "BETA"}');
 inputEvent(c,'AL');assert.deepEqual(c.awesomplete.visible.map(x=>x.value),['ALPHA']);""")
 
 

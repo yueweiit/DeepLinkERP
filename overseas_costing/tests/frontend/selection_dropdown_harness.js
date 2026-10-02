@@ -8,7 +8,17 @@ const path = require('node:path');
 const requests = [];
 const timers = new Map();
 let timerId = 0;
-const clock = {expire() { const callbacks=[...timers.values()];timers.clear();callbacks.forEach(fn=>fn()); }};
+let now = 0;
+const schedule=(fn,delay=0)=>{timers.set(++timerId,{fn,due:now+delay});return timerId;};
+const clock = {
+    tick(ms) {const end=now+ms;let next;
+        while((next=[...timers].filter(([,item])=>item.due<=end).sort((a,b)=>a[1].due-b[1].due)[0])){
+            timers.delete(next[0]);now=next[1].due;next[1].fn();}
+        now=end;},
+    expire() {const latest=Math.max(now,...[...timers.values()].map(item=>item.due));this.tick(latest-now);}
+};
+function debounce(fn,delay){let timer;const handler=(...args)=>{handler.cancel();timer=schedule(()=>fn(...args),delay);};
+    handler.cancel=()=>{timers.delete(timer);timer=undefined;};return handler;}
 class Input {
     constructor(value='') { this.value=value;this.writes=[];this.listeners={};this.focused=true;this.isConnected=true; }
     addEventListener(type,fn,capture=false) { (this.listeners[type] ||= []).push({fn,capture}); }
@@ -45,37 +55,42 @@ class Awesome {
         this.input.addEventListener('input',()=>this.evaluate());
         this.input.addEventListener('focus',()=>this.evaluate());
     }
-    set list(items) {this._list=items.map(item=>typeof item==='string'?{value:item,label:item}:item);this.evaluate();}
+    set list(items) {this._list=Array.from(items,item=>typeof item==='string'?{value:item,label:item}:item);this.evaluate();}
     get list(){return this._list;}
-    evaluate(){this.visible=this._list.filter(item=>this.filter.call(this,item,this.input.value));
-        this.index=this.autoFirst&&this.visible.length?0:-1;this.opened=Boolean(this.visible.length);}
+    evaluate(){this.visible=Array.from(this._list).filter(item=>this.filter.call(this,item,this.input.value));
+        this.index=this.autoFirst&&this.visible.length?0:-1;
+        if(this.visible.length)this.open();else this.close({reason:'nomatches'});}
     open(){if(this.visible.length)this.opened=true;}
-    close(){this.opened=false;this.input.dispatch('awesomplete-close');}
+    close(options={}){if(!this.opened)return;this.opened=false;this.input.dispatch('awesomplete-close',options);}
     get_item(value){return this._list.find(item=>item.value===value);}
     select(value,originalEvent){const item=this.get_item(value);
-        const event=this.input.dispatch('awesomplete-select',{originalEvent:{text:item,originalEvent}});
+        const event=this.input.dispatch('awesomplete-select',{text:item,originalEvent:{text:item,originalEvent}});
         if(event.defaultPrevented)return false;
-        this.replace(item);this.close();this.input.dispatch('awesomplete-selectcomplete',{originalEvent:{text:item}});return true;}
+        this.replace(item);this.close();this.input.dispatch('awesomplete-selectcomplete',{text:item,originalEvent:{text:item}});return true;}
 }
 class Base {
     constructor(options) {
         this.doc={company:'A',item:'SKU'};this.frm={doc:this.doc};this.doctype='Stock Entry';this.docname='ROW';
         this.df={fieldname:'warehouse',options:'Warehouse',ignore_user_permissions:1,only_select:1,...options.df};
         this.disp_status='Write';this.changed=0;this.nativeSelections=0;this.hrefUpdates=0;
-        this.initial=options.value||'';this.query=Boolean(options.query);this.make_input();
+        this.initial=options.value||'';this.modelValue=this.last_value=options.modelValue??this.initial;
+        this.query=Boolean(options.query);this.make_input();
     }
     make_input(){this.input=new Input(this.initial);this.$input=jq(this.input);this.awesomplete=new Awesome(this,this.df.fieldtype==='MultiSelect');}
-    parse_validate_and_set_in_model(value){this.changed++;this.nativeSelections++;this.selectedValue=value;}
+    parse_validate_and_set_in_model(value){const result=this.validate?this.validate(value):value;
+        this.changed++;this.nativeSelections++;this.selectedValue=this.modelValue=this.last_value=result;}
     get_input_value(){return this.$input.val();}
     get_label_value(){return this.$input.val();}
     get_translated(value){return value;}
     get_options(){return this.df.options;}
     get_reference_doctype(){return this.doctype;}
+    get_model_value(){return this.modelValue;}
 }
 class NativeLink extends Base {
     make_input(){super.make_input();this.awesomplete.filter=()=>true;
         this.$input.on('focus',()=>{if(!this.$input.val())this.on_input();});
-        this.$input.on('input',e=>this.on_input(e));
+        this._debounced_input_handler=debounce(this.on_input.bind(this),500);
+        this.$input.on('input',this._debounced_input_handler);
         this.$input.on('awesomplete-select',e=>{const o=e.originalEvent,item=this.awesomplete.get_item(o.text.value);
             const event=o.originalEvent;
             if(event&&[9,13].includes(event.keyCode)){const input=this.get_label_value().toLowerCase();
@@ -121,11 +136,19 @@ class NativeAutocomplete extends Base {
     make_input(){super.make_input();this.awesomplete.tabSelect=false;
         this.$input.on('input',e=>{if(this.get_query||this.df.get_query)this.execute_query_if_exists(e.target.value);else this.awesomplete.list=this.get_data();});
         this.$input.on('focus',()=>{if(!this.$input.val()){this.$input.val('');this.$input.trigger('input');}});
+        this.$input.on('blur',()=>{if(this.selected){this.selected=false;return;}
+            const value=this.get_input_value();if(value!==this.last_value)this.parse_validate_and_set_in_model(value);});
         this.$input.on('awesomplete-selectcomplete',()=>{this.$input.trigger('change');});
         this.$input.on('change',()=>this.parse_validate_and_set_in_model(this.get_input_value()));
         this.set_data([{value:'ALPHA'},{value:'BETA'},{value:'HIDDEN',hidden:true}]);}
     get_data(){return this._data||[];}
-    set_data(data){this._data=data;if(this.awesomplete)this.awesomplete.list=data;}
+    get_input_value(){const label=this.$input.val(),item=this._data?.find(item=>item.label===label);return item?item.value:label;}
+    parse_options(data){if(typeof data==='string')data=data[0]==='['?JSON.parse(data):data.split('\n');
+        if(typeof data[0]==='string')data=data.map(value=>({label:value,value}));
+        return data.map(item=>({...item,label:String(item.label??''),value:String(item.value??'')}));}
+    set_data(data){data=this.parse_options(data);if(this.awesomplete)this.awesomplete.list=data;this._data=data;}
+    validate(value){if(this.df.ignore_validation)return value||'';
+        const values=this.awesomplete._list.map(item=>item.value);return !values.length||values.includes(value)?value:'';}
     execute_query_if_exists(term) {
         const args={txt:term};let get_query=this.get_query||this.df.get_query;if(!get_query)return;
         const process=function(obj){if(obj.query)args.query=obj.query;if(obj.params)Object.assign(args,obj.params);
@@ -138,14 +161,19 @@ class NativeAutocomplete extends Base {
     }
 }
 class DynamicLink extends NativeLink {get_options(){return this.doc.target||'Warehouse';}}
-class MultiSelect extends NativeAutocomplete {get_values(){return this.$input.val().split(/\s*,\s*/).filter(Boolean);}}
+class MultiSelect extends NativeAutocomplete {
+    get_values(){return this.$input.val().split(/\s*,\s*/).filter(Boolean);}
+    validate(value){if(this.df.ignore_validation)return value||'';
+        const values=this.awesomplete._list.map(item=>item.value);if(!values.length)return value;
+        return value.replace(/,\s*$/,'').split(',').every(item=>values.includes(item))?value:'';}
+}
 const frappe={ui:{form:{ControlLink:NativeLink,ControlDynamicLink:DynamicLink,ControlAutocomplete:NativeAutocomplete,
     ControlMultiSelect:MultiSelect,ControlSelect:class extends Base{},ControlMultiSelectList:class extends Base{}}},
-    call:options=>requests.push(options),model:{can_create:()=>false},utils:{add_link_title(){}},
+    call:options=>requests.push(options),model:{can_create:()=>false},utils:{add_link_title(){},debounce},
     provide(){},boot:{sysdefaults:{link_field_results_limit:37}}};
 const window={frappe,Cypress:false};const locals={};
 const context={window,frappe,$,document,locals,console,Proxy,WeakMap,Map,Set,
-    setTimeout:fn=>{timers.set(++timerId,fn);return timerId},clearTimeout:id=>timers.delete(id)};
+    setTimeout:schedule,clearTimeout:id=>timers.delete(id)};
 vm.createContext(context);
 if(process.env.SELECTION_CLASSES_LATE){delete frappe.ui.form.ControlLink;delete frappe.ui.form.ControlAutocomplete;}
 function load(){const asset=path.join(__dirname,'../../public/js/selection_dropdown.bundle.js');
@@ -155,5 +183,5 @@ function makeControl(kind,options={}) {const Class=frappe.ui.form['Control'+kind
     return new Class({...options,df:{fieldtype:kind,...options.df}});}
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 async function reply(index,message=[{value:'ALPHA'},{value:'BETA'}]) {await requests[index].callback({message});await flush();}
-function inputEvent(control,value){control.input.value=value;control.input.dispatch('input');}
+function inputEvent(control,value,{defer=false}={}){control.input.value=value;control.input.dispatch('input');if(!defer)clock.tick(500);}
 module.exports={assert,makeControl,requests,reply,flush,load,frappe,inputEvent,document,clock,NativeLink,NativeAutocomplete};

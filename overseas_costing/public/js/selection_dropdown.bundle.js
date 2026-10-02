@@ -44,6 +44,7 @@
     }
 
     function invalidate(state) {
+        state.debouncedInput?.cancel();
         state.epoch++;
         state.request = null;
         clearTimeout(state.timeout);
@@ -71,10 +72,21 @@
         })};
     }
 
+    function clearObsoleteDisplay(control, state, term) {
+        if (!state.displayedKey) return;
+        try {
+            if (state.displayedKey === queryContext(control, state.kind, term).key) return;
+        } catch (_) {
+            // Missing native dependency: discard options that no longer have a context.
+        }
+        state.displayedKey = null;
+        state.widget.list = [];
+    }
+
     function requestView(control, state, context, term) {
         const request = {
             epoch: ++state.epoch, value: state.$input.val(), key: context.key,
-            term, completed: false,
+            term, completed: false, browse: state.browse,
         };
         state.request = request;
         const current = () => {
@@ -135,6 +147,14 @@
                     request.completed = true;
                     state.displayedKey = context.key;
                     clearTimeout(state.timeout);
+                    if (request.browse) {
+                        // Browsing must preserve the current label-to-value mapping.
+                        // The native change/validation callback receives these only
+                        // after an actual Awesomplete selection completes.
+                        state.browseCandidates = target.parse_options(data);
+                        widgetView.list = state.browseCandidates;
+                        return;
+                    }
                     return target.set_data(data);
                 };
                 if (name === "toggle_href") return (...args) => {
@@ -148,21 +168,27 @@
 
     function search(control, state, term, nativeSearch) {
         if (!editable(control, state)) return;
+        clearObsoleteDisplay(control, state, term);
         const context = queryContext(control, state.kind, term);
         if (state.kind === "link" && !context.args) return;
         const receiver = requestView(control, state, context, term);
-        return state.kind === "link"
-            ? nativeSearch.call(receiver, {target: {value: term}})
-            : nativeSearch.call(receiver, term);
+        state.inNativeSearch = true;
+        try {
+            return state.kind === "link"
+                ? nativeSearch.call(receiver, {target: {value: term}})
+                : nativeSearch.call(receiver, term);
+        } finally {
+            state.inNativeSearch = false;
+        }
     }
 
     function browse(control, state, nativeSearch) {
         if (!editable(control, state) || !state.$input.is(":focus")) return;
+        state.debouncedInput?.cancel();
         const context = queryContext(control, state.kind, "");
-        if (state.displayedKey && state.displayedKey !== context.key) {
-            state.widget.list = [];
-        }
+        clearObsoleteDisplay(control, state, "");
         const request = state.request;
+        state.pendingSelection = null;
         state.browse = true;
         state.keyboardChoice = false;
         state.widget.autoFirst = false;
@@ -175,6 +201,7 @@
         };
         // Focus on an empty Link may already have launched exactly this query.
         if (request && request.term === "" && request.key === context.key && request.current()) {
+            request.browse = true;
             if (request.completed) {
                 state.widget.evaluate();
                 state.widget.open();
@@ -182,9 +209,8 @@
             return;
         }
         if (state.kind === "autocomplete" && !context.source) {
-            state.displayedKey = context.key;
-            state.widget.list = control.get_data();
-            state.widget.evaluate();
+            const receiver = requestView(control, state, context, "");
+            receiver.set_data(control.get_data.call(receiver));
             return;
         }
         search(control, state, "", nativeSearch);
@@ -199,29 +225,81 @@
             input: control.input, $input: control.$input, widget: control.awesomplete,
             kind, epoch: 0, caches: new Map(), filter: control.awesomplete.filter,
             autoFirst: control.awesomplete.autoFirst, tabSelect: control.awesomplete.tabSelect,
+            debouncedInput: control._debounced_input_handler,
         };
         states.set(control, state);
+        const close = state.widget.close;
+        state.widget.close = function (...args) {
+            // Native close emits no event when already hidden. A queued Link
+            // debounce must still be canceled when the caller closes the selector.
+            // An empty native cache can close the widget while on_input is
+            // still starting its refresh. Preserve that new request.
+            if (!state.inNativeSearch) invalidate(state);
+            return close.apply(this, args);
+        };
         // Run before Awesomplete's earlier input listener and Frappe's jQuery handler.
-        state.input.addEventListener("input", () => invalidate(state), true);
+        state.input.addEventListener("input", () => {
+            state.pendingSelection = null;
+            state.browseCandidates = null;
+            invalidate(state);
+            clearObsoleteDisplay(control, state, state.input.value);
+        }, true);
         state.input.addEventListener("focus", () => {
             if (!editable(control, state) || !state.displayedKey) return;
-            try {
-                if (state.displayedKey !== queryContext(control, kind, "").key) {
-                    invalidate(state);
-                    state.widget.list = [];
-                }
-            } catch (_) {
-                invalidate(state);
-                state.widget.list = [];
-            }
+            clearObsoleteDisplay(control, state, "");
         }, true);
+        if (kind === "autocomplete") {
+            state.input.addEventListener("awesomplete-select", event => {
+                const value = event.text?.value;
+                state.pendingSelection = state.browse && state.request?.current() &&
+                    state.browseCandidates?.some(item => item.value === value)
+                    ? {value, data: state.browseCandidates, key: state.request.key,
+                        term: state.request.term,
+                        stored: control.df.fieldtype === "MultiSelect"
+                            ? String(control.get_model_value?.() ?? control.last_value ?? "")
+                                .split(",").map(value => value.trim()).filter(Boolean) : null} : null;
+            }, true);
+            state.input.addEventListener("awesomplete-selectcomplete", event => {
+                const selected = state.pendingSelection;
+                state.pendingSelection = null;
+                if (!selected || event.text?.value !== selected.value || !editable(control, state)) return;
+                if (queryContext(control, kind, selected.term).key !== selected.key) return;
+                if (control.df.fieldtype === "MultiSelect") {
+                    // Native replace treats a saved final token as the search
+                    // token. Only retain validated model values, never a typed
+                    // query tail that has not been selected.
+                    const tokens = selected.stored.map(value => control.df.ignore_validation
+                        ? control._data?.find(item => item.value === value)?.label || value : value);
+                    const choice = control.df.ignore_validation
+                        ? String(event.text.label || selected.value) : selected.value;
+                    if (!selected.stored.includes(selected.value)) tokens.push(choice);
+                    // Native validation splits commas without trimming each token.
+                    const separator = control.df.ignore_validation ? ", " : ",";
+                    state.$input.val(tokens.join(separator) + ", ");
+                }
+                const merged = new Map((control._data || []).map(item => [item.value, item]));
+                selected.data.forEach(item => merged.set(item.value, item));
+                // A remote page may omit already stored selections. Preserve
+                // only those model values in the native validation backing list.
+                selected.stored?.forEach(value => {
+                    if (!merged.has(value)) merged.set(value, {label: value, value});
+                });
+                control._data = [...merged.values()];
+                // Native validation includes existing MultiSelect values. Assign
+                // the parsed backing list directly so a selection never reopens it.
+                state.widget._list = control._data;
+            }, true);
+        }
         state.input.addEventListener("keydown", event => {
             if (state.browse && ["ArrowDown", "ArrowUp"].includes(event.key)) {
                 state.keyboardChoice = true;
             }
         }, true);
         state.$input.on("click.selection-dropdown", () => browse(control, state, nativeSearch));
-        state.$input.on("blur.selection-dropdown awesomplete-close.selection-dropdown", () => invalidate(state));
+        state.$input.on("blur.selection-dropdown", () => invalidate(state));
+        state.$input.on("awesomplete-close.selection-dropdown", () => {
+            if (!state.inNativeSearch) invalidate(state);
+        });
     }
 
     function patch(Control, kind) {
@@ -239,6 +317,7 @@
         prototype[method] = function (eventOrTerm) {
             const state = states.get(this);
             if (!state) return nativeSearch.call(this, eventOrTerm);
+            if (kind === "link" && eventOrTerm && eventOrTerm.target !== state.input) return;
             const term = kind === "link"
                 ? (eventOrTerm ? eventOrTerm.target.value : this.$input.val()) : eventOrTerm;
             return search(this, state, term, nativeSearch);
