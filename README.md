@@ -1,6 +1,6 @@
-### Deeplinkerp Branding
+### DeeplinkERP Branding and Shared Customizations
 
-Deeplinkerp brand
+DeeplinkERP 的品牌、导航和跨业务通用定制。目前包含四个库存明细页面、库存快照及标准物料移动单预填入口。
 
 ### Installation
 

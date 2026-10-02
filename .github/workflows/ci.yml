@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches:
+      - deeplinkerp_branding
       - main
   pull_request:
 
@@ -54,6 +55,14 @@ jobs:
           node-version: 24
           check-latest: true
 
+      - name: Check inventory JavaScript syntax
+        run: |
+          node --check deeplinkerp_branding/public/js/inventory_detail.bundle.js
+          node --check deeplinkerp_branding/deeplinkerp_branding/page/inventory_location_detail/inventory_location_detail.js
+          node --check deeplinkerp_branding/deeplinkerp_branding/page/semi_finished_inventory_detail/semi_finished_inventory_detail.js
+          node --check deeplinkerp_branding/deeplinkerp_branding/page/finished_goods_inventory_detail/finished_goods_inventory_detail.js
+          node --check deeplinkerp_branding/deeplinkerp_branding/page/mold_inventory_detail/mold_inventory_detail.js
+
       - name: Cache pip
         uses: actions/cache@v4
         with:
@@ -99,6 +108,8 @@ jobs:
       - name: Run Tests
         working-directory: /home/runner/frappe-bench
         run: |
+          ./env/bin/pip install pytest
+          ./env/bin/python -m pytest -q "$GITHUB_WORKSPACE/deeplinkerp_branding/tests"
           bench --site test_site set-config allow_tests true
           bench --site test_site run-tests --app deeplinkerp_branding
         env:

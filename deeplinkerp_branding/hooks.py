@@ -1,7 +1,7 @@
 app_name = "deeplinkerp_branding"
 app_title = "Deeplinkerp Branding"
 app_publisher = "yuewei"
-app_description = "Deeplinkerp brand"
+app_description = "DeeplinkERP 品牌与全局业务定制"
 app_email = "308642281@qq.com"
 app_license = "mit"
 app_logo_url = "/assets/deeplinkerp_branding/logo/deeplinkerp_logo_radius.png?v=0.0.6"
@@ -24,8 +24,13 @@ add_to_apps_screen = [
 # ------------------
 
 # include js, css files in header of desk.html
-# app_include_css = "/assets/deeplinkerp_branding/css/deeplinkerp_branding.css"
-app_include_js = "/assets/deeplinkerp_branding/js/deeplinkerp_branding.js?v=0.0.7"
+app_include_css = [
+	"/assets/deeplinkerp_branding/css/inventory_detail.bundle.css",
+]
+app_include_js = [
+	"/assets/deeplinkerp_branding/js/deeplinkerp_branding.js?v=0.0.7",
+	"/assets/deeplinkerp_branding/js/inventory_detail.bundle.js",
+]
 
 # include js, css files in header of web template
 web_include_css = "/assets/deeplinkerp_branding/css/deeplinkerp_branding.css"
@@ -87,7 +92,7 @@ boot_session = "deeplinkerp_branding.deeplinkerp_branding.branding.apply_boot_br
 # ------------
 
 # before_install = "deeplinkerp_branding.install.before_install"
-# after_install = "deeplinkerp_branding.install.after_install"
+after_install = "deeplinkerp_branding.inventory_install.after_install"
 
 # Uninstallation
 # ------------
@@ -116,7 +121,10 @@ boot_session = "deeplinkerp_branding.deeplinkerp_branding.branding.apply_boot_br
 # To hook into the build process
 
 # after_build = "deeplinkerp_branding.build.after_build"
-after_migrate = ["deeplinkerp_branding.deeplinkerp_branding.branding.apply_deeplinkerp_settings_branding"]
+after_migrate = [
+	"deeplinkerp_branding.deeplinkerp_branding.branding.apply_deeplinkerp_settings_branding",
+	"deeplinkerp_branding.inventory_install.after_migrate",
+]
 website_context = {
 	"favicon": "/assets/deeplinkerp_branding/logo/tab_logo.svg?v=0.0.6",
 	"splash_image": "/assets/deeplinkerp_branding/logo/deeplinkerp_logo_radius.png?v=0.0.6",

@@ -3,12 +3,13 @@ name = "deeplinkerp_branding"
 authors = [
     { name = "yuewei", email = "308642281@qq.com"}
 ]
-description = "Deeplinkerp brand"
+description = "DeeplinkERP branding and shared business customizations"
 requires-python = ">=3.14"
 readme = "README.md"
 dynamic = ["version"]
 dependencies = [
-    # "frappe~=16.0.0" # Installed and managed by bench.
+	"openpyxl>=3.1.0",
+	# "frappe~=16.0.0" # Installed and managed by bench.
 ]
 
 [build-system]

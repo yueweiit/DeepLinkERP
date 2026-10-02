@@ -1,0 +1,18 @@
+{
+  "doctype": "Page",
+  "name": "semi-finished-inventory-detail",
+  "module": "Deeplinkerp Branding",
+  "title": "半成品库存明细",
+  "standard": "Yes",
+  "roles": [
+    {"role": "System Manager"},
+    {"role": "Stock Manager"},
+    {"role": "Stock User"},
+    {"role": "Item Manager"},
+    {"role": "Sales User"},
+    {"role": "Purchase User"},
+    {"role": "Maintenance User"},
+    {"role": "Accounts User"},
+    {"role": "Manufacturing User"}
+  ]
+}
