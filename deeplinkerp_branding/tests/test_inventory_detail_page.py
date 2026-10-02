@@ -94,6 +94,17 @@ def test_shared_page_uses_integer_page_size_and_only_opens_an_unsaved_stock_entr
 		assert forbidden not in source
 
 
+def test_reset_selection_clears_visible_row_and_header_checkboxes() -> None:
+	source = SHARED_JS.read_text(encoding="utf-8")
+	reset_selection = source.split("resetSelection() {", 1)[1].split(
+		"updateSelectionUi() {", 1
+	)[0]
+
+	assert '"[data-selection-key], [data-select-current-page]"' in reset_selection
+	assert '$selectionInputs.prop("checked", false);' in reset_selection
+	assert '$selectionInputs.prop("indeterminate", false);' in reset_selection
+
+
 def test_all_four_routes_are_thin_wrappers_over_the_shared_component() -> None:
 	pages = {
 		"inventory_location_detail": "material",

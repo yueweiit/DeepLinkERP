@@ -490,6 +490,13 @@
 
 		resetSelection() {
 			this.selected.clear();
+			const $selectionInputs = this.$root?.find(
+				"[data-selection-key], [data-select-current-page]"
+			);
+			if ($selectionInputs?.length) {
+				$selectionInputs.prop("checked", false);
+				$selectionInputs.prop("indeterminate", false);
+			}
 			this.updateSelectionUi();
 		}
 
