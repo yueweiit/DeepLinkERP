@@ -317,24 +317,6 @@ def test_deploy_recovers_interrupted_services_before_taking_the_backup() -> None
     assert "docker compose -f compose.custom.yaml logs --tail=200 backend" in recovery
 
 
-def test_deploy_recovers_the_interrupted_database_restore_before_service_health() -> None:
-    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-    deploy = workflow.split("\n  deploy:\n", maxsplit=1)[1]
-    recovery = deploy.split("- name: Recover interrupted database restore", 1)[1].split(
-        "\n      - name:", 1
-    )[0]
-
-    assert deploy.index("Recover interrupted database restore") < deploy.index(
-        "Ensure ERP services are running"
-    )
-    assert "frappe.get_installed_apps" in recovery
-    assert "rollback-safe /home/yuewei/ERPNext-Docker/frappe_docker deeplinkerp.com '37060985472-1'" in recovery
-    assert 'backup_image="deeplinkerp-custom:pre-material-ai-release-37060985472-1"' in recovery
-    assert 'docker image tag "$base_image" "$backup_image"' in recovery
-    assert "ASSET_SYNC_SCRIPT=" in recovery
-    assert "BASE_IMAGE_SCRIPT=" in recovery
-
-
 def test_database_rollback_restores_maintenance_even_when_asset_verification_fails() -> None:
     release = (
         WORKFLOW_PATH.parents[1] / "scripts" / "manage_material_ai_release.sh"

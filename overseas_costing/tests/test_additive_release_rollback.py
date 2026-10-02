@@ -155,7 +155,7 @@ def test_deploy_scripts_take_the_base_image_from_compose_not_a_literal():
         assert 'base_image="$(resolve_base_image "$compose_file"' in body
     workflow = (ROOT / ".github/workflows/deploy-overseas-costing.yml").read_text()
     assert ".github/scripts/resolve_base_image.sh" in workflow
-    assert workflow.count("BASE_IMAGE_SCRIPT=") == 7
+    assert workflow.count("BASE_IMAGE_SCRIPT=") == 6
 
 
 def test_install_script_explains_a_base_image_that_was_reclaimed():

@@ -146,47 +146,6 @@ jobs:
             "$DEPLOY_USER@$DEPLOY_HOST" \
             "BASE_IMAGE_SCRIPT='$remote_resolve_script' bash '$remote_runtime_script' /home/yuewei/ERPNext-Docker/frappe_docker deeplinkerp.com '$remote_runtime_dockerfile' '${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}' preflight; script_exit_code=\$?; rm -f '$remote_runtime_script' '$remote_runtime_dockerfile'; exit \$script_exit_code"
 
-      - name: Recover interrupted database restore
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-        run: |
-          remote_release_script="/tmp/recover_material_ai_release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh"
-          remote_asset_script="/tmp/recover_sync_assets-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh"
-          remote_resolve_script="/tmp/resolve_base_image-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh"
-          scp -o BatchMode=yes -o StrictHostKeyChecking=yes \
-            .github/scripts/manage_material_ai_release.sh \
-            "$DEPLOY_USER@$DEPLOY_HOST:$remote_release_script"
-          scp -o BatchMode=yes -o StrictHostKeyChecking=yes \
-            .github/scripts/sync_and_verify_assets.sh \
-            "$DEPLOY_USER@$DEPLOY_HOST:$remote_asset_script"
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
-            "$DEPLOY_USER@$DEPLOY_HOST" \
-            "ASSET_SYNC_SCRIPT='$remote_asset_script' BASE_IMAGE_SCRIPT='$remote_resolve_script' RECOVERY_SCRIPT='$remote_release_script' bash -s" <<'REMOTE_RECOVERY'
-          set -eu
-          cd /home/yuewei/ERPNext-Docker/frappe_docker
-          docker compose -f compose.custom.yaml up -d backend
-          for attempt in $(seq 1 10); do
-            backend_id=$(docker compose -f compose.custom.yaml ps -q backend)
-            [ -z "$backend_id" ] || break
-            sleep 3
-          done
-          test -n "${backend_id:-}"
-          if ! docker compose -f compose.custom.yaml exec -T -w /home/frappe/frappe-bench backend \
-            bench --site deeplinkerp.com execute frappe.get_installed_apps >/dev/null 2>&1; then
-            backup_image="deeplinkerp-custom:pre-material-ai-release-37060985472-1"
-            if ! docker image inspect "$backup_image" >/dev/null 2>&1; then
-              . "$BASE_IMAGE_SCRIPT"
-              base_image=$(resolve_base_image compose.custom.yaml)
-              docker image tag "$base_image" "$backup_image"
-            fi
-            bash "$RECOVERY_SCRIPT" rollback-safe /home/yuewei/ERPNext-Docker/frappe_docker deeplinkerp.com '37060985472-1'
-          fi
-          REMOTE_RECOVERY
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
-            "$DEPLOY_USER@$DEPLOY_HOST" \
-            "rm -f '$remote_release_script' '$remote_asset_script'"
-
       - name: Ensure ERP services are running
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
