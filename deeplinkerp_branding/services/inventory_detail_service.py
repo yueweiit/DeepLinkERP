@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 from collections import OrderedDict
 from collections.abc import Iterable
 from io import BytesIO
@@ -19,7 +20,6 @@ except Exception:  # pragma: no cover - 本地单测环境不安装 Frappe
 
 
 SNAPSHOT_DOCTYPE = "Inventory Original Location Snapshot"
-DEFAULT_COMPANY = "YUEWEI MX"
 COUNT_UOM_TOKENS = (
 	"个",
 	"件",
@@ -257,7 +257,7 @@ def build_inventory_location_payload(
 	return {
 		"snapshot_key": snapshot_source.get("snapshot_key") or "",
 		"snapshot_date": snapshot_source.get("snapshot_date") or "",
-		"company": filters.get("company") or snapshot_source.get("company") or DEFAULT_COMPANY,
+		"company": filters.get("company") or snapshot_source.get("company") or "",
 		"groups": page_groups,
 		"group_count": total_count,
 		"total_count": total_count,
@@ -650,6 +650,33 @@ def _require_company_permission(company: str) -> None:
 	frappe.get_doc("Company", company).check_permission("read")
 
 
+def _resolve_company(company: Any = None) -> str:
+	"""Use an explicit company or the current user's Frappe default."""
+
+	resolved = _text(company)
+	if resolved:
+		return resolved
+	if frappe is None:
+		raise ValueError("请先选择公司或设置默认公司。")
+	resolved = _text(frappe.defaults.get_user_default("Company"))
+	if not resolved:
+		frappe.throw("请先选择公司或设置默认公司。", frappe.ValidationError)
+	return resolved
+
+
+def _accessible_items() -> tuple[str, ...]:
+	rows = frappe.get_list(
+		"Item",
+		fields=["name"],
+		limit_page_length=0,
+	)
+	return tuple(
+		_text(row.get("name") if isinstance(row, dict) else getattr(row, "name", row))
+		for row in rows
+		if _text(row.get("name") if isinstance(row, dict) else getattr(row, "name", row))
+	)
+
+
 def _latest_snapshot_key(company: str) -> str:
 	rows = frappe.db.sql(
 		f"""
@@ -666,9 +693,16 @@ def _latest_snapshot_key(company: str) -> str:
 
 
 def _load_snapshot_rows(filters: dict[str, Any]) -> list[dict[str, Any]]:
-	company = _text(filters.get("company")) or DEFAULT_COMPANY
+	company = _resolve_company(filters.get("company"))
 	snapshot_key = _text(filters.get("snapshot_key")) or _latest_snapshot_key(company)
 	if not snapshot_key:
+		return []
+	items = _accessible_items()
+	warehouses = _accessible_warehouses(company)
+	selected_warehouse = _text(filters.get("warehouse"))
+	if selected_warehouse and selected_warehouse not in warehouses:
+		frappe.throw("没有权限查看所选仓库。", frappe.PermissionError)
+	if not items or not warehouses:
 		return []
 	filters["company"] = company
 	filters["snapshot_key"] = snapshot_key
@@ -692,9 +726,16 @@ def _load_snapshot_rows(filters: dict[str, Any]) -> list[dict[str, Any]]:
         INNER JOIN `tabItem` item ON item.name = snapshot.item_code
         WHERE snapshot.snapshot_key = %(snapshot_key)s
           AND snapshot.company = %(company)s
+		  AND snapshot.item_code IN %(items)s
+		  AND snapshot.warehouse IN %(warehouses)s
         ORDER BY snapshot.warehouse, snapshot.item_code, snapshot.original_location
         """,
-		{"snapshot_key": snapshot_key, "company": company},
+		{
+			"snapshot_key": snapshot_key,
+			"company": company,
+			"items": items,
+			"warehouses": warehouses,
+		},
 		as_dict=True,
 	)
 
@@ -748,7 +789,7 @@ def _accessible_warehouses(company: str) -> tuple[str, ...]:
 
 
 def _category_query_context(category: str, filters: dict[str, Any]) -> dict[str, Any]:
-	company = _text(filters.get("company")) or DEFAULT_COMPANY
+	company = _resolve_company(filters.get("company"))
 	bounds = _category_group_bounds(category, _text(filters.get("item_group")))
 	if bounds is None:
 		return {
@@ -759,6 +800,7 @@ def _category_query_context(category: str, filters: dict[str, Any]) -> dict[str,
 		}
 	group_lft, group_rgt = bounds
 	warehouses = _accessible_warehouses(company)
+	items = _accessible_items()
 	selected_warehouse = _text(filters.get("warehouse"))
 	if selected_warehouse and selected_warehouse not in warehouses:
 		if frappe is not None:
@@ -769,12 +811,16 @@ def _category_query_context(category: str, filters: dict[str, Any]) -> dict[str,
 		"group_lft": group_lft,
 		"group_rgt": group_rgt,
 		"warehouses": warehouses,
+		"items": items,
 		"snapshot_key": _latest_snapshot_key(company),
 	}
 
 
 def _load_category_stock_rows(context: dict[str, Any]) -> list[dict[str, Any]]:
 	warehouses = context["warehouses"]
+	items = context["items"]
+	if not items:
+		return []
 	if warehouses:
 		stock_join = """
         LEFT JOIN (
@@ -810,6 +856,7 @@ def _load_category_stock_rows(context: dict[str, Any]) -> list[dict[str, Any]]:
         {stock_join}
         WHERE item.disabled = 0
           AND item.is_stock_item = 1
+		  AND item.name IN %(items)s
           AND item_group.lft >= %(group_lft)s
           AND item_group.rgt <= %(group_rgt)s
         ORDER BY item.name, stock.warehouse
@@ -817,6 +864,7 @@ def _load_category_stock_rows(context: dict[str, Any]) -> list[dict[str, Any]]:
 		{
 			"company": context["company"],
 			"warehouses": warehouses or ("",),
+			"items": items,
 			"group_lft": context["group_lft"],
 			"group_rgt": context["group_rgt"],
 		},
@@ -825,7 +873,7 @@ def _load_category_stock_rows(context: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _load_category_snapshot_rows(context: dict[str, Any]) -> list[dict[str, Any]]:
-	if not context["snapshot_key"] or not context["warehouses"]:
+	if not context["snapshot_key"] or not context["warehouses"] or not context["items"]:
 		return []
 	return frappe.db.sql(
 		f"""
@@ -848,6 +896,7 @@ def _load_category_snapshot_rows(context: dict[str, Any]) -> list[dict[str, Any]
         WHERE snapshot.snapshot_key = %(snapshot_key)s
           AND snapshot.company = %(company)s
           AND snapshot.warehouse IN %(warehouses)s
+		  AND snapshot.item_code IN %(items)s
           AND item_group.lft >= %(group_lft)s
           AND item_group.rgt <= %(group_rgt)s
         ORDER BY snapshot.item_code, snapshot.warehouse, snapshot.original_location
@@ -856,6 +905,7 @@ def _load_category_snapshot_rows(context: dict[str, Any]) -> list[dict[str, Any]
 			"snapshot_key": context["snapshot_key"],
 			"company": context["company"],
 			"warehouses": context["warehouses"],
+			"items": context["items"],
 			"group_lft": context["group_lft"],
 			"group_rgt": context["group_rgt"],
 		},
@@ -979,6 +1029,8 @@ def build_movement_item_spec(
 		quantity = float(quantity)
 	except (TypeError, ValueError) as error:
 		raise ValueError(f"{item_code or '物料'}的移动数量必须是数字。") from error
+	if not math.isfinite(quantity):
+		raise ValueError(f"{item_code or '物料'}的移动数量必须是有限数字。")
 	if quantity <= 0:
 		raise ValueError(f"{item_code or '物料'}的移动数量必须大于零。")
 
@@ -1029,7 +1081,7 @@ def get_inventory_movement_context(company: str, selections: Any) -> dict[str, A
 	"""Re-read selected item/warehouse groups from live Bin quantities."""
 
 	_require_stock_entry_create_permission()
-	company = _text(company)
+	company = _resolve_company(company)
 	_require_company_permission(company)
 	selected = _parse_list(selections, "已选物料")
 	seen: set[tuple[str, str]] = set()
@@ -1069,7 +1121,7 @@ def prepare_inventory_stock_entry(
 	"""Return a complete local Stock Entry without inserting or saving it."""
 
 	_require_stock_entry_create_permission()
-	company = _text(company)
+	company = _resolve_company(company)
 	_require_company_permission(company)
 	stock_entry_type = _text(stock_entry_type)
 	if not stock_entry_type:
@@ -1154,7 +1206,7 @@ def get_inventory_location_detail(
 ) -> dict[str, Any]:
 	_require_read_permission()
 	parsed = _parse_filters(filters, **kwargs)
-	company = _text(parsed.get("company")) or DEFAULT_COMPANY
+	company = _resolve_company(parsed.get("company"))
 	parsed["company"] = company
 	_require_company_permission(company)
 	payload = build_inventory_location_payload(
@@ -1172,7 +1224,7 @@ def get_inventory_location_detail(
 def export_inventory_location_detail(filters: Any = None, **kwargs: Any) -> dict[str, Any]:
 	_require_read_permission()
 	parsed = _parse_filters(filters, **kwargs)
-	company = _text(parsed.get("company")) or DEFAULT_COMPANY
+	company = _resolve_company(parsed.get("company"))
 	parsed["company"] = company
 	_require_company_permission(company)
 	payload = build_inventory_location_payload(_load_snapshot_rows(parsed), parsed, start=0, page_length=None)
@@ -1195,7 +1247,7 @@ def get_categorized_inventory_detail(
 ) -> dict[str, Any]:
 	_require_categorized_inventory_read_permission()
 	parsed = _parse_filters(filters, **kwargs)
-	company = _text(parsed.get("company")) or DEFAULT_COMPANY
+	company = _resolve_company(parsed.get("company"))
 	parsed["company"] = company
 	_require_company_permission(company)
 	get_category_definition(category)
@@ -1221,7 +1273,7 @@ def get_categorized_inventory_detail(
 def export_categorized_inventory_detail(category: str, filters: Any = None, **kwargs: Any) -> dict[str, Any]:
 	_require_categorized_inventory_read_permission()
 	parsed = _parse_filters(filters, **kwargs)
-	company = _text(parsed.get("company")) or DEFAULT_COMPANY
+	company = _resolve_company(parsed.get("company"))
 	parsed["company"] = company
 	_require_company_permission(company)
 	definition = get_category_definition(category)

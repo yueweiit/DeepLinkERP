@@ -11,7 +11,6 @@ from openpyxl import load_workbook
 from deeplinkerp_branding.services import inventory_detail_service as service
 from deeplinkerp_branding.services.inventory_detail_service import (
 	CATEGORY_DEFINITIONS,
-	DEFAULT_COMPANY,
 	build_categorized_inventory_payload,
 	build_categorized_inventory_xlsx,
 	build_inventory_location_payload,
@@ -19,11 +18,6 @@ from deeplinkerp_branding.services.inventory_detail_service import (
 	format_quantity,
 	get_category_definition,
 )
-
-
-def test_inventory_reports_default_to_the_renamed_manufacturing_company() -> None:
-	assert DEFAULT_COMPANY == "YUEWEI MX"
-
 
 ROWS = [
 	{
@@ -133,6 +127,63 @@ def test_company_document_permission_is_checked_before_raw_snapshot_queries(monk
 	service._require_company_permission("YUEWEI MX")
 
 	assert checked == ["read"]
+
+
+def test_snapshot_sql_is_limited_to_permission_filtered_items_and_warehouses(monkeypatch) -> None:
+	queries: list[tuple[str, dict]] = []
+
+	class FakeDB:
+		@staticmethod
+		def sql(query: str, values: dict, as_dict: bool):
+			assert as_dict is True
+			queries.append((query, values))
+			return []
+
+	class FakeFrappe:
+		db = FakeDB()
+
+	monkeypatch.setattr(service, "frappe", FakeFrappe())
+	monkeypatch.setattr(service, "_accessible_items", lambda: ("ITEM-ALLOWED",))
+	monkeypatch.setattr(
+		service,
+		"_accessible_warehouses",
+		lambda company: ("WAREHOUSE-ALLOWED",) if company == "ACME" else (),
+	)
+	service._load_snapshot_rows({"company": "ACME", "snapshot_key": "SNAPSHOT-1"})
+
+	query, values = queries[0]
+	assert "snapshot.item_code IN %(items)s" in query
+	assert "snapshot.warehouse IN %(warehouses)s" in query
+	assert values["items"] == ("ITEM-ALLOWED",)
+	assert values["warehouses"] == ("WAREHOUSE-ALLOWED",)
+
+
+def test_category_sql_is_limited_to_permission_filtered_items(monkeypatch) -> None:
+	queries: list[tuple[str, dict]] = []
+
+	class FakeDB:
+		@staticmethod
+		def sql(query: str, values: dict, as_dict: bool):
+			assert as_dict is True
+			queries.append((query, values))
+			return []
+
+	class FakeFrappe:
+		db = FakeDB()
+
+	monkeypatch.setattr(service, "frappe", FakeFrappe())
+	context = {
+		"company": "ACME",
+		"warehouses": ("WAREHOUSE-ALLOWED",),
+		"items": ("ITEM-ALLOWED",),
+		"group_lft": 1,
+		"group_rgt": 2,
+	}
+	service._load_category_stock_rows(context)
+
+	query, values = queries[0]
+	assert "item.name IN %(items)s" in query
+	assert values["items"] == ("ITEM-ALLOWED",)
 
 
 def test_xlsx_export_merges_group_fields_but_keeps_location_rows_separate() -> None:
@@ -397,6 +448,7 @@ def test_real_time_query_uses_bin_and_item_group_bounds_not_code_prefixes(monkey
 		"group_lft": 10,
 		"group_rgt": 20,
 		"warehouses": ("半成品仓 - YWFM",),
+		"items": ("NSEMI-001",),
 		"snapshot_key": "YWFM-2026-09-29",
 	}
 	service._load_category_stock_rows(context)

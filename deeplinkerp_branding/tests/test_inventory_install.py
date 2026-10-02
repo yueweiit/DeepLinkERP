@@ -73,3 +73,15 @@ def test_inventory_trace_fields_are_owned_by_branding_installation() -> None:
 		"custom_external_code",
 		"custom_original_identifier_alias",
 	}
+
+
+def test_branding_declares_and_ci_installs_erpnext_dependency() -> None:
+	hooks = (ROOT / "hooks.py").read_text(encoding="utf-8")
+	workflow = (ROOT.parent / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+	assert 'required_apps = ["erpnext"]' in hooks
+	assert "--frappe-branch version-16" in workflow
+	assert "bench get-app --branch version-16 erpnext" in workflow
+	assert workflow.index("bench --site test_site install-app erpnext") < workflow.index(
+		"bench --site test_site install-app deeplinkerp_branding"
+	)

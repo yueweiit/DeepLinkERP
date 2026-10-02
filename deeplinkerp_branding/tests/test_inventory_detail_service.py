@@ -168,6 +168,58 @@ def test_issue_and_transfer_reject_zero_excess_and_same_warehouse() -> None:
 		)
 
 
+@pytest.mark.parametrize("quantity", (float("nan"), float("inf"), float("-inf")))
+def test_movement_quantity_rejects_non_finite_numbers(quantity: float) -> None:
+	with pytest.raises(ValueError, match="有限数字"):
+		service.build_movement_item_spec(
+			purpose="Material Transfer",
+			item_code="ITEM-1",
+			source_warehouse="W1",
+			target_warehouse="W2",
+			quantity=quantity,
+			actual_qty=5,
+		)
+
+
+def test_server_company_fallback_uses_the_current_user_default(monkeypatch) -> None:
+	class FakeDefaults:
+		@staticmethod
+		def get_user_default(key: str) -> str:
+			assert key == "Company"
+			return "用户默认公司"
+
+	class FakeFrappe:
+		defaults = FakeDefaults()
+		ValidationError = ValueError
+
+		@staticmethod
+		def throw(message: str, exception: type[Exception]) -> None:
+			raise exception(message)
+
+	monkeypatch.setattr(service, "frappe", FakeFrappe())
+	assert service._resolve_company("") == "用户默认公司"
+	assert service._resolve_company("明确公司") == "明确公司"
+
+
+def test_server_company_fallback_requires_a_configured_default(monkeypatch) -> None:
+	class FakeDefaults:
+		@staticmethod
+		def get_user_default(_key: str):
+			return None
+
+	class FakeFrappe:
+		defaults = FakeDefaults()
+		ValidationError = ValueError
+
+		@staticmethod
+		def throw(message: str, exception: type[Exception]) -> None:
+			raise exception(message)
+
+	monkeypatch.setattr(service, "frappe", FakeFrappe())
+	with pytest.raises(ValueError, match="默认公司"):
+		service._resolve_company("")
+
+
 def test_prepare_endpoint_requires_create_permission_before_building_a_document(monkeypatch) -> None:
 	class FakeFrappe:
 		PermissionError = PermissionError

@@ -4,6 +4,7 @@ app_publisher = "yuewei"
 app_description = "DeeplinkERP 品牌与全局业务定制"
 app_email = "308642281@qq.com"
 app_license = "mit"
+required_apps = ["erpnext"]
 app_logo_url = "/assets/deeplinkerp_branding/logo/deeplinkerp_logo_radius.png?v=0.0.6"
 favicon = "/assets/deeplinkerp_branding/logo/tab_logo.svg?v=0.0.6"
 splash_image = "/assets/deeplinkerp_branding/logo/deeplinkerp_logo_radius.png?v=0.0.6"
