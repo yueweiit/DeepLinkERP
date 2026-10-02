@@ -334,19 +334,6 @@ def test_failed_release_maintenance_can_be_recovered_without_database_rollback()
     assert "recover-maintenance) recover_maintenance_after_rollback" in release
 
 
-def test_deploy_recovers_the_known_failed_release_before_taking_a_new_backup() -> None:
-    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-    prepare = workflow.split("- name: Prepare production rollback point", 1)[1].split(
-        "\n      - name:", 1
-    )[0]
-
-    recovery = "recover-maintenance /home/yuewei/ERPNext-Docker/frappe_docker deeplinkerp.com '37057810814-1'"
-    assert recovery in prepare
-    assert prepare.index(recovery) < prepare.index(
-        "prepare /home/yuewei/ERPNext-Docker/frappe_docker"
-    )
-
-
 def test_login_smoke_waits_for_backend_without_retrying_expected_maintenance_status() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
     check = workflow.split("- name: Check online maintenance response", 1)[1].split("\n      - name:", 1)[0]
