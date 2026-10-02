@@ -57,6 +57,9 @@ ignore = [
     "UP032", # Use f-string instead of `format` call (translations)
     "UP037", # quoted annotations
     "UP040", # Use type aliases instead of type annotations
+    "RUF001", # Chinese business copy intentionally uses full-width punctuation
+    "RUF002", # Chinese docstrings intentionally use full-width punctuation
+    "RUF003", # Chinese comments intentionally use full-width punctuation
 ]
 typing-modules = ["frappe.types.DF"]
 

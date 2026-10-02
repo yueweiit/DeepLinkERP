@@ -8,14 +8,15 @@ from types import SimpleNamespace
 
 from deeplinkerp_branding import inventory_install
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class FakeSidebar:
 	def __init__(self) -> None:
 		self.items = [
-			SimpleNamespace(label="可用数量", link_type="Report", link_to="Stock Projected Qty", icon="package", idx=1),
+			SimpleNamespace(
+				label="可用数量", link_type="Report", link_to="Stock Projected Qty", icon="package", idx=1
+			),
 			SimpleNamespace(label="储位", link_type="DocType", link_to="Bin", icon="warehouse", idx=2),
 		]
 
@@ -45,7 +46,10 @@ def test_sidebar_keeps_standard_entries_and_adds_the_four_inventory_pages() -> N
 
 
 def test_snapshot_doctype_keeps_its_name_and_data_contract_but_changes_module_owner() -> None:
-	path = ROOT / "deeplinkerp_branding/doctype/inventory_original_location_snapshot/inventory_original_location_snapshot.json"
+	path = (
+		ROOT
+		/ "deeplinkerp_branding/doctype/inventory_original_location_snapshot/inventory_original_location_snapshot.json"
+	)
 	definition = json.loads(path.read_text(encoding="utf-8"))
 	assert definition["name"] == "Inventory Original Location Snapshot"
 	assert definition["module"] == "Deeplinkerp Branding"

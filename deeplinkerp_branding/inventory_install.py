@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 INVENTORY_DETAIL_PAGES = (
 	{
 		"label": "物料库存明细",
@@ -75,9 +74,7 @@ def ensure_stock_sidebar_inventory_pages() -> dict:
 	if not frappe.db.exists("DocType", "Workspace Sidebar"):
 		return {"ok": False, "message": "当前站点没有 Workspace Sidebar，已跳过。"}
 	missing_pages = [
-		page["link_to"]
-		for page in INVENTORY_DETAIL_PAGES
-		if not frappe.db.exists("Page", page["link_to"])
+		page["link_to"] for page in INVENTORY_DETAIL_PAGES if not frappe.db.exists("Page", page["link_to"])
 	]
 	if missing_pages:
 		return {"ok": False, "message": f"库存明细页面尚未安装：{', '.join(missing_pages)}"}
@@ -112,8 +109,7 @@ def upsert_stock_sidebar_inventory_pages(sidebar) -> bool:
 		matches = [
 			row
 			for row in items
-			if getattr(row, "link_to", None) == page["link_to"]
-			or getattr(row, "label", None) in labels
+			if getattr(row, "link_to", None) == page["link_to"] or getattr(row, "label", None) in labels
 		]
 		if matches:
 			target = matches[0]

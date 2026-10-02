@@ -9,7 +9,6 @@ import pytest
 
 from deeplinkerp_branding.services import inventory_detail_service as service
 
-
 MATERIAL_ROWS = [
 	{
 		"snapshot_key": "YWFM-2026-09-29",
@@ -228,7 +227,9 @@ class FakeStockEntry:
 		}
 
 
-def fake_frappe(*, purpose: str, actual_qty: float = 5, target_company: str = "YUEWEI MX", target_group: int = 0):
+def fake_frappe(
+	*, purpose: str, actual_qty: float = 5, target_company: str = "YUEWEI MX", target_group: int = 0
+):
 	stock_entry = FakeStockEntry()
 
 	class FakeDB:
@@ -244,8 +245,7 @@ def fake_frappe(*, purpose: str, actual_qty: float = 5, target_company: str = "Y
 		@staticmethod
 		def has_permission(doctype: str, permission_type: str) -> bool:
 			return (doctype, permission_type) == ("Stock Entry", "create") or (
-				permission_type == "read"
-				and doctype in {"Item", "Bin", "Warehouse", "Stock Entry Type"}
+				permission_type == "read" and doctype in {"Item", "Bin", "Warehouse", "Stock Entry Type"}
 			)
 
 		@staticmethod
@@ -353,9 +353,7 @@ def test_movement_context_reloads_live_bin_instead_of_using_page_quantity(monkey
 		[{"item_code": "ITEM-1", "source_warehouse": "W1", "actual_qty": 999}],
 	)
 	assert context["items"][0]["actual_qty"] == 7.5
-	assert context["stock_entry_types"] == [
-		{"name": "Material Transfer", "purpose": "Material Transfer"}
-	]
+	assert context["stock_entry_types"] == [{"name": "Material Transfer", "purpose": "Material Transfer"}]
 
 
 @pytest.mark.parametrize(

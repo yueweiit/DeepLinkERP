@@ -6,7 +6,6 @@ import json
 import subprocess
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 SHARED_JS = ROOT / "deeplinkerp_branding/public/js/inventory_detail.bundle.js"
 SHARED_CSS = ROOT / "deeplinkerp_branding/public/css/inventory_detail.bundle.css"
