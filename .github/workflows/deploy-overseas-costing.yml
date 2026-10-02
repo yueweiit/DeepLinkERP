@@ -214,6 +214,24 @@ jobs:
             "$DEPLOY_USER@$DEPLOY_HOST" \
             'cd /home/yuewei/ERPNext-Docker/frappe_docker && docker compose -f compose.custom.yaml exec -T -w /home/frappe/frappe-bench backend bench --site deeplinkerp.com execute overseas_costing.services.company_rename_service.verify_company_renames_complete'
 
+      - name: Transfer legacy Mexico inventory to YUEWEI MX
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            'cd /home/yuewei/ERPNext-Docker/frappe_docker && docker compose -f compose.custom.yaml exec -T -w /home/frappe/frappe-bench backend bench --site deeplinkerp.com execute overseas_costing.services.company_inventory_transfer_service.execute_company_inventory_transfer'
+
+      - name: Verify company inventory transfer
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            'cd /home/yuewei/ERPNext-Docker/frappe_docker && docker compose -f compose.custom.yaml exec -T -w /home/frappe/frappe-bench backend bench --site deeplinkerp.com execute overseas_costing.services.company_inventory_transfer_service.verify_company_inventory_transfer_complete'
+
       - name: Install document parsing runtime
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -306,7 +324,7 @@ jobs:
             "ASSET_SYNC_SCRIPT='/tmp/sync_and_verify_assets-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh' BASE_IMAGE_SCRIPT='/tmp/resolve_base_image-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh' bash '$remote_release_script' finish /home/yuewei/ERPNext-Docker/frappe_docker deeplinkerp.com '${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}'"
 
       - name: Rollback failed ERP release
-        if: failure()
+        if: failure() || cancelled()
         continue-on-error: true
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}

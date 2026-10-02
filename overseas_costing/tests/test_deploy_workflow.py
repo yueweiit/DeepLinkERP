@@ -61,6 +61,40 @@ def test_deploy_rechecks_company_rename_integrity_after_migrate() -> None:
     assert deploy.index("Upgrade and migrate ERP") < deploy.index(verification)
 
 
+def test_deploy_transfers_and_verifies_company_inventory_inside_maintenance_window() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    deploy = workflow.split("\n  deploy:\n", maxsplit=1)[1]
+    execute = (
+        "overseas_costing.services.company_inventory_transfer_service."
+        "execute_company_inventory_transfer"
+    )
+    verify = (
+        "overseas_costing.services.company_inventory_transfer_service."
+        "verify_company_inventory_transfer_complete"
+    )
+
+    assert execute in deploy
+    assert verify in deploy
+    assert deploy.index("Verify company rename integrity") < deploy.index(execute)
+    assert deploy.index(execute) < deploy.index(verify) < deploy.index(
+        "Finalize production release"
+    )
+
+
+def test_cancelled_deploy_also_runs_recovery_before_temp_file_cleanup() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    deploy = workflow.split("\n  deploy:\n", maxsplit=1)[1]
+    rollback = deploy.split("- name: Rollback failed ERP release", 1)[1].split(
+        "\n      - name:", 1
+    )[0]
+
+    assert "if: failure() || cancelled()" in rollback
+    assert "rollback-safe" in rollback
+    assert deploy.index("Rollback failed ERP release") < deploy.index(
+        "Remove temporary deployment files"
+    )
+
+
 def test_deploy_cleans_legacy_route_revision_before_migrate() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
     deploy = workflow.split("\n  deploy:\n", maxsplit=1)[1]
