@@ -145,7 +145,55 @@ def test_reconciliation_batch_size_must_be_bounded() -> None:
     with pytest.raises(service.CompanyInventoryTransferError, match="chunk_size"):
         service.build_reconciliation_batches([], chunk_size=0)
     with pytest.raises(service.CompanyInventoryTransferError, match="chunk_size"):
-        service.build_reconciliation_batches([], chunk_size=1001)
+        service.build_reconciliation_batches([], chunk_size=101)
+
+
+def test_default_batches_stay_within_erpnext_synchronous_submission_limit() -> None:
+    rows = [_balance(item_code=f"FL{i:06d}") for i in range(201)]
+
+    batches = service.build_reconciliation_batches(rows)
+
+    assert [len(batch["rows"]) for batch in batches] == [100, 100, 1]
+
+
+def test_submit_pair_refuses_queued_drafts_and_rolls_back(monkeypatch) -> None:
+    events = []
+    docs = {
+        name: SimpleNamespace(docstatus=0, submit=lambda name=name: events.append(name))
+        for name in ("target", "source")
+    }
+    monkeypatch.setattr(service, "frappe", SimpleNamespace(
+        get_doc=lambda _doctype, name: docs[name],
+        db=SimpleNamespace(commit=lambda: events.append("commit"), rollback=lambda: events.append("rollback")),
+    ))
+
+    with pytest.raises(service.CompanyInventoryTransferError, match="not submitted"):
+        service._submit_reconciliation_pair({"target_name": "target", "source_name": "source", "rows": []})
+
+    assert "commit" not in events
+    assert events[-1] == "rollback"
+
+
+def test_submit_pair_commits_only_after_both_documents_are_submitted(monkeypatch) -> None:
+    events = []
+
+    class FakeDocument:
+        docstatus = 0
+        def __init__(self, name):
+            self.name = name
+        def submit(self):
+            events.append(self.name)
+            self.docstatus = 1
+
+    docs = {name: FakeDocument(name) for name in ("target", "source")}
+    monkeypatch.setattr(service, "frappe", SimpleNamespace(
+        get_doc=lambda _doctype, name: docs[name],
+        db=SimpleNamespace(commit=lambda: events.append("commit"), rollback=lambda: events.append("rollback")),
+    ))
+
+    service._submit_reconciliation_pair({"target_name": "target", "source_name": "source", "rows": []})
+
+    assert events == ["target", "source", "commit"]
 
 
 def test_create_target_tree_uses_unsuffixed_warehouse_title_even_when_source_title_contains_suffix(

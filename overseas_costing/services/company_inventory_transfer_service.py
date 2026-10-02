@@ -27,8 +27,10 @@ SOURCE_SUFFIX = " - YC"
 TARGET_SUFFIX = " - YWFM"
 MIGRATION_ID = "YWC-YMX-20261002"
 RECONCILIATION_PREFIX = f"MAT-RECO-{MIGRATION_ID}"
-DEFAULT_CHUNK_SIZE = 500
-MAX_CHUNK_SIZE = 1000
+# ERPNext queues Stock Reconciliations with more than 100 rows.  A release
+# migration must finish and audit each pair before workers are re-enabled.
+DEFAULT_CHUNK_SIZE = 100
+MAX_CHUNK_SIZE = 100
 QUANTITY_TOLERANCE = Decimal("0.000001")
 VALUE_TOLERANCE = Decimal("0.01")
 
@@ -253,8 +255,8 @@ def execute_company_inventory_transfer(chunk_size: int = DEFAULT_CHUNK_SIZE) -> 
     if not snapshot["balances"]:
         raise CompanyInventoryTransferError("No source inventory was found to transfer")
 
-    _create_target_warehouse_tree(snapshot["warehouses"])
     batches = build_reconciliation_batches(snapshot["balances"], chunk_size=chunk_size)
+    _create_target_warehouse_tree(snapshot["warehouses"])
     posting_date, posting_time = _posting_timestamp()
 
     # Every draft is inserted before the first stock mutation.  The deterministic
@@ -282,15 +284,7 @@ def execute_company_inventory_transfer(chunk_size: int = DEFAULT_CHUNK_SIZE) -> 
 
     submitted_pairs = []
     for batch in batches:
-        try:
-            target_doc = frappe.get_doc("Stock Reconciliation", batch["target_name"])
-            source_doc = frappe.get_doc("Stock Reconciliation", batch["source_name"])
-            target_doc.submit()
-            source_doc.submit()
-            frappe.db.commit()
-        except Exception:
-            frappe.db.rollback()
-            raise
+        _submit_reconciliation_pair(batch)
         submitted_pairs.append(
             {"target": batch["target_name"], "source": batch["source_name"]}
         )
@@ -310,6 +304,29 @@ def execute_company_inventory_transfer(chunk_size: int = DEFAULT_CHUNK_SIZE) -> 
         "reconciliation_pairs": submitted_pairs,
         "audit": audit,
     }
+
+
+def _submit_reconciliation_pair(batch: dict) -> None:
+    """Commit only a synchronous, fully posted, balanced transfer pair."""
+
+    try:
+        target_doc = frappe.get_doc("Stock Reconciliation", batch["target_name"])
+        source_doc = frappe.get_doc("Stock Reconciliation", batch["source_name"])
+        target_doc.submit()
+        if int(target_doc.docstatus) != 1:
+            raise CompanyInventoryTransferError(
+                f"Stock Reconciliation {batch['target_name']!r} is not submitted"
+            )
+        source_doc.submit()
+        if int(source_doc.docstatus) != 1:
+            raise CompanyInventoryTransferError(
+                f"Stock Reconciliation {batch['source_name']!r} is not submitted"
+            )
+        _audit_snapshot({"balances": batch["rows"]})
+        frappe.db.commit()
+    except Exception:
+        frappe.db.rollback()
+        raise
 
 
 def verify_company_inventory_transfer_complete() -> dict:
