@@ -292,6 +292,11 @@ def test_missing_category_root_returns_an_empty_page_instead_of_a_server_error(m
 	monkeypatch.setattr(service, "_require_company_permission", lambda _company: None)
 	monkeypatch.setattr(
 		service,
+		"_movement_permission_payload",
+		lambda: {"can_create_stock_entry": False, "movement_disabled_reason": "测试环境"},
+	)
+	monkeypatch.setattr(
+		service,
 		"_category_query_context",
 		lambda _category, _filters: {
 			"company": "Yuewei",
