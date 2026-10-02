@@ -21,7 +21,7 @@ jobs:
 
       - name: Verify paired inventory owner branch
         env:
-          REQUIRED_INVENTORY_BRANDING_SHA: 1c54dc60637b4c51cdb628ed543d8c76f92877df
+          REQUIRED_INVENTORY_BRANDING_SHA: 0bc3529a880d6a9ebc8bd29a019ebd8bba4becc5
         run: |
           git fetch --no-tags origin deeplinkerp_branding
           test "$(git rev-parse origin/deeplinkerp_branding)" = "$REQUIRED_INVENTORY_BRANDING_SHA"
@@ -181,7 +181,7 @@ jobs:
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          REQUIRED_INVENTORY_BRANDING_SHA: 1c54dc60637b4c51cdb628ed543d8c76f92877df
+          REQUIRED_INVENTORY_BRANDING_SHA: 0bc3529a880d6a9ebc8bd29a019ebd8bba4becc5
         run: |
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
             "$DEPLOY_USER@$DEPLOY_HOST" \
@@ -201,7 +201,7 @@ jobs:
             "$DEPLOY_USER@$DEPLOY_HOST:$remote_upgrade_script"
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
             "$DEPLOY_USER@$DEPLOY_HOST" \
-            "GITHUB_RUN_ID='${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}' REQUIRED_INVENTORY_BRANDING_SHA='1c54dc60637b4c51cdb628ed543d8c76f92877df' bash '$remote_upgrade_script' /home/yuewei/ERPNext-Docker/frappe_docker deeplinkerp.com '${REQUIRED_INVENTORY_BRANDING_SHA}'; script_exit_code=\$?; rm -f '$remote_upgrade_script'; exit \$script_exit_code"
+            "GITHUB_RUN_ID='${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}' REQUIRED_INVENTORY_BRANDING_SHA='0bc3529a880d6a9ebc8bd29a019ebd8bba4becc5' bash '$remote_upgrade_script' /home/yuewei/ERPNext-Docker/frappe_docker deeplinkerp.com '${REQUIRED_INVENTORY_BRANDING_SHA}'; script_exit_code=\$?; rm -f '$remote_upgrade_script'; exit \$script_exit_code"
 
       - name: Verify company rename integrity
         env:
