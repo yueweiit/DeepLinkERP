@@ -79,6 +79,9 @@ def test_deploy_transfers_and_verifies_company_inventory_inside_maintenance_wind
     assert deploy.index(execute) < deploy.index(verify) < deploy.index(
         "Finalize production release"
     )
+    transfer_step = deploy.split("- name: Transfer legacy Mexico inventory to YUEWEI MX", 1)[1].split("\n      - name:", 1)[0]
+    assert "ServerAliveInterval=30" in transfer_step
+    assert "ServerAliveCountMax=20" in transfer_step
 
 
 def test_cancelled_deploy_also_runs_recovery_before_temp_file_cleanup() -> None:

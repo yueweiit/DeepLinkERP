@@ -288,6 +288,16 @@ def execute_company_inventory_transfer(chunk_size: int = DEFAULT_CHUNK_SIZE) -> 
         submitted_pairs.append(
             {"target": batch["target_name"], "source": batch["source_name"]}
         )
+        print(
+            json.dumps(
+                {
+                    "migration_id": MIGRATION_ID,
+                    "submitted_pairs": len(submitted_pairs),
+                    "total_pairs": len(batches),
+                }
+            ),
+            flush=True,
+        )
 
     audit = _audit_snapshot(snapshot)
     _disable_migrated_source_warehouses(snapshot["warehouses"])
@@ -542,10 +552,14 @@ def _audit_snapshot(snapshot: dict) -> dict:
     mismatches = []
     actual_target_qty = Decimal("0")
     actual_target_value = Decimal("0")
+    states = _bin_states(snapshot["balances"])
+    empty_state = (Decimal("0"), Decimal("0"))
     for row in snapshot["balances"]:
-        source_qty, source_value = _bin_state(row["item_code"], row["warehouse"])
-        target_qty, target_value = _bin_state(
-            row["item_code"], row["target_warehouse"]
+        source_qty, source_value = states.get(
+            (row["item_code"], row["warehouse"]), empty_state
+        )
+        target_qty, target_value = states.get(
+            (row["item_code"], row["target_warehouse"]), empty_state
         )
         expected = _decimal(row["actual_qty"])
         expected_value = _decimal(row["stock_value"])
@@ -593,17 +607,34 @@ def _audit_snapshot(snapshot: dict) -> dict:
     }
 
 
-def _bin_state(item_code: str, warehouse: str) -> tuple[Decimal, Decimal]:
-    row = frappe.db.get_value(
-        "Bin",
-        {"item_code": item_code, "warehouse": warehouse},
-        ["actual_qty", "stock_value"],
-        as_dict=True,
-    )
-    return (
-        _decimal(row.get("actual_qty") if row else 0),
-        _decimal(row.get("stock_value") if row else 0),
-    )
+def _bin_states(balances: list[dict]) -> dict[tuple[str, str], tuple[Decimal, Decimal]]:
+    """Read bounded batches while preserving item/warehouse audit identity."""
+
+    states = {}
+    for offset in range(0, len(balances), 1000):
+        batch = balances[offset : offset + 1000]
+        item_codes = sorted({row["item_code"] for row in batch})
+        warehouses = sorted(
+            {row[key] for row in batch for key in ("warehouse", "target_warehouse")}
+        )
+        item_placeholders = ", ".join(["%s"] * len(item_codes))
+        warehouse_placeholders = ", ".join(["%s"] * len(warehouses))
+        rows = frappe.db.sql(
+            f"""
+            SELECT item_code, warehouse, actual_qty, stock_value
+            FROM `tabBin`
+            WHERE item_code IN ({item_placeholders})
+              AND warehouse IN ({warehouse_placeholders})
+            """,
+            tuple(item_codes + warehouses),
+            as_dict=True,
+        )
+        for row in rows:
+            states[(row["item_code"], row["warehouse"])] = (
+                _decimal(row.get("actual_qty")),
+                _decimal(row.get("stock_value")),
+            )
+    return states
 
 
 def _disable_migrated_source_warehouses(rows: list[dict]) -> None:

@@ -196,6 +196,81 @@ def test_submit_pair_commits_only_after_both_documents_are_submitted(monkeypatch
     assert events == ["target", "source", "commit"]
 
 
+def test_audit_reads_balances_in_bulk_and_preserves_decimal_qty_and_value(monkeypatch) -> None:
+    calls = []
+    warehouse = "AI-1-A01 ALMACEN IML - YC"
+    target = service.target_warehouse_name(warehouse)
+    rows = [dict(_balance(qty=12.3456, valuation_rate=10), target_warehouse=target)]
+
+    def sql(query, parameters, *, as_dict):
+        calls.append((query, parameters))
+        assert as_dict is True
+        return [
+            {"item_code": "FL000001", "warehouse": warehouse, "actual_qty": 0, "stock_value": 0},
+            {"item_code": "FL000001", "warehouse": target, "actual_qty": 12.3456, "stock_value": 123.456},
+        ]
+
+    monkeypatch.setattr(service, "frappe", SimpleNamespace(db=SimpleNamespace(sql=sql)))
+
+    audit = service._audit_snapshot({"balances": rows})
+
+    assert audit["target_migrated_qty"] == pytest.approx(12.3456)
+    assert audit["target_migrated_stock_value"] == pytest.approx(123.456)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("source_qty,target_qty,target_value", [(1, 12, 0), (0, 11, 0), (0, 12, 10)])
+def test_bulk_audit_rejects_source_residuals_target_qty_or_value_mismatch(monkeypatch, source_qty, target_qty, target_value) -> None:
+    row = dict(_balance(), target_warehouse="AI-1-A01 ALMACEN IML - YWFM")
+    states = [
+        {"item_code": row["item_code"], "warehouse": row["warehouse"], "actual_qty": source_qty, "stock_value": 0},
+        {"item_code": row["item_code"], "warehouse": row["target_warehouse"], "actual_qty": target_qty, "stock_value": target_value},
+    ]
+    monkeypatch.setattr(service, "frappe", SimpleNamespace(db=SimpleNamespace(sql=lambda *_args, **_kwargs: states)))
+
+    with pytest.raises(service.CompanyInventoryTransferError, match="audit failed"):
+        service._audit_snapshot({"balances": [row]})
+
+
+def test_bulk_audit_does_not_confuse_the_same_item_in_different_warehouses(monkeypatch) -> None:
+    rows = [
+        dict(_balance(warehouse="A - YC", qty=12), target_warehouse="A - YWFM"),
+        dict(_balance(warehouse="B - YC", qty=5), target_warehouse="B - YWFM"),
+    ]
+    states = [
+        {"item_code": "FL000001", "warehouse": "A - YWFM", "actual_qty": 5, "stock_value": 0},
+        {"item_code": "FL000001", "warehouse": "B - YWFM", "actual_qty": 12, "stock_value": 0},
+    ]
+    monkeypatch.setattr(service, "frappe", SimpleNamespace(db=SimpleNamespace(sql=lambda *_args, **_kwargs: states)))
+
+    # The overall total is correct, but stock is in the wrong warehouses.
+    with pytest.raises(service.CompanyInventoryTransferError, match="audit failed"):
+        service._audit_snapshot({"balances": rows})
+
+
+def test_bulk_bin_reads_are_bounded_and_use_parameters(monkeypatch) -> None:
+    rows = [
+        dict(_balance(item_code=f"FL{number:06d}"), target_warehouse="AI-1-A01 ALMACEN IML - YWFM")
+        for number in range(1001)
+    ]
+    calls = []
+
+    def sql(query, parameters, *, as_dict):
+        calls.append((query, parameters))
+        assert as_dict is True
+        assert "FL000000" not in query
+        return []
+
+    monkeypatch.setattr(service, "frappe", SimpleNamespace(db=SimpleNamespace(sql=sql)))
+
+    assert service._bin_states(rows) == {}
+    assert len(calls) == 2
+    assert len(calls[0][1]) == 1002
+    assert len(calls[1][1]) == 3
+    with pytest.raises(service.CompanyInventoryTransferError, match="audit failed"):
+        service._audit_snapshot({"balances": rows[:1]})
+
+
 def test_create_target_tree_uses_unsuffixed_warehouse_title_even_when_source_title_contains_suffix(
     monkeypatch,
 ) -> None:
