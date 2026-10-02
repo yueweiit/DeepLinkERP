@@ -174,6 +174,12 @@ jobs:
           test -n "${backend_id:-}"
           if ! docker compose -f compose.custom.yaml exec -T -w /home/frappe/frappe-bench backend \
             bench --site deeplinkerp.com execute frappe.get_installed_apps >/dev/null 2>&1; then
+            backup_image="deeplinkerp-custom:pre-material-ai-release-37060985472-1"
+            if ! docker image inspect "$backup_image" >/dev/null 2>&1; then
+              . "$BASE_IMAGE_SCRIPT"
+              base_image=$(resolve_base_image compose.custom.yaml)
+              docker image tag "$base_image" "$backup_image"
+            fi
             bash "$RECOVERY_SCRIPT" rollback-safe /home/yuewei/ERPNext-Docker/frappe_docker deeplinkerp.com '37060985472-1'
           fi
           REMOTE_RECOVERY

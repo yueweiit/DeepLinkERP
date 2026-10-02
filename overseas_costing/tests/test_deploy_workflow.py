@@ -329,6 +329,8 @@ def test_deploy_recovers_the_interrupted_database_restore_before_service_health(
     )
     assert "frappe.get_installed_apps" in recovery
     assert "rollback-safe /home/yuewei/ERPNext-Docker/frappe_docker deeplinkerp.com '37060985472-1'" in recovery
+    assert 'backup_image="deeplinkerp-custom:pre-material-ai-release-37060985472-1"' in recovery
+    assert 'docker image tag "$base_image" "$backup_image"' in recovery
     assert "ASSET_SYNC_SCRIPT=" in recovery
     assert "BASE_IMAGE_SCRIPT=" in recovery
 
