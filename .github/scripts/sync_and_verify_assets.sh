@@ -220,7 +220,7 @@ fi
 
 echo "== Verify assets.json and frontend files =="
 docker compose -f "$COMPOSE_FILE" exec -T frontend \
-    env ASSETS_DIR="$ASSETS_DIR" python3 - <<'PY'
+    env ASSETS_DIR="$ASSETS_DIR" VERIFY_INVENTORY_ASSETS="$VERIFY_APP_RELEASE" python3 - <<'PY'
 import json
 import os
 
@@ -238,19 +238,20 @@ for key in required:
         raise SystemExit(f"frontend asset file missing: {key} -> {path}")
     print(f"OK {key}: {url}")
 
-for relative_path in (
-    "deeplinkerp_branding/js/inventory_detail.bundle.js",
-    "deeplinkerp_branding/css/inventory_detail.bundle.css",
-):
-    path = os.path.join(assets_dir, relative_path)
-    if not os.path.isfile(path):
-        raise SystemExit(f"frontend inventory asset file missing: {path}")
-    print(f"OK inventory asset: /assets/{relative_path}")
+if os.environ["VERIFY_INVENTORY_ASSETS"] == "1":
+    for relative_path in (
+        "deeplinkerp_branding/js/inventory_detail.bundle.js",
+        "deeplinkerp_branding/css/inventory_detail.bundle.css",
+    ):
+        path = os.path.join(assets_dir, relative_path)
+        if not os.path.isfile(path):
+            raise SystemExit(f"frontend inventory asset file missing: {path}")
+        print(f"OK inventory asset: /assets/{relative_path}")
 PY
 
 echo "== Verify frontend HTTP responses =="
 docker compose -f "$COMPOSE_FILE" exec -T frontend \
-    env SITE_NAME="$SITE_NAME" python3 - <<'PY'
+    env SITE_NAME="$SITE_NAME" VERIFY_INVENTORY_ASSETS="$VERIFY_APP_RELEASE" python3 - <<'PY'
 import json
 import os
 import subprocess
@@ -260,12 +261,13 @@ with open("/home/frappe/frappe-bench/assets/assets.json", encoding="utf-8") as h
     assets = json.load(handle)
 
 urls = [assets[key] for key in ("desk.bundle.css", "desk.bundle.js", "website.bundle.css")]
-urls.extend(
-    (
-        "/assets/deeplinkerp_branding/js/inventory_detail.bundle.js",
-        "/assets/deeplinkerp_branding/css/inventory_detail.bundle.css",
+if os.environ["VERIFY_INVENTORY_ASSETS"] == "1":
+    urls.extend(
+        (
+            "/assets/deeplinkerp_branding/js/inventory_detail.bundle.js",
+            "/assets/deeplinkerp_branding/css/inventory_detail.bundle.css",
+        )
     )
-)
 for url in urls:
     result = subprocess.run(
         ["curl", "--fail", "--silent", "--show-error", "-H", f"Host: {os.environ['SITE_NAME']}", f"http://127.0.0.1:8080{url}"],

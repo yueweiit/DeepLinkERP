@@ -301,6 +301,52 @@ def test_database_migration_is_covered_by_a_full_maintenance_window() -> None:
     assert "' finish " in finalize
 
 
+def test_database_rollback_restores_maintenance_even_when_asset_verification_fails() -> None:
+    release = (
+        WORKFLOW_PATH.parents[1] / "scripts" / "manage_material_ai_release.sh"
+    ).read_text(encoding="utf-8")
+    rollback = release.split("rollback_release()", 1)[1].split(
+        "rollback_safe_release()", 1
+    )[0]
+
+    assert "asset_status=0" in rollback
+    assert "sync_and_verify_assets_only || asset_status=$?" in rollback
+    assert rollback.index("sync_and_verify_assets_only || asset_status=$?") < rollback.index(
+        "restore_maintenance_mode"
+    )
+    assert rollback.index("restore_maintenance_mode") < rollback.index(
+        'return "$asset_status"'
+    )
+
+
+def test_failed_release_maintenance_can_be_recovered_without_database_rollback() -> None:
+    release = (
+        WORKFLOW_PATH.parents[1] / "scripts" / "manage_material_ai_release.sh"
+    ).read_text(encoding="utf-8")
+    recovery = release.split("recover_maintenance_after_rollback()", 1)[1].split(
+        "rollback_release()", 1
+    )[0]
+
+    assert "database_is_committed" in recovery
+    assert "current_maintenance_state" in recovery
+    assert 'if [ "$state" != "on" ]' in recovery
+    assert "restore_maintenance_mode" in recovery
+    assert "recover-maintenance) recover_maintenance_after_rollback" in release
+
+
+def test_deploy_recovers_the_known_failed_release_before_taking_a_new_backup() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    prepare = workflow.split("- name: Prepare production rollback point", 1)[1].split(
+        "\n      - name:", 1
+    )[0]
+
+    recovery = "recover-maintenance /home/yuewei/ERPNext-Docker/frappe_docker deeplinkerp.com '37057810814-1'"
+    assert recovery in prepare
+    assert prepare.index(recovery) < prepare.index(
+        "prepare /home/yuewei/ERPNext-Docker/frappe_docker"
+    )
+
+
 def test_login_smoke_waits_for_backend_without_retrying_expected_maintenance_status() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
     check = workflow.split("- name: Check online maintenance response", 1)[1].split("\n      - name:", 1)[0]
@@ -387,6 +433,8 @@ def test_container_restart_scripts_reuse_asset_sync_gate() -> None:
     assert 'asset_sync_script="$script_dir/sync_and_verify_assets.sh"' in release
     assert "VERIFY_APP_RELEASE=0" in release
     assert 'VERIFY_APP_RELEASE="${VERIFY_APP_RELEASE:-1}"' in asset_script
+    assert 'VERIFY_INVENTORY_ASSETS="$VERIFY_APP_RELEASE"' in asset_script
+    assert 'os.environ["VERIFY_INVENTORY_ASSETS"] == "1"' in asset_script
     assert "Skip overseas costing application release verification" in asset_script
 
 

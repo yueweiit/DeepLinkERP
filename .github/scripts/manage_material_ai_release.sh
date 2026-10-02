@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-mode="${1:?prepare, finish, rollback-safe, rollback or rollback-code is required}"
+mode="${1:?prepare, finish, recover-maintenance, rollback-safe, rollback or rollback-code is required}"
 compose_root="${2:-/home/yuewei/ERPNext-Docker/frappe_docker}"
 site_name="${3:-deeplinkerp.com}"
 release_id="${4:?release id is required}"
@@ -195,6 +195,22 @@ PY
   return "$status"
 }
 
+recover_maintenance_after_rollback() {
+  state=$(current_maintenance_state) || {
+    echo "Cannot read the current maintenance state; refusing recovery" >&2
+    return 1
+  }
+  if [ "$state" != "on" ]; then
+    echo "Site is not in maintenance mode; no recovery is required"
+    return 0
+  fi
+  if database_is_committed; then
+    echo "Release database is committed; refusing failed-release recovery" >&2
+    return 1
+  fi
+  restore_maintenance_mode
+}
+
 rollback_release() {
   docker image inspect "$backup_image" >/dev/null
   test -s "$backup_archive"
@@ -238,8 +254,10 @@ rollback_release() {
     backend websocket queue-short queue-long scheduler frontend
   docker compose -f "$compose_file" exec -T -w /home/frappe/frappe-bench backend \
     bench --site "$site_name" clear-cache
-  sync_and_verify_assets_only
+  asset_status=0
+  sync_and_verify_assets_only || asset_status=$?
   restore_maintenance_mode
+  return "$asset_status"
 }
 
 rollback_safe_release() {
@@ -315,7 +333,8 @@ PY
     bench --site "$site_name" clear-cache
   docker compose -f "$compose_file" exec -T -w /home/frappe/frappe-bench backend \
     bench --site "$site_name" clear-website-cache
-  sync_and_verify_assets_only
+  asset_status=0
+  sync_and_verify_assets_only || asset_status=$?
   previous_release_id=$(python3 - "$release_marker_backup" <<'PY'
 import json
 import sys
@@ -328,11 +347,13 @@ PY
   docker compose -f "$compose_file" exec -T -w /home/frappe/frappe-bench backend \
     bench --site "$site_name" set-config overseas_costing_release_id "$previous_release_id"
   restore_maintenance_mode
+  return "$asset_status"
 }
 
 case "$mode" in
   prepare) prepare_release ;;
   finish) finish_release ;;
+  recover-maintenance) recover_maintenance_after_rollback ;;
   rollback-safe) rollback_safe_release ;;
   rollback) rollback_release ;;
   rollback-code) rollback_code_release ;;
