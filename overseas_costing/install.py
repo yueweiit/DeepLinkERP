@@ -19,30 +19,6 @@ WORKSPACE_HEADING = "海外采购综合成本核算"
 MODULE_NAME = "Overseas Costing"
 WORKBENCH_PAGE = "overseas-cost-workbench"
 COMPARISON_PAGE = "air-sea-cost-comparison"
-INVENTORY_LOCATION_PAGE = "inventory-location-detail"
-INVENTORY_LOCATION_LABEL = "物料库存明细"
-INVENTORY_DETAIL_PAGES = (
-    {
-        "label": INVENTORY_LOCATION_LABEL,
-        "link_to": INVENTORY_LOCATION_PAGE,
-        "legacy_labels": ("库存库位明细",),
-    },
-    {
-        "label": "半成品库存明细",
-        "link_to": "semi-finished-inventory-detail",
-        "legacy_labels": (),
-    },
-    {
-        "label": "成品库存明细",
-        "link_to": "finished-goods-inventory-detail",
-        "legacy_labels": (),
-    },
-    {
-        "label": "模具库存明细",
-        "link_to": "mold-inventory-detail",
-        "legacy_labels": (),
-    },
-)
 ACCESS_ROLE = "海外成本核算用户"
 ERP_SETTINGS_DOCTYPE = "Overseas Cost ERP Settings"
 HOME_WORKSPACE_LABEL = "Home"
@@ -73,8 +49,6 @@ def after_install() -> None:
     ensure_language_defaults()
     ensure_access_role()
     ensure_erpnext_standard_fields()
-    ensure_stock_sidebar_inventory_location()
-    retire_legacy_inventory_report()
     ensure_workspace()
     ensure_workspace_sidebar()
     ensure_desktop_icon()
@@ -138,8 +112,6 @@ def after_migrate() -> None:
     ensure_language_defaults()
     ensure_access_role()
     ensure_erpnext_standard_fields()
-    ensure_stock_sidebar_inventory_location()
-    retire_legacy_inventory_report()
     ensure_workspace()
     ensure_workspace_sidebar()
     ensure_desktop_icon()
@@ -581,10 +553,7 @@ def ensure_erpnext_standard_fields() -> dict:
             },
         ],
     }
-    supplemental_specs = (
-        build_erpnext_standard_field_spec(),
-        get_inventory_trace_custom_fields(),
-    )
+    supplemental_specs = (build_erpnext_standard_field_spec(),)
     for field_spec in supplemental_specs:
         for doctype, fields in field_spec.items():
             existing = {field["fieldname"] for field in custom_fields.get(doctype, [])}
@@ -596,167 +565,6 @@ def ensure_erpnext_standard_fields() -> dict:
     except TypeError:
         create_custom_fields(custom_fields)
     return {"ok": True, "message": "ERPNext 标准单据海外成本字段已确保存在。"}
-
-
-def get_inventory_trace_custom_fields() -> dict[str, list[dict]]:
-    """返回库存明细页面使用的物料追溯字段。"""
-
-    return {
-        "Item": [
-            {
-                "fieldname": "custom_dpci",
-                "label": "DPCI",
-                "fieldtype": "Data",
-                "insert_after": "item_group",
-            },
-            {
-                "fieldname": "custom_external_code",
-                "label": "外部编码",
-                "fieldtype": "Data",
-                "insert_after": "custom_dpci",
-            },
-            {
-                "fieldname": "custom_original_identifier_alias",
-                "label": "原始标识/别名",
-                "fieldtype": "Small Text",
-                "insert_after": "custom_external_code",
-            },
-        ]
-    }
-
-
-def ensure_stock_sidebar_inventory_location() -> dict:
-    """在库存侧边栏的标准“可用数量”之后确保四个库存明细入口。"""
-
-    try:
-        import frappe
-    except Exception:
-        return {"ok": False, "message": "当前未连接 Frappe。"}
-
-    if not frappe.db.exists("DocType", "Workspace Sidebar"):
-        return {"ok": False, "message": "当前站点没有 Workspace Sidebar，已跳过。"}
-    missing_pages = [
-        page["link_to"]
-        for page in INVENTORY_DETAIL_PAGES
-        if not frappe.db.exists("Page", page["link_to"])
-    ]
-    if missing_pages:
-        return {"ok": False, "message": f"库存明细页面尚未安装：{', '.join(missing_pages)}"}
-
-    sidebar_name = (
-        frappe.db.exists("Workspace Sidebar", {"module": "Stock"})
-        or frappe.db.exists("Workspace Sidebar", "Stock")
-        or frappe.db.exists("Workspace Sidebar", {"title": "库存"})
-    )
-    if not sidebar_name:
-        return {"ok": False, "message": "未找到库存 Workspace Sidebar。"}
-
-    sidebar = frappe.get_doc("Workspace Sidebar", sidebar_name)
-    changed = _upsert_stock_sidebar_inventory_location(sidebar)
-    if changed:
-        sidebar.save(ignore_permissions=True)
-        frappe.db.commit()
-    return {
-        "ok": True,
-        "changed": changed,
-        "sidebar": sidebar.name,
-        "pages": [page["link_to"] for page in INVENTORY_DETAIL_PAGES],
-    }
-
-
-def _upsert_stock_sidebar_inventory_location(sidebar) -> bool:
-    items = list(sidebar.get("items") or [])
-    changed = False
-    targets = []
-    for page in INVENTORY_DETAIL_PAGES:
-        labels = {page["label"], *page["legacy_labels"]}
-        matches = [
-            row
-            for row in items
-            if getattr(row, "link_to", None) == page["link_to"]
-            or getattr(row, "label", None) in labels
-        ]
-        if matches:
-            target = matches[0]
-            for duplicate in matches[1:]:
-                items.remove(duplicate)
-                changed = True
-        else:
-            target = sidebar.append(
-                "items",
-                {
-                    "label": page["label"],
-                    "type": "Link",
-                    "link_type": "Page",
-                    "link_to": page["link_to"],
-                    "icon": "warehouse",
-                    "idx": len(items) + 1,
-                },
-            )
-            items = list(sidebar.get("items") or [])
-            changed = True
-
-        desired = {
-            "label": page["label"],
-            "type": "Link",
-            "link_type": "Page",
-            "link_to": page["link_to"],
-            "icon": "warehouse",
-        }
-        for fieldname, value in desired.items():
-            if getattr(target, fieldname, None) != value:
-                setattr(target, fieldname, value)
-                changed = True
-        targets.append(target)
-
-    for target in targets:
-        items.remove(target)
-
-    anchor_index = next(
-        (
-            index
-            for index, row in enumerate(items)
-            if getattr(row, "link_to", None) == "Stock Projected Qty"
-            or getattr(row, "label", None) in {"可用数量", "Stock Projected Qty"}
-        ),
-        -1,
-    )
-    desired_index = anchor_index + 1 if anchor_index >= 0 else len(items)
-    original_order = list(sidebar.get("items") or [])
-    for offset, target in enumerate(targets):
-        items.insert(desired_index + offset, target)
-    if items != original_order:
-        changed = True
-
-    sidebar.items[:] = items
-    for index, row in enumerate(sidebar.items, start=1):
-        if getattr(row, "idx", None) != index:
-            row.idx = index
-            changed = True
-    return changed
-
-
-def retire_legacy_inventory_report() -> dict:
-    """新页面安装后移除已被替代的 Inventory On Hand 报表。"""
-
-    try:
-        import frappe
-    except Exception:
-        return {"ok": False, "removed": False, "message": "当前未连接 Frappe。"}
-
-    if not frappe.db.exists("Page", INVENTORY_LOCATION_PAGE):
-        return {"ok": False, "removed": False, "message": "新页面尚未安装。"}
-    report_name = "Inventory On Hand"
-    if not frappe.db.exists("Report", report_name):
-        return {"ok": True, "removed": False, "report": report_name}
-    frappe.delete_doc(
-        "Report",
-        report_name,
-        ignore_permissions=True,
-        force=True,
-    )
-    frappe.db.commit()
-    return {"ok": True, "removed": True, "report": report_name}
 
 
 def ensure_workspace() -> dict:

@@ -15,11 +15,7 @@ app_description = "海外采购综合成本核算模块后端骨架"
 app_email = "dev@yuewei.local"
 app_license = "MIT"
 
-app_include_js = [
-    "categorized_inventory_detail.bundle.js",
-    "selection_dropdown.bundle.js",
-]
-app_include_css = "categorized_inventory_detail.bundle.css"
+app_include_js = "selection_dropdown.bundle.js"
 
 after_install = "overseas_costing.install.after_install"
 before_migrate = "overseas_costing.install.before_migrate"

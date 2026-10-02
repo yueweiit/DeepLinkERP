@@ -47,16 +47,6 @@ jobs:
           node --check overseas_costing/page/air_sea_cost_comparison/air_sea_cost_comparison.js
           node --check overseas_costing/overseas_costing/page/air_sea_cost_comparison/air_sea_cost_comparison.js
 
-      - name: Verify inventory detail assets
-        run: |
-          python overseas_costing/scripts/build_inventory_assets.py
-          git diff --exit-code -- overseas_costing/page/inventory_location_detail overseas_costing/page/semi_finished_inventory_detail overseas_costing/page/finished_goods_inventory_detail overseas_costing/page/mold_inventory_detail overseas_costing/public overseas_costing/overseas_costing/page/inventory_location_detail overseas_costing/overseas_costing/page/semi_finished_inventory_detail overseas_costing/overseas_costing/page/finished_goods_inventory_detail overseas_costing/overseas_costing/page/mold_inventory_detail overseas_costing/overseas_costing/public
-          node --check overseas_costing/public/js/categorized_inventory_detail.bundle.js
-          node --check overseas_costing/page/inventory_location_detail/inventory_location_detail.js
-          node --check overseas_costing/page/semi_finished_inventory_detail/semi_finished_inventory_detail.js
-          node --check overseas_costing/page/finished_goods_inventory_detail/finished_goods_inventory_detail.js
-          node --check overseas_costing/page/mold_inventory_detail/mold_inventory_detail.js
-
       - name: Run tests affected by this update
         env:
           TEST_BASE: ${{ github.event.before }}

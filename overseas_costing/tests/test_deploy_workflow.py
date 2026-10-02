@@ -34,14 +34,13 @@ def test_deploy_job_checks_out_repository_before_running_asset_script():
     assert deploy_block.index(checkout) < deploy_block.index(asset_script)
 
 
-def test_ci_rebuilds_and_syntax_checks_inventory_page_assets() -> None:
+def test_overseas_costing_ci_no_longer_owns_inventory_page_assets() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
     test_job = workflow.split("\n  deploy:\n", maxsplit=1)[0]
 
-    assert "python overseas_costing/scripts/build_inventory_assets.py" in test_job
-    assert "git diff --exit-code -- overseas_costing/page/inventory_location_detail" in test_job
-    assert "overseas_costing/overseas_costing/page/mold_inventory_detail" in test_job
-    assert "node --check overseas_costing/public/js/categorized_inventory_detail.bundle.js" in test_job
+    assert "build_inventory_assets.py" not in test_job
+    assert "categorized_inventory_detail.bundle.js" not in test_job
+    assert "inventory_location_detail" not in test_job
 
 
 def test_deploy_prewarms_packing_cache_before_switching_frontend_assets() -> None:
