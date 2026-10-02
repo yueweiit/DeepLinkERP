@@ -189,6 +189,19 @@ def test_failed_release_can_restore_image_database_files_and_site_config() -> No
     assert "backend websocket queue-short queue-long scheduler frontend" in release
 
 
+def test_database_rollback_supplies_the_container_root_password_non_interactively() -> None:
+    release = (
+        WORKFLOW_PATH.parent.parent / "scripts" / "manage_material_ai_release.sh"
+    ).read_text(encoding="utf-8")
+    rollback = release.split("rollback_release()", 1)[1].split(
+        "rollback_safe_release()", 1
+    )[0]
+
+    assert "MYSQL_ROOT_PASSWORD" in rollback
+    assert "--db-root-password" in rollback
+    assert "printenv MYSQL_ROOT_PASSWORD" not in rollback
+
+
 def test_database_migration_is_covered_by_a_full_maintenance_window() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
     deploy = workflow.split("\n  deploy:\n", maxsplit=1)[1]

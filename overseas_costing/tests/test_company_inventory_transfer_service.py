@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from overseas_costing.services import company_inventory_transfer_service as service
@@ -144,3 +146,41 @@ def test_reconciliation_batch_size_must_be_bounded() -> None:
         service.build_reconciliation_batches([], chunk_size=0)
     with pytest.raises(service.CompanyInventoryTransferError, match="chunk_size"):
         service.build_reconciliation_batches([], chunk_size=1001)
+
+
+def test_create_target_tree_uses_unsuffixed_warehouse_title_even_when_source_title_contains_suffix(
+    monkeypatch,
+) -> None:
+    created = []
+
+    class FakeWarehouse:
+        def __init__(self, values: dict):
+            created.append(values)
+            self.name = f"{values['warehouse_name']} - YWFM"
+
+        def insert(self, *, ignore_permissions: bool) -> None:
+            assert ignore_permissions is True
+
+    monkeypatch.setattr(
+        service,
+        "frappe",
+        SimpleNamespace(
+            db=SimpleNamespace(exists=lambda *_args, **_kwargs: False),
+            get_doc=lambda values: FakeWarehouse(values),
+        ),
+    )
+
+    service._create_target_warehouse_tree(
+        [
+            {
+                "source_name": "P17R25S INVENTARIO SEMITERMINADO - YC",
+                "target_name": "P17R25S INVENTARIO SEMITERMINADO - YWFM",
+                "warehouse_name": "P17R25S INVENTARIO SEMITERMINADO - YC",
+                "target_parent_warehouse": "墨西哥仓库 - YWFM",
+                "is_group": 0,
+                "warehouse_type": None,
+            }
+        ]
+    )
+
+    assert created[0]["warehouse_name"] == "P17R25S INVENTARIO SEMITERMINADO"

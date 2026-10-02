@@ -446,10 +446,18 @@ def _create_target_warehouse_tree(rows: list[dict]) -> None:
         target_name = row["target_name"]
         if frappe.db.exists("Warehouse", target_name):
             continue
+        if not target_name.endswith(TARGET_SUFFIX):
+            raise CompanyInventoryTransferError(
+                f"Target warehouse {target_name!r} does not use the approved target suffix"
+            )
+        # ERPNext derives the document name by appending the company abbreviation
+        # to warehouse_name.  Some legacy records incorrectly persisted their
+        # abbreviation inside warehouse_name as well, so never copy that field.
+        warehouse_title = target_name[: -len(TARGET_SUFFIX)]
         doc = frappe.get_doc(
             {
                 "doctype": "Warehouse",
-                "warehouse_name": str(row.get("warehouse_name") or row["source_name"][: -len(SOURCE_SUFFIX)]),
+                "warehouse_name": warehouse_title,
                 "company": TARGET_COMPANY,
                 "parent_warehouse": row.get("target_parent_warehouse"),
                 "is_group": int(row.get("is_group") or 0),

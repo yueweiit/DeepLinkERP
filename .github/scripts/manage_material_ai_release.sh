@@ -212,14 +212,23 @@ rollback_release() {
   docker compose -f "$compose_file" up -d --no-deps --force-recreate backend
   backend_id=$(docker compose -f "$compose_file" ps -q backend)
   test -n "$backend_id"
+  database_id=$(docker compose -f "$compose_file" ps -q db)
+  test -n "$database_id"
+  database_root_password=$(
+    docker inspect "$database_id" --format '{{json .Config.Env}}' |
+      python3 -c 'import json, sys; values = json.load(sys.stdin); print(next((value.split("=", 1)[1] for value in values if value.startswith("MYSQL_ROOT_PASSWORD=")), ""))'
+  )
+  test -n "$database_root_password"
   remote_dir="/tmp/material-ai-rollback-$release_id"
   docker exec "$backend_id" mkdir -p "$remote_dir"
   docker cp "$restore_dir/." "$backend_id:$remote_dir/"
 
-  restore_args=(bench --site "$site_name" restore "$remote_dir/$(basename "$database")" --force)
+  restore_args=(bench --site "$site_name" restore "$remote_dir/$(basename "$database")" --force \
+    --db-root-username root --db-root-password "$database_root_password")
   [ -z "$public" ] || restore_args+=(--with-public-files "$remote_dir/$(basename "$public")")
   [ -z "$private" ] || restore_args+=(--with-private-files "$remote_dir/$(basename "$private")")
   docker compose -f "$compose_file" exec -T -w /home/frappe/frappe-bench backend "${restore_args[@]}"
+  unset database_root_password
   if [ -n "$config" ]; then
     docker compose -f "$compose_file" exec -T backend sh -lc \
       "cp '$remote_dir/$(basename "$config")' '/home/frappe/frappe-bench/sites/$site_name/site_config.json' && chown frappe:frappe '/home/frappe/frappe-bench/sites/$site_name/site_config.json' && chmod 640 '/home/frappe/frappe-bench/sites/$site_name/site_config.json'"
