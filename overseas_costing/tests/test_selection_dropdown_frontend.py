@@ -213,15 +213,20 @@ assert(!c.awesomplete._list.some(item=>item.value==='A-OTHER'));""")
 
 @pytest.mark.parametrize("previous", [None, "PREVIOUS"])
 @pytest.mark.parametrize("cancel", ["close", "timeout", "canceled_selection", "blur"])
-def test_standalone_multiselect_browse_cancel_then_native_blur_keeps_initialized_value(previous, cancel):
-    run_js(f"""const c=makeControl('MultiSelect',{{standalone:true,query:true}});c.set_data([]);
+@pytest.mark.parametrize("mapped_label", [False, True])
+def test_standalone_multiselect_browse_cancel_then_native_blur_keeps_initialized_value(previous, cancel, mapped_label):
+    run_js(f"""const mapped={str(mapped_label).lower()};
+const options=[{{label:'Saved Label',value:'SAVED'}},{{label:'New Label',value:'NEW'}}];
+const c=makeControl('MultiSelect',{{standalone:true,query:true,df:{{options:mapped?options:[]}}}});c.set_data([]);
 const previous={json.dumps(previous)};if(previous!==null)await c.set_value(previous);
+if(mapped)c.set_data(options);
 await c.set_value('SAVED');c.input.writes=[];c.$input.trigger('click');
+if(mapped){{assert.equal(c.get_input_value(),'SAVED');assert.deepEqual(c.get_values(),[]);}}
 const cancel='{cancel}';if(cancel==='timeout')clock.expire();else await reply(0,[{{label:'NEW',value:'NEW'}}]);
 if(cancel==='close')c.awesomplete.close();if(cancel==='canceled_selection'){{
 c.$input.on('awesomplete-select',event=>event.preventDefault());assert(!c.awesomplete.select('NEW'));}}
 c.$input.trigger('blur');await flush();
-assert.equal(c.value,'SAVED');assert.equal(c.$input.val(),'SAVED');assert.deepEqual(c.input.writes,[]);""")
+assert.equal(c.value,'SAVED');assert.equal(c.$input.val(),mapped?'Saved Label':'SAVED');assert.deepEqual(c.input.writes,[]);""")
 
 
 @pytest.mark.parametrize("display", ["SAVED,NE", "NE"])

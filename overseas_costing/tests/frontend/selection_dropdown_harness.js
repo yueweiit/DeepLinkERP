@@ -71,7 +71,8 @@ class Awesome {
 class Base {
     constructor(options) {
         this.doc={company:'A',item:'SKU'};this.frm={doc:this.doc};this.doctype='Stock Entry';this.docname='ROW';
-        this.df={fieldname:'warehouse',options:'Warehouse',ignore_user_permissions:1,only_select:1,...options.df};
+        this.df={fieldname:'warehouse',options:options.df.fieldtype==='MultiSelect'?[]:'Warehouse',
+            ignore_user_permissions:1,only_select:1,...options.df};
         this.disp_status='Write';this.changed=0;this.nativeSelections=0;this.hrefUpdates=0;
         this.initial=options.value||'';this.modelValue=this.last_value=options.modelValue??this.initial;
         if(options.standalone){delete this.doc;delete this.frm;delete this.doctype;delete this.docname;
@@ -93,6 +94,7 @@ class Base {
         if(this.doc)this.doc[this.df.fieldname]=value;this.set_input(value);return Promise.resolve();}
     set_input(value){this.last_value=this.value;this.value=value;this.set_formatted_input(value);}
     set_formatted_input(value){this.$input.val(value==null?'':value);}
+    get_value(){return this.disp_status==='Write'?this.get_input_value():this.value||undefined;}
     get_input_value(){return this.$input.val();}
     get_label_value(){return this.$input.val();}
     get_translated(value){return value;}
@@ -176,7 +178,19 @@ class NativeAutocomplete extends Base {
 }
 class DynamicLink extends NativeLink {get_options(){return this.doc.target||'Warehouse';}}
 class MultiSelect extends NativeAutocomplete {
-    get_values(){return this.$input.val().split(/\s*,\s*/).filter(Boolean);}
+    // Native MultiSelect applies its options mapping after Autocomplete's
+    // get_input_value mapping, including the single-label get_values=[] boundary.
+    get_parsed_options(){return typeof this.df.options==='string'
+        ?this.df.options.split('\n').map(value=>({label:value,value})):this.df.options;}
+    get_value(){let data=super.get_value();const options=this.get_parsed_options();
+        if(options&&options.length&&options[0].label!==undefined)data=data.split(',').map(value=>value.trim())
+            .map(value=>options.find(item=>item.label===value)?.value??null).filter(value=>value!=null).join(', ');
+        return data;}
+    get_values(){return (this.get_value()||'').split(/\s*,\s*/).filter(Boolean);}
+    set_formatted_input(value){if(!value)return;const options=this.get_parsed_options();
+        if(options&&options.length&&options[0].label!==undefined)value=value.split(',').map(value=>value.trim())
+            .map(value=>options.find(item=>item.value===value)?.label??value).filter(value=>value!=null).join(', ');
+        super.set_formatted_input(value);}
     validate(value){if(this.df.ignore_validation)return value||'';
         const values=this.awesomplete._list.map(item=>item.value);if(!values.length)return value;
         return value.replace(/,\s*$/,'').split(',').every(item=>values.includes(item))?value:'';}

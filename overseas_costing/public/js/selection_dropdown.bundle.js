@@ -195,9 +195,9 @@
         state.debouncedInput?.cancel();
         if (state.kind === "autocomplete") {
             const source = storedValue(control);
-            const unchanged = control.df.fieldtype === "MultiSelect"
-                ? fingerprint(control.get_values()) === fingerprint(storedTokens(source))
-                : control.get_input_value() === source;
+            const unchanged = control.get_input_value() === source ||
+                (control.df.fieldtype === "MultiSelect" &&
+                    fingerprint(control.get_values()) === fingerprint(storedTokens(source)));
             state.cancelSnapshot = unchanged
                 ? {input: state.$input.val(), source} : null;
         }
