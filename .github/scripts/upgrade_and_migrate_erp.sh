@@ -3,7 +3,7 @@ set -euo pipefail
 
 compose_root="${1:?compose root is required}"
 site_name="${2:?site name is required}"
-required_inventory_branding_sha="${3:?required inventory branding sha is required}"
+required_inventory_branding_content_sha256="${3:?required inventory branding content sha256 is required}"
 
 cd "$compose_root"
 
@@ -40,31 +40,69 @@ fi
 
 echo "== Verify paired inventory ownership before migrate =="
 docker compose -f "$compose_root/compose.custom.yaml" exec -T \
-  -e REQUIRED_INVENTORY_BRANDING_SHA="$required_inventory_branding_sha" \
-  -w /home/frappe/frappe-bench backend bash -lc '
-set -euo pipefail
-branding_app="/home/frappe/frappe-bench/apps/deeplinkerp_branding"
-overseas_app="/home/frappe/frappe-bench/apps/overseas_costing"
+  -e REQUIRED_INVENTORY_BRANDING_CONTENT_SHA256="$required_inventory_branding_content_sha256" \
+  -w /home/frappe/frappe-bench backend python - <<'PY'
+import hashlib
+import os
+from pathlib import Path
 
-test "$(git -C "$branding_app" rev-parse HEAD)" = "$REQUIRED_INVENTORY_BRANDING_SHA"
+bench = Path("/home/frappe/frappe-bench")
+branding_app = bench / "apps/deeplinkerp_branding"
+overseas_app = bench / "apps/overseas_costing"
+files = {
+    Path("deeplinkerp_branding/hooks.py"),
+    Path("deeplinkerp_branding/inventory_install.py"),
+    Path("deeplinkerp_branding/services/inventory_detail_service.py"),
+    Path("deeplinkerp_branding/public/js/inventory_detail.bundle.js"),
+    Path("deeplinkerp_branding/public/css/inventory_detail.bundle.css"),
+    Path(
+        "deeplinkerp_branding/deeplinkerp_branding/doctype/"
+        "inventory_original_location_snapshot/inventory_original_location_snapshot.json"
+    ),
+}
+for directory in (
+    Path("deeplinkerp_branding/deeplinkerp_branding/page/inventory_location_detail"),
+    Path("deeplinkerp_branding/deeplinkerp_branding/page/semi_finished_inventory_detail"),
+    Path("deeplinkerp_branding/deeplinkerp_branding/page/finished_goods_inventory_detail"),
+    Path("deeplinkerp_branding/deeplinkerp_branding/page/mold_inventory_detail"),
+    Path("deeplinkerp_branding/deeplinkerp_branding/doctype/inventory_original_location_snapshot"),
+):
+    full_directory = branding_app / directory
+    if not full_directory.is_dir():
+        raise SystemExit(f"inventory branding directory is missing: {directory}")
+    files.update(
+        path.relative_to(branding_app)
+        for path in full_directory.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    )
 
-for required_path in \
-  "deeplinkerp_branding/services/inventory_detail_service.py" \
-  "deeplinkerp_branding/public/js/inventory_detail.bundle.js" \
-  "deeplinkerp_branding/public/css/inventory_detail.bundle.css" \
-  "deeplinkerp_branding/deeplinkerp_branding/page/inventory_location_detail/inventory_location_detail.json" \
-  "deeplinkerp_branding/deeplinkerp_branding/page/semi_finished_inventory_detail/semi_finished_inventory_detail.json" \
-  "deeplinkerp_branding/deeplinkerp_branding/page/finished_goods_inventory_detail/finished_goods_inventory_detail.json" \
-  "deeplinkerp_branding/deeplinkerp_branding/page/mold_inventory_detail/mold_inventory_detail.json" \
-  "deeplinkerp_branding/deeplinkerp_branding/doctype/inventory_original_location_snapshot/inventory_original_location_snapshot.json"
-do
-  test -f "$branding_app/$required_path"
-done
+digest = hashlib.sha256()
+for relative in sorted(files, key=lambda value: value.as_posix()):
+    path = branding_app / relative
+    if not path.is_file():
+        raise SystemExit(f"inventory branding file is missing: {relative}")
+    digest.update(relative.as_posix().encode())
+    digest.update(b"\0")
+    digest.update(path.read_bytes())
+    digest.update(b"\0")
 
-test ! -e "$overseas_app/overseas_costing/services/inventory_location_service.py"
-test ! -e "$overseas_app/overseas_costing/overseas_costing/page/inventory_location_detail"
-test ! -e "$overseas_app/overseas_costing/overseas_costing/doctype/inventory_original_location_snapshot"
-'
+actual = digest.hexdigest()
+expected = os.environ["REQUIRED_INVENTORY_BRANDING_CONTENT_SHA256"]
+if actual != expected:
+    raise SystemExit(
+        f"inventory branding content digest mismatch: expected {expected}, got {actual}"
+    )
+
+for legacy_path in (
+    Path("overseas_costing/services/inventory_location_service.py"),
+    Path("overseas_costing/overseas_costing/page/inventory_location_detail"),
+    Path("overseas_costing/overseas_costing/doctype/inventory_original_location_snapshot"),
+):
+    if (overseas_app / legacy_path).exists():
+        raise SystemExit(f"legacy inventory owner still exists: {legacy_path}")
+
+print(f"Inventory ownership content OK: {actual}")
+PY
 
 docker compose -f "$compose_root/compose.custom.yaml" exec -T -w /home/frappe/frappe-bench backend \
   bench --site "$site_name" execute overseas_costing.install.before_migrate

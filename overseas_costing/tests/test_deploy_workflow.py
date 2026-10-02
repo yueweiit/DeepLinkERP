@@ -61,6 +61,16 @@ def test_inventory_ownership_cutover_requires_the_paired_branding_commit() -> No
     )
     assert f"REQUIRED_INVENTORY_BRANDING_SHA='{required_sha}'" in deploy
 
+    content_match = re.search(
+        r"REQUIRED_INVENTORY_BRANDING_CONTENT_SHA256:\s*([0-9a-f]{64})",
+        deploy,
+    )
+    assert content_match, "deployment must pin the inventory source content"
+    assert (
+        f"REQUIRED_INVENTORY_BRANDING_CONTENT_SHA256='{content_match.group(1)}'"
+        in deploy
+    )
+
 
 def test_upgrade_blocks_migration_until_inventory_ownership_is_present() -> None:
     script = (
@@ -69,9 +79,14 @@ def test_upgrade_blocks_migration_until_inventory_ownership_is_present() -> None
 
     ownership_gate = "Verify paired inventory ownership before migrate"
     migrate = './migrate_site.sh "$site_name"'
-    assert 'required_inventory_branding_sha="${3:?required inventory branding sha is required}"' in script
+    assert (
+        'required_inventory_branding_content_sha256="${3:?required inventory branding content sha256 is required}"'
+        in script
+    )
     assert ownership_gate in script
-    assert 'test "$(git -C "$branding_app" rev-parse HEAD)" = "$REQUIRED_INVENTORY_BRANDING_SHA"' in script
+    assert "hashlib.sha256" in script
+    assert "inventory branding content digest mismatch" in script
+    assert 'git -C "$branding_app"' not in script
     assert "deeplinkerp_branding/services/inventory_detail_service.py" in script
     assert "inventory_original_location_snapshot/inventory_original_location_snapshot.json" in script
     assert "overseas_costing/services/inventory_location_service.py" in script
