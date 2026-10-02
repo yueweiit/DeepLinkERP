@@ -301,6 +301,22 @@ def test_database_migration_is_covered_by_a_full_maintenance_window() -> None:
     assert "' finish " in finalize
 
 
+def test_deploy_recovers_interrupted_services_before_taking_the_backup() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    deploy = workflow.split("\n  deploy:\n", maxsplit=1)[1]
+    recovery = deploy.split("- name: Ensure ERP services are running", 1)[1].split(
+        "\n      - name:", 1
+    )[0]
+
+    assert deploy.index("Ensure ERP services are running") < deploy.index(
+        "Prepare production rollback point"
+    )
+    assert "docker compose -f compose.custom.yaml up -d" in recovery
+    assert "backend websocket queue-short queue-long scheduler frontend" in recovery
+    assert "docker compose -f compose.custom.yaml ps -q backend" in recovery
+    assert "docker compose -f compose.custom.yaml logs --tail=200 backend" in recovery
+
+
 def test_database_rollback_restores_maintenance_even_when_asset_verification_fails() -> None:
     release = (
         WORKFLOW_PATH.parents[1] / "scripts" / "manage_material_ai_release.sh"

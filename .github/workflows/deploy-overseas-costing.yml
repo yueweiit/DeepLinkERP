@@ -146,6 +146,29 @@ jobs:
             "$DEPLOY_USER@$DEPLOY_HOST" \
             "BASE_IMAGE_SCRIPT='$remote_resolve_script' bash '$remote_runtime_script' /home/yuewei/ERPNext-Docker/frappe_docker deeplinkerp.com '$remote_runtime_dockerfile' '${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}' preflight; script_exit_code=\$?; rm -f '$remote_runtime_script' '$remote_runtime_dockerfile'; exit \$script_exit_code"
 
+      - name: Ensure ERP services are running
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" '
+              set -eu
+              cd /home/yuewei/ERPNext-Docker/frappe_docker
+              docker compose -f compose.custom.yaml up -d \
+                backend websocket queue-short queue-long scheduler frontend
+              for attempt in $(seq 1 10); do
+                backend_id=$(docker compose -f compose.custom.yaml ps -q backend)
+                if [ -n "$backend_id" ]; then
+                  exit 0
+                fi
+                sleep 3
+              done
+              docker compose -f compose.custom.yaml ps -a
+              docker compose -f compose.custom.yaml logs --tail=200 backend
+              exit 1
+            '
+
       - name: Prepare production rollback point
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
