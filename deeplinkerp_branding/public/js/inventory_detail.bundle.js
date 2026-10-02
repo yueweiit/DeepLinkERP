@@ -409,6 +409,7 @@
 			this.$movementButton = this.page.add_inner_button("物料移动 (0)", () =>
 				this.openMovementDialog()
 			);
+			this.movementActionDataLabel = encodeURIComponent("物料移动 (0)");
 			this.updateMovementButton();
 		}
 
@@ -513,11 +514,26 @@
 
 		updateMovementButton() {
 			if (!this.$movementButton?.length) return;
-			this.$movementButton.text(`物料移动 (${this.selected.size})`);
+			const label = `物料移动 (${this.selected.size})`;
+			const nextDataLabel = encodeURIComponent(label);
 			const reason = this.movementDisabledReason || "";
+			const disabled = !this.canCreateStockEntry || this.selected.size === 0;
+			const $pageActions = $(this.page.wrapper).find(".page-actions");
+			const $actionLabels = $pageActions
+				.find(`[data-label="${this.movementActionDataLabel}"]`)
+				.filter("button, .menu-item-label");
+			$actionLabels.text(label).attr("data-label", nextDataLabel);
+			$actionLabels
+				.filter(".menu-item-label")
+				.closest("a")
+				.toggleClass("disabled", disabled)
+				.attr("aria-disabled", disabled ? "true" : "false")
+				.attr("title", reason);
+			this.movementActionDataLabel = nextDataLabel;
+			this.$movementButton.text(label);
 			this.$movementButton.prop(
 				"disabled",
-				!this.canCreateStockEntry || this.selected.size === 0
+				disabled
 			);
 			this.$movementButton.attr("title", reason);
 		}

@@ -87,6 +87,9 @@ def test_shared_page_uses_integer_page_size_and_only_opens_an_unsaved_stock_entr
 	assert "overseas_costing.services.inventory_location_service" not in source
 	assert "this.resetSelection();" in source
 	assert "物料移动 (${this.selected.size})" in source
+	assert "this.movementActionDataLabel" in source
+	assert ".menu-item-label" in source
+	assert 'aria-disabled' in source
 	for forbidden in (".insert(", ".save(", ".submit(", "frappe.client.insert"):
 		assert forbidden not in source
 
