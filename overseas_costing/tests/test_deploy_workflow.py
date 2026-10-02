@@ -1,4 +1,9 @@
 from pathlib import Path
+import os
+import subprocess
+import textwrap
+
+import pytest
 
 
 WORKFLOW_PATH = (
@@ -82,6 +87,7 @@ def test_deploy_transfers_and_verifies_company_inventory_inside_maintenance_wind
     transfer_step = deploy.split("- name: Transfer legacy Mexico inventory to YUEWEI MX", 1)[1].split("\n      - name:", 1)[0]
     assert "ServerAliveInterval=30" in transfer_step
     assert "ServerAliveCountMax=20" in transfer_step
+    assert deploy.index("Check online maintenance response") < deploy.index(execute)
 
 
 def test_cancelled_deploy_also_runs_recovery_before_temp_file_cleanup() -> None:
@@ -225,12 +231,40 @@ def test_database_migration_is_covered_by_a_full_maintenance_window() -> None:
     assert "' finish " in finalize
 
 
-def test_login_smoke_waits_for_restarted_backend() -> None:
+def test_login_smoke_waits_for_backend_without_retrying_expected_maintenance_status() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    check = workflow.split("- name: Check online maintenance response", 1)[1].split("\n      - name:", 1)[0]
 
-    assert "--retry-all-errors" in workflow
-    assert "--retry-max-time 90" in workflow
-    assert "--retry-delay 5" in workflow
+    assert "--retry" not in check
+    assert "seq 1 19" in check
+    assert "sleep 5" in check
+    assert "SECONDS + 90" in check
+    assert "--max-time 5" in check
+
+
+@pytest.mark.parametrize(
+    "curl_exit,http_status,expected_exit",
+    [(0, "503", 0), (0, "200", 0), (0, "502", 1), (23, "503", 1)],
+)
+def test_maintenance_http_gate_accepts_only_successful_expected_responses(
+    tmp_path, curl_exit, http_status, expected_exit,
+) -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    check = workflow.split("- name: Check online maintenance response", 1)[1].split("\n      - name:", 1)[0]
+    shell = textwrap.dedent(check.split("run: |\n", 1)[1])
+    curl = tmp_path / "curl"
+    curl.write_text('#!/bin/sh\nprintf "%s" "$MOCK_HTTP_STATUS"\nexit "$MOCK_CURL_EXIT"\n')
+    curl.chmod(0o755)
+    sleep = tmp_path / "sleep"
+    sleep.write_text("#!/bin/sh\nexit 0\n")
+    sleep.chmod(0o755)
+    environment = dict(os.environ, PATH=f"{tmp_path}:{os.environ['PATH']}",
+                       MOCK_HTTP_STATUS=http_status, MOCK_CURL_EXIT=str(curl_exit))
+
+    result = subprocess.run(["bash", "-e", "-c", shell], env=environment,
+                            capture_output=True, text=True, timeout=10)
+
+    assert result.returncode == expected_exit
 
 
 def test_deepseek_preflight_reads_secret_from_environment_without_printing_it() -> None:

@@ -214,25 +214,6 @@ jobs:
             "$DEPLOY_USER@$DEPLOY_HOST" \
             'cd /home/yuewei/ERPNext-Docker/frappe_docker && docker compose -f compose.custom.yaml exec -T -w /home/frappe/frappe-bench backend bench --site deeplinkerp.com execute overseas_costing.services.company_rename_service.verify_company_renames_complete'
 
-      - name: Transfer legacy Mexico inventory to YUEWEI MX
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-        run: |
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
-            -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
-            "$DEPLOY_USER@$DEPLOY_HOST" \
-            'cd /home/yuewei/ERPNext-Docker/frappe_docker && docker compose -f compose.custom.yaml exec -T -w /home/frappe/frappe-bench backend bench --site deeplinkerp.com execute overseas_costing.services.company_inventory_transfer_service.execute_company_inventory_transfer'
-
-      - name: Verify company inventory transfer
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-        run: |
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
-            "$DEPLOY_USER@$DEPLOY_HOST" \
-            'cd /home/yuewei/ERPNext-Docker/frappe_docker && docker compose -f compose.custom.yaml exec -T -w /home/frappe/frappe-bench backend bench --site deeplinkerp.com execute overseas_costing.services.company_inventory_transfer_service.verify_company_inventory_transfer_complete'
-
       - name: Install document parsing runtime
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -304,15 +285,51 @@ jobs:
 
       - name: Check online maintenance response
         run: |
-          status=$(curl --silent --show-error \
-            --retry 18 \
-            --retry-delay 5 \
-            --retry-max-time 90 \
-            --retry-all-errors \
-            --output /dev/null \
-            --write-out '%{http_code}' \
-            https://deeplinkerp.com/login)
-          test "$status" = "200" || test "$status" = "503"
+          # A maintenance 503 is success, not a curl retry condition.  Explicit
+          # attempts also avoid retrying a response body into /dev/null, which
+          # some curl versions cannot rewind (CURLE_WRITE_ERROR / exit 23).
+          task_http_deadline=$((SECONDS + 90))
+          for task_http_attempt in $(seq 1 19); do
+            if task_http_status=$(curl --silent --show-error \
+              --connect-timeout 5 --max-time 5 \
+              --output /dev/null --write-out '%{http_code}' \
+              https://deeplinkerp.com/login); then
+              if [ "$task_http_status" = "200" ] || [ "$task_http_status" = "503" ]; then
+                echo "Online maintenance response: HTTP $task_http_status"
+                exit 0
+              fi
+            else
+              task_http_status="000"
+            fi
+            echo "Waiting for online maintenance response: HTTP $task_http_status"
+            if [ "$SECONDS" -ge "$task_http_deadline" ] || [ "$task_http_attempt" -eq 19 ]; then
+              break
+            fi
+            sleep 5
+          done
+          echo "Online maintenance response check failed" >&2
+          exit 1
+
+      # Run the reviewed business-data correction only after all runtime,
+      # assets and HTTP checks, while the original backup still covers it.
+      - name: Transfer legacy Mexico inventory to YUEWEI MX
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            'cd /home/yuewei/ERPNext-Docker/frappe_docker && docker compose -f compose.custom.yaml exec -T -w /home/frappe/frappe-bench backend bench --site deeplinkerp.com execute overseas_costing.services.company_inventory_transfer_service.execute_company_inventory_transfer'
+
+      - name: Verify company inventory transfer
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            'cd /home/yuewei/ERPNext-Docker/frappe_docker && docker compose -f compose.custom.yaml exec -T -w /home/frappe/frappe-bench backend bench --site deeplinkerp.com execute overseas_costing.services.company_inventory_transfer_service.verify_company_inventory_transfer_complete'
 
       - name: Finalize production release
         env:
