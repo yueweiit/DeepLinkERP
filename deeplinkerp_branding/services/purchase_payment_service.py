@@ -43,22 +43,44 @@ def _read(doctype, name, fields=()):
     return doc
 
 
-def _visible(doctype, name):
-    return bool(name and frappe.has_permission(doctype, "read", doc=name))
+LINK_WARNING = "关联缺失或无权读取，请在原生单据核对；快捷付款/确认应付已禁用"
+SOURCE_FIELDS = {"company", "supplier", "currency", "grand_total", "items", "status"}
+
+
+def _related(doctype, name, warnings, fields=(), company=None, supplier=None):
+    """Resolve optional links through normal permissions; never disclose hidden target names."""
+    try:
+        doc = _read(doctype, name, fields)
+        if (company and doc.company != company) or (supplier and doc.supplier != supplier):
+            raise frappe.PermissionError
+        return doc
+    except (frappe.DoesNotExistError, frappe.PermissionError):
+        if LINK_WARNING not in warnings:
+            warnings.append(LINK_WARNING)
+        return None
+
+
+def _source_links(doc, doctype, field, warnings):
+    names = sorted({item.get(field) for item in doc.items if item.get(field)})
+    return [name for name in names if _related(doctype, name, warnings, SOURCE_FIELDS,
+                                              doc.company, doc.supplier)]
 
 
 def _source(doctype, name):
     if doctype not in SOURCES:
         frappe.throw("仅支持采购订单和采购入库")
-    return _read(doctype, name, {"company", "supplier", "currency", "grand_total", "items", "status"})
+    return _read(doctype, name, SOURCE_FIELDS)
 
 
 def _invoice_names(doctype, name):
     field = "purchase_receipt" if doctype == "Purchase Receipt" else "purchase_order"
     _require_fields("Purchase Invoice", {"items"})
     _require_fields("Purchase Invoice Item", {field}, "Purchase Invoice")
-    return frappe.get_list("Purchase Invoice", filters=[["Purchase Invoice Item", field, "=", name]],
-                           fields=["name"], distinct=True, limit_page_length=0, pluck="name")
+    # Discover parent candidates only through the readable source link; callers must
+    # resolve each parent with _read/_related before exposing names or balances.
+    # Joining to the parent would silently hide orphan children and permit duplicate PI creation.
+    return frappe.get_all("Purchase Invoice Item", filters={field: name},
+                          distinct=True, limit_page_length=0, pluck="parent")
 
 
 def invoice_balance(doc):
@@ -109,22 +131,22 @@ def _vouchers(payment_name):
                            fields=["name", "statutory_number", "source_event", "status", "docstatus"], limit_page_length=0)
 
 
-def _procurement_references(payment):
+def _procurement_references(payment, warnings):
     _require_fields("Payment Entry Reference", {"reference_doctype", "reference_name", "allocated_amount"}, "Payment Entry")
     refs = []
     for row in payment.references:
-        if row.reference_doctype == "Purchase Order" and _visible("Purchase Order", row.reference_name):
-            order = _source("Purchase Order", row.reference_name)
-            if order.company == payment.company and order.supplier == payment.party:
+        if row.reference_doctype == "Purchase Order":
+            order = _related("Purchase Order", row.reference_name, warnings, SOURCE_FIELDS, payment.company, payment.party)
+            if order:
                 refs.append({"doctype": "Purchase Order", "name": order.name, "allocated": row.allocated_amount, "currency": payment.paid_to_account_currency if payment.payment_type == "Pay" else payment.paid_from_account_currency, "orders": [order.name], "receipts": []})
-        elif row.reference_doctype == "Purchase Invoice" and _visible("Purchase Invoice", row.reference_name):
-            invoice = _read("Purchase Invoice", row.reference_name, PI_FIELDS)
-            _require_fields("Purchase Invoice Item", {"purchase_order", "purchase_receipt"}, "Purchase Invoice")
-            if invoice.company != payment.company or invoice.supplier != payment.party:
+        elif row.reference_doctype == "Purchase Invoice":
+            invoice = _related("Purchase Invoice", row.reference_name, warnings, PI_FIELDS, payment.company, payment.party)
+            if not invoice:
                 continue
-            orders = sorted({item.purchase_order for item in invoice.items if item.purchase_order and _visible("Purchase Order", item.purchase_order)})
-            receipts = sorted({item.purchase_receipt for item in invoice.items if item.purchase_receipt and _visible("Purchase Receipt", item.purchase_receipt)})
-            if orders or receipts:
+            _require_fields("Purchase Invoice Item", {"purchase_order", "purchase_receipt"}, "Purchase Invoice")
+            orders = _source_links(invoice, "Purchase Order", "purchase_order", warnings)
+            receipts = _source_links(invoice, "Purchase Receipt", "purchase_receipt", warnings)
+            if any(item.purchase_order or item.purchase_receipt for item in invoice.items):
                 refs.append({"doctype": "Purchase Invoice", "name": invoice.name, "allocated": row.allocated_amount, "currency": payment.paid_to_account_currency if payment.payment_type == "Pay" else payment.paid_from_account_currency, "orders": orders, "receipts": receipts})
     return refs
 
@@ -133,13 +155,18 @@ def _payment_row(doc):
     _require_fields("Payment Entry", {"company", "party", "party_type", "payment_type", "references", "posting_date", "paid_amount", "paid_from_account_currency", "paid_from", "received_amount", "paid_to_account_currency", "paid_to", "remarks"})
     doc.check_permission("read")
     frappe.get_doc("Company", doc.company).check_permission("read")
-    refs = _procurement_references(doc)
+    warnings = []
+    refs = _procurement_references(doc, warnings)
     if not refs:
         return None
+    try:
+        vouchers = _vouchers(doc.name)
+    except frappe.PermissionError:
+        vouchers = []
     return {"name": doc.name, "company": doc.company, "supplier": doc.party, "posting_date": doc.posting_date,
             "docstatus": doc.docstatus, "payment_type": doc.payment_type, "amount": doc.received_amount if doc.payment_type == "Receive" else doc.paid_amount,
             "currency": doc.paid_to_account_currency if doc.payment_type == "Receive" else doc.paid_from_account_currency, "bank_account": doc.paid_to if doc.payment_type == "Receive" else doc.paid_from, "remarks": doc.remarks,
-            "references": refs, "vouchers": _vouchers(doc.name),
+            "references": refs, "vouchers": vouchers, "warnings": warnings,
             "state": {0: "草稿 · 未计已付", 1: "已提交", 2: "已取消 · 未计已付"}[doc.docstatus]}
 
 
@@ -151,7 +178,7 @@ def get_payment_records(company=None, supplier=None, purchase_order=None, purcha
     if purchase_receipt:
         receipt = _source("Purchase Receipt", purchase_receipt)
         _require_fields("Purchase Receipt Item", {"purchase_order"}, "Purchase Receipt")
-        receipt_orders = {item.purchase_order for item in receipt.items if item.purchase_order and _visible("Purchase Order", item.purchase_order)}
+        receipt_orders = set(_source_links(receipt, "Purchase Order", "purchase_order", []))
     start, page_length = int(start), int(page_length)
     if start < 0 or not 1 <= page_length <= 100:
         frappe.throw("分页参数无效")
@@ -163,7 +190,10 @@ def get_payment_records(company=None, supplier=None, purchase_order=None, purcha
     names = frappe.get_list("Payment Entry", filters=filters, fields=["name"], order_by="posting_date desc, creation desc", limit_page_length=0, pluck="name")
     rows = []
     for name in names:
-        row = _payment_row(frappe.get_doc("Payment Entry", name))
+        try:
+            row = _payment_row(frappe.get_doc("Payment Entry", name))
+        except (frappe.DoesNotExistError, frappe.PermissionError):
+            continue
         if not row:
             continue
         refs = row["references"]
@@ -176,14 +206,16 @@ def get_payment_records(company=None, supplier=None, purchase_order=None, purcha
         rows.append(row)
     # No monetary total: refunds and mixed-purpose/multi-currency payments must not be silently summed.
     return {"rows": rows[start:start + page_length], "total_count": len(rows),
-            "notice": "仅显示有权查看的订单预付款或关联采购应付付款；草稿、取消不计已付。金额为整张付款单银行币种金额，核销见引用。关联订单预付款尚未核销时不计本入库已付。"}
+            "notice": "关联缺失或无权读取的单据不会作为可用链接；请在原生单据核对。仅显示有权查看的订单预付款或关联采购应付付款；草稿、取消不计已付。金额为整张付款单银行币种金额，核销见引用。关联订单预付款尚未核销时不计本入库已付。"}
 
 
-def _order_progress(names):
+def _order_progress(names, warnings):
     rows=[]
     for name in names:
         try:
-            order=_source("Purchase Order",name)
+            order=_related("Purchase Order", name, warnings, SOURCE_FIELDS)
+            if not order:
+                continue
             _require_fields("Purchase Order Item", {"qty","received_qty","uom","rate"}, "Purchase Order")
             units={}
             pending=Decimal(0)
@@ -195,7 +227,8 @@ def _order_progress(names):
             rows.append({"name":name,"currency":order.currency,"grand_total":order.grand_total,
                          "pending_net_amount":float(pending),"units":[{k:float(v) if isinstance(v,Decimal) else v for k,v in u.items()} for u in units.values()]})
         except frappe.PermissionError:
-            continue
+            if LINK_WARNING not in warnings:
+                warnings.append(LINK_WARNING)
     return rows
 
 
@@ -207,7 +240,12 @@ def get_purchase_chain(source_doctype, source_name, include_payments=True):
     warnings = []
     if frappe.has_permission("Purchase Invoice", "read"):
         for name in _invoice_names(source_doctype, source_name):
-            invoice = _read("Purchase Invoice", name, PI_FIELDS)
+            invoice = _related("Purchase Invoice", name, warnings, PI_FIELDS, doc.company, doc.supplier)
+            if not invoice:
+                continue
+            _require_fields("Purchase Invoice Item", {"purchase_order", "purchase_receipt"}, "Purchase Invoice")
+            _source_links(invoice, "Purchase Order", "purchase_order", warnings)
+            _source_links(invoice, "Purchase Receipt", "purchase_receipt", warnings)
             if invoice.company == doc.company and invoice.supplier == doc.supplier:
                 invoices.append(_invoice_row(invoice, source_doctype, source_name))
     else:
@@ -224,14 +262,20 @@ def get_purchase_chain(source_doctype, source_name, include_payments=True):
         reason = reason or ("有关联应付草稿，请核对并提交；草稿不计应付" if any(i["docstatus"] == 0 for i in invoices) else "关联应付已结清、暂停或取消，请打开关联单据核对" if invoices else "尚无可付款的已提交应付单，请先确认应付")
     orders = []
     if source_doctype == "Purchase Receipt":
-        orders = sorted({item.purchase_order for item in doc.items if item.purchase_order and _visible("Purchase Order", item.purchase_order)})
+        orders = _source_links(doc, "Purchase Order", "purchase_order", warnings)
     else:
         orders = [doc.name]
+    progress = _order_progress(orders, warnings)
+    incomplete = LINK_WARNING in warnings
+    if incomplete:
+        reason = LINK_WARNING
+        for row in invoices:
+            row["can_pay"] = False
     return {"source_doctype": source_doctype, "name": doc.name, "company": doc.company, "supplier": doc.supplier,
             "currency": doc.currency, "grand_total": doc.grand_total, "status": doc.status,
-            "docstatus": doc.docstatus, "orders": orders, "order_progress": _order_progress(orders), "invoices": invoices, "balances": summarize(invoices),
-            "can_create_invoice": bool(source_doctype == "Purchase Receipt" and doc.docstatus == 1 and not doc.get("is_return") and frappe.has_permission("Purchase Invoice", "read") and frappe.has_permission("Purchase Invoice", "create") and not any(i["docstatus"] in (0, 1) for i in invoices)),
-            "payments": payments, "warnings": warnings, "can_create": can_create and bool(eligible), "reason": reason,
+            "docstatus": doc.docstatus, "orders": orders, "order_progress": progress, "invoices": invoices, "balances": [] if incomplete else summarize(invoices), "incomplete_links": incomplete,
+            "can_create_invoice": bool(not incomplete and source_doctype == "Purchase Receipt" and doc.docstatus == 1 and not doc.get("is_return") and frappe.has_permission("Purchase Invoice", "read") and frappe.has_permission("Purchase Invoice", "create") and not any(i["docstatus"] in (0, 1) for i in invoices)),
+            "payments": payments, "warnings": warnings, "can_create": can_create and bool(eligible) and not incomplete, "reason": reason,
             "settlement_label": "已付/核销（含预付款抵扣、贷项等）"}
 
 
@@ -255,13 +299,13 @@ def get_receipt_list(filters=None, start=0, page_length=100, **unused):
     for row in rows:
         try:
             chain = get_purchase_chain("Purchase Receipt", row.name, include_payments=False)
-            row.update({key: chain[key] for key in ("orders", "balances", "can_create", "reason", "warnings")})
-            row["payment_state"] = ("共享应付" if any(i["shared"] for i in chain["invoices"]) else "余额不可见" if chain["warnings"] else "未形成应付")
+            row.update({key: chain[key] for key in ("orders", "balances", "can_create", "reason", "warnings", "incomplete_links")})
+            row["payment_state"] = ("关联缺失或无权读取" if chain["incomplete_links"] else "共享应付" if any(i["shared"] for i in chain["invoices"]) else "余额不可见" if chain["warnings"] else "未形成应付")
             if chain["balances"] and not chain["warnings"]:
                 balances = chain["balances"]
                 row["payment_state"] = "已付清" if all(b["outstanding"] <= 0 for b in balances) else "部分付款/核销" if any(b["settled"] > 0 for b in balances) else "未付款"
-        except frappe.PermissionError:
-            row.update(balances=[], orders=[], can_create=False, reason="无关联金额权限", payment_state="余额不可见", warnings=[])
+        except (frappe.PermissionError, frappe.DoesNotExistError):
+            row.update(balances=[], orders=[], can_create=False, reason=LINK_WARNING, payment_state="关联缺失或无权读取", warnings=[LINK_WARNING], incomplete_links=True)
     total = len(frappe.get_list("Purchase Receipt", filters=query, fields=["name"], limit_page_length=0))
     return {"rows": rows, "total_count": total}
 
@@ -270,6 +314,8 @@ def get_receipt_list(filters=None, start=0, page_length=100, **unused):
 def create_payment_draft(source_doctype, source_name, purchase_invoice, amount_to_pay, bank_account, posting_date=None, remarks=None, request_id=None, reference_no=None):
     """Save exactly a native draft. Never bypass create/read/write or approval permissions."""
     source = _source(source_doctype, source_name)
+    if get_purchase_chain(source_doctype, source_name, include_payments=False)["incomplete_links"]:
+        frappe.throw(LINK_WARNING)
     if source.docstatus != 1 or source.get("is_return"):
         frappe.throw("来源必须为已提交且非退货的采购单据")
     if not frappe.has_permission("Payment Entry", "create"):

@@ -14,6 +14,17 @@ exec 9>/tmp/deeplinkerp-erp-release.lock
 flock -n 9 || { echo 'Another ERP release owns the lock'; exit 1; }
 dc=(docker compose -p frappe_docker -f compose.custom.yaml)
 services=(backend frontend queue-long queue-short scheduler websocket)
+current_revision=$(docker inspect frappe_docker-backend-1 --format '{{index .Config.Labels "org.deeplinkerp.branding.revision"}}')
+if [[ "$current_revision" == "$branding_sha" ]]; then
+  current_id=$(docker inspect frappe_docker-backend-1 --format '{{.Image}}')
+  for service in "${services[@]}"; do
+    test "$(docker inspect "frappe_docker-$service-1" --format '{{.Image}}')" = "$current_id"
+    test "$(docker inspect "frappe_docker-$service-1" --format '{{.State.Running}}')" = true
+  done
+  curl -fsS --max-time 10 https://deeplinkerp.com/api/method/ping
+  echo 'Target revision already running; no repeated cutover.'
+  exit 0
+fi
 for service in "${services[@]}"; do
   test "$(docker inspect "frappe_docker-$service-1" --format '{{.Config.Image}}')" = "$old_image"
   test "$(docker inspect "frappe_docker-$service-1" --format '{{.Image}}')" = "$old_image_id"
@@ -81,8 +92,8 @@ recover() {
       "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend bench --site deeplinkerp.com set-maintenance-mode off || recovery_ok=0
       if (( recovery_ok )); then
         health_ok=0
-        for attempt in $(seq 1 10); do
-          if curl -fsS https://deeplinkerp.com/api/method/ping; then health_ok=1; break; fi
+        for attempt in $(seq 1 90); do
+          if curl -fsS --max-time 10 https://deeplinkerp.com/api/method/ping; then health_ok=1; break; fi
           sleep 1
         done
         if (( ! health_ok )); then
@@ -132,7 +143,7 @@ PY
 "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend bench --site deeplinkerp.com set-maintenance-mode off
 maintenance=0
 for attempt in $(seq 1 90); do
-  if curl -fsS https://deeplinkerp.com/api/method/ping; then break; fi
+  if curl -fsS --max-time 10 https://deeplinkerp.com/api/method/ping; then break; fi
   if (( attempt == 90 )); then exit 1; fi
   sleep 1
 done

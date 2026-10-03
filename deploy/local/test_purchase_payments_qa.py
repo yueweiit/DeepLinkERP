@@ -101,6 +101,69 @@ def execute():
   assert any(row['name']==advance.name for row in service.get_payment_records(purchase_receipt=receipts[0].name)['rows'])
   assert service.get_purchase_chain('Purchase Receipt',receipts[0].name)['balances'][0]['outstanding']==2000
   results.append('order advance traces from receipt; unallocated advance never falsely reduces receipt payable')
+  shared_draft=service.create_payment_draft(source_doctype='Purchase Receipt',source_name=receipts[0].name,purchase_invoice=shared.name,amount_to_pay=1,bank_account='Cash - QAB',request_id=str(uuid.uuid4()))
+  shared_pe=frappe.get_doc('Payment Entry',shared_draft['name'])
+  # Dirty links are created only inside savepoints in this allowlisted synthetic site.
+  def dirty_case(label, mutate, check):
+   frappe.db.savepoint('dirty_links')
+   try:
+    mutate();check()
+   finally:
+    frappe.db.rollback(save_point='dirty_links')
+   results.append(label)
+  def blocked_receipt():
+   c=service.get_purchase_chain('Purchase Receipt',receipts[0].name)
+   assert c['incomplete_links'] and not c['can_create'] and not c['can_create_invoice'] and not c['balances']
+   assert 'QA-MISSING' not in json.dumps(c,default=str)
+   listing=service.get_receipt_list(filters={'company':COMPANY,'search':receipts[0].name},page_length=1)
+   assert len(listing['rows'])==1 and listing['rows'][0]['incomplete_links'] and not listing['rows'][0]['can_create']
+   try:service.create_payment_draft(source_doctype='Purchase Receipt',source_name=receipts[0].name,purchase_invoice=shared.name,amount_to_pay=1,bank_account='Cash - QAB',request_id=str(uuid.uuid4()))
+   except frappe.ValidationError:pass
+   else:raise AssertionError('dirty linked source accepted a payment draft')
+  dirty_case('missing PO does not break receipt list; balances hidden and draft/invoice actions blocked',
+   lambda:frappe.db.set_value('Purchase Receipt Item',receipts[0].items[0].name,'purchase_order','QA-MISSING-PO'),blocked_receipt)
+  dirty_case('orphan PI children do not pretend no payable exists or allow duplicate invoice',
+   lambda:frappe.db.delete('Purchase Invoice',{'name':shared.name}),blocked_receipt)
+  def missing_receipt_records():
+   c=service.get_purchase_chain('Purchase Receipt',receipts[0].name)
+   assert c['incomplete_links'] and not c['can_create'] and not c['balances']
+   records=service.get_payment_records(purchase_order=po2.name,page_length=1)
+   assert records['rows'] and records['total_count']>=1
+   matching=[r for r in service.get_payment_records(purchase_order=po2.name)['rows'] if r['name']==shared_pe.name]
+   assert matching and matching[0]['warnings']
+   assert 'QA-MISSING' not in json.dumps(records,default=str)
+  dirty_case('missing PR in invoice cannot break payment records or leak a dead link',
+   lambda:frappe.db.set_value('Purchase Invoice Item',shared.items[1].name,'purchase_receipt','QA-MISSING-PR'),missing_receipt_records)
+  def unavailable_payment_ref():
+   records=service.get_payment_records(purchase_order=po2.name,page_length=1)
+   assert all(r['name']!=advance.name for r in records['rows']) and 'QA-MISSING' not in json.dumps(records,default=str)
+  dirty_case('missing direct PO payment reference is safely omitted from procurement records',
+   lambda:frappe.db.set_value('Payment Entry Reference',advance.references[0].name,'reference_name','QA-MISSING-PO'),unavailable_payment_ref)
+  def assert_no_missing_payment():
+   records=service.get_payment_records(purchase_order=po2.name)
+   assert all(r['name']!=shared_pe.name for r in records['rows']) and 'QA-MISSING' not in json.dumps(records,default=str)
+  dirty_case('missing PI payment reference is safely omitted without leaking the missing target',
+   lambda:frappe.db.set_value('Payment Entry Reference',shared_pe.references[0].name,'reference_name','QA-MISSING-PI'),
+   lambda:assert_no_missing_payment())
+  from unittest.mock import patch
+  def denied_read(doctype,name,fields=()):
+   if doctype=='Purchase Order' and name==po2.name:raise frappe.PermissionError
+   return real_read(doctype,name,fields)
+  real_read=service._read
+  with patch.object(service,'_read',side_effect=denied_read):
+   c=service.get_purchase_chain('Purchase Receipt',receipts[0].name,include_payments=False)
+   assert c['incomplete_links'] and not c['orders'] and not c['order_progress'] and not c['balances'] and not c['can_create']
+   assert po2.name not in json.dumps(c,default=str)
+  results.append('unreadable linked PO exposes neither name nor amount and disables quick payment')
+  foreign_order=frappe.get_list('Purchase Order',filters={'company':['!=',COMPANY]},pluck='name',limit_page_length=1)
+  assert foreign_order, 'QA must include another synthetic company order'
+  dirty_case('cross-company linked PO is treated as unavailable without exposing target',
+   lambda:frappe.db.set_value('Purchase Receipt Item',receipts[0].items[0].name,'purchase_order',foreign_order[0]),blocked_receipt)
+  # Verify pagination still counts the permission-filtered procurement rows, with no overlapping pages.
+  one=service.get_payment_records(page_length=1);two=service.get_payment_records(start=1,page_length=1)
+  assert one['total_count']==two['total_count'] and (not one['rows'] or not two['rows'] or one['rows'][0]['name']!=two['rows'][0]['name'])
+  assert service.get_purchase_chain('Purchase Receipt',receipts[0].name)['balances'][0]['outstanding']==2000
+  results.append('normal balances and payment pagination remain exact after dirty-link rollback')
   stock_item=frappe.get_doc({'doctype':'Item','item_code':'QA-PAYMENT-STOCK','item_name':'QA Synthetic Stock Payment Item','item_group':'Services','stock_uom':'Nos','is_stock_item':1}).insert()
   warehouse=frappe.get_doc({'doctype':'Warehouse','warehouse_name':'QA Payment Stock','company':COMPANY,'parent_warehouse':frappe.db.get_value('Warehouse',{'company':COMPANY,'is_group':1},'name')}).insert()
   stock_po=frappe.get_doc({'doctype':'Purchase Order','company':COMPANY,'supplier':supplier,'currency':'CNY','schedule_date':add_days(nowdate(),1),'items':[{'item_code':stock_item.name,'qty':10,'rate':1000,'warehouse':warehouse.name,'schedule_date':add_days(nowdate(),1)}]}).insert();stock_po.submit()
