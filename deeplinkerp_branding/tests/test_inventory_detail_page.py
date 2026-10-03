@@ -160,13 +160,37 @@ def test_company_switch_cancel_keeps_filters_and_selections_and_ignores_pending_
  let cancel; frappe.confirm=(message,yes,no)=>{cancel=no};
  const changing=page.changeCompany();
  const pending={company:values.company,warehouse:values.warehouse,loading:page.loading};
- cancel(); await changing;
+ let recoveryCompany,resolveRecovery,recoveryStarted;
+ const recovery=new Promise(resolve=>recoveryStarted=resolve);
+ frappe.call=({args})=>{recoveryCompany=args.filters.company;recoveryStarted();
+  return new Promise(resolve=>resolveRecovery=resolve)};
+ cancel(); await recovery;
+ const recovering={loading:page.loading,movable:page.canMoveSelection()};
+ resolveRecovery({message:{company:'C1',groups:[group('A')],can_create_stock_entry:true}});
+ await changing;
  resolve({message:{company:'C2',groups:[group('B')],can_create_stock_entry:true}}); await loading;
  console.log(JSON.stringify({pending,company:values.company,warehouse:values.warehouse,
-  count:page.selected.size,effective:page.effectiveCompany,groups:page.currentGroups.length}));
+  count:page.selected.size,effective:page.effectiveCompany,groups:page.currentGroups.length,
+  movable:page.canMoveSelection(),loading:page.loading,recoveryCompany,recovering}));
 })();
 """)
-	assert result == {"pending": {"company": "C1", "warehouse": "W1", "loading": True}, "company": "C1", "warehouse": "W1", "count": 1, "effective": "C1", "groups": 0}
+	assert result == {"pending": {"company": "C1", "warehouse": "W1", "loading": True}, "company": "C1", "warehouse": "W1", "count": 1, "effective": "C1", "groups": 1, "movable": True, "loading": False, "recoveryCompany": "C1", "recovering": {"loading": True, "movable": False}}
+
+
+def test_movement_context_permission_failure_preserves_selection_and_requires_fresh_inventory() -> None:
+	result = run_js(LIFECYCLE_SETUP + """
+(async()=>{
+ const {page}=makePage();page.selected=inventory.updateCurrentPageSelection([group('A')],page.selected,true);
+ let calls=0,message;frappe.msgprint=value=>message=value;
+ frappe.call=async()=>{calls++;throw Error('permission revoked')};
+ await page.openMovementDialog();await page.openMovementDialog();
+ const failure={calls,count:page.selected.size,movable:page.canMoveSelection(),message};
+ frappe.call=async()=>({message:{company:'C1',groups:[group('A')],can_create_stock_entry:true}});
+ await page.refresh();
+ console.log(JSON.stringify({failure,recovered:page.canMoveSelection(),count:page.selected.size}));
+})();
+""")
+	assert result == {"failure": {"calls": 1, "count": 1, "movable": False, "message": "permission revoked"}, "recovered": True, "count": 1}
 
 
 def test_company_confirmation_accept_clears_once_and_cancel_restores_racing_field_edit() -> None:

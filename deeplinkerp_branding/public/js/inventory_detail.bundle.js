@@ -411,6 +411,8 @@
 			const nextCompany = this.fields.company.get_value() || "";
 			const previousCompany = this.company || "";
 			if (nextCompany === previousCompany) return;
+			const interruptedRefresh = Boolean(this.loading);
+			let changedCompany = false;
 			this.companyChangePending = true;
 			++this.requestId; // Invalidate responses from the company being left.
 			this.suppressFilterChanges = true;
@@ -429,15 +431,17 @@
 				: Promise.resolve(true);
 			try {
 				await restored;
-				if (!(await decision)) return;
-				this.resetSelection();
-				this.company = nextCompany;
-				this.selectionCompany = nextCompany;
-				this.effectiveCompany = "";
-				this.canCreateStockEntry = false;
-				await this.fields.company.set_value(nextCompany);
-				for (const key of ["snapshot_key", "warehouse", ...(!this.isMaterial ? ["item_group"] : [])]) {
-					if (this.fields[key]) await this.fields[key].set_value("");
+				if (await decision) {
+					changedCompany = true;
+					this.resetSelection();
+					this.company = nextCompany;
+					this.selectionCompany = nextCompany;
+					this.effectiveCompany = "";
+					this.canCreateStockEntry = false;
+					await this.fields.company.set_value(nextCompany);
+					for (const key of ["snapshot_key", "warehouse", ...(!this.isMaterial ? ["item_group"] : [])]) {
+						if (this.fields[key]) await this.fields[key].set_value("");
+					}
 				}
 			} finally {
 				// A second edit while the confirmation is open must not commit a third company.
@@ -448,7 +452,7 @@
 				this.$root?.removeClass("is-loading");
 				this.updateMovementButton();
 			}
-			return this.refresh(true);
+			if (changedCompany || interruptedRefresh) return this.refresh(changedCompany);
 		}
 
 		renderShell() {
@@ -763,12 +767,22 @@
 			const company = this.effectiveCompany;
 			const requestId = this.requestId;
 			const selections = JSON.stringify([...this.selected.values()]);
-			const response = await frappe.call({
-				method: "deeplinkerp_branding.services.inventory_detail_service.get_inventory_movement_context",
-				args: { company, selections },
-				freeze: true,
-				freeze_message: "正在重新核对实时库存…",
-			});
+			let response;
+			try {
+				response = await frappe.call({
+					method: "deeplinkerp_branding.services.inventory_detail_service.get_inventory_movement_context",
+					args: { company, selections },
+					freeze: true,
+					freeze_message: "正在重新核对实时库存…",
+				});
+			} catch (error) {
+				if (requestId !== this.requestId) return;
+				this.canCreateStockEntry = false;
+				this.movementDisabledReason = error.message || "实时库存核对失败，请刷新库存后重试。";
+				this.updateMovementButton();
+				frappe.msgprint(this.movementDisabledReason);
+				return;
+			}
 			if (requestId !== this.requestId || !this.canMoveSelection() ||
 				selections !== JSON.stringify([...this.selected.values()])) return;
 			const context = response.message || {};
