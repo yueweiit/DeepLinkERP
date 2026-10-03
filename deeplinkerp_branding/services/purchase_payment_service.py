@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
 
 import frappe
@@ -47,17 +48,29 @@ LINK_WARNING = "关联缺失或无权读取，请在原生单据核对；快捷�
 SOURCE_FIELDS = {"company", "supplier", "currency", "grand_total", "items", "status"}
 
 
+@contextmanager
+def _quiet_link_errors():
+    """Caught Frappe throws must not enqueue private target names in _server_messages."""
+    previous = frappe.flags.mute_messages
+    frappe.flags.mute_messages = True
+    try:
+        yield
+    finally:
+        frappe.flags.mute_messages = previous
+
+
 def _related(doctype, name, warnings, fields=(), company=None, supplier=None):
     """Resolve optional links through normal permissions; never disclose hidden target names."""
-    try:
-        doc = _read(doctype, name, fields)
-        if (company and doc.company != company) or (supplier and doc.supplier != supplier):
-            raise frappe.PermissionError
-        return doc
-    except (frappe.DoesNotExistError, frappe.PermissionError):
-        if LINK_WARNING not in warnings:
-            warnings.append(LINK_WARNING)
-        return None
+    with _quiet_link_errors():
+        try:
+            doc = _read(doctype, name, fields)
+            if (company and doc.company != company) or (supplier and doc.supplier != supplier):
+                raise frappe.PermissionError
+            return doc
+        except (frappe.DoesNotExistError, frappe.PermissionError):
+            if LINK_WARNING not in warnings:
+                warnings.append(LINK_WARNING)
+            return None
 
 
 def _source_links(doc, doctype, field, warnings):
@@ -191,7 +204,8 @@ def get_payment_records(company=None, supplier=None, purchase_order=None, purcha
     rows = []
     for name in names:
         try:
-            row = _payment_row(frappe.get_doc("Payment Entry", name))
+            with _quiet_link_errors():
+                row = _payment_row(frappe.get_doc("Payment Entry", name))
         except (frappe.DoesNotExistError, frappe.PermissionError):
             continue
         if not row:
@@ -216,7 +230,8 @@ def _order_progress(names, warnings):
             order=_related("Purchase Order", name, warnings, SOURCE_FIELDS)
             if not order:
                 continue
-            _require_fields("Purchase Order Item", {"qty","received_qty","uom","rate"}, "Purchase Order")
+            with _quiet_link_errors():
+                _require_fields("Purchase Order Item", {"qty","received_qty","uom","rate"}, "Purchase Order")
             units={}
             pending=Decimal(0)
             for item in order.items:
@@ -298,7 +313,8 @@ def get_receipt_list(filters=None, start=0, page_length=100, **unused):
     rows = frappe.get_list("Purchase Receipt", filters=query, fields=fields, order_by="posting_date desc, creation desc", start=start, limit_page_length=page_length)
     for row in rows:
         try:
-            chain = get_purchase_chain("Purchase Receipt", row.name, include_payments=False)
+            with _quiet_link_errors():
+                chain = get_purchase_chain("Purchase Receipt", row.name, include_payments=False)
             row.update({key: chain[key] for key in ("orders", "balances", "can_create", "reason", "warnings", "incomplete_links")})
             row["payment_state"] = ("关联缺失或无权读取" if chain["incomplete_links"] else "共享应付" if any(i["shared"] for i in chain["invoices"]) else "余额不可见" if chain["warnings"] else "未形成应付")
             if chain["balances"] and not chain["warnings"]:

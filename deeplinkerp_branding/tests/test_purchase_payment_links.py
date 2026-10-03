@@ -8,6 +8,30 @@ from deeplinkerp_branding.services import purchase_payment_service as service
 
 
 class PurchaseLinkTests(unittest.TestCase):
+    def setUp(self):
+        self.flags_patch = patch.object(frappe, 'flags', frappe._dict())
+        self.flags_patch.start()
+        self.addCleanup(self.flags_patch.stop)
+
+    def test_caught_framework_throw_does_not_queue_private_messages(self):
+        frappe.local.message_log = []
+        frappe.flags.mute_messages = False
+        def private_error(*args):
+            frappe.throw('private-target does not exist', frappe.DoesNotExistError)
+        with patch.object(service, '_read', side_effect=private_error):
+            warnings = []
+            self.assertIsNone(service._related('Purchase Order', 'private-target', warnings))
+        self.assertFalse(frappe.local.message_log)
+        self.assertFalse(frappe.flags.mute_messages)
+        self.assertEqual(warnings, [service.LINK_WARNING])
+
+    def test_message_flag_is_restored_after_unexpected_error(self):
+        frappe.flags.mute_messages = False
+        with patch.object(service, '_read', side_effect=RuntimeError):
+            with self.assertRaises(RuntimeError):
+                service._related('Purchase Order', 'target', [])
+        self.assertFalse(frappe.flags.mute_messages)
+
     def test_missing_and_denied_targets_have_the_same_public_result(self):
         for error in (frappe.DoesNotExistError, frappe.PermissionError):
             with self.subTest(error=error), patch.object(service, '_read', side_effect=error):

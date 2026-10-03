@@ -106,8 +106,10 @@ def execute():
   # Dirty links are created only inside savepoints in this allowlisted synthetic site.
   def dirty_case(label, mutate, check):
    frappe.db.savepoint('dirty_links')
+   messages_before=len(frappe.message_log)
    try:
     mutate();check()
+    assert all(m.message==service.LINK_WARNING for m in frappe.message_log[messages_before:]), 'private framework message queued'
    finally:
     frappe.db.rollback(save_point='dirty_links')
    results.append(label)
