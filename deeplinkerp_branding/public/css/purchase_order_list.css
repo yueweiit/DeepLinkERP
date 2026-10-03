@@ -443,3 +443,21 @@ body[data-theme="dark"]:is(.dlp-purchase-order-grid-active, .dlp-material-reques
 .dlp-mr-form-summary { padding: 10px 14px; margin-bottom: 12px; border: 1px solid var(--border-color, #e1e8f0); border-radius: 4px; background: var(--control-bg, #f4f7fb); }
 .dlp-mr-form-primary { display: flex; flex-wrap: wrap; gap: 18px; font-size: 16px; font-weight: 600; }
 .dlp-mr-form-secondary { margin-top: 4px; color: var(--text-muted); font-size: 12px; }
+
+/* The optional union is read-only; native PO controls remain in the orders view. */
+body.dlp-purchase-order-grid-active-readonly .standard-filter-section,
+body.dlp-purchase-order-grid-active-readonly .filter-button,
+body.dlp-purchase-order-grid-active-readonly .sort-selector,
+body.dlp-purchase-order-grid-active-readonly .list-sidebar,
+body.dlp-purchase-order-grid-active-readonly .page-actions .primary-action {
+	display: none !important;
+}
+.dlp-po-scope { width: 120px; }
+.dlp-po-provider-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; padding: 8px 0; width: 100%; }
+.dlp-po-provider-controls label { display: flex; align-items: center; gap: 6px; margin: 0; }
+.dlp-po-provider-controls select, .dlp-po-provider-controls input:not([type="checkbox"]) { width: 156px; }
+.dlp-po-provider-controls .text-muted { font-size: 12px; }
+.dlp-po-provider-notice { padding: 4px 0 8px; }
+.dlp-po-grid-cell[data-fieldname="oa_amount"] { text-align: right; font-variant-numeric: tabular-nums; }
+.dlp-provider-empty { padding: 32px 16px; }
+[data-dlp-oa-compatibility="true"] { display: none !important; }

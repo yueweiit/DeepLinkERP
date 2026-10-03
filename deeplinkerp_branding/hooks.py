@@ -27,11 +27,12 @@ add_to_apps_screen = [
 # include js, css files in header of desk.html
 app_include_css = [
 	"/assets/deeplinkerp_branding/css/deeplinkerp_navigation.css?v=0.0.10",
-	"/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.6",
+	"/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.7",
 	"/assets/deeplinkerp_branding/css/inventory_detail.bundle.css",
 ]
 app_include_js = [
-	"/assets/deeplinkerp_branding/js/compact_list.js",
+	"/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.2",
+	"/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.1",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_navigation.js?v=0.0.18",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_interface_mode.js?v=0.0.3",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_branding.js?v=0.0.26",

@@ -28,8 +28,8 @@
 		return ["dlp-list", site, user, DOCTYPE].map((part) => encodeURIComponent(String(part || ""))).join(":");
 	}
 
-	function normalizePreferences(value, allowed) {
-		const candidates = COLUMNS.filter((col) => allowed.has(col.fieldname)).map((col) => col.fieldname);
+	function normalizePreferences(value, allowed, definitions = COLUMNS) {
+		const candidates = definitions.filter((col) => allowed.has(col.fieldname)).map((col) => col.fieldname);
 		const selected = Array.isArray(value?.columns) ? value.columns : candidates;
 		const columns = [...new Set(selected.filter((field) => candidates.includes(field)))];
 		if (!columns.includes("name") && allowed.has("name")) columns.unshift("name");
@@ -149,6 +149,11 @@
 		return JSON.stringify([args.filters, args.or_filters, args.order_by, args.group_by, args.start, args.page_length, args.fields]);
 	}
 
+	function providerActive(controller) { return Boolean(config.provider && controller.providerScope !== "orders"); }
+	function displayColumns(controller) { return providerActive(controller) ? config.provider.columns : COLUMNS; }
+	function displayPermissions(controller) { return providerActive(controller) ? controller.providerAllowed : controller.displayAllowed; }
+	function currentRows(controller) { return providerActive(controller) ? controller.providerRows : controller.list.data; }
+
 	function mount(list, root) {
 		if (!isNativeList(list)) return null;
 		if (list[config.controllerKey]) {
@@ -167,9 +172,16 @@
 		let saved;
 		try { saved = JSON.parse(root.localStorage?.getItem(key) || "null"); } catch (_) { /* Browsers may disable storage. */ }
 		const originals = {};
-		for (const name of ["get_args", "get_call_args", "no_change", "prepare_data", "reset_defaults", "get_header_html", "get_list_row_html", "render_list", "render_count", "toggle_result_area", "on_filter_change", "process_document_refreshes", "debounced_refresh"]) originals[name] = list[name];
+		for (const name of ["get_args", "get_call_args", "no_change", "prepare_data", "reset_defaults", "get_header_html", "get_list_row_html", "render_list", "render_count", "toggle_result_area", "on_filter_change", "process_document_refreshes", "debounced_refresh", "get_checked_items", "set_rows_as_checked", "before_render", "after_render"]) originals[name] = list[name];
+		const providerAllowed = new Set(displayAllowed);
+		for (const field of config.provider?.virtualFields || []) providerAllowed.add(field);
+		let providerSaved;
+		try { providerSaved = JSON.parse(root.localStorage?.getItem(`${key}:unified`) || "null"); } catch (_) { /* Local preferences are optional. */ }
+		if (!providerSaved && saved && config.provider) providerSaved = { ...saved, columns: [...(saved.columns || []), ...(config.provider.newColumns || [])] };
 		const controller = {
 			list, root, allowed, displayAllowed, originals, quick: {}, controls: {}, resetting: false, preferences: normalizePreferences(saved, displayAllowed),
+			providerAllowed, providerScope: "orders", providerRows: [], providerPayload: null, providerOrderBy: "transaction_date desc",
+			nativePreferences: normalizePreferences(saved, displayAllowed), providerPreferences: config.provider ? normalizePreferences(providerSaved, providerAllowed, config.provider.columns) : null,
 			page: 0, pageSize: 100, requestId: 0, querySignature: null, total: null, summary: [],
 			translate: root.__ || ((label) => label),
 			setPage(page) {
@@ -180,10 +192,30 @@
 			},
 			activate() {
 				root.document?.body?.classList.toggle(config.routeClass, isListRoute(frappe));
+				root.document?.body?.classList.toggle(`${config.routeClass}-readonly`, isListRoute(frappe) && providerActive(this));
+				if (isListRoute(frappe) && providerActive(this)) config.provider.onActivate?.(this);
+			},
+			setProviderScope(scope, refresh = true) {
+				if (!config.provider || !["all", "orders", "oa"].includes(scope)) return;
+				if (providerActive(this)) this.providerPreferences = this.preferences; else this.nativePreferences = this.preferences;
+				list.clear_checked_items?.();
+				this.providerScope = scope;
+				this.preferences = providerActive(this) ? this.providerPreferences : this.nativePreferences;
+				this.providerRows = []; this.providerPayload = null; list.data = [];
+				this.total = null; this.summary = []; this.querySignature = null; this.requestId++;
+				this.setPage(0); this.savePreferences(); this.activate();
+				this.$providerScope?.val(scope);
+				this.$providerControls?.toggle(providerActive(this));
+				for (const field of config.quickFields || []) if (field !== "company") this.controls[field]?.$wrapper?.toggle(!providerActive(this));
+				list.page?.hide_actions_menu?.();
+				if (providerActive(this)) list.page?.clear_primary_action?.();
+				// Do not leave readonly OA rows onscreen after native actions become available.
+				list.render_list();
+				if (refresh) return this.refresh();
 			},
 			savePreferences() {
-				this.preferences = normalizePreferences(this.preferences, displayAllowed);
-				try { root.localStorage?.setItem(key, JSON.stringify(this.preferences)); } catch (_) { /* Rendering must work without storage. */ }
+				this.preferences = normalizePreferences(this.preferences, displayPermissions(this), displayColumns(this));
+				try { root.localStorage?.setItem(providerActive(this) ? `${key}:unified` : key, JSON.stringify(this.preferences)); } catch (_) { /* Rendering must work without storage. */ }
 				list.$frappe_list?.toggleClass("dlp-po-standard", this.preferences.density === "standard");
 			},
 			setColumns(columns) {
@@ -201,9 +233,10 @@
 				this.quick = {};
 				this.setPage(0);
 				try { await Promise.all(Object.values(this.controls).map((control) => control.set_value(""))); }
-				finally { this.resetting = false; this.restoreSavedFilterLabel?.(); await this.refresh(); }
+				finally { this.resetting = false; this.$providerControls?.find("input, select").val("").prop("checked", false); this.restoreSavedFilterLabel?.(); await this.refresh(); }
 			},
 			async exportCurrent() {
+				if (providerActive(this)) return config.provider.exportCurrent(this);
 				if (!frappe.model.can_export?.(DOCTYPE)) throw new Error("当前用户没有导出权限。");
 				const args = buildRequests(list.get_args(), this.preferences.columns, allowed).export;
 				if (!root.DeepLinkERPPurchaseOrderExport?.exportExcel) await frappe.require("/assets/deeplinkerp_branding/js/purchase_order_export.js");
@@ -224,6 +257,16 @@
 		}
 
 		list.get_args = function () {
+			if (providerActive(controller)) {
+				const args = config.provider.request(controller).args;
+				const signature = JSON.stringify([args.filters, args.order_by]);
+				if (controller.querySignature !== null && signature !== controller.querySignature) {
+					controller.setPage(0); controller.total = null; controller.providerPayload = null;
+					args.start = 0;
+				}
+				controller.querySignature = signature;
+				return args;
+			}
 			const nativeArgs = originals.get_args.call(this);
 			if (controller.quick.search && nativeArgs.or_filters?.length) {
 				controller.quick.search = "";
@@ -246,6 +289,7 @@
 		};
 		list.get_call_args = function () {
 			const call = originals.get_call_args.call(this);
+			if (providerActive(controller)) { call.method = config.provider.request(controller).method; call.args = this.get_args(); }
 			const request = { id: null, key: requestKey(call.args) };
 			callRequests.set(call, request);
 			const callback = call.callback;
@@ -266,6 +310,16 @@
 			// Compare the current filters too: a pending throttled refresh may not have issued its new request yet.
 			const current = this.get_args();
 			if (request && (request.id !== controller.requestId || request.key !== requestKey(current))) return;
+			if (providerActive(controller)) {
+				controller.providerPayload = response.message || {};
+				controller.providerRows = controller.providerPayload.rows || [];
+				controller.total = Number(controller.providerPayload.total_count || 0);
+				this.total_count = controller.total;
+				// Read-only union records never enter native PO selection or document actions.
+				this.data = [];
+				config.provider.onPayload?.(controller);
+				return;
+			}
 			const start = this.start;
 			this.start = 0;
 			originals.prepare_data.call(this, response);
@@ -281,6 +335,17 @@
 			controller.setPage(0);
 			return originals.on_filter_change?.apply(this, args);
 		};
+		list.get_checked_items = function (...args) { return providerActive(controller) ? [] : originals.get_checked_items?.apply(this, args) || []; };
+		list.set_rows_as_checked = function (...args) { if (!providerActive(controller)) return originals.set_rows_as_checked?.apply(this, args); };
+		for (const name of ["before_render", "after_render"]) list[name] = function (...args) { if (!providerActive(controller)) return originals[name]?.apply(this, args); };
+		if (config.provider && list.setup_realtime_updates) {
+			const nativeSetupRealtime = list.setup_realtime_updates;
+			list.setup_realtime_updates = function (...args) {
+				const result = nativeSetupRealtime.apply(this, args);
+				if (providerActive(controller)) config.provider.onActivate?.(controller);
+				return result;
+			};
+		}
 		list.get_header_html = () => headerHTML(controller);
 		list.get_list_row_html = (doc) => rowHTML(controller, doc);
 		list.render_list = function () {
@@ -288,13 +353,15 @@
 			this.$list_head_subject = null;
 			this.$checkbox_actions = null;
 			this.render_header();
-			this.data.forEach((doc, index) => {
+			currentRows(controller).forEach((doc, index) => {
 				doc._idx = index;
 				this.$result?.append(this.get_list_row_html(doc));
 			});
+			if (providerActive(controller) && !currentRows(controller).length) this.$result?.append('<div class="list-row-container dlp-provider-empty text-muted text-center" role="status">没有符合条件的采购记录</div>');
 		};
 		list.toggle_result_area = function () {
-			originals.toggle_result_area.call(this);
+			if (!providerActive(controller)) originals.toggle_result_area.call(this);
+			else { this.$no_result?.hide(); this.page?.hide_actions_menu?.(); this.page?.clear_primary_action?.(); }
 			this.$result?.parent(".result-container").show();
 			this.$result?.show();
 			this.$paging_area?.hide();
@@ -354,8 +421,8 @@
 	}
 
 	function layout(controller) {
-		const cols = controller.preferences.columns.map((field) => COLUMNS.find((col) => col.fieldname === field));
-		const lastFrozen = cols.findIndex((col) => col.fieldname === config.freezeUntil);
+		const cols = controller.preferences.columns.map((field) => displayColumns(controller).find((col) => col.fieldname === field)).filter(Boolean);
+		const lastFrozen = cols.findIndex((col) => col.fieldname === (providerActive(controller) ? config.provider.freezeUntil : config.freezeUntil));
 		let left = 76;
 		return cols.map((col, index) => {
 			const frozen = lastFrozen >= 0 && index <= lastFrozen;
@@ -365,9 +432,9 @@
 		});
 	}
 
-	function cellHTML(col, value, title = "", header = false) {
+	function cellHTML(col, value, title = "", header = false, readonly = false) {
 		const classes = ["dlp-po-grid-cell", "ellipsis", col.frozen ? "dlp-po-frozen" : "", NUMBERS.has(col.fieldname) ? "dlp-po-number" : "", DATES.has(col.fieldname) ? "dlp-po-date" : "", col.fieldname === "status" ? "dlp-po-status" : "", col.fieldname === "name" ? "list-subject" : ""].filter(Boolean).join(" ");
-		return `<div class="${classes}" data-fieldname="${col.fieldname}" style="--dlp-po-left:${col.left}px;width:${col.width}px" title="${escapeHTML(title)}"${header ? ` data-sort-by="${col.fieldname}"` : ""}>${value}</div>`;
+		return `<div class="${classes}" data-fieldname="${col.fieldname}" style="--dlp-po-left:${col.left}px;width:${col.width}px" title="${escapeHTML(title)}"${header ? ` data-${readonly ? "provider-sort" : "sort-by"}="${col.fieldname}"` : ""}>${value}</div>`;
 	}
 
 	function template(controller) {
@@ -380,31 +447,33 @@
 
 	function headerHTML(controller) {
 		const { translate: t, list } = controller;
-		const checkbox = `<input class="list-header-checkbox list-check-all" type="checkbox" title="${escapeHTML(t("Select All"))}">`;
+		const readonly = providerActive(controller);
+		const checkbox = readonly ? "" : `<input class="list-header-checkbox list-check-all" type="checkbox" title="${escapeHTML(t("Select All"))}">`;
 		const columns = layout(controller).map((col) => {
 			const label = t(col.label);
-			return cellHTML(col, escapeHTML(label), label, controller.allowed.has(col.fieldname));
+			return cellHTML(col, escapeHTML(label), label, readonly ? (config.provider.sortFields || []).includes(col.fieldname) : controller.allowed.has(col.fieldname), readonly);
 		}).join("");
 		return `<div class="list-row-container"><header class="list-row-head dlp-po-grid-header" style="--dlp-po-columns:${template(controller)}"><div class="list-header-subject dlp-po-grid-header-columns">${selectionCell(checkbox, "#")}${columns}</div><div class="checkbox-actions" style="display:none"><span class="select-like">${checkbox}</span><span class="list-header-meta"></span></div></header></div>`;
 	}
 
 	function rowHTML(controller, doc) {
 		const { list, root } = controller;
+		const readonly = providerActive(controller);
 		const formatters = {
 			allowed: controller.allowed,
 			translate: controller.translate,
 			number: (value, field) => formatNumber(root, value, field),
 			date: (value) => root.frappe.datetime?.str_to_user ? root.frappe.datetime.str_to_user(value) : value,
 		};
-		const checkbox = `<input type="checkbox" class="list-row-checkbox" data-doctype="${DOCTYPE}" data-name="${escapeHTML(doc.name)}">`;
+		const checkbox = readonly ? "" : `<input type="checkbox" class="list-row-checkbox" data-doctype="${DOCTYPE}" data-name="${escapeHTML(doc.name)}">`;
 		const cells = layout(controller).map((col) => {
-			let value = renderValue(col.fieldname, doc, formatters);
-			if (col.fieldname === "name") value = `<a href="${escapeHTML(list.get_form_link(doc))}" data-name="${escapeHTML(doc.name)}">${value}</a>`;
+			let value = (readonly ? config.provider.renderValue?.(col.fieldname, doc, formatters, escapeHTML) : undefined) ?? renderValue(col.fieldname, doc, formatters);
+			if (col.fieldname === "name") value = `<a href="${escapeHTML(readonly ? config.provider.formLink(doc) : list.get_form_link(doc))}" data-name="${escapeHTML(doc.name)}">${value}</a>`;
 			if (col.fieldname === "supplier_name" && doc.supplier) value = `<a href="/desk/supplier/${encodeURIComponent(doc.supplier)}">${value}</a>`;
-			if (col.fieldname === "status") value = list.get_indicator_html(doc, Boolean(list.workflow_state_fieldname)) || value;
+			if (col.fieldname === "status" && !readonly) value = list.get_indicator_html(doc, Boolean(list.workflow_state_fieldname)) || value;
 			return cellHTML(col, value, controller.allowed.has(col.fieldname) ? doc[col.fieldname] ?? "—" : "");
 		}).join("");
-		return `<div class="list-row-container" tabindex="0"><div class="level list-row dlp-po-grid-row" style="--dlp-po-columns:${template(controller)}">${selectionCell(checkbox, controller.page * controller.pageSize + (doc._idx || 0) + 1)}${cells}</div></div>`;
+		return `<div class="list-row-container" tabindex="0"><div class="level ${readonly ? "dlp-po-readonly-row" : "list-row"} dlp-po-grid-row" style="--dlp-po-columns:${template(controller)}">${selectionCell(checkbox, controller.page * controller.pageSize + (doc._idx || 0) + 1)}${cells}</div></div>`;
 	}
 
 	function mountControls(controller) {
@@ -462,23 +531,26 @@
 			});
 		}
 		controller.savePreferences();
+		config.provider?.mountControls?.(controller);
 		paintSummary(controller);
 	}
 
 	function paintSummary(controller) {
 		const { translate: t, list } = controller;
 		const count = controller.total === null ? "…" : controller.total.toLocaleString();
-		const amounts = controller.summary.map((row) => renderValue("grand_total", { grand_total: row._aggregate_column, currency: row.currency }, { number: (value, field) => formatNumber(controller.root, value, field) })).join(" · ");
+		const amounts = providerActive(controller) ? config.provider.summary(controller, escapeHTML) : controller.summary.map((row) => renderValue("grand_total", { grand_total: row._aggregate_column, currency: row.currency }, { number: (value, field) => formatNumber(controller.root, value, field) })).join(" · ");
 		controller.$summary?.html(`${escapeHTML(t("Total"))}: ${escapeHTML(count)}${amounts ? ` · ${amounts}` : ""}`);
-		const from = list.data.length ? controller.page * controller.pageSize + 1 : 0;
-		const to = list.data.length ? controller.page * controller.pageSize + list.data.length : 0;
+		const rows = currentRows(controller);
+		const from = rows.length ? controller.page * controller.pageSize + 1 : 0;
+		const to = rows.length ? controller.page * controller.pageSize + rows.length : 0;
 		controller.$paging?.find(".dlp-po-page-info").text(`${from}–${to} / ${count}`);
 		controller.$paging?.find(".dlp-po-previous").prop("disabled", controller.page === 0);
-		controller.$paging?.find(".dlp-po-next").prop("disabled", controller.total === null || to >= controller.total || list.data.length === 0);
+		controller.$paging?.find(".dlp-po-next").prop("disabled", controller.total === null || to >= controller.total || rows.length === 0);
 	}
 
 	function updateSummary(controller) {
 		const { list, root } = controller;
+		if (providerActive(controller)) { paintSummary(controller); return Promise.resolve(); }
 		if (!root.frappe.call) return Promise.resolve();
 		const args = list.get_args();
 		const signature = controller.querySignature;
@@ -505,14 +577,15 @@
 	function columnDialog(controller) {
 		const { root, list, translate: t } = controller;
 		const visible = new Set(controller.preferences.columns);
-		const order = [...controller.preferences.columns, ...COLUMNS.map((col) => col.fieldname).filter((field) => controller.displayAllowed.has(field) && !visible.has(field))];
+		const columns = displayColumns(controller);
+		const order = [...controller.preferences.columns, ...columns.map((col) => col.fieldname).filter((field) => displayPermissions(controller).has(field) && !visible.has(field))];
 		const dialog = new root.frappe.ui.Dialog({ title: t("列设置"), fields: [{ fieldtype: "HTML", fieldname: "columns" }], primary_action_label: t("保存"), primary_action: () => {
 			controller.setColumns(order.filter((field) => visible.has(field)));
 			dialog.hide();
 		} });
 		const wrapper = dialog.fields_dict.columns.$wrapper;
 		const draw = () => wrapper.html(`<div class="dlp-po-column-options">${order.map((field) => {
-			const col = COLUMNS.find((col) => col.fieldname === field);
+				const col = columns.find((col) => col.fieldname === field);
 			return `<div class="dlp-po-column-option" data-field="${field}"><label><input type="checkbox"${visible.has(field) ? " checked" : ""}${field === "name" ? " disabled" : ""}> ${escapeHTML(t(col.label))}</label><button type="button" class="btn btn-xs btn-default" data-move="-1" aria-label="${escapeHTML(t("Move Up"))}">↑</button><button type="button" class="btn btn-xs btn-default" data-move="1" aria-label="${escapeHTML(t("Move Down"))}">↓</button></div>`;
 		}).join("")}</div>`);
 		wrapper.off(".dlpPO").on("change.dlpPO", "input", (event) => {
@@ -550,6 +623,8 @@
 		};
 		frappe.router?.on("change", () => {
 			root.document?.body?.classList.toggle(config.routeClass, isListRoute(frappe));
+			const current = frappe.views?.list_view?.[DOCTYPE] || root.cur_list;
+			root.document?.body?.classList.toggle(`${config.routeClass}-readonly`, isListRoute(frappe) && Boolean(current?.[config.controllerKey] && providerActive(current[config.controllerKey])));
 			const list = frappe.views?.list_view?.[DOCTYPE] || root.cur_list;
 			if (isListRoute(frappe) && isNativeList(list)) mount(list, root);
 		});

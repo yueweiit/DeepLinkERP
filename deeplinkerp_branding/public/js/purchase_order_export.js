@@ -224,12 +224,12 @@
 		return writeZip(entries);
 	}
 
-	async function fetchNativeWorkbook(root, args) {
+	async function fetchNativeWorkbook(root, args, method = "frappe.desk.reportview.export_query") {
 		const url = new URL(root.frappe.request.url || "/", root.location.href);
 		if (url.origin !== root.location.origin) fail("Excel 导出必须使用同源 origin 请求。");
 		if (!root.frappe.csrf_token) fail("缺少导出所需的 CSRF 验证，请刷新页面后重试。");
 		const body = new URLSearchParams();
-		for (const [key, value] of Object.entries({ ...args, cmd: "frappe.desk.reportview.export_query", file_format_type: "Excel" })) {
+		for (const [key, value] of Object.entries({ ...args, cmd: method, ...(method === "frappe.desk.reportview.export_query" ? { file_format_type: "Excel" } : {}) })) {
 			if (value !== null && value !== undefined) body.set(key, typeof value === "object" ? JSON.stringify(value) : String(value));
 		}
 		const response = await root.fetch(url.href, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "X-Frappe-CSRF-Token": root.frappe.csrf_token }, body: body.toString() });
@@ -246,13 +246,17 @@
 	async function exportExcel(root, args) {
 		const native = await fetchNativeWorkbook(root, args);
 		const bytes = await removeNativeOwner(native, { expectedColumns: args.fields.length + 1, ownerLabels: [...new Set(["Owner", "Created By", "创建人", root.__("Owner"), root.__("Created By")])] });
+		downloadWorkbook(root, bytes, args.title === "Purchase Order" ? "采购订单" : args.title === "Material Request" ? "物料申请" : args.title || args.doctype || "Export");
+	}
+
+	function downloadWorkbook(root, bytes, title) {
 		const url = root.URL.createObjectURL(new root.Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
 		const link = root.document.createElement("a");
-		link.href = url; link.download = `${args.title === "Purchase Order" ? "采购订单" : args.title === "Material Request" ? "物料申请" : args.title || args.doctype || "Export"}.xlsx`;
+		link.href = url; link.download = `${title}.xlsx`;
 		root.document.body.appendChild(link);
 		link.click(); link.remove();
 		root.setTimeout(() => root.URL.revokeObjectURL(url), 1000);
 	}
 
-	return { crc32, readZip, writeZip, stripTrailingOwner, removeNativeOwner, fetchNativeWorkbook, exportExcel };
+	return { crc32, readZip, writeZip, stripTrailingOwner, removeNativeOwner, fetchNativeWorkbook, exportExcel, downloadWorkbook };
 });

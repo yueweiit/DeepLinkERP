@@ -25,6 +25,13 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 			{"Purchase Order": "public/js/purchase_order_list.js", "Material Request": "public/js/material_request_list.js"},
 		)
 
+	def test_unified_adapter_loads_after_cache_busted_shared_engine(self):
+		scripts = hooks.app_include_js
+		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.2"
+		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.1"
+		self.assertIn(engine, scripts)
+		self.assertLess(scripts.index(engine), scripts.index(adapter))
+
 	def test_desk_loads_compact_styles_without_changing_website_assets(self):
 		styles = hooks.app_include_css
 		if isinstance(styles, str):

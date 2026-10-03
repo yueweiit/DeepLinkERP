@@ -1,0 +1,6 @@
+# Only overlay the brand application; preserve all other apps and existing local volumes.
+ARG BASE_IMAGE=deeplinkerp-local:requests-d7e83ae7-a5eb0608
+FROM ${BASE_IMAGE}
+ARG BRANDING_SHA=local-preview
+LABEL org.deeplinkerp.branding.revision=${BRANDING_SHA}
+COPY --chown=frappe:frappe deeplinkerp_branding /home/frappe/frappe-bench/apps/deeplinkerp_branding/deeplinkerp_branding

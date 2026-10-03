@@ -1,0 +1,13 @@
+services:
+  backend:
+    image: deeplinkerp-local:unified-purchase-preview
+  frontend:
+    image: deeplinkerp-local:unified-purchase-preview
+  queue-long:
+    image: deeplinkerp-local:unified-purchase-preview
+  queue-short:
+    image: deeplinkerp-local:unified-purchase-preview
+  scheduler:
+    image: deeplinkerp-local:unified-purchase-preview
+  websocket:
+    image: deeplinkerp-local:unified-purchase-preview
