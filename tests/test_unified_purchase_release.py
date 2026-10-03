@@ -5,6 +5,12 @@ import unittest
 
 
 class ReleaseRecoveryTests(unittest.TestCase):
+	def test_copied_audit_is_readable_despite_private_release_umask(self):
+		source = (Path(__file__).parents[1] / "deploy/production/deploy_unified_purchase.sh").read_text()
+		permission_fix = 'chmod 644 "$build_dir/deploy/production/audit_unified_purchase.py"'
+		self.assertIn(permission_fix, source)
+		self.assertLess(source.index(permission_fix), source.index('docker cp "$build_dir/deploy/production/audit_unified_purchase.py"'))
+
 	def run_recovery(self, up_status=0, health_status=0, initial_maintenance_status=0):
 		source = (Path(__file__).parents[1] / "deploy/production/deploy_unified_purchase.sh").read_text()
 		function = source.split("recover() {", 1)[1].split("\ntrap recover EXIT", 1)[0]

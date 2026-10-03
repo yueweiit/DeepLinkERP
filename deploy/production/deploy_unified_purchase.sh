@@ -24,6 +24,8 @@ mkdir "$release_dir" # Refuse an ambiguous repeated cutover; retain previous evi
 cp compose.custom.yaml "$release_dir/compose.before.yaml"
 build_dir=$(mktemp -d /tmp/unified-purchase-build.XXXXXX)
 tar -xzf "$archive" -C "$build_dir"
+# The private release umask is right for backups, not for a script copied as root to a non-root container.
+chmod 644 "$build_dir/deploy/production/audit_unified_purchase.py"
 new_image="deeplinkerp-custom:unified-purchase-${branding_sha:0:12}"
 frozen_base="deeplinkerp-custom:unified-base-${branding_sha:0:12}"
 docker image tag "$old_image_id" "$frozen_base"
