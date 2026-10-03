@@ -121,6 +121,10 @@ test("preferences are isolated by site and user and sanitize unknown or duplicat
 
 test("cells distinguish zero and missing values, escape labels, and render percentages numerically", () => {
 	const cell = production("renderValue");
+	for (const field of ["grand_total", "advance_paid"]) {
+		assert.ok(grid.COLUMNS.find((column) => column.fieldname === field).width >= 140,
+			`${field} must fit two-decimal amounts including their currency suffix`);
+	}
 	const configured = { frappe: { boot: { sysdefaults: { currency_precision: "3", float_precision: "8" } } } };
 	assert.equal(production("formatNumber")(configured, 1.23456, "grand_total"), "1.235");
 	assert.equal(production("formatNumber")(configured, 0, "advance_paid"), "0.000");

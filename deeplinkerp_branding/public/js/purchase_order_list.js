@@ -11,7 +11,7 @@
 		["transaction_date", "订单日期", 96], ["name", "采购订单号", 166],
 		["supplier_name", "供应商名称", 205], ["status", "订单状态", 120],
 		["schedule_date", "需求日期", 96], ["company", "公司", 100],
-		["currency", "币种", 56], ["grand_total", "订单金额", 112],
+		["currency", "币种", 56], ["grand_total", "订单金额", 140],
 		["advance_paid", "已预付", 140], ["advance_payment_status", "预付款状态", 94],
 		["per_received", "已收货%", 70], ["per_billed", "已开票%", 70],
 		["project", "项目", 96], ["owner", "创建人", 96],
