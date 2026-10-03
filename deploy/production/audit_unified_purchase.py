@@ -25,14 +25,14 @@ def capture_audit():
 	"""Capture inside the caller's transaction; the CLI remains read-only."""
 	tables = ["Purchase Order", "Purchase Order Item", "Material Request", "Material Request Item",
 		"OA Purchase Request", "Stock Entry", "Stock Entry Detail", "Stock Ledger Entry", "GL Entry",
-		"Bin", "Inventory Original Location Snapshot"]
+		"Bin", "Inventory Original Location Snapshot", "Purchase Receipt", "Purchase Invoice", "Payment Entry", "Payment Ledger Entry", "China Accounting Voucher", "Sales Order", "Sales Order Item"]
 	# Include all installed children: taxes/payment schedules as well as item/OA detail tables.
-	for parent in ["Purchase Order", "OA Purchase Request", "Material Request", "Stock Entry"]:
+	for parent in ["Purchase Order", "OA Purchase Request", "Material Request", "Stock Entry", "Purchase Receipt", "Purchase Invoice", "Payment Entry", "China Accounting Voucher", "Sales Order"]:
 		if frappe.db.exists("DocType", parent):
 			tables.extend(df.options for df in frappe.get_meta(parent).fields
 				if df.fieldtype in {"Table", "Table MultiSelect"} and df.options)
 	result = {"site": frappe.local.site, "tables": {}, "preserved_apps": {
-		app: source_digest(app) for app in ["overseas_costing", "mes_integration", "oa_purchase_request"]}}
+		app: source_digest(app) for app in ["overseas_costing", "mes_integration", "oa_purchase_request", "china_finance", "draft_notifications", "custom_filters", "crm_integration", "ai_assistant", "client_akivision", "mobile_operations"]}}
 	for doctype in sorted(set(tables)):
 		if not frappe.db.exists("DocType", doctype):
 			continue

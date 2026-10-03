@@ -30,7 +30,8 @@
 
 	function normalizePreferences(value, allowed, definitions = COLUMNS) {
 		const candidates = definitions.filter((col) => allowed.has(col.fieldname)).map((col) => col.fieldname);
-		const selected = Array.isArray(value?.columns) ? value.columns : candidates;
+		const defaults = definitions === COLUMNS ? config.defaultColumns : config.provider?.defaultColumns;
+		const selected = Array.isArray(value?.columns) ? value.columns : (defaults || candidates);
 		const columns = [...new Set(selected.filter((field) => candidates.includes(field)))];
 		if (!columns.includes("name") && allowed.has("name")) columns.unshift("name");
 		return { density: value?.density === "standard" ? "standard" : "tight", columns };
@@ -52,8 +53,8 @@
 		const add = (field, operator, value) => {
 			if (allowed.has(field) && value !== undefined && value !== null && value !== "") filters.push([DOCTYPE, field, operator, value]);
 		};
-		add("transaction_date", ">=", quick.from_date);
-		add("transaction_date", "<=", quick.to_date);
+		add(config.dateField || "transaction_date", ">=", quick.from_date);
+		add(config.dateField || "transaction_date", "<=", quick.to_date);
 		for (const field of config.quickFields || []) add(field, "=", quick[field]);
 		const search = String(quick.search || "").trim();
 		if (search && or_filters.length) throw new Error("Quick search cannot be combined with existing OR filters.");
@@ -164,6 +165,7 @@
 		const allowed = allowedFields(list.meta, (level) => frappe.perm.has_perm(DOCTYPE, level, "read"), frappe.model.std_fields_list);
 		const missing = (config.optionalFields || []).filter((field) => !(list.meta?.fields || []).some((df) => df.fieldname === field));
 		const displayAllowed = new Set(allowed);
+		if (frappe.perm.has_perm(DOCTYPE, 0, "read")) for (const field of config.computedFields || []) displayAllowed.add(field);
 		if (frappe.perm.has_perm(DOCTYPE, 0, "read")) {
 			for (const field of config.legacyDisplayFields || []) if (missing.includes(field)) displayAllowed.add(field);
 		}
@@ -324,6 +326,7 @@
 			this.start = 0;
 			originals.prepare_data.call(this, response);
 			this.start = start;
+			config.onRows?.(controller);
 		};
 		list.reset_defaults = function () {
 			originals.reset_defaults.call(this);

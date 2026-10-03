@@ -22,12 +22,12 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 	def test_compact_list_is_registered_only_for_supported_native_lists(self):
 		self.assertEqual(
 			getattr(hooks, "doctype_list_js", {}),
-			{"Purchase Order": "public/js/purchase_order_list.js", "Material Request": "public/js/material_request_list.js"},
+			{"Purchase Order": "public/js/purchase_order_list.js", "Material Request": "public/js/material_request_list.js", "Purchase Receipt": "public/js/purchase_receipt_list.js", "Sales Order": "public/js/sales_order_list.js"},
 		)
 
 	def test_unified_adapter_loads_after_cache_busted_shared_engine(self):
 		scripts = hooks.app_include_js
-		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.2"
+		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.3"
 		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.1"
 		self.assertIn(engine, scripts)
 		self.assertLess(scripts.index(engine), scripts.index(adapter))
@@ -47,7 +47,7 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 			Path(__file__).resolve().parents[1]
 			/ "deeplinkerp_branding/public/css/purchase_order_list.css"
 		).read_text()
-		css = css.replace("body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active)", "body.dlp-purchase-order-grid-active")
+		css = css.replace("body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active)", "body.dlp-purchase-order-grid-active")
 		shared_grid_rule = re.search(
 			r"\.dlp-po-grid-header-columns,\s*"
 			r"body\.dlp-purchase-order-grid-active \.dlp-po-grid-row\s*\{([^}]+)\}",

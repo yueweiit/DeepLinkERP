@@ -27,11 +27,13 @@ add_to_apps_screen = [
 # include js, css files in header of desk.html
 app_include_css = [
 	"/assets/deeplinkerp_branding/css/deeplinkerp_navigation.css?v=0.0.10",
-	"/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.7",
+	"/assets/deeplinkerp_branding/css/purchase_payments.css?v=0.0.1",
+	"/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.8",
 	"/assets/deeplinkerp_branding/css/inventory_detail.bundle.css",
 ]
 app_include_js = [
-	"/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.2",
+	"/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.1",
+	"/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.3",
 	"/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.1",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_navigation.js?v=0.0.19",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_interface_mode.js?v=0.0.3",
@@ -57,10 +59,12 @@ web_include_css = "/assets/deeplinkerp_branding/css/deeplinkerp_branding.css"
 # include js in doctype views
 # doctype_js = {"doctype" : "public/js/doctype.js"}
 doctype_list_js = {
+	"Purchase Receipt": "public/js/purchase_receipt_list.js",
+	"Sales Order": "public/js/sales_order_list.js",
 	"Purchase Order": "public/js/purchase_order_list.js",
 	"Material Request": "public/js/material_request_list.js",
 }
-doctype_js = {"Material Request": "public/js/material_request_form.js"}
+doctype_js = {"Material Request": "public/js/material_request_form.js", "Purchase Order": "public/js/purchase_payment_form.js", "Purchase Receipt": "public/js/purchase_payment_form.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
 

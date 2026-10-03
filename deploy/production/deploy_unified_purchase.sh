@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Brand-only serialized release; no migrate, metadata patches, or business writes.
+# Brand-only serialized release; one new Page reload, no migrate or business writes.
 set -euo pipefail
 umask 077
 archive=${1:?Committed source archive required}
@@ -114,6 +114,7 @@ for service in "${services[@]}"; do
   test "$(docker inspect "frappe_docker-$service-1" --format '{{.State.Running}}')" = true
 done
 docker cp "$build_dir/deploy/production/audit_unified_purchase.py" frappe_docker-backend-1:/tmp/audit-unified-purchase.py
+"${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend bench --site deeplinkerp.com reload-doc deeplinkerp_branding page purchase_payment_records
 # Frappe's lazy require cache version is the manifest mtime. Preserve its contents/bundles.
 "${dc[@]}" exec -T backend touch /home/frappe/frappe-bench/sites/assets/assets.json
 "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend bench --site deeplinkerp.com clear-cache
