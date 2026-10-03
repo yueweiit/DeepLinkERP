@@ -6,6 +6,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 SHARED_JS = ROOT / "deeplinkerp_branding/public/js/inventory_detail.bundle.js"
 SHARED_CSS = ROOT / "deeplinkerp_branding/public/css/inventory_detail.bundle.css"
@@ -87,8 +89,8 @@ def test_shared_page_uses_integer_page_size_and_only_opens_an_unsaved_stock_entr
 	assert "overseas_costing.services.inventory_location_service" not in source
 	assert "this.resetSelection();" in source
 	assert "物料移动 (${this.selected.size})" in source
-	assert "this.movementActionDataLabel" in source
-	assert ".menu-item-label" in source
+	assert "this.movementActionDataLabel" not in source
+	assert ".menu-item-label" not in source
 	assert 'aria-disabled' in source
 	for forbidden in (".insert(", ".save(", ".submit(", "frappe.client.insert"):
 		assert forbidden not in source
@@ -127,3 +129,49 @@ def test_shared_assets_are_registered_once_in_branding_hooks() -> None:
 	assert "inventory_detail.bundle.js" in hooks
 	assert "inventory_detail.bundle.css" in hooks
 	assert SHARED_CSS.is_file()
+
+
+@pytest.mark.parametrize("category", ["material", "semi_finished", "finished_goods", "mold"])
+def test_movement_action_is_in_page_content_not_responsive_toolbar(category: str) -> None:
+	result = run_js(
+		f"""
+let html='';
+const button={{length:1,text(){{return this}},prop(){{return this}},attr(){{return this}}}};
+const root={{find(){{return button}}}};
+global.$=(value)=>typeof value==='string' ? (html=value,root) :
+ {{children:()=>({{remove(){{}}}}),append(){{}}}};
+const page=Object.assign(Object.create(inventory.InventoryDetailPage.prototype),{{
+ config:{{title:'库存明细'}},isMaterial:{json.dumps(category == 'material')},
+ page:{{body:{{}}}},selected:new Map(),canCreateStockEntry:false
+}});
+page.renderShell();
+console.log(JSON.stringify({{html}}));
+"""
+	)
+	assert 'data-inventory-action="movement"' in result["html"]
+	assert 'class="id-actions"' in result["html"]
+	source = SHARED_JS.read_text(encoding="utf-8")
+	assert 'add_inner_button("物料移动' not in source
+	assert "'[data-inventory-action=\"movement\"]'" in source
+
+
+@pytest.mark.parametrize("count,can_create", [(0, True), (1, True), (200, True), (2, False)])
+def test_content_movement_action_preserves_count_and_creation_permission(count: int, can_create: bool) -> None:
+	result = run_js(
+		f"""
+const state={{}};
+const button={{length:1,text(v){{state.label=v;return this}},
+ prop(k,v){{state[k]=v;return this}},attr(k,v){{state[k]=v;return this}}}};
+inventory.InventoryDetailPage.prototype.updateMovementButton.call({{
+ $movementButton:button,selected:new Map(Array.from({{length:{count}}},(_,i)=>[i,{{}}])),
+ canCreateStockEntry:{json.dumps(can_create)},movementDisabledReason:'权限说明'
+}});
+console.log(JSON.stringify(state));
+"""
+	)
+	assert result == {
+		"label": f"物料移动 ({count})",
+		"disabled": not can_create or count == 0,
+		"aria-disabled": "true" if not can_create or count == 0 else "false",
+		"title": "权限说明",
+	}

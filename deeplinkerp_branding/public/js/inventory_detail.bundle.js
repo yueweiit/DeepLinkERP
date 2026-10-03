@@ -406,16 +406,14 @@
 			this.page.set_primary_action("筛选", () => this.refresh(true), "filter");
 			this.page.add_inner_button("清除筛选", () => this.clearFilters());
 			this.page.add_inner_button("导出 Excel", () => this.exportExcel());
-			this.$movementButton = this.page.add_inner_button("物料移动 (0)", () =>
-				this.openMovementDialog()
-			);
-			this.movementActionDataLabel = encodeURIComponent("物料移动 (0)");
-			this.updateMovementButton();
 		}
 
 		renderShell() {
 			this.$root = $(
 				`<section class="inventory-detail" aria-label="${escapeHtml(this.config.title)}">
+          <div class="id-actions">
+            <button type="button" class="btn btn-default btn-sm" data-inventory-action="movement" disabled aria-disabled="true">物料移动 (0)</button>
+          </div>
           <div class="id-summary" role="status">正在读取库存…</div>
           <div class="id-table-wrap">${
 				this.isMaterial ? materialTable() : categorizedTable(this.config.title)
@@ -429,9 +427,14 @@
 			);
 			$(this.page.body).children(":not(.page-form)").remove();
 			$(this.page.body).append(this.$root);
+			this.$movementButton = this.$root.find('[data-inventory-action="movement"]');
+			this.updateMovementButton();
 		}
 
 		bindEvents() {
+			this.$root.on("click", '[data-inventory-action="movement"]', () =>
+				this.openMovementDialog()
+			);
 			this.$root.on("click", "[data-item-code]", (event) => {
 				event.preventDefault();
 				frappe.set_route("Form", "Item", $(event.currentTarget).attr("data-item-code"));
@@ -522,26 +525,11 @@
 		updateMovementButton() {
 			if (!this.$movementButton?.length) return;
 			const label = `物料移动 (${this.selected.size})`;
-			const nextDataLabel = encodeURIComponent(label);
 			const reason = this.movementDisabledReason || "";
 			const disabled = !this.canCreateStockEntry || this.selected.size === 0;
-			const $pageActions = $(this.page.wrapper).find(".page-actions");
-			const $actionLabels = $pageActions
-				.find(`[data-label="${this.movementActionDataLabel}"]`)
-				.filter("button, .menu-item-label");
-			$actionLabels.text(label).attr("data-label", nextDataLabel);
-			$actionLabels
-				.filter(".menu-item-label")
-				.closest("a")
-				.toggleClass("disabled", disabled)
-				.attr("aria-disabled", disabled ? "true" : "false")
-				.attr("title", reason);
-			this.movementActionDataLabel = nextDataLabel;
 			this.$movementButton.text(label);
-			this.$movementButton.prop(
-				"disabled",
-				disabled
-			);
+			this.$movementButton.prop("disabled", disabled);
+			this.$movementButton.attr("aria-disabled", disabled ? "true" : "false");
 			this.$movementButton.attr("title", reason);
 		}
 
