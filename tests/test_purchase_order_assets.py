@@ -6,6 +6,19 @@ from deeplinkerp_branding import hooks
 
 
 class PurchaseOrderAssetsTest(unittest.TestCase):
+	def test_ci_runs_navigation_and_purchase_order_regressions(self):
+		workflow = (
+			Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml"
+		).read_text()
+		self.assertIn("node --test tests/*.test.js", workflow)
+		for suite in (
+			"tests.test_interface_mode",
+			"tests.test_boot_branding",
+			"tests.test_interface_mode_metadata",
+			"tests.test_purchase_order_assets",
+		):
+			self.assertIn(suite, workflow)
+
 	def test_compact_list_is_registered_only_for_purchase_orders(self):
 		self.assertEqual(
 			getattr(hooks, "doctype_list_js", {}),

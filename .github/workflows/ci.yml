@@ -63,6 +63,11 @@ jobs:
           node --check deeplinkerp_branding/deeplinkerp_branding/page/finished_goods_inventory_detail/finished_goods_inventory_detail.js
           node --check deeplinkerp_branding/deeplinkerp_branding/page/mold_inventory_detail/mold_inventory_detail.js
 
+      - name: Check navigation and purchase order extensions
+        run: |
+          node --test tests/*.test.js
+          python -m unittest -v tests.test_interface_mode tests.test_boot_branding tests.test_interface_mode_metadata tests.test_purchase_order_assets
+
       - name: Cache pip
         uses: actions/cache@v4
         with:
