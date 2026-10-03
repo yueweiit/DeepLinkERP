@@ -121,6 +121,10 @@ test("preferences are isolated by site and user and sanitize unknown or duplicat
 
 test("cells distinguish zero and missing values, escape labels, and render percentages numerically", () => {
 	const cell = production("renderValue");
+	for (const field of ["grand_total", "advance_paid"]) {
+		assert.ok(grid.COLUMNS.find((column) => column.fieldname === field).width >= 176,
+			`${field} must fit native eight-decimal amounts with their currency suffix`);
+	}
 	assert.equal(cell("grand_total", { grand_total: 0, currency: "USD" }), "0 USD");
 	assert.equal(cell("grand_total", {}), "—");
 	assert.equal(cell("per_received", { per_received: 0 }), "0%");
