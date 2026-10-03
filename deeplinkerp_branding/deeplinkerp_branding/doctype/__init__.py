@@ -1,1 +1,1 @@
-
+"""DeeplinkERP DocTypes."""
