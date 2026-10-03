@@ -9,4 +9,6 @@ LABEL com.deeplinkerp.ui.overseas-hooks-sha=${OVERSEAS_HOOKS_RELEASE_SHA}
 COPY --chown=frappe:frappe branding/ /home/frappe/frappe-bench/apps/deeplinkerp_branding/
 COPY --chown=frappe:frappe overseas_costing_hooks.py /home/frappe/frappe-bench/apps/overseas_costing/overseas_costing/hooks.py
 # The old selector is now owned and loaded by Branding, not by Overseas.
-RUN rm -f /home/frappe/frappe-bench/apps/overseas_costing/overseas_costing/public/js/selection_dropdown.bundle.js
+RUN rm -f /home/frappe/frappe-bench/apps/overseas_costing/overseas_costing/public/js/selection_dropdown.bundle.js \
+    /home/frappe/frappe-bench/apps/overseas_costing/overseas_costing/tests/test_selection_dropdown_frontend.py \
+    /home/frappe/frappe-bench/apps/overseas_costing/overseas_costing/tests/frontend/selection_dropdown_harness.js
