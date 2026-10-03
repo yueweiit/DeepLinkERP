@@ -11,8 +11,8 @@
 		["transaction_date", "订单日期", 96], ["name", "采购订单号", 166],
 		["supplier_name", "供应商名称", 205], ["status", "订单状态", 120],
 		["schedule_date", "需求日期", 96], ["company", "公司", 100],
-		["currency", "币种", 56], ["grand_total", "订单金额", 176],
-		["advance_paid", "已预付", 176], ["advance_payment_status", "预付款状态", 94],
+		["currency", "币种", 56], ["grand_total", "订单金额", 112],
+		["advance_paid", "已预付", 140], ["advance_payment_status", "预付款状态", 94],
 		["per_received", "已收货%", 70], ["per_billed", "已开票%", 70],
 		["project", "项目", 96], ["owner", "创建人", 96],
 	].map(([fieldname, label, width]) => ({ fieldname, label, width }));
@@ -111,13 +111,21 @@
 		return [...totals].map(([currency, amount]) => ({ currency, _aggregate_column: amount }));
 	}
 
+	function formatNumber(root, value, field) {
+		const configured = root.frappe?.boot?.sysdefaults?.currency_precision;
+		const currencyPrecision = configured !== undefined && configured !== null && configured !== "" ? Number(configured) : 2;
+		const precision = field.startsWith("per_") ? 2 : (Number.isInteger(currencyPrecision) && currencyPrecision >= 0 && currencyPrecision <= 9 ? currencyPrecision : 2);
+		return root.format_number ? root.format_number(value, null, precision) : value.toLocaleString(undefined, { minimumFractionDigits: field.startsWith("per_") ? 0 : precision, maximumFractionDigits: precision });
+	}
+
 	function renderValue(field, doc, formatters = {}) {
 		const value = doc[field];
 		if (value === undefined || value === null || value === "") return "—";
 		if (NUMBERS.has(field)) {
 			const number = Number(value);
 			if (!Number.isFinite(number)) return "—";
-			const formatted = number === 0 ? "0" : escapeHTML(formatters.number ? formatters.number(number, field, doc) : number.toLocaleString(undefined, { maximumFractionDigits: 6 }));
+			const percentage = field.startsWith("per_");
+			const formatted = percentage && number === 0 ? "0" : escapeHTML(formatters.number ? formatters.number(number, field, doc) : number.toLocaleString(undefined, { minimumFractionDigits: percentage ? 0 : 2, maximumFractionDigits: 2 }));
 			if (field.startsWith("per_")) return `${formatted}%`;
 			const currency = doc[field === "advance_paid" ? "party_account_currency" : "currency"];
 			return formatted + (currency ? ` ${escapeHTML(currency)}` : "");
@@ -377,7 +385,7 @@
 		const { list, root } = controller;
 		const formatters = {
 			translate: controller.translate,
-			number: (value, field) => root.format_number ? root.format_number(value, null, field.startsWith("per_") ? 2 : undefined) : value.toLocaleString(undefined, { maximumFractionDigits: 6 }),
+			number: (value, field) => formatNumber(root, value, field),
 			date: (value) => root.frappe.datetime?.str_to_user ? root.frappe.datetime.str_to_user(value) : value,
 		};
 		const checkbox = `<input type="checkbox" class="list-row-checkbox" data-doctype="${DOCTYPE}" data-name="${escapeHTML(doc.name)}">`;
@@ -456,7 +464,7 @@
 	function paintSummary(controller) {
 		const { translate: t, list } = controller;
 		const count = controller.total === null ? "…" : controller.total.toLocaleString();
-		const amounts = controller.summary.map((row) => renderValue("grand_total", { grand_total: row._aggregate_column, currency: row.currency })).join(" · ");
+		const amounts = controller.summary.map((row) => renderValue("grand_total", { grand_total: row._aggregate_column, currency: row.currency }, { number: (value, field) => formatNumber(controller.root, value, field) })).join(" · ");
 		controller.$summary?.html(`${escapeHTML(t("Total"))}: ${escapeHTML(count)}${amounts ? ` · ${amounts}` : ""}`);
 		const from = list.data.length ? controller.page * controller.pageSize + 1 : 0;
 		const to = list.data.length ? controller.page * controller.pageSize + list.data.length : 0;
@@ -543,5 +551,5 @@
 		});
 	}
 
-	return { COLUMNS, allowedFields, preferenceKey, normalizePreferences, buildQuery, buildRequests, currencyTotals, renderValue, mount, install };
+	return { COLUMNS, allowedFields, preferenceKey, normalizePreferences, buildQuery, buildRequests, currencyTotals, formatNumber, renderValue, mount, install };
 });

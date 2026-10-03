@@ -121,25 +121,28 @@ test("preferences are isolated by site and user and sanitize unknown or duplicat
 
 test("cells distinguish zero and missing values, escape labels, and render percentages numerically", () => {
 	const cell = production("renderValue");
-	for (const field of ["grand_total", "advance_paid"]) {
-		assert.ok(grid.COLUMNS.find((column) => column.fieldname === field).width >= 176,
-			`${field} must fit native eight-decimal amounts with their currency suffix`);
+	const configured = { frappe: { boot: { sysdefaults: { currency_precision: "3", float_precision: "8" } } } };
+	assert.equal(production("formatNumber")(configured, 1.23456, "grand_total"), "1.235");
+	assert.equal(production("formatNumber")(configured, 0, "advance_paid"), "0.000");
+	assert.equal(production("formatNumber")({}, 1.23456, "grand_total"), "1.23");
+	assert.equal(cell("grand_total", { grand_total: 0, currency: "USD" }), "0.00 USD");
+	for (const [value, expected] of [[1.23456789, "1.23"], [-1.239, "-1.24"], [9.995, "10.00"]]) {
+		assert.equal(cell("grand_total", { grand_total: value, currency: "USD" }), `${expected} USD`);
 	}
-	assert.equal(cell("grand_total", { grand_total: 0, currency: "USD" }), "0 USD");
 	assert.equal(cell("grand_total", {}), "—");
 	assert.equal(cell("per_received", { per_received: 0 }), "0%");
 	assert.equal(cell("per_billed", { per_billed: 82.5 }), "82.5%");
 	assert.equal(cell("supplier_name", { supplier_name: '<img src=x onerror="x">' }), "&lt;img src=x onerror=&quot;x&quot;&gt;");
-	assert.equal(cell("advance_paid", { advance_paid: 100, currency: "MXN", party_account_currency: "USD" }), "100 USD");
-	assert.equal(cell("advance_paid", { advance_paid: 0, currency: "MXN" }), "0");
-	const padded = { number: (value) => value.toFixed(3) };
+	assert.equal(cell("advance_paid", { advance_paid: 100, currency: "MXN", party_account_currency: "USD" }), "100.00 USD");
+	assert.equal(cell("advance_paid", { advance_paid: 0, currency: "MXN" }), "0.00");
+	const padded = { number: (value) => value.toFixed(2) };
 	for (const [field, doc, expected] of [
-		["grand_total", { grand_total: 0, currency: "CNY" }, "0 CNY"],
-		["advance_paid", { advance_paid: "0.000", currency: "MXN", party_account_currency: "USD" }, "0 USD"],
+		["grand_total", { grand_total: 0, currency: "CNY" }, "0.00 CNY"],
+		["advance_paid", { advance_paid: "0.000", currency: "MXN", party_account_currency: "USD" }, "0.00 USD"],
 		["per_received", { per_received: 0 }, "0%"],
 		["per_billed", { per_billed: "0.00" }, "0%"],
 	]) assert.equal(cell(field, doc, padded), expected);
-	assert.equal(cell("grand_total", { grand_total: 1, currency: "CNY" }, padded), "1.000 CNY");
+	assert.equal(cell("grand_total", { grand_total: 1, currency: "CNY" }, padded), "1.00 CNY");
 });
 
 function bareList() {
@@ -454,8 +457,13 @@ test("native OR filters that appear while quick search is active keep the query 
 test("rendered rows retain native selection hooks, native indicator, and escaped order and supplier links", () => {
 	const { list, env } = bareList();
 	env.__ = (label) => ({ "Partially Paid": "部分已付", "Supplier <A>": "must not translate business name" })[label] || label;
+	env.frappe.boot.sysdefaults = { currency_precision: "2", float_precision: "8" };
+	env.format_number = (value, _format, precision) => {
+		assert.equal(precision, 2, "list display must override native global precision without changing data");
+		return value.toFixed(precision);
+	};
 	production("mount")(list, env);
-	const doc = { name: 'PO/"1', supplier: "SUP/1", supplier_name: "Supplier <A>", advance_payment_status: "Partially Paid", docstatus: 2, _idx: 0 };
+	const doc = { name: 'PO/"1', supplier: "SUP/1", supplier_name: "Supplier <A>", grand_total: 123.456789, currency: "MXN", advance_paid: 5.6789, party_account_currency: "CNY", advance_payment_status: "Partially Paid", docstatus: 2, _idx: 0 };
 	const html = list.get_list_row_html(doc);
 	assert.match(html, /list-row-container/);
 	assert.match(html, /list-row-checkbox/);
@@ -467,6 +475,9 @@ test("rendered rows retain native selection hooks, native indicator, and escaped
 	assert.match(html, /purchase-order\/PO%2F%221/);
 	assert.match(html, /supplier\/SUP%2F1/);
 	assert.match(html, /Supplier &lt;A&gt;/);
+	assert.match(html, />123\.46 MXN<\/div>/);
+	assert.match(html, />5\.68 CNY<\/div>/);
+	assert.equal(doc.grand_total, 123.456789, "display rounding must not alter source amounts or export values");
 	assert.match(html, />部分已付<\/div>/);
 	assert.equal(doc.advance_payment_status, "Partially Paid", "display translation must not alter the query/export field value");
 });
