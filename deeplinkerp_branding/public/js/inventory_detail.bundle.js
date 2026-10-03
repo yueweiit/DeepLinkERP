@@ -417,7 +417,7 @@
 			++this.requestId; // Invalidate responses from the company being left.
 			this.suppressFilterChanges = true;
 			const restored = this.fields.company.set_value(previousCompany);
-			this.updateMovementButton();
+			this.updateSelectionUi();
 			const decision = this.selected.size
 				? new Promise((resolve) => {
 					const confirmation = frappe.confirm(
@@ -450,7 +450,7 @@
 				this.suppressFilterChanges = false;
 				this.loading = false;
 				this.$root?.removeClass("is-loading");
-				this.updateMovementButton();
+				this.updateSelectionUi();
 			}
 			if (changedCompany || interruptedRefresh) return this.refresh(changedCompany);
 		}
@@ -564,6 +564,11 @@
 			const selectedCount = selectableKeys.filter((key) => this.selected.has(key)).length;
 			const header = this.$root?.find("[data-select-current-page]");
 			if (header?.length) {
+				header.prop("disabled", Boolean(this.loading || this.companyChangePending) ||
+					selectableKeys.length === 0 || !this.effectiveCompany ||
+					this.effectiveCompany !== this.company ||
+					this.effectiveCompany !== this.selectionCompany ||
+					this.effectiveCompany !== this.fields.company.get_value());
 				header.prop(
 					"checked",
 					selectableKeys.length > 0 && selectedCount === selectableKeys.length
@@ -671,7 +676,7 @@
 				if (requestId === this.requestId) {
 					this.loading = false;
 					this.$root.removeClass("is-loading");
-					this.updateMovementButton();
+					this.updateSelectionUi();
 				}
 			}
 		}

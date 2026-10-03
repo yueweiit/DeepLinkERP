@@ -193,6 +193,43 @@ def test_movement_context_permission_failure_preserves_selection_and_requires_fr
 	assert result == {"failure": {"calls": 1, "count": 1, "movable": False, "message": "permission revoked"}, "recovered": True, "count": 1}
 
 
+@pytest.mark.parametrize("category", ["material", "semi_finished", "finished_goods", "mold"])
+def test_persistent_header_reenables_after_initial_and_repeated_refresh(category: str) -> None:
+	result = run_js(LIFECYCLE_SETUP + f"const category={json.dumps(category)};\n" + """
+(async()=>{
+ const {page}=makePage();page.config.category=category;page.isMaterial=category==='material';
+ page.setSnapshotOptions=()=>{};
+ const header={length:1,state:{},prop(key,value){this.state[key]=value;return this}};
+ let row={length:1,state:{},prop:header.prop};
+ const body={html(value){row={length:1,state:{},prop:header.prop};return this}};
+ const events={};
+ page.$root={addClass(){return this},removeClass(){return this},
+  on(event,selector,callback){events[selector]=callback;return this},
+  find(selector){
+   if(selector==='tbody') return body;
+   if(selector==='[data-select-current-page]') return header;
+   if(selector==='[data-selection-key], [data-select-current-page]')
+    return {length:2,prop(key,value){header.prop(key,value);row.prop(key,value);return this}};
+   return element;
+  }};
+ page.bindEvents();
+ const initialLoad=page.refresh();const during=header.state.disabled;await initialLoad;
+ const initial=header.state.disabled;
+ events['[data-select-current-page]']({currentTarget:{checked:true}});
+ frappe.call=async()=>({message:{company:'C1',groups:[group('B')],can_create_stock_entry:false}});
+ await page.refresh();const repeated={disabled:header.state.disabled,checked:header.state.checked};
+ events['[data-select-current-page]']({currentTarget:{checked:true}});
+ const count=page.selected.size;
+ frappe.call=async()=>{throw Error('permission denied')};await page.refresh();const failed=header.state.disabled;
+ frappe.call=async()=>({message:{company:'C1',groups:[group('B')],can_create_stock_entry:true}});
+ await page.refresh();
+ console.log(JSON.stringify({during,initial,repeated,count,failed,recovered:header.state.disabled,
+  recoveredChecked:header.state.checked}));
+})();
+""")
+	assert result == {"during": True, "initial": False, "repeated": {"disabled": False, "checked": False}, "count": 2, "failed": True, "recovered": False, "recoveredChecked": True}
+
+
 def test_company_confirmation_accept_clears_once_and_cancel_restores_racing_field_edit() -> None:
 	result = run_js(LIFECYCLE_SETUP + """
 (async()=>{
