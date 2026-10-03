@@ -35,6 +35,7 @@ app_include_js = [
 	"/assets/deeplinkerp_branding/js/deeplinkerp_interface_mode.js?v=0.0.3",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_branding.js?v=0.0.26",
 	"/assets/deeplinkerp_branding/js/inventory_detail.bundle.js",
+	"/assets/deeplinkerp_branding/js/selection_dropdown.bundle.js",
 ]
 
 # include js, css files in header of web template
