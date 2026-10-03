@@ -1,5 +1,5 @@
 (function(root) {
- const categories = {consumable:"消耗品",raw_material:"原料申请",semi_finished:"半成品申请",unclassified:"未分类"};
+ const categories = Object.assign(Object.create(null), {consumable:"消耗品",raw_material:"原料申请",semi_finished:"半成品申请",unclassified:"未分类"});
  const escape = value => String(value ?? "").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
  const installed = new WeakSet();
  function summaryHTML(doc,allowed,translate=x=>x) {

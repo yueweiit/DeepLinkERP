@@ -1,6 +1,6 @@
 (function (root) {
  const engine = typeof module === "object" && module.exports ? require("./compact_list.js") : root.DeepLinkERPCompactList;
- const categories = {consumable:"消耗品",raw_material:"原料申请",semi_finished:"半成品申请",unclassified:"未分类"};
+ const categories = Object.assign(Object.create(null), {consumable:"消耗品",raw_material:"原料申请",semi_finished:"半成品申请",unclassified:"未分类"});
  const columns = [["custom_odt","ODT",150],["custom_mes_issue_category","申请类别",110],["name","ERP申请号",180],["status","状态",120],["transaction_date","申请日期",96],["schedule_date","需求日期",96],["company","公司",130],["set_from_warehouse","来源仓库",160],["per_ordered","已发料/履行%",110],["custom_material_request_no","MES申请号",180],["owner","创建人",120]].map(([fieldname,label,width])=>({fieldname,label,width}));
  const grid = engine.create({doctype:"Material Request",columns,controllerKey:"dlpMaterialRequestGrid",routeClass:"dlp-material-request-grid-active",freezeUntil:"custom_mes_issue_category",numbers:["per_ordered"],dates:["transaction_date","schedule_date"],quickFields:["custom_odt","custom_mes_issue_category"],searchFields:["name","custom_material_request_no"],extraFields:["material_request_type"],controls:[
   {fieldname:"custom_odt",fieldtype:"Data",label:"ODT"},

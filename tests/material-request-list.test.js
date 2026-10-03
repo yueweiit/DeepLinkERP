@@ -104,3 +104,13 @@ test('legacy stored sorting cannot query missing display-only fields', () => {
  const installed=mr.buildQuery({fields:['name'],filters:[],or_filters:[],order_by:'custom_odt asc'},{},new Set(['name','custom_odt']));
  assert.equal(installed.order_by,'custom_odt asc');
 });
+test('inherited category keys fall back to the original type in list and form', () => {
+ const form=require(base+'material_request_form.js');
+ for(const custom_mes_issue_category of ['constructor','__proto__','toString']) {
+  const doc={custom_mes_issue_category,material_request_type:'Material Issue'};
+  const translate=x=>x === 'Material Issue' ? '发料' : x;
+  assert.equal(mr.renderValue('custom_mes_issue_category',doc,{translate}),'发料');
+  const html=form.summaryHTML(doc,new Set(Object.keys(doc)),translate);
+  assert.match(html,/>发料<\/span>/);assert.doesNotMatch(html,/function|Object/);
+ }
+});
