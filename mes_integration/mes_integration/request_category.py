@@ -88,7 +88,8 @@ def apply_category_backfill(plan, expected_digest):
 				raise ValueError("Missing category backfill evidence")
 			rows = frappe.db.sql(
 				"SELECT name, company, custom_material_request_no, modified, custom_mes_issue_category "
-				"FROM `tabMaterial Request` WHERE name=%s FOR UPDATE", (update["name"],), as_dict=True,
+				"FROM `tabMaterial Request` WHERE company=%s AND custom_material_request_no=%s FOR UPDATE",
+				(update["expected"]["company"], update["expected"]["custom_material_request_no"]), as_dict=True,
 			)
 			if len(rows) != 1 or {field: str(rows[0].get(field) or "") for field in IDENTITY_FIELDS} != {
 				field: str(update["expected"].get(field) or "") for field in IDENTITY_FIELDS

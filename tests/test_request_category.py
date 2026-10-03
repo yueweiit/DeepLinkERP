@@ -91,11 +91,17 @@ class TestRequestCategory(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.module.apply_category_backfill(plan, digest)
             db.set_value.assert_not_called()
+            db.sql.return_value = [row, dict(row, name="MR-DUP")]
+            with self.assertRaises(ValueError):
+                self.module.apply_category_backfill(plan, digest)
+            db.set_value.assert_not_called()
             db.sql.return_value = [row]
             result = self.module.apply_category_backfill(plan, digest)
         self.assertEqual(result["applied"][0]["name"], "MR-A")
         db.set_value.assert_called_once_with("Material Request", "MR-A", "custom_mes_issue_category", "consumable", update_modified=False)
         self.assertIn("FOR UPDATE", db.sql.call_args.args[0])
+        self.assertIn("WHERE company=%s AND custom_material_request_no=%s", db.sql.call_args.args[0])
+        self.assertEqual(db.sql.call_args.args[1], ("CN", "A"))
         frappe.only_for.assert_called_with("System Manager")
 
 
