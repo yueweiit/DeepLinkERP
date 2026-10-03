@@ -21,7 +21,7 @@ jobs:
 
       - name: Verify paired inventory owner branch
         env:
-          REQUIRED_INVENTORY_BRANDING_SHA: c0fd95acd8dc47ebef647e7c17ec72a5c5fd45f7
+          REQUIRED_INVENTORY_BRANDING_SHA: a057791342a7f0f02686b6b54bb800a6e8473092
         run: |
           git fetch --no-tags origin deeplinkerp_branding
           test "$(git rev-parse origin/deeplinkerp_branding)" = "$REQUIRED_INVENTORY_BRANDING_SHA"
@@ -204,7 +204,7 @@ jobs:
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          REQUIRED_INVENTORY_BRANDING_SHA: c0fd95acd8dc47ebef647e7c17ec72a5c5fd45f7
+          REQUIRED_INVENTORY_BRANDING_SHA: a057791342a7f0f02686b6b54bb800a6e8473092
           REQUIRED_INVENTORY_BRANDING_CONTENT_SHA256: 10ce91a7347831a95d7245bea8da9333c981480914184e9c0eac893b05d0cbf6
         run: |
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
@@ -225,7 +225,7 @@ jobs:
             "$DEPLOY_USER@$DEPLOY_HOST:$remote_upgrade_script"
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
             "$DEPLOY_USER@$DEPLOY_HOST" \
-            "GITHUB_RUN_ID='${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}' REQUIRED_INVENTORY_BRANDING_SHA='c0fd95acd8dc47ebef647e7c17ec72a5c5fd45f7' REQUIRED_INVENTORY_BRANDING_CONTENT_SHA256='10ce91a7347831a95d7245bea8da9333c981480914184e9c0eac893b05d0cbf6' bash '$remote_upgrade_script' /home/yuewei/ERPNext-Docker/frappe_docker deeplinkerp.com '${REQUIRED_INVENTORY_BRANDING_CONTENT_SHA256}'; script_exit_code=\$?; rm -f '$remote_upgrade_script'; exit \$script_exit_code"
+            "GITHUB_RUN_ID='${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}' REQUIRED_INVENTORY_BRANDING_SHA='a057791342a7f0f02686b6b54bb800a6e8473092' REQUIRED_INVENTORY_BRANDING_CONTENT_SHA256='10ce91a7347831a95d7245bea8da9333c981480914184e9c0eac893b05d0cbf6' bash '$remote_upgrade_script' /home/yuewei/ERPNext-Docker/frappe_docker deeplinkerp.com '${REQUIRED_INVENTORY_BRANDING_CONTENT_SHA256}'; script_exit_code=\$?; rm -f '$remote_upgrade_script'; exit \$script_exit_code"
 
       - name: Verify company rename integrity
         env:
