@@ -33,9 +33,9 @@ app_include_css = [
 app_include_js = [
 	"/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.2",
 	"/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.1",
-	"/assets/deeplinkerp_branding/js/deeplinkerp_navigation.js?v=0.0.18",
+	"/assets/deeplinkerp_branding/js/deeplinkerp_navigation.js?v=0.0.19",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_interface_mode.js?v=0.0.3",
-	"/assets/deeplinkerp_branding/js/deeplinkerp_branding.js?v=0.0.26",
+	"/assets/deeplinkerp_branding/js/deeplinkerp_branding.js?v=0.0.27",
 	"/assets/deeplinkerp_branding/js/inventory_detail.bundle.js",
 	"/assets/deeplinkerp_branding/js/selection_dropdown.bundle.js",
 ]

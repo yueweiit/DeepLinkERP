@@ -332,6 +332,20 @@
 			.map(({ node }) => node);
 	}
 
+	function arrangeClassicSidebar(controller) {
+		const container = controller?.bar?.querySelector(".custom-filters-right-sidebar-items");
+		if (!container) return false;
+		const buttons = Array.from(container.children);
+		const icons = new Map((controller.items || []).map((icon) => [icon.label, icon]));
+		const ordered = arrangeNavigationRoots(buttons.map((element) => ({
+			...(icons.get(element.dataset.iconLabel) || { label: element.dataset.iconLabel }),
+			element,
+		}))).map((item) => item.element);
+		if (ordered.every((button, index) => button === buttons[index])) return false;
+		ordered.forEach((button) => container.appendChild(button));
+		return true;
+	}
+
 	function buildNavigationTree(desktopIcons) {
 		const visibleIcons = (desktopIcons || []).filter(
 			(icon) => icon && icon.hidden !== 1 && icon.hidden !== "1"
@@ -593,6 +607,7 @@
 	}
 
 	return Object.freeze({
+		arrangeClassicSidebar,
 		bindNavigationBranchToggle,
 		bindNavigationRowInteractions,
 		bindNativeSidebarClose,

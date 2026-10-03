@@ -125,6 +125,20 @@ class FakeElement {
 	}
 }
 
+function classicSidebar(icons) {
+	const container = new FakeElement();
+	icons.forEach((icon) => {
+		const button = new FakeElement(["custom-filters-right-sidebar-item"]);
+		button.dataset.iconLabel = icon.label;
+		container.appendChild(button);
+	});
+	return {
+		items: icons,
+		bar: { querySelector: (selector) => selector === ".custom-filters-right-sidebar-items" ? container : null },
+		container,
+	};
+}
+
 test("maps the approved MES line icons and keeps a deterministic fallback", () => {
 	const getNavigationIcon = productionFunction("getNavigationIcon");
 	const labels = [
@@ -254,6 +268,23 @@ test("applies the approved fixed DL root order", () => {
 		]
 	);
 	assert.deepEqual(icons, snapshot, "ordering must not mutate Frappe boot data");
+
+	const classic = classicSidebar(icons);
+	const originalButtons = [...classic.container.children];
+	let clicks = 0;
+	originalButtons[1].addEventListener("click", () => clicks++);
+	const arrangeClassicSidebar = productionFunction("arrangeClassicSidebar");
+	assert.equal(arrangeClassicSidebar(classic), true);
+	assert.deepEqual(
+		classic.container.children.map((button) => button.dataset.iconLabel),
+		buildNavigationTree(icons).map((item) => item.label)
+	);
+	assert.equal(arrangeClassicSidebar(classic), false, "unchanged order must not move nodes again");
+	originalButtons[1].dispatch("click");
+	assert.equal(clicks, 1, "classic click handlers survive sorting");
+	assert.equal(new Set(classic.container.children).size, originalButtons.length);
+	assert.ok(originalButtons.every((button) => classic.container.children.includes(button)));
+	assert.deepEqual(classic.items, snapshot, "the native controller and desktop layout retain original order");
 });
 
 test("keeps unknown DL roots stable after known roots and preserves children", () => {
@@ -274,6 +305,24 @@ test("keeps unknown DL roots stable after known roots and preserves children", (
 	);
 	assert.deepEqual(roots[0].children.map((item) => item.name), ["Buying Settings"]);
 	assert.deepEqual(icons, snapshot, "tree construction must not mutate its input");
+	const classic = classicSidebar(icons.filter((icon) => !icon.parent_icon));
+	productionFunction("arrangeClassicSidebar")(classic);
+	assert.deepEqual(classic.container.children.map((button) => button.dataset.iconLabel), roots.map((item) => item.label));
+});
+
+test("classic sorting tolerates the optional sidebar missing and recognizes Chinese identities", () => {
+	const arrangeClassicSidebar = productionFunction("arrangeClassicSidebar");
+	for (const controller of [null, {}, { bar: { querySelector: () => null } }]) {
+		assert.equal(arrangeClassicSidebar(controller), false);
+	}
+	const classic = classicSidebar([
+		{ name: "Overseas Cost Workbench", label: "海外成本核算" },
+		{ name: "Assets", label: "资产" },
+		{ name: "China Finance", label: "中国财务" },
+		{ name: "Buying", label: "采购" },
+	]);
+	arrangeClassicSidebar(classic);
+	assert.deepEqual(classic.container.children.map((button) => button.dataset.iconLabel), ["采购", "资产", "中国财务", "海外成本核算"]);
 });
 
 test("clones authorized workspace items before native nesting mutates them", () => {
@@ -794,9 +843,9 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 	);
 	assert.ok(hooks.indexOf(modelAsset) < hooks.indexOf(interfaceModeAsset));
 	assert.ok(hooks.indexOf(interfaceModeAsset) < hooks.indexOf(lifecycleAsset));
-	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.18/);
+	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.19/);
 	assert.match(hooks, /deeplinkerp_interface_mode\.js\?v=0\.0\.3/);
-	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.26/);
+	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.27/);
 	assert.match(hooks, /web_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_branding\.css"/);
 });
 
@@ -1112,6 +1161,7 @@ test("integrates the executable lifecycle helpers through the existing single ro
 
 	assert.equal((lifecycle.match(/frappe\.router\.on\("change"/g) || []).length, 1);
 	assert.match(lifecycle, /function renderPersistentNavigation\(/);
+	assert.match(lifecycle, /disableDLEnhancements\(\);\s*DeepLinkERPNavigation\.arrangeClassicSidebar\(window\.CustomFiltersRightSidebar\)/);
 	assert.match(lifecycle, /refreshDeskEnhancements[\s\S]*renderPersistentNavigation\(\)/);
 	assert.match(lifecycle, /projectAuthorizedDesktopIcons\(/);
 	assert.match(lifecycle, /replaceNavigationRoot\(/);

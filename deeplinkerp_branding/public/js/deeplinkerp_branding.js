@@ -645,6 +645,7 @@
 			enhanceDesktopIcons();
 		} else {
 			disableDLEnhancements();
+			DeepLinkERPNavigation.arrangeClassicSidebar(window.CustomFiltersRightSidebar);
 		}
 	}
 
