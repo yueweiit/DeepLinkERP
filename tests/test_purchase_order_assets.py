@@ -51,6 +51,10 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 			r"justify-content:\s*start\s*;",
 			"Native .level space-between must not offset data columns on wide screens",
 		)
+		self.assertRegex(shared_grid_rule.group(1), r"font-size:\s*inherit\s*;")
+		header_rule = re.search(r"\.dlp-po-grid-header\s*\{([^}]+)\}", css)
+		self.assertIsNotNone(header_rule)
+		self.assertRegex(header_rule.group(1), r"font-size:\s*inherit\s*;")
 
 
 if __name__ == "__main__":

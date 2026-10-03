@@ -166,6 +166,7 @@ body.dlp-purchase-order-grid-active .dlp-po-grid-row {
 	grid-template-columns: var(--dlp-po-columns);
 	/* Native .level uses space-between; keep the same track origin as the header. */
 	justify-content: start;
+	font-size: inherit;
 	align-items: stretch;
 	width: max-content;
 	min-width: 100%;
@@ -194,6 +195,7 @@ body.dlp-purchase-order-grid-active .dlp-po-grid-row:focus-within {
 
 body.dlp-purchase-order-grid-active .dlp-po-grid-header {
 	display: block;
+	font-size: inherit;
 	position: sticky;
 	top: 0;
 	z-index: 4;
