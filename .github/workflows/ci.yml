@@ -122,3 +122,5 @@ jobs:
           bench --site test_site run-tests --app deeplinkerp_branding
         env:
           TYPE: server
+          # Pure XLSX integration imports Frappe without initializing a site/log directory.
+          FRAPPE_STREAM_LOGGING: '1'
