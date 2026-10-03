@@ -62,7 +62,14 @@
 				if (allowed.has(field)) or_filters.push([DOCTYPE, field, "like", `%${search}%`]);
 			}
 		}
-		return { ...nativeArgs, fields: (nativeArgs.fields || []).filter((field) => allowed.has(fieldName(field))), filters, or_filters };
+		let order_by = nativeArgs.order_by;
+		if (typeof order_by === "string") {
+			const unavailable = new Set((config.legacyDisplayFields || []).filter((field) => !allowed.has(field)));
+			const parts = order_by.split(",").map((part) => part.trim());
+			const retained = parts.filter((part) => !unavailable.has(fieldName(part.replace(/\s+(?:asc|desc)\s*$/i, ""))));
+			if (retained.length !== parts.length) order_by = retained.join(", ") || (allowed.has("name") ? "name desc" : undefined);
+		}
+		return { ...nativeArgs, order_by, fields: (nativeArgs.fields || []).filter((field) => allowed.has(fieldName(field))), filters, or_filters };
 	}
 
 	function buildRequests(args, columns, allowed) {
@@ -376,7 +383,7 @@
 		const checkbox = `<input class="list-header-checkbox list-check-all" type="checkbox" title="${escapeHTML(t("Select All"))}">`;
 		const columns = layout(controller).map((col) => {
 			const label = t(col.label);
-			return cellHTML(col, escapeHTML(label), label, true);
+			return cellHTML(col, escapeHTML(label), label, controller.allowed.has(col.fieldname));
 		}).join("");
 		return `<div class="list-row-container"><header class="list-row-head dlp-po-grid-header" style="--dlp-po-columns:${template(controller)}"><div class="list-header-subject dlp-po-grid-header-columns">${selectionCell(checkbox, "#")}${columns}</div><div class="checkbox-actions" style="display:none"><span class="select-like">${checkbox}</span><span class="list-header-meta"></span></div></header></div>`;
 	}

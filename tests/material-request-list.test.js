@@ -83,9 +83,24 @@ test('legacy list retains blank ODT and category fallback as display-only column
  const list={doctype:'Material Request',view_name:'List',meta:{fields:[{fieldname:'material_request_type'}]},fields:[['name','Material Request']],data:[],get_args(){return {fields:this.fields,filters:[],or_filters:[]};},render_header(){},get_form_link(){return '/desk/material-request/MR';},get_indicator_html(){return ''}};
  const controller=mr.mount(list,env);
  assert.deepEqual(controller.preferences.columns.slice(0,2),['custom_odt','custom_mes_issue_category']);
+ const header=list.get_header_html();
+ assert.doesNotMatch(header,/data-sort-by="custom_odt"|data-sort-by="custom_mes_issue_category"/);
+ assert.match(header,/data-sort-by="name"/);
  const html=list.get_list_row_html({name:'MR',material_request_type:'Material Issue',custom_odt:'must not expose'});
  assert.match(html,/data-fieldname="custom_odt"/);assert.match(html,/Material Issue/);assert.doesNotMatch(html,/must not expose/);
  assert.deepEqual(list.get_args().fields,[['name','Material Request'],['owner','Material Request'],['material_request_type','Material Request']]);
  assert.deepEqual(mr.buildRequests(list.get_args(),controller.preferences.columns,controller.allowed).export.fields,['name','owner']);
  mr.mount(list,env);assert.equal(notices.length,1);
+});
+test('legacy stored sorting cannot query missing display-only fields', () => {
+ const allowed=new Set(['name','owner']);
+ for(const order_by of ['custom_odt asc','`tabMaterial Request`.`custom_mes_issue_category` desc']) {
+  const q=mr.buildQuery({fields:['name'],filters:[],or_filters:[],order_by},{},allowed);
+  assert.equal(q.order_by,'name desc');
+  assert.equal(mr.buildRequests(q,['name'],allowed).export.order_by,'name desc');
+ }
+ const q=mr.buildQuery({fields:['name'],filters:[],or_filters:[],order_by:'custom_odt asc, name asc'},{},allowed);
+ assert.equal(q.order_by,'name asc');
+ const installed=mr.buildQuery({fields:['name'],filters:[],or_filters:[],order_by:'custom_odt asc'},{},new Set(['name','custom_odt']));
+ assert.equal(installed.order_by,'custom_odt asc');
 });
