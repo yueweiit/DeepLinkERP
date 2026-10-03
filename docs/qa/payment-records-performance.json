@@ -1,0 +1,139 @@
+{
+    "site": "po-grid-qa.localhost",
+    "baseline": "40200e2c9f1ccea8061df495569c7809ae540ee1",
+    "samples": [
+        {
+            "synthetic_drafts": 10,
+            "runs": [
+                {
+                    "label": "first",
+                    "before": {
+                        "seconds": 0.0673,
+                        "sql_calls": 397
+                    },
+                    "after": {
+                        "seconds": 0.0126,
+                        "sql_calls": 31
+                    }
+                },
+                {
+                    "label": "warm",
+                    "before": {
+                        "seconds": 0.0651,
+                        "sql_calls": 397
+                    },
+                    "after": {
+                        "seconds": 0.0126,
+                        "sql_calls": 31
+                    }
+                },
+                {
+                    "label": "unmatched_search",
+                    "before": {
+                        "seconds": 0.0678,
+                        "sql_calls": 397
+                    },
+                    "after": {
+                        "seconds": 0.0007,
+                        "sql_calls": 1
+                    }
+                }
+            ],
+            "total_matches": 12
+        },
+        {
+            "synthetic_drafts": 50,
+            "runs": [
+                {
+                    "label": "first",
+                    "before": {
+                        "seconds": 0.2953,
+                        "sql_calls": 1717
+                    },
+                    "after": {
+                        "seconds": 0.0168,
+                        "sql_calls": 31
+                    }
+                },
+                {
+                    "label": "warm",
+                    "before": {
+                        "seconds": 0.2866,
+                        "sql_calls": 1717
+                    },
+                    "after": {
+                        "seconds": 0.017,
+                        "sql_calls": 31
+                    }
+                },
+                {
+                    "label": "unmatched_search",
+                    "before": {
+                        "seconds": 0.298,
+                        "sql_calls": 1717
+                    },
+                    "after": {
+                        "seconds": 0.0008,
+                        "sql_calls": 1
+                    }
+                }
+            ],
+            "total_matches": 52
+        },
+        {
+            "synthetic_drafts": 100,
+            "runs": [
+                {
+                    "label": "first",
+                    "before": {
+                        "seconds": 0.5752,
+                        "sql_calls": 3367
+                    },
+                    "after": {
+                        "seconds": 0.0223,
+                        "sql_calls": 31
+                    }
+                },
+                {
+                    "label": "warm",
+                    "before": {
+                        "seconds": 0.5701,
+                        "sql_calls": 3367
+                    },
+                    "after": {
+                        "seconds": 0.0229,
+                        "sql_calls": 31
+                    }
+                },
+                {
+                    "label": "unmatched_search",
+                    "before": {
+                        "seconds": 0.583,
+                        "sql_calls": 3367
+                    },
+                    "after": {
+                        "seconds": 0.0009,
+                        "sql_calls": 1
+                    }
+                }
+            ],
+            "total_matches": 102
+        }
+    ],
+    "scenarios": [
+        "ordered pagination, exact total, no overlap, empty tail, literal/casefold keyword search",
+        "draft/submitted/cancelled, PO advance through PR, PI references, vouchers, combined filters",
+        "missing PI reference",
+        "missing PR association",
+        "cross-company PO association",
+        "non-procurement PI excluded",
+        "Receive bank amount/currency preserved",
+        "shared PI across two PRs and nontrivial Unicode casefold/literal wildcard searches",
+        "normal per-document/controller permission checks on PE/PI/PO/Company",
+        "parent/child field permission denial without target or amount leakage",
+        "existing company-restricted user and forbidden source filters; request cache restored"
+    ],
+    "equivalent_calls": 60,
+    "status": "passed",
+    "rollback_counts_unchanged": true
+}

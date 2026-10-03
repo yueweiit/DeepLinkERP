@@ -88,5 +88,55 @@ class PurchaseLinkTests(unittest.TestCase):
         self.assertTrue(result['rows'][1]['can_create'])
 
 
+class PaymentRecordReaderTests(unittest.TestCase):
+    def setUp(self):
+        flags = patch.object(frappe, 'flags', frappe._dict())
+        flags.start()
+        self.addCleanup(flags.stop)
+
+    def test_bulk_hydration_preserves_children_and_masks_parent(self):
+        reader = service._RecordReader()
+        rows = [frappe._dict(name='PE-1', company='C')]
+        children = [frappe._dict(name='REF-1', parent='PE-1', idx=1)]
+        doc = SimpleNamespace(mask_fields=unittest.mock.Mock())
+        meta = SimpleNamespace(get_table_fields=lambda: [frappe._dict(fieldname='references', options='Payment Entry Reference')])
+        values = unittest.mock.Mock(side_effect=[rows, children])
+        with patch.object(frappe, 'db', SimpleNamespace(get_values=values)), patch.object(frappe, 'get_meta', return_value=meta), patch.object(frappe, 'get_doc', return_value=doc) as get_doc:
+            reader.preload('Payment Entry', ['PE-1', 'missing', 'PE-1'])
+            reader.preload('Payment Entry', ['PE-1', 'missing'])
+        self.assertEqual(values.call_count, 2)
+        self.assertEqual(values.call_args_list[1].args[1], {'parent': ['in', ['PE-1']], 'parenttype': 'Payment Entry', 'parentfield': 'references'})
+        self.assertEqual(get_doc.call_args.args[0]['references'], children)
+        doc.mask_fields.assert_called_once()
+        self.assertIs(reader.doc('Payment Entry', 'PE-1'), doc)
+        with self.assertRaises(frappe.DoesNotExistError):
+            reader.doc('Payment Entry', 'missing')
+
+    def test_denied_permission_is_never_cached_as_success(self):
+        reader = service._RecordReader()
+        doc = SimpleNamespace(doctype='Payment Entry', name='PE-1', check_permission=unittest.mock.Mock(side_effect=frappe.PermissionError))
+        for _ in range(2):
+            with self.assertRaises(frappe.PermissionError): reader.check(doc)
+        self.assertEqual(doc.check_permission.call_count, 2)
+        self.assertFalse(reader.checked)
+
+    def test_context_is_restored_after_unexpected_error(self):
+        outer = service._RecordReader()
+        token = service._record_reader.set(outer)
+        try:
+            with patch.object(service, '_payment_records', side_effect=RuntimeError):
+                with self.assertRaises(RuntimeError): service.get_payment_records()
+            self.assertIs(service._record_reader.get(), outer)
+        finally:
+            service._record_reader.reset(token)
+
+    def test_empty_page_does_not_read_vouchers(self):
+        with patch.object(service, '_require_fields'), patch.object(frappe, 'get_list', return_value=[]), patch.object(service, '_vouchers') as vouchers:
+            result = service.get_payment_records(search='no match')
+        self.assertEqual(result['total_count'], 0)
+        self.assertEqual(result['rows'], [])
+        vouchers.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()

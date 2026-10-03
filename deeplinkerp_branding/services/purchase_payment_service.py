@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 from contextlib import contextmanager
+from contextvars import ContextVar
 from decimal import Decimal, InvalidOperation
 
 import frappe
@@ -14,6 +15,70 @@ from frappe.utils import getdate, nowdate
 SOURCES = {"Purchase Receipt", "Purchase Order"}
 PI_FIELDS = {"company", "supplier", "currency", "party_account_currency", "grand_total", "base_grand_total",
              "rounded_total", "base_rounded_total", "disable_rounded_total", "outstanding_amount", "items", "is_return"}
+
+_record_reader = ContextVar("purchase_payment_record_reader", default=None)
+
+
+class _RecordReader:
+    """Request-local bulk hydration; every exposed document still passes normal permissions."""
+
+    def __init__(self):
+        self.docs = {}
+        self.fields = set()
+        self.checked = set()
+
+    def preload(self, doctype, names):
+        names = sorted(set(names) - {name for dt, name in self.docs if dt == doctype})
+        for offset in range(0, len(names), 500):
+            chunk = names[offset:offset + 500]
+            # Same internal raw values as get_doc/load_from_db, never returned directly.
+            parents = frappe.db.get_values(doctype, {"name": ["in", chunk]}, "*", as_dict=True)
+            by_name = {row.name: row for row in parents}
+            # Hydrate all child tables, including fields inspected by controller/user permissions.
+            for field in frappe.get_meta(doctype).get_table_fields():
+                for row in by_name.values():
+                    row[field.fieldname] = []
+                if by_name:
+                    children = frappe.db.get_values(field.options, {"parent": ["in", list(by_name)],
+                        "parenttype": doctype, "parentfield": field.fieldname}, "*", as_dict=True, order_by="idx asc")
+                    for child in children:
+                        by_name[child.parent][field.fieldname].append(child)
+            for name in chunk:
+                row = by_name.get(name)
+                doc = frappe.get_doc({"doctype": doctype, **row}) if row else None
+                if doc:
+                    if hasattr(doc, "__setup__"):
+                        doc.__setup__()
+                    doc.mask_fields()
+                self.docs[doctype, name] = doc
+
+    def doc(self, doctype, name):
+        key = (doctype, name)
+        if key not in self.docs:
+            self.docs[key] = frappe.get_doc(doctype, name)
+        doc = self.docs[key]
+        if doc is None:
+            raise frappe.DoesNotExistError
+        return doc
+
+    def check(self, doc):
+        key = (doc.doctype, doc.name)
+        if key not in self.checked:
+            doc.check_permission("read")
+            self.checked.add(key)
+
+
+def _read_doc(doctype, name):
+    reader = _record_reader.get()
+    return reader.doc(doctype, name) if reader else frappe.get_doc(doctype, name)
+
+
+def _check_read(doc):
+    reader = _record_reader.get()
+    if reader:
+        reader.check(doc)
+    else:
+        doc.check_permission("read")
 
 
 def amount(value):
@@ -27,20 +92,26 @@ def amount(value):
 
 
 def _require_fields(doctype, fields, parenttype=None):
+    reader = _record_reader.get()
+    key = (doctype, frozenset(fields), parenttype)
+    if reader and key in reader.fields:
+        return
     permitted = set(get_permitted_fields(doctype, parenttype=parenttype, permission_type="read"))
     meta = frappe.get_meta(doctype)
     levels = set(meta.get_permlevel_access(permission_type="read", parenttype=parenttype))
     permitted.update(df.fieldname for df in meta.fields if df.fieldtype in ("Table", "Table MultiSelect") and df.permlevel in levels)
     if not set(fields) <= permitted:
         frappe.throw("无权查看完整关联或金额字段", frappe.PermissionError)
+    if reader:
+        reader.fields.add(key)
 
 
 def _read(doctype, name, fields=()):
-    doc = frappe.get_doc(doctype, name)
-    doc.check_permission("read")
+    doc = _read_doc(doctype, name)
+    _check_read(doc)
     _require_fields(doctype, fields)
     if doc.get("company"):
-        frappe.get_doc("Company", doc.company).check_permission("read")
+        _check_read(_read_doc("Company", doc.company))
     return doc
 
 
@@ -136,12 +207,12 @@ def summarize(invoices):
     return [{key: float(value) if isinstance(value, Decimal) else value for key, value in row.items()} for row in groups.values()]
 
 
-def _vouchers(payment_name):
+def _vouchers(payment_names):
     if not frappe.db.exists("DocType", "China Accounting Voucher") or not frappe.has_permission("China Accounting Voucher", "read"):
         return []
     _require_fields("China Accounting Voucher", {"source_doctype", "source_name", "source_event", "status", "statutory_number"})
-    return frappe.get_list("China Accounting Voucher", filters={"source_doctype": "Payment Entry", "source_name": payment_name},
-                           fields=["name", "statutory_number", "source_event", "status", "docstatus"], limit_page_length=0)
+    return frappe.get_list("China Accounting Voucher", filters={"source_doctype": "Payment Entry", "source_name": ["in", payment_names]},
+                           fields=["name", "source_name", "statutory_number", "source_event", "status", "docstatus"], limit_page_length=0)
 
 
 def _procurement_references(payment, warnings):
@@ -166,25 +237,29 @@ def _procurement_references(payment, warnings):
 
 def _payment_row(doc):
     _require_fields("Payment Entry", {"company", "party", "party_type", "payment_type", "references", "posting_date", "paid_amount", "paid_from_account_currency", "paid_from", "received_amount", "paid_to_account_currency", "paid_to", "remarks"})
-    doc.check_permission("read")
-    frappe.get_doc("Company", doc.company).check_permission("read")
+    _check_read(doc)
+    _check_read(_read_doc("Company", doc.company))
     warnings = []
     refs = _procurement_references(doc, warnings)
     if not refs:
         return None
-    try:
-        vouchers = _vouchers(doc.name)
-    except frappe.PermissionError:
-        vouchers = []
     return {"name": doc.name, "company": doc.company, "supplier": doc.party, "posting_date": doc.posting_date,
             "docstatus": doc.docstatus, "payment_type": doc.payment_type, "amount": doc.received_amount if doc.payment_type == "Receive" else doc.paid_amount,
             "currency": doc.paid_to_account_currency if doc.payment_type == "Receive" else doc.paid_from_account_currency, "bank_account": doc.paid_to if doc.payment_type == "Receive" else doc.paid_from, "remarks": doc.remarks,
-            "references": refs, "vouchers": vouchers, "warnings": warnings,
+            "references": refs, "vouchers": [], "warnings": warnings,
             "state": {0: "草稿 · 未计已付", 1: "已提交", 2: "已取消 · 未计已付"}[doc.docstatus]}
 
 
 @frappe.whitelist()
 def get_payment_records(company=None, supplier=None, purchase_order=None, purchase_receipt=None, search=None, start=0, page_length=50):
+    token = _record_reader.set(_RecordReader())
+    try:
+        return _payment_records(company, supplier, purchase_order, purchase_receipt, search, start, page_length)
+    finally:
+        _record_reader.reset(token)
+
+
+def _payment_records(company, supplier, purchase_order, purchase_receipt, search, start, page_length):
     if purchase_order:
         _source("Purchase Order", purchase_order)
     receipt_orders = set()
@@ -200,12 +275,29 @@ def get_payment_records(company=None, supplier=None, purchase_order=None, purcha
     for field, value in (("company", company), ("party", supplier)):
         if value:
             filters[field] = value
-    names = frappe.get_list("Payment Entry", filters=filters, fields=["name"], order_by="posting_date desc, creation desc", limit_page_length=0, pluck="name")
+    try:
+        with _quiet_link_errors():
+            _require_fields("Payment Entry", {"party"})
+    except frappe.PermissionError:
+        candidates = []
+    else:
+        candidates = frappe.get_list("Payment Entry", filters=filters, fields=["name", "party"], order_by="posting_date desc, creation desc", limit_page_length=0)
+    # Preserve Python casefold and literal substring semantics (SQL LIKE/collations differ).
+    names = [row.name for row in candidates if not search or str(search).casefold() in (row.name + " " + (row.party or "")).casefold()]
+    reader = _record_reader.get()
+    reader.preload("Payment Entry", names)
+    payments = [reader.doc("Payment Entry", name) for name in names if reader.docs["Payment Entry", name]]
+    reader.preload("Company", {doc.company for doc in payments})
+    for doctype in ("Purchase Order", "Purchase Invoice"):
+        reader.preload(doctype, {ref.reference_name for doc in payments for ref in doc.references if ref.reference_doctype == doctype and ref.reference_name})
+    invoices = [doc for (dt, name), doc in reader.docs.items() if dt == "Purchase Invoice" and doc]
+    for doctype, field in (("Purchase Order", "purchase_order"), ("Purchase Receipt", "purchase_receipt")):
+        reader.preload(doctype, {item.get(field) for doc in invoices for item in doc.items if item.get(field)})
     rows = []
     for name in names:
         try:
             with _quiet_link_errors():
-                row = _payment_row(frappe.get_doc("Payment Entry", name))
+                row = _payment_row(reader.doc("Payment Entry", name))
         except (frappe.DoesNotExistError, frappe.PermissionError):
             continue
         if not row:
@@ -215,11 +307,20 @@ def get_payment_records(company=None, supplier=None, purchase_order=None, purcha
             continue
         if purchase_receipt and not any(purchase_receipt in ref["receipts"] or (ref["doctype"] == "Purchase Order" and receipt_orders.intersection(ref["orders"])) for ref in refs):
             continue
-        if search and str(search).casefold() not in (row["name"] + " " + row["supplier"]).casefold():
-            continue
         rows.append(row)
+    page = rows[start:start + page_length]
+    if page:
+        try:
+            with _quiet_link_errors():
+                vouchers = _vouchers([row["name"] for row in page])
+            by_name = {row["name"]: row for row in page}
+            for voucher in vouchers:
+                parent = voucher.pop("source_name")
+                by_name[parent]["vouchers"].append(voucher)
+        except frappe.PermissionError:
+            pass
     # No monetary total: refunds and mixed-purpose/multi-currency payments must not be silently summed.
-    return {"rows": rows[start:start + page_length], "total_count": len(rows),
+    return {"rows": page, "total_count": len(rows),
             "notice": "关联缺失或无权读取的单据不会作为可用链接；请在原生单据核对。仅显示有权查看的订单预付款或关联采购应付付款；草稿、取消不计已付。金额为整张付款单银行币种金额，核销见引用。关联订单预付款尚未核销时不计本入库已付。"}
 
 
