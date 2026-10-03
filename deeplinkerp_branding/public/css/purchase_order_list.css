@@ -1,0 +1,439 @@
+/* Purchase Order display adapter only. Removing the route class restores Desk. */
+body.dlp-purchase-order-grid-active {
+	--dlp-po-border: #e1e8f0;
+	--dlp-po-header-bg: #f4f7fb;
+	--dlp-po-row-bg: var(--fg-color, #fff);
+	--dlp-po-row-alt: #f8fafc;
+	--dlp-po-hover: #edf5ff;
+}
+
+body.dlp-purchase-order-grid-active .layout-main-section-wrapper {
+	min-width: 0;
+}
+
+body.dlp-purchase-order-grid-active .layout-main-section,
+body.dlp-purchase-order-grid-active .frappe-list {
+	min-width: 0;
+	border-radius: 4px;
+}
+
+body.dlp-purchase-order-grid-active .page-head-content {
+	min-height: 42px;
+	padding: 4px 12px;
+}
+
+body.dlp-purchase-order-grid-active .page-title h3 {
+	font-size: 18px;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-grid {
+	font-size: 13px;
+	--dlp-po-row-height: 30px;
+	--dlp-po-cell-padding: 4px 7px;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-standard,
+body.dlp-purchase-order-grid-active .dlp-po-standard .dlp-po-grid {
+	--dlp-po-row-height: 40px;
+	--dlp-po-cell-padding: 7px 9px;
+	font-size: 14px;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-filters,
+body.dlp-purchase-order-grid-active .dlp-po-toolbar,
+body.dlp-purchase-order-grid-active .dlp-po-paging {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 6px;
+	padding: 6px 0;
+	font-size: 13px;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-filters .form-group,
+body.dlp-purchase-order-grid-active .dlp-po-filters .frappe-control {
+	margin-bottom: 0;
+}
+
+body.dlp-purchase-order-grid-active .page-form .standard-filter-section {
+	display: none;
+}
+
+body.dlp-purchase-order-grid-active .page-form {
+	align-items: center;
+	gap: 6px;
+	padding: 6px 15px;
+}
+
+body.dlp-purchase-order-grid-active .page-form .dlp-po-filters {
+	padding: 0;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-filters .control-label {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	margin: -1px;
+	overflow: hidden;
+	clip: rect(0, 0, 0, 0);
+	white-space: nowrap;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-filter { width: 125px; }
+body.dlp-purchase-order-grid-active .dlp-po-filter[data-fieldname="search"] { width: 230px; }
+body.dlp-purchase-order-grid-active .dlp-po-filter[data-fieldname="from_date"],
+body.dlp-purchase-order-grid-active .dlp-po-filter[data-fieldname="to_date"] { width: 135px; }
+body.dlp-purchase-order-grid-active .dlp-po-filter[data-fieldname="company"] { width: 150px; }
+
+body.dlp-purchase-order-grid-active .dlp-po-toolbar label,
+body.dlp-purchase-order-grid-active .dlp-po-paging label {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	margin: 0;
+	white-space: nowrap;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-toolbar label select,
+body.dlp-purchase-order-grid-active .dlp-po-paging label select {
+	width: auto;
+	flex: 0 0 auto;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-column-option {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 0;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-column-option label {
+	flex: 1;
+	margin: 0;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-filters input,
+body.dlp-purchase-order-grid-active .dlp-po-filters select,
+body.dlp-purchase-order-grid-active .dlp-po-toolbar select,
+body.dlp-purchase-order-grid-active .dlp-po-paging select,
+body.dlp-purchase-order-grid-active .dlp-po-filters .btn,
+body.dlp-purchase-order-grid-active .dlp-po-toolbar .btn,
+body.dlp-purchase-order-grid-active .dlp-po-paging .btn,
+body.dlp-purchase-order-grid-active .page-actions .btn {
+	min-height: 30px;
+	height: 30px;
+	padding: 3px 8px;
+	border-radius: 4px;
+	font-size: 13px;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-filters .input-with-feedback {
+	background: var(--control-bg, #f6f8fa);
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-toolbar {
+	border-top: 1px solid var(--dlp-po-border);
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-grid .result-container {
+	max-width: 100%;
+	/* Reserve the wrapped filters, toolbar, totals and fixed-page controls. */
+	max-height: calc(100dvh - 320px);
+	height: auto !important;
+	overflow: auto;
+	scrollbar-width: thin;
+	border: 1px solid var(--dlp-po-border);
+	border-radius: 2px;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-grid .result {
+	min-width: 100%;
+	/* Override native mobile clipping; the outer result-container owns scrolling. */
+	width: max-content !important;
+	overflow: visible !important;
+	height: auto !important;
+	min-height: 32px;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-grid .no-result {
+	height: 200px !important;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-grid-header-columns,
+body.dlp-purchase-order-grid-active .dlp-po-grid-row {
+	display: grid;
+	grid-template-columns: var(--dlp-po-columns);
+	/* Native .level uses space-between; keep the same track origin as the header. */
+	justify-content: start;
+	align-items: stretch;
+	width: max-content;
+	min-width: 100%;
+	gap: 0;
+	margin: 0;
+	padding: 0;
+	background: var(--dlp-po-row-bg);
+	border: 0;
+	border-bottom: 1px solid var(--dlp-po-border);
+	border-radius: 0;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-grid-row {
+	min-height: var(--dlp-po-row-height);
+	position: static;
+}
+
+body.dlp-purchase-order-grid-active .result > .list-row-container:nth-child(odd) .dlp-po-grid-row {
+	--dlp-po-row-bg: var(--dlp-po-row-alt);
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-grid-row:hover,
+body.dlp-purchase-order-grid-active .dlp-po-grid-row:focus-within {
+	--dlp-po-row-bg: var(--dlp-po-hover);
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-grid-header {
+	display: block;
+	position: sticky;
+	top: 0;
+	z-index: 4;
+	min-height: 32px;
+	--dlp-po-row-bg: var(--dlp-po-header-bg);
+	color: var(--text-muted, #536174);
+	font-weight: 500;
+	width: max-content;
+	min-width: 100%;
+	margin: 0;
+	padding: 0;
+	background: var(--dlp-po-header-bg);
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-grid .list-row-container {
+	width: max-content;
+	min-width: 100%;
+	margin: 0;
+	padding: 0;
+}
+
+body.dlp-purchase-order-grid-active .result > .list-row-container:has(> .dlp-po-grid-header) {
+	position: sticky;
+	top: 0;
+	z-index: 4;
+	background: var(--dlp-po-header-bg);
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-native-paging {
+	display: none !important;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-grid-cell {
+	display: flex;
+	align-items: center;
+	min-width: 0;
+	max-width: none;
+	margin: 0;
+	padding: var(--dlp-po-cell-padding, 4px 7px);
+	line-height: 20px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	border-right: 1px solid var(--dlp-po-border);
+	background: var(--dlp-po-row-bg);
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-grid-cell:last-child {
+	border-right: 0;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-grid-cell > a,
+body.dlp-purchase-order-grid-active .dlp-po-grid-cell > span {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-grid-cell a {
+	color: var(--primary, #1677ff);
+	font-weight: 400;
+	text-decoration: none;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-grid-cell a:hover {
+	text-decoration: underline;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-frozen {
+	position: sticky;
+	left: var(--dlp-po-left, 0px);
+	z-index: 2;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-grid-header .dlp-po-frozen {
+	z-index: 5;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-frozen[data-fieldname="supplier_name"] {
+	box-shadow: 2px 0 0 var(--dlp-po-border);
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-number {
+	justify-content: flex-end;
+	font-variant-numeric: tabular-nums;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-date {
+	justify-content: center;
+	font-variant-numeric: tabular-nums;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-status {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	font-size: inherit;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-status .indicator-pill::before {
+	display: inline-block;
+	content: "";
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: currentColor;
+	flex-shrink: 0;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-status .indicator-pill {
+	background: transparent;
+	border: 0;
+	border-radius: 0;
+	box-shadow: none;
+	padding: 0;
+	font-size: inherit;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-status.green {
+	color: var(--green-600, #198754);
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-status.orange {
+	color: var(--orange-600, #b86e09);
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-status.red {
+	color: var(--red-600, #d23b3b);
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-status.blue {
+	color: var(--blue-600, #1677ff);
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-status.gray,
+body.dlp-purchase-order-grid-active .dlp-po-status.grey {
+	color: var(--text-muted, #65758b);
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-summary {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 12px;
+	min-height: 32px;
+	padding: 6px 8px;
+	background: #edf5ff;
+	border: 1px solid var(--dlp-po-border);
+	color: var(--text-color, #253447);
+	font-size: 13px;
+	font-variant-numeric: tabular-nums;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-paging {
+	justify-content: space-between;
+	min-height: 36px;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-grid input[type="checkbox"] {
+	width: 14px;
+	height: 14px;
+	margin: 0;
+	flex-shrink: 0;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-grid [data-sort-by] {
+	cursor: pointer;
+}
+
+body.dlp-purchase-order-grid-active .dlp-po-grid :focus-visible {
+	outline: 2px solid var(--primary, #1677ff);
+	outline-offset: -2px;
+}
+
+@media (min-width: 768px) {
+	body.dlp-purchase-order-grid-active:not(.dlp-mes-navigation-enabled) {
+		--sidebar-width: 132px;
+	}
+
+	body.dlp-purchase-order-grid-active:not(.dlp-mes-navigation-enabled) .body-sidebar {
+		padding: 6px;
+		gap: 8px;
+	}
+
+	body.dlp-purchase-order-grid-active:not(.dlp-mes-navigation-enabled) .body-sidebar .header-subtitle,
+	body.dlp-purchase-order-grid-active:not(.dlp-mes-navigation-enabled) .body-sidebar .sidebar-user-button .text-secondary {
+		display: none;
+	}
+
+	body.dlp-purchase-order-grid-active:not(.dlp-mes-navigation-enabled) .body-sidebar .sidebar-item-label {
+		font-size: 13px;
+	}
+
+	body.dlp-purchase-order-grid-active:not(.dlp-mes-navigation-enabled) .custom-filters-right-sidebar-container,
+	body.dlp-purchase-order-grid-active:not(.dlp-mes-navigation-enabled) .custom-filters-right-sidebar {
+		width: 56px;
+	}
+
+	body.dlp-purchase-order-grid-active:not(.dlp-mes-navigation-enabled) .custom-filters-right-sidebar-item {
+		width: 48px;
+		min-height: 48px;
+	}
+}
+
+@media (max-width: 767.98px) {
+	body.dlp-purchase-order-grid-active .page-form {
+		flex-wrap: wrap;
+	}
+
+	body.dlp-purchase-order-grid-active .dlp-po-filters {
+		width: 100%;
+	}
+
+	body.dlp-purchase-order-grid-active .dlp-po-frozen {
+		position: static;
+		box-shadow: none;
+	}
+
+	body.dlp-purchase-order-grid-active .dlp-po-filters > * {
+		max-width: 100%;
+	}
+
+	body.dlp-purchase-order-grid-active .dlp-po-filters input,
+	body.dlp-purchase-order-grid-active .dlp-po-filters select {
+		min-width: 0;
+	}
+
+	body.dlp-purchase-order-grid-active .dlp-po-grid .result-container {
+		max-height: 55dvh;
+	}
+}
+
+[data-theme="dark"] body.dlp-purchase-order-grid-active,
+body[data-theme="dark"].dlp-purchase-order-grid-active {
+	--dlp-po-border: #384456;
+	--dlp-po-header-bg: #263346;
+	--dlp-po-row-alt: #202c3d;
+	--dlp-po-hover: #223b59;
+}
+
+[data-theme="dark"] body.dlp-purchase-order-grid-active .dlp-po-summary,
+body[data-theme="dark"].dlp-purchase-order-grid-active .dlp-po-summary {
+	background: #223b59;
+}

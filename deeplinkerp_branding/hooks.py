@@ -24,7 +24,10 @@ add_to_apps_screen = [
 # ------------------
 
 # include js, css files in header of desk.html
-app_include_css = "/assets/deeplinkerp_branding/css/deeplinkerp_navigation.css?v=0.0.10"
+app_include_css = [
+	"/assets/deeplinkerp_branding/css/deeplinkerp_navigation.css?v=0.0.10",
+	"/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.5",
+]
 app_include_js = [
 	"/assets/deeplinkerp_branding/js/deeplinkerp_navigation.js?v=0.0.18",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_interface_mode.js?v=0.0.3",
@@ -47,7 +50,7 @@ web_include_css = "/assets/deeplinkerp_branding/css/deeplinkerp_branding.css"
 
 # include js in doctype views
 # doctype_js = {"doctype" : "public/js/doctype.js"}
-# doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
+doctype_list_js = {"Purchase Order": "public/js/purchase_order_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
 

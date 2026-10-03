@@ -1,0 +1,13 @@
+services:
+  backend:
+    image: deeplinkerp-local:purchase-order-grid
+  frontend:
+    image: deeplinkerp-local:purchase-order-grid
+  queue-long:
+    image: deeplinkerp-local:purchase-order-grid
+  queue-short:
+    image: deeplinkerp-local:purchase-order-grid
+  scheduler:
+    image: deeplinkerp-local:purchase-order-grid
+  websocket:
+    image: deeplinkerp-local:purchase-order-grid

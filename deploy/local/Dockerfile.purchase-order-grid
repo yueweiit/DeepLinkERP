@@ -1,0 +1,7 @@
+# Local UI preview only: retain all apps and inventory changes in the running image.
+ARG BASE_IMAGE=overseas-cost-local:inventory-category-preview
+FROM ${BASE_IMAGE}
+COPY --chown=frappe:frappe deeplinkerp_branding/hooks.py /home/frappe/frappe-bench/apps/deeplinkerp_branding/deeplinkerp_branding/hooks.py
+COPY --chown=frappe:frappe deeplinkerp_branding/public/js/purchase_order_list.js /home/frappe/frappe-bench/apps/deeplinkerp_branding/deeplinkerp_branding/public/js/purchase_order_list.js
+COPY --chown=frappe:frappe deeplinkerp_branding/public/js/purchase_order_export.js /home/frappe/frappe-bench/apps/deeplinkerp_branding/deeplinkerp_branding/public/js/purchase_order_export.js
+COPY --chown=frappe:frappe deeplinkerp_branding/public/css/purchase_order_list.css /home/frappe/frappe-bench/apps/deeplinkerp_branding/deeplinkerp_branding/public/css/purchase_order_list.css
