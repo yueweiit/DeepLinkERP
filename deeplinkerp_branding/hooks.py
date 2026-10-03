@@ -31,6 +31,7 @@ app_include_css = [
 	"/assets/deeplinkerp_branding/css/inventory_detail.bundle.css",
 ]
 app_include_js = [
+	"/assets/deeplinkerp_branding/js/compact_list.js",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_navigation.js?v=0.0.18",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_interface_mode.js?v=0.0.3",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_branding.js?v=0.0.26",
@@ -54,7 +55,11 @@ web_include_css = "/assets/deeplinkerp_branding/css/deeplinkerp_branding.css"
 
 # include js in doctype views
 # doctype_js = {"doctype" : "public/js/doctype.js"}
-doctype_list_js = {"Purchase Order": "public/js/purchase_order_list.js"}
+doctype_list_js = {
+	"Purchase Order": "public/js/purchase_order_list.js",
+	"Material Request": "public/js/material_request_list.js",
+}
+doctype_js = {"Material Request": "public/js/material_request_form.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
 

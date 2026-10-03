@@ -19,10 +19,10 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		):
 			self.assertIn(suite, workflow)
 
-	def test_compact_list_is_registered_only_for_purchase_orders(self):
+	def test_compact_list_is_registered_only_for_supported_native_lists(self):
 		self.assertEqual(
 			getattr(hooks, "doctype_list_js", {}),
-			{"Purchase Order": "public/js/purchase_order_list.js"},
+			{"Purchase Order": "public/js/purchase_order_list.js", "Material Request": "public/js/material_request_list.js"},
 		)
 
 	def test_desk_loads_compact_styles_without_changing_website_assets(self):
@@ -40,6 +40,7 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 			Path(__file__).resolve().parents[1]
 			/ "deeplinkerp_branding/public/css/purchase_order_list.css"
 		).read_text()
+		css = css.replace("body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active)", "body.dlp-purchase-order-grid-active")
 		shared_grid_rule = re.search(
 			r"\.dlp-po-grid-header-columns,\s*"
 			r"body\.dlp-purchase-order-grid-active \.dlp-po-grid-row\s*\{([^}]+)\}",

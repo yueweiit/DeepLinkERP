@@ -248,7 +248,7 @@
 		const bytes = await removeNativeOwner(native, { expectedColumns: args.fields.length + 1, ownerLabels: [...new Set(["Owner", "Created By", "创建人", root.__("Owner"), root.__("Created By")])] });
 		const url = root.URL.createObjectURL(new root.Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
 		const link = root.document.createElement("a");
-		link.href = url; link.download = "采购订单.xlsx";
+		link.href = url; link.download = `${args.title === "Purchase Order" ? "采购订单" : args.title === "Material Request" ? "物料申请" : args.title || args.doctype || "Export"}.xlsx`;
 		root.document.body.appendChild(link);
 		link.click(); link.remove();
 		root.setTimeout(() => root.URL.revokeObjectURL(url), 1000);
