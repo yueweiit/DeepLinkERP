@@ -105,6 +105,7 @@
 				if (checked) {
 					next.set(key, {
 						item_code: group.item_code,
+						...(group.item_name ? { item_name: group.item_name } : {}),
 						source_warehouse: group.warehouse,
 					});
 				} else {
@@ -307,8 +308,11 @@
 		}
 
 		makeFilters() {
-			const resetAndRefresh = () => this.refresh(true);
+			const resetAndRefresh = () => {
+				if (!this.suppressFilterChanges) this.refresh(true);
+			};
 			const defaultCompany = resolveDefaultCompany(frappe);
+			this.company = defaultCompany;
 			this.fields = {};
 			this.fields.company = this.page.add_field({
 				fieldname: "company",
@@ -316,13 +320,7 @@
 				fieldtype: "Link",
 				options: "Company",
 				default: defaultCompany,
-				change: () => {
-					if (this.fields.snapshot_key) this.fields.snapshot_key.set_value("");
-					if (this.fields.warehouse) this.fields.warehouse.set_value("");
-					if (this.fields.item_group && !this.isMaterial)
-						this.fields.item_group.set_value("");
-					resetAndRefresh();
-				},
+				change: () => this.changeCompany(),
 			});
 			if (this.isMaterial) {
 				this.fields.snapshot_key = this.page.add_field({
@@ -408,10 +406,56 @@
 			this.page.add_inner_button("导出 Excel", () => this.exportExcel());
 		}
 
+		async changeCompany() {
+			if (this.suppressFilterChanges || this.companyChangePending) return;
+			const nextCompany = this.fields.company.get_value() || "";
+			const previousCompany = this.company || "";
+			if (nextCompany === previousCompany) return;
+			this.companyChangePending = true;
+			++this.requestId; // Invalidate responses from the company being left.
+			this.suppressFilterChanges = true;
+			const restored = this.fields.company.set_value(previousCompany);
+			this.updateMovementButton();
+			const decision = this.selected.size
+				? new Promise((resolve) => {
+					const confirmation = frappe.confirm(
+						"切换公司将清空已选物料，是否继续？",
+						() => resolve(true), () => resolve(false));
+					confirmation?.$wrapper?.on("hidden.bs.modal", () => {
+						// Resolve dismissal after the primary/secondary action callbacks.
+						queueMicrotask(() => resolve(false));
+					});
+				})
+				: Promise.resolve(true);
+			try {
+				await restored;
+				if (!(await decision)) return;
+				this.resetSelection();
+				this.company = nextCompany;
+				this.selectionCompany = nextCompany;
+				this.effectiveCompany = "";
+				this.canCreateStockEntry = false;
+				await this.fields.company.set_value(nextCompany);
+				for (const key of ["snapshot_key", "warehouse", ...(!this.isMaterial ? ["item_group"] : [])]) {
+					if (this.fields[key]) await this.fields[key].set_value("");
+				}
+			} finally {
+				// A second edit while the confirmation is open must not commit a third company.
+				await this.fields.company.set_value(this.company || "");
+				this.companyChangePending = false;
+				this.suppressFilterChanges = false;
+				this.loading = false;
+				this.$root?.removeClass("is-loading");
+				this.updateMovementButton();
+			}
+			return this.refresh(true);
+		}
+
 		renderShell() {
 			this.$root = $(
 				`<section class="inventory-detail" aria-label="${escapeHtml(this.config.title)}">
           <div class="id-actions">
+            <button type="button" class="btn btn-default btn-sm" data-inventory-action="selected">已选物料 (0)</button>
             <button type="button" class="btn btn-default btn-sm" data-inventory-action="movement" disabled aria-disabled="true">物料移动 (0)</button>
           </div>
           <div class="id-summary" role="status">正在读取库存…</div>
@@ -428,10 +472,12 @@
 			$(this.page.body).children(":not(.page-form)").remove();
 			$(this.page.body).append(this.$root);
 			this.$movementButton = this.$root.find('[data-inventory-action="movement"]');
+			this.$selectedButton = this.$root.find('[data-inventory-action="selected"]');
 			this.updateMovementButton();
 		}
 
 		bindEvents() {
+			this.$root.on("click", '[data-inventory-action="selected"]', () => this.openSelectionDialog());
 			this.$root.on("click", '[data-inventory-action="movement"]', () =>
 				this.openMovementDialog()
 			);
@@ -440,12 +486,14 @@
 				frappe.set_route("Form", "Item", $(event.currentTarget).attr("data-item-code"));
 			});
 			this.$root.on("change", "[data-selection-key]", (event) => {
+				if (this.loading || this.companyChangePending || !this.effectiveCompany) return;
 				const key = $(event.currentTarget).attr("data-selection-key");
 				const group = this.currentGroups.find((row) => selectionKey(row) === key);
 				if (!group?.warehouse) return;
 				if (event.currentTarget.checked) {
 					this.selected.set(key, {
 						item_code: group.item_code,
+						item_name: group.item_name || "",
 						source_warehouse: group.warehouse,
 					});
 				} else {
@@ -454,6 +502,7 @@
 				this.updateSelectionUi();
 			});
 			this.$root.on("change", "[data-select-current-page]", (event) => {
+				if (this.loading || this.companyChangePending || !this.effectiveCompany) return;
 				this.selected = updateCurrentPageSelection(
 					this.currentGroups,
 					this.selected,
@@ -504,6 +553,7 @@
 		}
 
 		updateSelectionUi() {
+			this.$selectedButton?.text(`已选物料 (${this.selected.size})`);
 			const selectableKeys = this.currentGroups
 				.filter((group) => group.warehouse)
 				.map(selectionKey);
@@ -526,7 +576,12 @@
 			if (!this.$movementButton?.length) return;
 			const label = `物料移动 (${this.selected.size})`;
 			const reason = this.movementDisabledReason || "";
-			const disabled = !this.canCreateStockEntry || this.selected.size === 0;
+			const disabled = !this.canCreateStockEntry || this.selected.size === 0 ||
+				Boolean(this.loading || this.companyChangePending) ||
+				Boolean(this.fields && (!this.effectiveCompany ||
+					this.effectiveCompany !== this.company ||
+					this.effectiveCompany !== this.selectionCompany ||
+					this.effectiveCompany !== this.fields.company.get_value()));
 			this.$movementButton.text(label);
 			this.$movementButton.prop("disabled", disabled);
 			this.$movementButton.attr("aria-disabled", disabled ? "true" : "false");
@@ -543,6 +598,10 @@
 		}
 
 		async refresh(resetStart = false) {
+			if (this.companyChangePending || this.suppressFilterChanges) return;
+			if ((this.fields.company.get_value() || "") !== (this.company || "")) {
+				return this.changeCompany();
+			}
 			if (resetStart) this.start = 0;
 			try {
 				this.pageLength = normalizePageLength(this.fields.page_length.get_value());
@@ -550,9 +609,13 @@
 				frappe.msgprint(error.message);
 				return;
 			}
-			this.resetSelection();
 			const requestId = ++this.requestId;
+			const requestedCompany = this.company;
+			this.loading = true;
+			this.canCreateStockEntry = false;
+			this.updateMovementButton();
 			this.$root.addClass("is-loading");
+			this.$root.find("[data-selection-key], [data-select-current-page]").prop("disabled", true);
 			this.$root.find(".id-summary").text("正在读取库存…");
 			try {
 				const method = this.isMaterial
@@ -567,10 +630,15 @@
 				const response = await frappe.call({ method, args });
 				if (requestId !== this.requestId) return;
 				const payload = response.message || {};
+				if (payload.company && payload.company !== requestedCompany) {
+					throw new Error("公司信息已变化，请重新选择公司后读取库存。");
+				}
 				this.lastPayload = payload;
 				this.currentGroups = payload.groups || [];
-				this.effectiveCompany = payload.company || this.fields.company.get_value() || "";
-				this.canCreateStockEntry = Boolean(payload.can_create_stock_entry);
+				this.effectiveCompany = payload.company || "";
+				this.selectionCompany = this.effectiveCompany;
+				this.canCreateStockEntry = Boolean(payload.can_create_stock_entry) &&
+					Boolean(this.effectiveCompany) && this.effectiveCompany === requestedCompany;
 				this.movementDisabledReason = payload.movement_disabled_reason || "";
 				if (this.isMaterial) this.setSnapshotOptions(payload.snapshot_options || []);
 				else this.setItemGroupOptions(payload.item_group_options || []);
@@ -591,11 +659,16 @@
 				this.renderPager(payload);
 			} catch (error) {
 				if (requestId !== this.requestId) return;
+				this.canCreateStockEntry = false;
 				this.currentGroups = [];
 				this.renderRows();
 				this.$root.find(".id-summary").text(error.message || "库存明细读取失败。");
 			} finally {
-				if (requestId === this.requestId) this.$root.removeClass("is-loading");
+				if (requestId === this.requestId) {
+					this.loading = false;
+					this.$root.removeClass("is-loading");
+					this.updateMovementButton();
+				}
 			}
 		}
 
@@ -656,15 +729,48 @@
 			downloadBase64File(response.message || {});
 		}
 
+		canMoveSelection() {
+			return !this.loading && !this.companyChangePending && this.canCreateStockEntry &&
+				this.selected.size > 0 && Boolean(this.effectiveCompany) &&
+				this.effectiveCompany === this.company &&
+				this.effectiveCompany === this.selectionCompany &&
+				this.effectiveCompany === this.fields.company.get_value();
+		}
+
+		openSelectionDialog() {
+			const dialog = new frappe.ui.Dialog({
+				title: "已选物料",
+				fields: [{ fieldname: "selections", fieldtype: "HTML" }],
+				primary_action_label: "清空已选",
+				primary_action: () => { this.resetSelection(); this.renderRows(); render(); },
+			});
+			const wrapper = dialog.fields_dict.selections.$wrapper;
+			const render = () => wrapper.html(this.selected.size
+				? `<table class="table table-bordered"><thead><tr><th>物料编码</th><th>物料名称</th><th>来源仓库</th><th></th></tr></thead><tbody>${
+					[...this.selected.entries()].map(([key, row]) => `<tr><td>${escapeHtml(row.item_code)}</td><td>${escapeHtml(row.item_name || "")}</td><td>${escapeHtml(row.source_warehouse)}</td><td><button type="button" class="btn btn-default btn-xs" data-remove-selection="${escapeHtml(key)}">移除</button></td></tr>`).join("")
+				}</tbody></table>` : '<div class="text-muted">暂无已选物料</div>');
+			wrapper.on("click", "[data-remove-selection]", (event) => {
+				this.selected.delete($(event.currentTarget).attr("data-remove-selection"));
+				this.renderRows();
+				render();
+			});
+			render();
+			dialog.show();
+		}
+
 		async openMovementDialog() {
-			if (!this.canCreateStockEntry || !this.selected.size) return;
-			const company = this.effectiveCompany || this.fields.company.get_value();
+			if (!this.canMoveSelection()) return;
+			const company = this.effectiveCompany;
+			const requestId = this.requestId;
+			const selections = JSON.stringify([...this.selected.values()]);
 			const response = await frappe.call({
 				method: "deeplinkerp_branding.services.inventory_detail_service.get_inventory_movement_context",
-				args: { company, selections: JSON.stringify([...this.selected.values()]) },
+				args: { company, selections },
 				freeze: true,
 				freeze_message: "正在重新核对实时库存…",
 			});
+			if (requestId !== this.requestId || !this.canMoveSelection() ||
+				selections !== JSON.stringify([...this.selected.values()])) return;
 			const context = response.message || {};
 			const typePurposes = new Map(
 				(context.stock_entry_types || []).map((row) => [row.name, row.purpose])
@@ -770,7 +876,7 @@
 					},
 				],
 				primary_action_label: "打开未保存物料移动单",
-				primary_action: (values) => this.prepareMovement(dialog, values, company),
+				primary_action: (values) => this.prepareMovement(dialog, values, company, requestId, selections),
 			});
 			dialog.show();
 		}
@@ -793,7 +899,14 @@
 			);
 		}
 
-		async prepareMovement(dialog, values, company) {
+		async prepareMovement(dialog, values, company, requestId = this.requestId,
+			selections = JSON.stringify([...this.selected.values()])) {
+			const isCurrent = () => this.canMoveSelection() && company === this.effectiveCompany &&
+				requestId === this.requestId && selections === JSON.stringify([...this.selected.values()]);
+			if (!isCurrent()) {
+				frappe.msgprint("库存列表或已选物料已变化，请重新打开物料移动。");
+				return;
+			}
 			const rows = (values.items || []).map((row) => ({
 				item_code: row.item_code,
 				source_warehouse: row.source_warehouse,
@@ -814,6 +927,7 @@
 				freeze: true,
 				freeze_message: "正在准备标准物料移动单…",
 			});
+			if (!isCurrent()) return;
 			const result = response.message || {};
 			dialog.hide();
 			if (result.requires_completion && result.completion_message) {

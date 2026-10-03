@@ -87,7 +87,7 @@ def test_shared_page_uses_integer_page_size_and_only_opens_an_unsaved_stock_entr
 	assert "prepare_inventory_stock_entry" in source
 	assert 'frappe.set_route("Form", "Stock Entry"' in source
 	assert "overseas_costing.services.inventory_location_service" not in source
-	assert "this.resetSelection();" in source
+	assert "this.resetSelection();" not in source.split("async refresh(", 1)[1].split("renderPager(payload)", 1)[0]
 	assert "物料移动 (${this.selected.size})" in source
 	assert "this.movementActionDataLabel" not in source
 	assert ".menu-item-label" not in source
@@ -105,6 +105,171 @@ def test_reset_selection_clears_visible_row_and_header_checkboxes() -> None:
 	assert '"[data-selection-key], [data-select-current-page]"' in reset_selection
 	assert '$selectionInputs.prop("checked", false);' in reset_selection
 	assert '$selectionInputs.prop("indeterminate", false);' in reset_selection
+
+
+LIFECYCLE_SETUP = """
+const element={length:1,find(){return this},prop(){return this},attr(){return this},
+ text(){return this},html(){return this},addClass(){return this},removeClass(){return this}};
+function makePage(){
+ const values={company:'C1',keyword:'',warehouse:'W1',page_length:1};
+ const fields=Object.fromEntries(Object.keys(values).map(k=>[k,{get_value:()=>values[k],
+  set_value:async v=>{values[k]=v}}]));
+ const page=Object.assign(Object.create(inventory.InventoryDetailPage.prototype),{
+  fields,config:{category:'finished_goods'},isMaterial:false,start:0,pageLength:1,requestId:0,
+  selected:new Map(),currentGroups:[],company:'C1',effectiveCompany:'C1',
+  selectionCompany:'C1',canCreateStockEntry:true,$root:element,$movementButton:element,
+  setItemGroupOptions(){},renderPager(){}});
+ return {page,values};
+}
+const group=(code)=>({item_code:code,item_name:'Name '+code,warehouse:'W1',locations:[]});
+global.frappe={msgprint(){},call:async()=>({message:{company:'C1',groups:[group('A')],can_create_stock_entry:true}})};
+"""
+
+
+@pytest.mark.parametrize("category", ["material", "semi_finished", "finished_goods", "mold"])
+def test_actual_refresh_retains_selection_across_search_filter_paging_and_errors(category: str) -> None:
+	result = run_js(LIFECYCLE_SETUP + f"const category={json.dumps(category)};\n" + """
+(async()=>{
+ const {page,values}=makePage();
+ page.config.category=category;page.isMaterial=category==='material';page.setSnapshotOptions=()=>{};
+ await page.refresh();
+ page.selected=inventory.updateCurrentPageSelection(page.currentGroups,page.selected,true);
+ values.keyword='B'; frappe.call=async()=>({message:{company:'C1',groups:[group('B')],can_create_stock_entry:true}});
+ await page.refresh(true);
+ page.selected=inventory.updateCurrentPageSelection(page.currentGroups,page.selected,true);
+ values.warehouse=''; page.start=1; await page.refresh();
+ const count=page.selected.size;
+ page.selected=inventory.updateCurrentPageSelection(page.currentGroups,page.selected,false);
+ const offpage=[...page.selected.values()].map(r=>r.item_code);
+ frappe.call=async()=>{throw Error('permission denied')}; await page.refresh();
+ const failure={count:page.selected.size,permission:page.canCreateStockEntry};
+ page.resetSelection();
+ console.log(JSON.stringify({count,offpage,failure,reset:page.selected.size}));
+})();
+""")
+	assert result == {"count": 2, "offpage": ["A"], "failure": {"count": 1, "permission": False}, "reset": 0}
+
+
+def test_company_switch_cancel_keeps_filters_and_selections_and_ignores_pending_response() -> None:
+	result = run_js(LIFECYCLE_SETUP + """
+(async()=>{
+ const {page,values}=makePage();
+ page.selected=inventory.updateCurrentPageSelection([group('A')],page.selected,true);
+ let resolve; frappe.call=()=>new Promise(r=>resolve=r);
+ const loading=page.refresh(); values.company='C2';
+ let cancel; frappe.confirm=(message,yes,no)=>{cancel=no};
+ const changing=page.changeCompany();
+ const pending={company:values.company,warehouse:values.warehouse,loading:page.loading};
+ cancel(); await changing;
+ resolve({message:{company:'C2',groups:[group('B')],can_create_stock_entry:true}}); await loading;
+ console.log(JSON.stringify({pending,company:values.company,warehouse:values.warehouse,
+  count:page.selected.size,effective:page.effectiveCompany,groups:page.currentGroups.length}));
+})();
+""")
+	assert result == {"pending": {"company": "C1", "warehouse": "W1", "loading": True}, "company": "C1", "warehouse": "W1", "count": 1, "effective": "C1", "groups": 0}
+
+
+def test_company_confirmation_accept_clears_once_and_cancel_restores_racing_field_edit() -> None:
+	result = run_js(LIFECYCLE_SETUP + """
+(async()=>{
+ const {page,values}=makePage();
+ page.selected=inventory.updateCurrentPageSelection([group('A')],page.selected,true);
+ let yes,no,calls=0; frappe.confirm=(message,y,n)=>{yes=y;no=n};
+ values.company='C2'; const cancelled=page.changeCompany();
+ values.company='C3'; no(); await cancelled;
+ const cancelCompany=values.company;
+ values.company='C2'; const accepted=page.changeCompany();
+ frappe.call=async()=>{calls++;return {message:{company:'C2',groups:[group('B')],can_create_stock_entry:true}}};
+ yes(); await accepted;
+ console.log(JSON.stringify({cancelCompany,company:values.company,warehouse:values.warehouse,
+  count:page.selected.size,calls,movable:page.canMoveSelection()}));
+})();
+""")
+	assert result == {"cancelCompany": "C1", "company": "C2", "warehouse": "", "count": 0, "calls": 1, "movable": False}
+
+
+def test_company_confirmation_dismiss_releases_pending_state_and_reentrant_change_is_ignored() -> None:
+	result = run_js(LIFECYCLE_SETUP + """
+(async()=>{
+ const {page,values}=makePage();let hidden;
+ page.selected=inventory.updateCurrentPageSelection([group('A')],page.selected,true);
+ page.fields.company.set_value=async value=>{values.company=value;await page.changeCompany()};
+ frappe.confirm=()=>({$wrapper:{on(event,callback){hidden=callback}}});
+ values.company='C2';const changing=page.changeCompany();
+ if (!hidden){console.log(JSON.stringify({handler:false}));return;}
+ hidden();await changing;
+ console.log(JSON.stringify({handler:true,pending:page.companyChangePending,
+  company:values.company,warehouse:values.warehouse,count:page.selected.size}));
+})();
+""")
+	assert result == {"handler": True, "pending": False, "company": "C1", "warehouse": "W1", "count": 1}
+
+
+def test_loading_unknown_company_and_stale_movement_context_cannot_open_dialog() -> None:
+	result = run_js(LIFECYCLE_SETUP + """
+(async()=>{
+ const {page,values}=makePage();
+ page.selected=inventory.updateCurrentPageSelection([group('A')],page.selected,true);
+ let calls=0,resolve,dialogs=0;
+ frappe.ui={Dialog:function(){dialogs++}};
+ frappe.call=()=>{calls++;return new Promise(r=>resolve=r)};
+ page.loading=true; await page.openMovementDialog(); page.loading=false;
+ page.effectiveCompany=''; await page.openMovementDialog(); page.effectiveCompany='C1';
+ const opening=page.openMovementDialog(); ++page.requestId;
+ resolve({message:{items:[group('A')]}}); await opening;
+ console.log(JSON.stringify({calls,dialogs}));
+})();
+""")
+	assert result == {"calls": 1, "dialogs": 0}
+
+
+def test_removing_selection_while_movement_context_loads_cannot_open_old_dialog() -> None:
+	result = run_js(LIFECYCLE_SETUP + """
+(async()=>{
+ const {page}=makePage();
+ page.selected=inventory.updateCurrentPageSelection([group('A'),group('B')],page.selected,true);
+ let resolve,dialogs=0; frappe.ui={Dialog:function(){dialogs++;this.show=()=>{}}};
+ frappe.call=()=>new Promise(r=>resolve=r);
+ const opening=page.openMovementDialog();page.selected.delete(inventory.selectionKey(group('A')));
+ resolve({message:{items:[group('A'),group('B')]}});await opening;
+ console.log(JSON.stringify({dialogs,count:page.selected.size}));
+})();
+""")
+	assert result == {"dialogs": 0, "count": 1}
+
+
+def test_instances_have_independent_selection_and_stale_prepare_cannot_open_stock_entry() -> None:
+	result = run_js(LIFECYCLE_SETUP + """
+(async()=>{
+ const {page}=makePage();const other=makePage().page;
+ page.selected=inventory.updateCurrentPageSelection([group('A')],page.selected,true);
+ let resolve,opened=0; page.openUnsavedStockEntry=()=>opened++;
+ frappe.call=()=>new Promise(r=>resolve=r);
+ const preparing=page.prepareMovement({hide(){}},{items:[{item_code:'A',source_warehouse:'W1',qty:1}]},'C1');
+ ++page.requestId;resolve({message:{stock_entry:{name:'NEW'}}});await preparing;
+ console.log(JSON.stringify({opened,other:other.selected.size,count:page.selected.size}));
+})();
+""")
+	assert result == {"opened": 0, "other": 0, "count": 1}
+
+
+def test_selected_dialog_removes_individual_offpage_items_and_clears_all() -> None:
+	result = run_js(LIFECYCLE_SETUP + """
+const {page}=makePage();
+page.selected=inventory.updateCurrentPageSelection([group('A'),group('B')],page.selected,true);
+let options,remove,html='';
+const wrapper={html(v){html=v},on(event,selector,callback){remove=callback}};
+frappe.ui={Dialog:function(o){options=o;this.fields_dict={selections:{$wrapper:wrapper}};this.show=()=>{}}};
+global.$=target=>({attr:()=>target.key});
+page.openSelectionDialog(); const initial=html;
+remove({currentTarget:{key:inventory.selectionKey(group('A'))}});
+const remaining=[...page.selected.values()].map(row=>row.item_code);
+options.primary_action();
+console.log(JSON.stringify({initial,remaining,count:page.selected.size,empty:html}));
+""")
+	assert "Name A" in result["initial"] and "W1" in result["initial"]
+	assert result["remaining"] == ["B"]
+	assert result["count"] == 0 and "暂无已选物料" in result["empty"]
 
 
 def test_all_four_routes_are_thin_wrappers_over_the_shared_component() -> None:
