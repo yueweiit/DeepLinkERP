@@ -6,6 +6,7 @@ from copy import deepcopy
 
 import frappe
 from frappe import _
+from mes_integration.mes_integration.request_category import validate_category
 
 from frappe.model.document import bulk_insert
 from frappe.model.mapper import get_mapped_doc
@@ -387,6 +388,11 @@ def validate_mes_material_request_payload(material_request_data):
     """Perform cheap validation before storing a task; full validation runs in the worker."""
     if not isinstance(material_request_data, dict):
         frappe.throw(_("缺少 Material Request 数据或数据格式不正确"))
+
+    try:
+        validate_category(material_request_data.get("custom_mes_issue_category"))
+    except ValueError:
+        frappe.throw(_("MES申请类别不支持"))
 
     if material_request_data.get("doctype") not in (None, "Material Request"):
         frappe.throw(_("只能通过此接口创建 Material Request"))

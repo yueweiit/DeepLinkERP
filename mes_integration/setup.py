@@ -17,6 +17,7 @@ def sync_custom_fields():
 	from mes_integration.patches.v1_0.add_material_request_item_details import execute as add_request_details
 	from mes_integration.patches.v1_0.add_material_request_item_transferred_qty import execute as add_transferred_qty
 	from mes_integration.patches.v1_0.add_mes_custom_fields import execute as add_mes_fields
+	from mes_integration.patches.v1_0.add_material_request_issue_category import execute as add_issue_category
 
 	add_request_details()
 	add_transferred_qty()
@@ -24,6 +25,7 @@ def sync_custom_fields():
 	add_delivery_status()
 	add_company_fields()
 	add_mes_fields()
+	add_issue_category()
 
 
 def after_install():
