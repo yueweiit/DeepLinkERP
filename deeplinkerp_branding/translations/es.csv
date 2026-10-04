@@ -1,7 +1,117 @@
-"Deeplinkerp","Deeplinkerp"
-"Deeplinkerp Settings","Configuración de DLP"
-"DLP Framework","Framework de DLP"
-"Finance","Finanzas"
-"Deeplinkerp Branding","Branding de Deeplinkerp"
-"Deeplinkerp brand","Marca Deeplinkerp"
-"Sent via Deeplinkerp","Enviado mediante Deeplinkerp"
+Deeplinkerp,Deeplinkerp
+Deeplinkerp Settings,Configuración de DLP
+DLP Framework,Framework de DLP
+Finance,Finanzas
+Deeplinkerp Branding,Branding de Deeplinkerp
+Deeplinkerp brand,Marca Deeplinkerp
+Sent via Deeplinkerp,Enviado mediante Deeplinkerp
+IVA 增值税,IVA
+订单号 / 客户 / ODT,Pedido / cliente / ODT
+ERP 业务状态,Estado en ERP
+标准,Normal
+主要字段,Vista principal
+结束日期,Hasta
+导出失败,No se pudo exportar
+已开票,Facturado
+显示 ERP 已同步字段；负责人来自销售团队，创建人是 ERP 账户。,Estos datos vienen de ERP. El responsable es del equipo de ventas; el creador es la cuenta de ERP.
+更新时间,Última actualización
+草稿,Borrador
+每页,Por página
+ERP 标题,Título en ERP
+订单详情,Detalle del pedido
+ERP 单价,Precio unitario ERP
+下一页,Siguiente
+无权查看产品明细,No tienes acceso a las partidas.
+ERP 明细金额,Importe de la partida en ERP
+联系人,Contacto
+版本,Versión
+清空筛选,Limpiar filtros
+销售备注,Observaciones de ventas
+待确认,Pendiente de confirmar
+全部订单,Todos los pedidos
+紧凑,Compacta
+ERP 订单号,Pedido ERP
+订单附件,Archivos adjuntos
+已选择：{0},Seleccionados: {0}
+ERP 创建人,Creado en ERP por
+预计交付日期沿用 ERP 交期；CRM 未同步的源字段不作推断。,La entrega estimada es la fecha registrada en ERP. Los datos que CRM no envió no se completan por suposición.
+收起额外字段,Mostrar menos columnas
+展开产品行或查看明细；左右滚动查看全部字段。,Abre las partidas o el detalle. Desliza la tabla para ver todas las columnas.
+没有可见附件,No hay archivos adjuntos disponibles.
+CRM 订单号,Pedido CRM
+已提交,Confirmado
+开始日期,Desde
+财务待放行,Por autorizar a producción
+序号,No.
+显示全部明细字段,Ver todas las columnas
+订单资料,Datos del pedido
+订单日期,Fecha del pedido
+ERP 更新人,Actualizado en ERP por
+已关闭,Cerrado
+产品,Producto
+创建时间,Fecha de creación
+规格型号,Especificaciones
+币种,Moneda
+项,partidas
+最近确认人 / 时间,Última autorización / fecha
+已驳回,Rechazado
+联系人邮箱,Correo del contacto
+摘要,Descripción
+可发货,Listo para enviar
+允许生产,Autorizar producción
+已取消,Cancelado
+订单状态,Estado del pedido
+我的订单,Mis pedidos
+保存,Guardar
+客户,Cliente
+ERP 客户编码,Código del cliente en ERP
+字段分组,Grupo de columnas
+密度,Densidad
+订单基本信息,Datos del pedido
+数量,Cantidad
+列设置,Columnas
+已交付,Entregado
+待尾款确认,Pendiente de liquidar saldo
+品目编码,Código del artículo
+品项名,Artículo
+最多读取2500张订单,Se pueden leer hasta 2500 pedidos.
+联系电话,Teléfono
+导出失败，请重试。,No se pudo exportar. Intenta de nuevo.
+来源与进度,Origen y avance
+当前用户没有导出权限。,No tienes permiso para exportar.
+部分发货,Enviado parcialmente
+多单位明细,Varias unidades; ver partidas
+补充信息读取失败；可打开原生订单核对。,No se cargaron todos los datos. Puedes revisar el pedido en ERP.
+现有 OR 筛选已保留；清除后可使用订单 / 客户搜索。,Se conservaron los filtros OR. Quítalos para buscar por pedido o cliente.
+订单产品明细,Partidas del pedido
+打开原生订单,Abrir pedido en ERP
+ERP 订单金额,Importe del pedido en ERP
+待人工确认允许生产,Pendiente de autorización para producir
+Excel 导出组件加载失败，请刷新页面后重试。,No se cargó la herramienta de Excel. Actualiza la página e intenta de nuevo.
+ERP 预付款汇总,Anticipos registrados en ERP
+财务确认 / 同步,Autorización / envío a producción
+预计交付日期,Entrega estimada
+打开原生订单编辑,Editar pedido en ERP
+待财务放行,Pendiente de autorización financiera
+允许生产（{0}单）,Autorizar producción ({0} pedidos)
+查看明细,Ver detalle
+生产已放行,Autorizado para producción
+收款记录未录入不代表未收款；定金由财务按线下约定判断。,"Si no aparece un cobro, no significa que no se haya pagado. Finanzas autoriza según lo acordado con el cliente."
+展开产品明细,Ver partidas del pedido
+项目,Proyecto
+已完成,Terminado
+操作,Acciones
+多明细,Varias partidas
+交付日期,Fecha de entrega
+仓库,Almacén
+未找到可见的关联收款记录,No aparecen cobros registrados para este pedido.
+导出 Excel,Exportar a Excel
+公司,Empresa
+上一页,Anterior
+正在核验订单…,Revisando pedidos…
+关联收款记录,Cobros registrados
+CRM/MES 同步中,Enviando a CRM/MES
+业务负责人,Responsable de ventas
+产品系列,Línea de producto
+CRM / ERP 订单号,Pedido CRM / ERP
+未选择订单,Selecciona los pedidos que quieras autorizar.

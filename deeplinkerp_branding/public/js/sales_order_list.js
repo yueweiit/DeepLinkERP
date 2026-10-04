@@ -1,4 +1,124 @@
-(function(root){
- const columns=[["transaction_date","订单日期",96],["name","销售订单",166],["customer_name","客户",180],["dlp_product","产品",150],["dlp_quantity","数量",95],["dlp_rate","单价",100],["custom_process_status","业务状态",130],["status","订单状态",110],["delivery_date","交期",96],["grand_total","订单金额",135],["currency","币种",60],["company","公司",140],["per_delivered","已交付%",85],["per_billed","已开票%",85],["project","项目",110],["dlp_sales_person","业务员",100],["owner","创建人",110]].map(([fieldname,label,width])=>({fieldname,label,width}));
- const grid=root.DeepLinkERPCompactList.create({doctype:"Sales Order",columns,defaultColumns:["transaction_date","name","customer_name","dlp_product","dlp_quantity","dlp_rate","custom_process_status","delivery_date","grand_total"],computedFields:["dlp_product","dlp_quantity","dlp_rate","dlp_sales_person"],onRows:async c=>{const id=c.requestId,names=c.list.data.map(d=>d.name);if(!names.length)return;try{const result=(await frappe.call({method:"deeplinkerp_branding.services.compact_sales_service.get_sales_display_details",args:{sales_orders:JSON.stringify(names)}})).message||{};if(c.requestId!==id)return;for(const doc of c.list.data)Object.assign(doc,result[doc.name]||{});c.list.render_list();}catch(error){/* Native rows remain available. */}},renderValue:(field,doc,format,escape)=>{if(field==="dlp_rate")return typeof doc[field]==="number"?`${escape(doc[field].toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}))} ${escape(doc.currency||"")}`:escape(doc[field]||"—");if(field==="custom_process_status")return escape(__(doc[field]||"Pending Confirmation"));},controllerKey:"dlpSalesOrderGrid",routeClass:"dlp-sales-order-grid-active",freezeUntil:"customer_name",numbers:["grand_total","per_delivered","per_billed"],dates:["transaction_date","delivery_date"],moneySummary:true,quickFields:["company","status"],searchFields:["name","customer_name"],extraFields:["customer"],controls:[{fieldname:"search",fieldtype:"Data",label:"订单号 / 客户"},{fieldname:"company",fieldtype:"Link",options:"Company",label:"公司"},{fieldname:"status",fieldtype:"Select",label:"订单状态"},{fieldname:"from_date",fieldtype:"Date",label:"订单开始日期",permission_field:"transaction_date"},{fieldname:"to_date",fieldtype:"Date",label:"订单结束日期",permission_field:"transaction_date"}]});grid.install(root);
-})(globalThis);
+(function (root, factory) {
+	const api = factory(root, root.DeepLinkERPCompactList || (typeof require === "function" ? require("./compact_list.js") : null));
+	if (typeof module === "object" && module.exports) module.exports = api;
+	root.DeepLinkERPSalesWorkspace = api;
+	if (root.frappe?.listview_settings) api.install(root);
+})(typeof globalThis !== "undefined" ? globalThis : this, function (root, engine) {
+	"use strict";
+	const API = "deeplinkerp_branding.services.compact_sales_service.";
+	const statusLabels = { "Pending Confirmation": "待确认", "Pending Deposit Confirmation": "待财务放行", "Deposit Confirmation Processing": "CRM/MES 同步中", "Pending Production": "生产已放行", "Pending Final Payment": "待尾款确认", "Deliverable": "可发货", "Partially Delivered": "部分发货", "Completed": "已完成", "Rejected": "已驳回", "Cancelled": "已取消", "Closed": "已关闭" };
+	const COLUMNS = [
+		["name", "CRM / ERP 订单号", 190], ["customer_name", "客户", 165], ["custom_process_status", "ERP 业务状态", 145], ["dlp_product", "产品", 170], ["dlp_quantity", "数量", 105], ["grand_total", "ERP 订单金额", 145], ["delivery_date", "预计交付日期", 110], ["transaction_date", "订单日期", 105],
+		["title", "ERP 标题", 170], ["contact_display", "联系人", 160], ["contact_email", "联系人邮箱", 200], ["contact_mobile", "联系电话", 140], ["customer", "ERP 客户编码", 150], ["dlp_sales_person", "业务负责人", 155], ["dlp_rate", "ERP 单价", 125], ["custom_odt", "ODT", 130], ["custom_remark", "销售备注", 230], ["company", "公司", 180], ["currency", "币种", 70], ["status", "订单状态", 145], ["advance_paid", "ERP 预付款汇总", 150], ["owner", "ERP 创建人", 190], ["creation", "创建时间", 165], ["modified_by", "ERP 更新人", 190], ["modified", "更新时间", 165], ["per_delivered", "已交付", 85], ["per_billed", "已开票", 85], ["project", "项目", 130],
+		["dlp_receipts", "关联收款记录", 290], ["dlp_sync", "财务确认 / 同步", 200], ["dlp_last_confirmation", "最近确认人 / 时间", 235], ["dlp_actions", "操作", 110],
+	].map(([fieldname, label, width]) => ({ fieldname, label, width }));
+	const presets = {
+		main: ["name", "customer_name", "custom_process_status", "dlp_product", "dlp_quantity", "grand_total", "delivery_date", "dlp_actions"],
+		middle: ["name", "title", "contact_display", "dlp_sales_person", "customer", "transaction_date", "delivery_date", "custom_remark", "dlp_actions"],
+		tail: ["name", "custom_odt", "status", "per_delivered", "owner", "creation", "modified_by", "modified", "dlp_actions"],
+		finance: ["name", "customer_name", "grand_total", "dlp_receipts", "dlp_sync", "dlp_last_confirmation", "dlp_actions"],
+	};
+	const itemColumns = [["idx", "序号"], ["item_code", "品目编码"], ["item_name", "品项名"], ["custom_specifications", "规格型号"], ["custom_version", "版本"], ["qty", "数量"], ["rate", "ERP 单价"], ["custom_item_tax_amount", "IVA 增值税"], ["amount", "ERP 明细金额"], ["delivery_date", "交付日期"], ["description", "摘要"], ["custom_product", "产品系列"], ["warehouse", "仓库"]];
+	const esc = value => String(value ?? "").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]);
+	const t = (value, args) => (root.__ || ((x, values = []) => x.replace(/\{(\d+)\}/g, (_, i) => values[i] ?? "")))(value, args);
+	const state = value => t(statusLabels[value] || value || "—");
+	const money = (value, currency) => value === undefined || value === null ? "—" : `${Number(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${esc(currency || "")}`;
+	const call = async (method, args) => (await root.frappe.call({ method: API + method, args })).message;
+	function itemTable(detail, full = true) {
+		const permitted = new Set(detail.item_fields || []), currency = detail.header.currency;
+		const columns = itemColumns.filter(([field]) => permitted.has(field));
+		if (!columns.length) return `<p>${esc(t("无权查看产品明细"))}</p>`;
+		return `<div class="dlp-sales-items-scroll"><table class="table dlp-sales-items ${full ? "" : "dlp-sales-items-overview"}"><thead><tr>${columns.map(([field, label], i) => `<th${i > 7 ? ' class="dlp-sales-extra-item"' : ""}>${esc(t(label))}</th>`).join("")}</tr></thead><tbody>${(detail.items || []).map(item => `<tr>${columns.map(([field], i) => {
+			let value = item[field] ?? "—";
+			if (["rate", "custom_item_tax_amount", "amount"].includes(field)) value = money(item[field], currency);
+			else if (field === "qty") value = esc(item[field] ?? "—") + (permitted.has("uom") ? ` ${esc(item.uom)}` : "");
+			else value = esc(value);
+			return `<td${i > 7 ? ' class="dlp-sales-extra-item"' : ""}>${value}</td>`;
+		}).join("")}</tr>`).join("")}</tbody></table></div>`;
+	}
+	function detailsHTML(detail) {
+		const header = detail.header;
+		const fields = [["custom_crm_order_no", "CRM 订单号"], ["name", "ERP 订单号"], ["customer_name", "客户"], ["customer", "ERP 客户编码"], ["title", "ERP 标题"], ["contact_display", "联系人"], ["contact_email", "联系人邮箱"], ["contact_mobile", "联系电话"], ["transaction_date", "订单日期"], ["delivery_date", "预计交付日期"], ["company", "公司"], ["custom_process_status", "ERP 业务状态"], ["grand_total", "ERP 订单金额"], ["advance_paid", "ERP 预付款汇总"], ["custom_odt", "ODT"], ["custom_remark", "销售备注"], ["owner", "ERP 创建人"], ["creation", "创建时间"], ["modified_by", "ERP 更新人"], ["modified", "更新时间"]].filter(([field]) => Object.hasOwn(header, field));
+		return `<div class="dlp-sales-detail-layout"><section><h4>${esc(t("订单基本信息"))}</h4><dl>${fields.map(([field, label]) => `<dt>${esc(t(label))}</dt><dd>${field === "custom_process_status" ? esc(state(header[field])) : ["grand_total", "advance_paid"].includes(field) ? money(header[field], header[field === "advance_paid" ? "party_account_currency" : "currency"]) : esc(header[field] || "—")}</dd>`).join("")}</dl><p class="text-muted">${esc(t("显示 ERP 已同步字段；负责人来自销售团队，创建人是 ERP 账户。"))}</p><a class="btn btn-default btn-sm" href="/desk/sales-order/${encodeURIComponent(header.name)}">${esc(t(detail.can_edit ? "打开原生订单编辑" : "打开原生订单"))}</a></section><section><div class="dlp-sales-detail-heading"><h4>${esc(t("订单产品明细"))}</h4><button class="btn btn-default btn-sm dlp-sales-all-items" aria-expanded="false">${esc(t("显示全部明细字段"))}</button></div>${itemTable(detail, false)}<h4>${esc(t("订单附件"))}</h4>${(detail.attachments || []).filter(file => /^\/(private\/)?files\//.test(file.file_url)).map(file => `<p><a target="_blank" rel="noopener" href="${esc(file.file_url)}">${esc(file.file_name)}</a></p>`).join("") || `<p class="text-muted">${esc(t("没有可见附件"))}</p>`}<p class="text-muted">${esc(t("预计交付日期沿用 ERP 交期；CRM 未同步的源字段不作推断。"))}</p></section></div>`;
+	}
+	function renderValue(field, doc, formatters) {
+		const tr = formatters.translate || t;
+		if (field === "name") return `${esc(doc.custom_crm_order_no || doc.name)}${doc.custom_crm_order_no ? `<small class="dlp-sales-erp-number">ERP: ${esc(doc.name)}</small>` : ""}`;
+		if (field === "custom_process_status") return `<span class="dlp-sales-state">${esc(tr(statusLabels[doc[field]] || doc[field] || "—"))}</span>`;
+		if (field === "dlp_product") return esc(doc.dlp_product || "—") + (doc.dlp_item_count > 1 ? `<small> · ${doc.dlp_item_count} ${esc(tr("项"))}</small>` : "");
+		if (field === "dlp_quantity") return doc.dlp_multiple_units ? esc(tr("多单位明细")) : doc.dlp_quantity == null ? "—" : `${esc(doc.dlp_quantity)} ${esc(doc.dlp_uom)}`;
+		if (field === "dlp_rate") return doc.dlp_item_count > 1 ? esc(tr("多明细")) : money(doc.dlp_rate, doc.currency);
+		if (field === "dlp_actions") return `<button type="button" class="btn btn-default btn-xs dlp-sales-detail" data-name="${esc(doc.name)}">${esc(tr("查看明细"))}</button>`;
+		if (field === "dlp_receipts") return (doc.dlp_finance?.receipts || []).map(payment => `${esc(payment.name)} · ${esc(tr(payment.docstatus === 1 ? "已提交" : payment.docstatus === 2 ? "已取消" : "草稿"))}<br>${money(payment.allocated_amount, payment.currency)}`).join("<br>") || esc(tr("未找到可见的关联收款记录"));
+		if (field === "dlp_sync") return doc.dlp_finance ? `<span>${esc(doc.dlp_finance.reason || tr("待人工确认允许生产"))}</span>` : esc(tr("正在核验订单…"));
+		if (field === "dlp_last_confirmation") { const audit = doc.dlp_finance?.last_confirmation; return audit ? `${esc(audit.user)}<br>${esc(audit.creation)}` : "—"; }
+	}
+	function transformQuery(args, controller) {
+		if (controller.salesView === "mine" && controller.allowed.has("owner")) args.filters.push(["Sales Order", "owner", "=", root.frappe.session.user]);
+		if (controller.salesView === "finance" && controller.allowed.has("custom_process_status")) args.filters.push(["Sales Order", "custom_process_status", "in", ["Pending Deposit Confirmation", "Deposit Confirmation Processing"]]);
+		if (controller.quick.product && controller.allowed.has("items")) args.filters.push(["Sales Order Item", "item_code", "=", controller.quick.product]);
+		return args;
+	}
+	function invalidateExpandedDetails(controller) {
+		for (const [name, detail] of controller.salesExpanded || []) { const row = controller.list.data.find(item => item.name === name); if (!row || (row.modified && row.modified !== detail.header.modified)) controller.salesExpanded.delete(name); }
+	}
+	async function onRows(controller) {
+		invalidateExpandedDetails(controller);
+		const names = controller.list.data.map(row => row.name), generation = controller.requestId;
+		try {
+			const details = await call("get_sales_display_details", { sales_orders: names });
+			if (generation !== controller.requestId) return;
+			controller.list.data.forEach(row => Object.assign(row, details[row.name] || {}));
+			if (controller.salesView === "finance") {
+				const finance = [];
+				for (let start = 0; start < names.length; start += 100) { const response = await root.frappe.call({ method: "crm_integration.crm_integration.finance_release.get_finance_release_review", args: { sales_orders: names.slice(start, start + 100) } }); if (generation !== controller.requestId) return; finance.push(...response.message.orders); }
+				controller.list.data.forEach(row => { row.dlp_finance = finance.find(item => item.name === row.name); });
+			}
+			controller.list.render_list(); controller.list.set_rows_as_checked?.(); controller.list.on_row_checked?.();
+		} catch (_) { controller.$salesNotice?.text(t("补充信息读取失败；可打开原生订单核对。")); }
+	}
+	function mountControls(controller) {
+		if (!root.$ || !controller.$toolbar) return;
+		controller.salesView = "all"; controller.salesExpanded = new Map();
+		const bar = root.$(`<div class="dlp-sales-viewbar"><div class="dlp-sales-tabs">${[["all", "全部订单"], ["mine", "我的订单"], ["finance", "财务待放行"]].map(([value, label]) => `<button class="btn btn-default btn-sm" type="button" data-sales-view="${value}" aria-pressed="${value === "all"}">${esc(t(label))}</button>`).join("")}</div><div class="dlp-sales-release-action"><span class="dlp-sales-selected" role="status">${esc(t("未选择订单"))}</span><button type="button" class="btn btn-primary dlp-sales-release" disabled>${esc(t("允许生产"))} (0)</button></div></div>`).insertBefore(controller.list.$frappe_list);
+		controller.$salesNotice = root.$(`<p class="dlp-sales-notice text-muted">${esc(t("展开产品行或查看明细；左右滚动查看全部字段。"))}</p>`).insertAfter(bar);
+		const updateSelection = () => {
+			const selected = controller.list.get_checked_items?.() || [];
+			bar.find(".dlp-sales-selected").text(selected.length ? t("已选择：{0}", [selected.length]) : t("未选择订单"));
+			bar.find(".dlp-sales-release").text(root.CRMFinanceRelease?.buttonLabel(selected.length) || t("允许生产（{0}单）", [selected.length])).prop("disabled", !selected.length || selected.length > 100);
+		};
+		controller.list.$result?.on("change.dlpSalesSelection", ".list-row-checkbox,.list-check-all", () => setTimeout(updateSelection, 0));
+		controller.updateSalesSelection = updateSelection;
+		bar.find(".dlp-sales-release").on("click", async () => { const names = controller.list.get_checked_items().map(row => typeof row === "string" ? row : row.name); const open = () => root.CRMFinanceRelease.open(names, () => { controller.list.clear_checked_items?.(); updateSelection(); controller.refresh(); }); if (!root.CRMFinanceRelease) await root.frappe.require("/assets/crm_integration/js/finance_release.js"); open(); });
+		bar.find("[data-sales-view]").on("click", async event => {
+			controller.salesView = event.currentTarget.dataset.salesView;
+			bar.find("[data-sales-view]").attr("aria-pressed", "false"); root.$(event.currentTarget).attr("aria-pressed", "true");
+			controller.list.clear_checked_items?.(); controller.salesExpanded.clear(); updateSelection();
+			if (controller.salesView === "finance") { controller.resetting = true; controller.quick.custom_process_status = ""; await controller.controls.custom_process_status?.set_value(""); controller.resetting = false; }
+			controller.setColumns(presets[controller.salesView === "finance" ? "finance" : "main"]); controller.setPage(0); controller.refresh();
+			controller.$salesNotice.text(t(controller.salesView === "finance" ? "收款记录未录入不代表未收款；定金由财务按线下约定判断。" : "展开产品行或查看明细；左右滚动查看全部字段。"));
+		});
+		const select = root.$(`<select class="form-control input-xs dlp-sales-preset" aria-label="${esc(t("字段分组"))}">${[["main", "主要字段"], ["middle", "订单资料"], ["tail", "来源与进度"]].map(([value, label]) => `<option value="${value}">${esc(t(label))}</option>`).join("")}</select>`).prependTo(controller.$toolbar);
+		select.on("change", event => controller.setColumns(presets[event.target.value]));
+		controller.list.$result?.on("click.dlpSalesDetails", ".dlp-sales-detail,.dlp-sales-expand", async event => {
+			event.preventDefault(); event.stopPropagation(); const button = root.$(event.currentTarget), name = button.attr("data-name");
+			if (button.hasClass("dlp-sales-expand") && controller.salesExpanded.has(name)) { controller.salesExpanded.delete(name); controller.list.render_list(); controller.list.set_rows_as_checked?.(); return; }
+			button.prop("disabled", true);
+			try { const detail = await call("get_sales_order_details", { sales_order: name }); if (button.hasClass("dlp-sales-expand")) { controller.salesExpanded.set(name, detail); controller.list.render_list(); controller.list.set_rows_as_checked?.(); } else {
+				const dialog = new root.frappe.ui.Dialog({ title: `${t("订单详情")} · ${name}`, size: "extra-large", fields: [{ fieldname: "details", fieldtype: "HTML", options: detailsHTML(detail) }] }); dialog.$wrapper.addClass("dlp-sales-detail-dialog"); dialog.show(); dialog.$wrapper.find(".dlp-sales-all-items").on("click", e => { const expanded = e.currentTarget.getAttribute("aria-expanded") !== "true"; e.currentTarget.setAttribute("aria-expanded", String(expanded)); e.currentTarget.textContent = t(expanded ? "收起额外字段" : "显示全部明细字段"); dialog.$wrapper.find(".dlp-sales-items").toggleClass("dlp-sales-items-overview", !expanded); });
+			} } finally { button.prop("disabled", false); }
+		});
+	}
+	const grid = engine.create({ doctype: "Sales Order", controllerKey: "dlpSalesOrderGrid", routeClass: "dlp-sales-order-grid-active", columns: COLUMNS, freezeUntil: "name", defaultColumns: presets.main,
+		computedFields: ["dlp_product", "dlp_quantity", "dlp_rate", "dlp_sales_person", "dlp_receipts", "dlp_sync", "dlp_last_confirmation", "dlp_actions"], extraFields: ["customer", "custom_crm_order_no", "party_account_currency"],
+		numbers: ["grand_total", "advance_paid", "per_delivered", "per_billed"], dates: ["transaction_date", "delivery_date"], moneySummary: true, quickFields: ["company", "customer", "status", "custom_process_status"], searchFields: ["name", "custom_crm_order_no", "customer_name", "custom_odt"], optionLabels: { custom_process_status: statusLabels },
+		controls: [{ fieldname: "search", fieldtype: "Data", label: "订单号 / 客户 / ODT" }, { fieldname: "customer", fieldtype: "Link", options: "Customer", label: "客户" }, { fieldname: "custom_process_status", fieldtype: "Select", label: "ERP 业务状态" }, { fieldname: "from_date", permission_field: "transaction_date", fieldtype: "Date", label: "开始日期" }, { fieldname: "to_date", permission_field: "transaction_date", fieldtype: "Date", label: "结束日期" }, { fieldname: "product", permission_field: "items", fieldtype: "Link", options: "Item", label: "品目编码" }, { fieldname: "company", fieldtype: "Link", options: "Company", label: "公司" }],
+		searchConflictMessage: "现有 OR 筛选已保留；清除后可使用订单 / 客户搜索。",
+		transformQuery, onRows, mountControls, renderValue,
+		renderLink: (controller, doc, value) => `<button type="button" class="dlp-sales-name dlp-sales-detail" data-name="${esc(doc.name)}">${value}</button>`,
+		renderSequence: (controller, doc, sequence) => `<button class="dlp-sales-expand" type="button" data-name="${esc(doc.name)}" aria-expanded="${controller.salesExpanded?.has(doc.name) || false}" aria-label="${esc(t("展开产品明细"))}">${controller.salesExpanded?.has(doc.name) ? "⌄" : "›"} ${sequence}</button>`,
+		rowExtra: (controller, doc) => controller.salesExpanded?.has(doc.name) ? `<section class="dlp-sales-expanded"><strong>${esc(t("订单产品明细"))}</strong>${itemTable(controller.salesExpanded.get(doc.name))}</section>` : "",
+		afterRender: controller => controller.updateSalesSelection?.(),
+	});
+	return { ...grid, COLUMNS, presets, itemTable, detailsHTML, transformQuery, statusLabels, invalidateExpandedDetails };
+});

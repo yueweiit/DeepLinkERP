@@ -273,9 +273,10 @@
 			if (controller.quick.search && nativeArgs.or_filters?.length) {
 				controller.quick.search = "";
 				controller.searchControl?.$input?.val("");
-				frappe.show_alert?.({ message: controller.translate("现有 OR 筛选已保留；请清除这些条件后使用订单/供应商搜索。"), indicator: "orange" });
+				frappe.show_alert?.({ message: controller.translate(config.searchConflictMessage || "现有 OR 筛选已保留；请清除这些条件后使用订单/供应商搜索。"), indicator: "orange" });
 			}
-			const args = buildQuery(nativeArgs, controller.quick, allowed);
+			const baseArgs = buildQuery(nativeArgs, controller.quick, allowed);
+			const args = config.transformQuery?.(baseArgs, controller) || baseArgs;
 			const signature = JSON.stringify([args.filters, args.or_filters, args.order_by]);
 			if (controller.querySignature !== null && controller.querySignature !== signature) {
 				controller.setPage(0);
@@ -360,6 +361,7 @@
 				doc._idx = index;
 				this.$result?.append(this.get_list_row_html(doc));
 			});
+			config.afterRender?.(controller);
 			if (providerActive(controller) && !currentRows(controller).length) this.$result?.append('<div class="list-row-container dlp-provider-empty text-muted text-center" role="status">没有符合条件的采购记录</div>');
 		};
 		list.toggle_result_area = function () {
@@ -471,12 +473,13 @@
 		const checkbox = readonly ? "" : `<input type="checkbox" class="list-row-checkbox" data-doctype="${DOCTYPE}" data-name="${escapeHTML(doc.name)}">`;
 		const cells = layout(controller).map((col) => {
 			let value = (readonly ? config.provider.renderValue?.(col.fieldname, doc, formatters, escapeHTML) : undefined) ?? renderValue(col.fieldname, doc, formatters);
-			if (col.fieldname === "name") value = `<a href="${escapeHTML(readonly ? config.provider.formLink(doc) : list.get_form_link(doc))}" data-name="${escapeHTML(doc.name)}">${value}</a>`;
+			if (col.fieldname === "name") value = config.renderLink?.(controller, doc, value) ?? `<a href="${escapeHTML(readonly ? config.provider.formLink(doc) : list.get_form_link(doc))}" data-name="${escapeHTML(doc.name)}">${value}</a>`;
 			if (col.fieldname === "supplier_name" && doc.supplier) value = `<a href="/desk/supplier/${encodeURIComponent(doc.supplier)}">${value}</a>`;
 			if (col.fieldname === "status" && !readonly) value = list.get_indicator_html(doc, Boolean(list.workflow_state_fieldname)) || value;
 			return cellHTML(col, value, controller.allowed.has(col.fieldname) ? doc[col.fieldname] ?? "—" : "");
 		}).join("");
-		return `<div class="list-row-container" tabindex="0"><div class="level ${readonly ? "dlp-po-readonly-row" : "list-row"} dlp-po-grid-row" style="--dlp-po-columns:${template(controller)}">${selectionCell(checkbox, controller.page * controller.pageSize + (doc._idx || 0) + 1)}${cells}</div></div>`;
+		const sequence = controller.page * controller.pageSize + (doc._idx || 0) + 1;
+		return `<div class="list-row-container" tabindex="0"><div class="level ${readonly ? "dlp-po-readonly-row" : "list-row"} dlp-po-grid-row" style="--dlp-po-columns:${template(controller)}">${selectionCell(checkbox, config.renderSequence?.(controller, doc, sequence) ?? sequence)}${cells}</div>${config.rowExtra?.(controller, doc) || ""}</div>`;
 	}
 
 	function mountControls(controller) {
@@ -535,6 +538,7 @@
 		}
 		controller.savePreferences();
 		config.provider?.mountControls?.(controller);
+		config.mountControls?.(controller);
 		paintSummary(controller);
 	}
 
