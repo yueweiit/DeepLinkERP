@@ -220,10 +220,10 @@ function add_production_flow_buttons(frm) {
 
 	if (can_replace_cancel_with_reject(frm)) {
 		replace_cancel_button_with_reject(frm);
-		frm.add_custom_button(__("确认定金并推送至MES"), function() {
+		frm.add_custom_button(__("允许生产（1单）"), function() {
 			confirm_deposit_and_push_to_mes(frm);
 		});
-		apply_primary_action_style("确认定金并推送至MES");
+		apply_primary_action_style("允许生产（1单）");
 	}
 
 	if (frm.doc.docstatus === 1 && process_status === "Pending Final Payment") {

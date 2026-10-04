@@ -961,6 +961,9 @@ def reconcile_final_payment(sales_order_name):
 	if sales_order.docstatus != 1:
 		frappe.throw(_("销售订单必须提交后才能核销尾款。"))
 
+	from crm_integration.crm_integration.finance_release import assert_production_released
+	assert_production_released(sales_order.name, sales_order.get("company"))
+
 	grand_total = flt(sales_order.get("grand_total"), sales_order.precision("grand_total"))
 	advance_paid = flt(sales_order.get("advance_paid"), sales_order.precision("advance_paid"))
 

@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - crm_integration
   pull_request:
 
 concurrency:
@@ -53,6 +54,9 @@ jobs:
         with:
           node-version: 24
           check-latest: true
+
+      - name: Check manual finance release UI
+        run: node --test crm_integration/*.test.js
 
       - name: Cache pip
         uses: actions/cache@v4

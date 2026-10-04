@@ -143,3 +143,4 @@ ERP 订单金额,Importe del pedido en ERP
 未获得生产放行权限；管理员可在角色权限管理中配置。,No tienes permiso para autorizar producción. El administrador puede asignarlo en los permisos de roles.
 CRM/MES 同步处理中,Enviando a CRM/MES
 待定金确认,Pendiente de autorización financiera
+业务状态由财务确认和 CRM/MES 同步流程更新，不能直接修改。,El estado del pedido se actualiza con la autorización de Finanzas y el envío a CRM/MES. No se puede cambiar manualmente.

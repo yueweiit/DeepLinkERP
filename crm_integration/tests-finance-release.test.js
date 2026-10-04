@@ -23,3 +23,7 @@ test("malicious source names cannot inject markup into financial records",()=>{
 test("button wording identifies production and displays the selected count",()=>{
  assert.equal(finance.buttonLabel(1),"允许生产（1单）"); assert.equal(finance.buttonLabel(5),"允许生产（5单）");
 });
+
+test("current synchronized status wins over an older failed attempt",()=>{
+ assert.match(finance.stateLabel({process_status:"Pending Production",last_confirmation:{status:"Failed"}}),/已完成/);
+});

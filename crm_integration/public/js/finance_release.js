@@ -14,9 +14,9 @@
 	function eligibleNames(rows) { return rows.filter(row => row.can_release).map(row => row.name); }
 	function retryNames(rows) { return rows.filter(row => row.state === "failed").map(row => row.name); }
 	function stateLabel(row) {
-		if (row.state === "failed" || row.last_confirmation?.status === "Failed") return t("同步失败，可重新核验后重试");
-		if (row.process_status === "Deposit Confirmation Processing" || row.state === "processing") return t("CRM/MES 同步处理中");
 		if (["Pending Production", "Pending Final Payment", "Deliverable", "Partially Delivered", "Completed"].includes(row.process_status)) return t("已完成生产放行同步");
+		if (row.process_status === "Deposit Confirmation Processing" || row.state === "processing") return t("CRM/MES 同步处理中");
+		if (row.state === "failed" || row.last_confirmation?.status === "Failed") return t("同步失败，可重新核验后重试");
 		return row.can_release ? t("待人工确认允许生产") : row.reason || t("不可处理");
 	}
 	function rowsHTML(rows) {
@@ -44,7 +44,7 @@
 			panel.find(".crm-release-table").html(`<table class="table"><thead><tr>${["订单 / 客户", "ERP 订单金额", "关联收款（分配额 / 账户币种）", "核验与同步结果"].map(label => `<th>${esc(t(label))}</th>`).join("")}</tr></thead><tbody>${rowsHTML(review)}</tbody></table>`);
 			const eligible = eligibleNames(review);
 			panel.find(".crm-release-count").text(`${t("可确认")}: ${eligible.length} · ${t("暂不可处理")}: ${review.length - eligible.length}`);
-			panel.find(".crm-release-confirm").text(`${t("允许生产")} (${eligible.length})`).prop("disabled", busy || !eligible.length || results.length > 0);
+			panel.find(".crm-release-confirm").text(buttonLabel(eligible.length)).prop("disabled", busy || !eligible.length || results.length > 0);
 			panel.find(".crm-release-retry").prop("hidden", !retryNames(results).length);
 		}
 		async function load(selected) {

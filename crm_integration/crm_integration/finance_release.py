@@ -29,33 +29,40 @@ def readable_fields(doctype, parenttype=None):
 def read_order(name):
 	doc = frappe.get_doc("Sales Order", name)
 	doc.check_permission("read")
-	if not {"company", "custom_process_status"} <= readable_fields("Sales Order"):
+	if not {"company", "customer", "custom_process_status"} <= readable_fields("Sales Order"):
 		frappe.throw(_("无权读取放行所需的订单字段。"), frappe.PermissionError)
 	frappe.get_doc("Company", doc.company).check_permission("read")
 	return doc
 
 
 def recorded_receipts(doc):
-	"""Expose readable PE allocations with their native account currency, never infer cash received."""
+	"""Validate associations internally; expose only readable native PE allocation fields."""
 	result = {"receipts": [], "receipts_complete": False, "association_error": False}
-	order_fields = readable_fields("Sales Order")
-	pe_fields = {"company", "party_type", "party", "payment_type", "references", "posting_date", "paid_from_account_currency", "paid_to_account_currency"}
-	ref_fields = {"reference_doctype", "reference_name", "allocated_amount"}
-	if "customer" not in order_fields or not pe_fields <= readable_fields("Payment Entry") or not ref_fields <= readable_fields("Payment Entry Reference", "Payment Entry"):
-		return result
 	parents = frappe.get_all("Payment Entry Reference", filters={"reference_doctype": "Sales Order", "reference_name": doc.name}, pluck="parent", distinct=True, limit_page_length=0)
-	result["receipts_complete"] = True
+	payments = []
 	for name in parents:
-		payment = frappe.get_doc("Payment Entry", name)
-		if not frappe.has_permission("Payment Entry", "read", doc=payment):
-			result["receipts_complete"] = False
+		try:
+			payment = frappe.get_doc("Payment Entry", name)
+		except frappe.DoesNotExistError:
+			result["association_error"] = True
 			continue
 		if payment.company != doc.company or payment.party_type != "Customer" or payment.party != doc.customer:
 			result["association_error"] = True
 			continue
+		payments.append(payment)
+	pe_fields = {"company", "party_type", "party", "payment_type", "references", "posting_date", "paid_from_account_currency", "paid_to_account_currency"}
+	ref_fields = {"reference_doctype", "reference_name", "allocated_amount"}
+	if not pe_fields <= readable_fields("Payment Entry") or not ref_fields <= readable_fields("Payment Entry Reference", "Payment Entry"):
+		return result
+	result["receipts_complete"] = True
+	for payment in payments:
+		if not frappe.has_permission("Payment Entry", "read", doc=payment):
+			result["receipts_complete"] = False
+			continue
 		allocation = sum(row.allocated_amount for row in payment.references if row.reference_doctype == "Sales Order" and row.reference_name == doc.name)
 		result["receipts"].append({"name": payment.name, "posting_date": payment.posting_date, "docstatus": payment.docstatus,
-			"payment_type": payment.payment_type, "allocated_amount": allocation, "currency": payment.paid_from_account_currency if payment.payment_type == "Receive" else payment.paid_to_account_currency})
+			"payment_type": payment.payment_type, "allocated_amount": allocation,
+			"currency": payment.paid_from_account_currency if payment.payment_type == "Receive" else payment.paid_to_account_currency})
 	return result
 
 
@@ -159,3 +166,15 @@ def update_finance_audit(name, order_name, status, process_status):
 	if frappe.db.get_value("CRM Integration Log", name, ["event", "reference_name"]) != (AUDIT_EVENT, order_name):
 		frappe.throw(_("财务确认记录与订单不一致。"))
 	frappe.db.set_value("CRM Integration Log", name, {"status": status, "response_payload": frappe.as_json({"process_status": process_status})})
+
+
+def protect_process_status(doc, method=None):
+	"""Read-only form fields are not an authorization boundary for native REST writes."""
+	if not is_crm_integration_enabled(doc.get("company")):
+		return
+	previous = doc.get_doc_before_save()
+	if previous and previous.get("custom_process_status") == doc.get("custom_process_status"):
+		return
+	if not previous and doc.get("custom_process_status") in {None, "", "Pending Confirmation"}:
+		return
+	frappe.throw(_("业务状态由财务确认和 CRM/MES 同步流程更新，不能直接修改。"))

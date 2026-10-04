@@ -104,3 +104,28 @@ class TestFinanceRelease(UnitTestCase):
 		self.assertEqual(release.order_names(["SO-1", "SO-1"]), ["SO-1"])
 		for invalid in ([], "{}", [1], ["SO"] * 101):
 			with self.subTest(invalid=invalid), self.assertRaises(frappe.ValidationError): release.order_names(invalid)
+
+	def test_final_payment_cannot_bypass_pending_production_authorization(self):
+		doc = MagicMock(); doc.name = "SO-1"; doc.company = "MX"; doc.docstatus = 1; doc.get.side_effect = self.doc.get
+		with patch.object(frappe, "get_doc", return_value=doc), patch.object(release, "read_order", return_value=self.doc), patch.object(flow, "is_crm_integration_enabled", return_value=True), patch.object(flow, "set_process_status") as set_status:
+			with self.assertRaises(frappe.ValidationError): flow.reconcile_final_payment("SO-1")
+		set_status.assert_not_called()
+
+	def test_native_document_writes_cannot_invent_a_released_status(self):
+		doc = MagicMock(); doc.get.side_effect = lambda field: "MX" if field == "company" else "Pending Production"
+		doc.get_doc_before_save.return_value = self.doc
+		with self.assertRaises(frappe.ValidationError): release.protect_process_status(doc)
+
+	def test_native_edits_preserve_existing_status_and_new_orders_start_pending(self):
+		doc = MagicMock(); doc.get.side_effect = self.doc.get; doc.get_doc_before_save.return_value = self.doc
+		release.protect_process_status(doc)
+		doc.get.side_effect = lambda field: "MX" if field == "company" else "Pending Confirmation"
+		doc.get_doc_before_save.return_value = None
+		release.protect_process_status(doc)
+
+	def test_hidden_wrong_company_receipt_blocks_without_disclosing_its_identity(self):
+		payment = self.payment(); payment.company = "OTHER"
+		with patch.object(frappe, "get_all", return_value=["HIDDEN"]), patch.object(frappe, "get_doc", return_value=payment), patch.object(frappe, "has_permission", return_value=False):
+			review = release.review_order(self.doc)
+		self.assertFalse(review["can_release"])
+		self.assertNotIn("HIDDEN", str(review)); self.assertNotIn("OTHER", str(review))
