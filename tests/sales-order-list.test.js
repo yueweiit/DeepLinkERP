@@ -16,7 +16,7 @@ test("mine and finance scopes remain inside native filters and never include can
  const args=grid.transformQuery(base,{salesView:"finance",allowed:new Set(["custom_process_status"]),quick:{}});
  assert.equal(args.filters[0][3],"MX");
  assert.deepEqual(args.filters[1][3],["Pending Deposit Confirmation","Deposit Confirmation Processing"]);
- assert.equal(args.filters.length,2);
+ assert.deepEqual(args.filters.slice(2),[['Sales Order','docstatus','=',1],['Sales Order','status','not in',['Closed','Cancelled','Stopped','On Hold']]]);
 });
 
 test("detail output escapes source text and only renders permission-filtered item fields", () => {
@@ -41,20 +41,121 @@ test("sales presets retain an explicit details action and ERP account identity f
  assert.ok(!grid.COLUMNS.some(c=>/deposit_required|deposit_difference/.test(c.fieldname)));
 });
 
-test('main sales columns show native order status separately from the business process',()=>{
- assert.ok(grid.presets.main.includes('status'));
+test('default finance columns show approval while delivery status stays optional',()=>{
+ assert.ok(!grid.presets.main.includes('status'));
+ assert.deepEqual(grid.presets.finance,['name','customer_name','custom_process_status','grand_total','dlp_receipts','dlp_last_confirmation','dlp_actions']);
  assert.ok(grid.presets.main.includes('custom_process_status'));
- const query=grid.buildQuery({filters:[],or_filters:[]},{status:'Closed',custom_process_status:'Pending Production'},new Set(['status','custom_process_status']));
+ const query=grid.buildQuery({filters:[['Sales Order','status','=','Closed'],['Sales Order','custom_process_status','=','Pending Production']],or_filters:[]},{},new Set(['status','custom_process_status']));
  assert.deepEqual(query.filters,[['Sales Order','status','=','Closed'],['Sales Order','custom_process_status','=','Pending Production']]);
 });
 
-test('old sales column preferences gain order status once without discarding their order or density',()=>{
+test('old sales column preferences remove delivery status once without discarding order or density',()=>{
  const allowed=new Set(grid.COLUMNS.map(col=>col.fieldname));
- const upgraded=grid.normalizePreferences({density:'standard',columns:['name','customer_name','custom_process_status','grand_total']},allowed);
- assert.deepEqual(upgraded.columns,['name','customer_name','custom_process_status','status','grand_total']);
+ const upgraded=grid.normalizePreferences({version:2,density:'standard',columns:['name','customer_name','custom_process_status','status','grand_total']},allowed);
+ assert.deepEqual(upgraded.columns,['name','customer_name','custom_process_status','grand_total']);
  assert.equal(upgraded.density,'standard');
  const hidden=grid.normalizePreferences({...upgraded,columns:['name','customer_name']},allowed);
  assert.deepEqual(hidden.columns,['name','customer_name'],'a deliberate hide after the upgrade remains respected');
+});
+
+test('financial grouping uses process state rather than release permission and unknown states show a dash',()=>{
+ for(const raw of ['Pending Deposit Confirmation','Deposit Confirmation Processing']) assert.equal(grid.financialLabel(raw),'待财务审核');
+ for(const raw of ['Pending Production','Pending Final Payment','Deliverable','Partially Delivered','Completed']) assert.equal(grid.financialLabel(raw),'已放行生产');
+ assert.equal(grid.financialLabel('Rejected'),'已驳回');
+ for(const raw of ['Pending Confirmation','Draft','Closed','Cancelled',undefined]) assert.equal(grid.financialLabel(raw),'—');
+ assert.match(grid.renderValue('custom_process_status',{custom_process_status:'Pending Production',dlp_finance:{can_release:false}},{translate:x=>x}),/已放行生产/);
+});
+
+test('sync warnings stay supplemental to approval and permission denial is never a sync failure',()=>{
+ const render=(field,doc)=>grid.renderValue(field,doc,{translate:x=>x});
+ const processing={custom_process_status:'Deposit Confirmation Processing',dlp_finance:{can_release:false,process_status:'Deposit Confirmation Processing',last_confirmation:{user:'finance',creation:'today',status:'Processing'}}};
+ assert.match(render('custom_process_status',processing),/待财务审核/);
+ assert.match(render('dlp_last_confirmation',processing),/finance.*today.*CRM\/MES 同步中/s);
+ const failed={custom_process_status:'Pending Deposit Confirmation',dlp_finance:{can_release:false,last_confirmation:{user:'finance',creation:'today',status:'Failed'}}};
+ assert.match(render('dlp_last_confirmation',failed),/CRM\/MES 同步失败/);
+ assert.match(render('dlp_sync',failed),/CRM\/MES 同步失败/);
+ const denied={custom_process_status:'Pending Production',dlp_finance:{can_release:false,reason:'no permission'}};
+ assert.equal(render('dlp_last_confirmation',denied),'—');assert.equal(render('dlp_sync',denied),'—');
+});
+
+test('financial filters preserve raw native filters and missing source permission yields no rows',()=>{
+ const native=['Sales Order','company','=','MX'];
+ const controller={salesView:'finance',allowed:new Set(['custom_process_status']),quick:{financial_status:'approved'},list:{clear_checked_items(){}},salesExpanded:new Map()};
+ const query=grid.transformQuery({filters:[native]},controller);
+ assert.equal(controller.salesView,'all');
+ assert.deepEqual(query.filters,[native,['Sales Order','custom_process_status','in',['Pending Production','Pending Final Payment','Deliverable','Partially Delivered','Completed']]]);
+ const denied=grid.transformQuery({filters:[]},{salesView:'finance',allowed:new Set(),quick:{}});
+ assert.deepEqual(denied.filters,[['Sales Order','name','in',[]]]);
+});
+
+test('mounted configuration defaults to finance without resetting saved columns',()=>{
+ const f=mountedReleaseFixture();
+ f.config.mountControls(f.controller);
+ assert.equal(f.controller.salesView,'finance');
+ assert.deepEqual(Array.from(f.config.defaultColumns),grid.presets.finance);
+ assert.equal(f.config.preferenceVersion,3);
+ const control=f.config.controls.find(control=>control.fieldname==='financial_status');
+ assert.equal(control.permission_field,'custom_process_status');
+ assert.deepEqual(JSON.parse(JSON.stringify(f.grid.selectOptions(control,null,x=>x))),[{value:'',label:'全部审核状态'},{value:'pending',label:'待财务审核'},{value:'approved',label:'已放行生产'},{value:'rejected',label:'已驳回'}]);
+ assert.ok(!f.config.controls.some(control=>['status','custom_process_status'].includes(control.fieldname)));
+ const css=fs.readFileSync(require.resolve('../deeplinkerp_branding/public/css/sales_order_list.css'),'utf8');
+ assert.match(css,/body\.dlp-sales-order-grid-active\s+\.dlp-po-filter\[data-fieldname=financial_status\]\{width:220px\}/);
+});
+
+test('finance reviews supplement all orders when financial columns are visible and ignore stale reviews',async()=>{
+ const f=mountedReleaseFixture();f.controller.salesView='all';f.controller.preferences.columns=['name','dlp_receipts'];
+ const pending=f.config.onRows(f.controller);
+ f.reads[0].resolve({message:{'SO-A':{dlp_product:'Current product'}}});
+ await new Promise(setImmediate);
+ assert.match(f.reads[1].request.method,/get_finance_release_review$/);
+ f.controller.requestId++;
+ f.reads[1].resolve({message:{orders:[{name:'SO-A',process_status:'Deposit Confirmation Processing',last_confirmation:{status:'Failed'},receipts:[{name:'stale'}]}]}});await pending;
+ assert.equal(f.list.data[0].dlp_finance,undefined);
+ assert.equal(f.grid.renderValue('dlp_last_confirmation',f.list.data[0],{translate:x=>x}),'—');
+});
+
+test('departed finance list ignores a late supplemental network error',async()=>{
+ const f=mountedReleaseFixture();const notices=[];f.controller.$salesNotice={text:value=>notices.push(value)};
+ const pending=f.config.onRows(f.controller);
+ f.setRoute(['List','Purchase Order','List']);f.config.onRouteChange(f.controller,false);
+ f.reads[0].reject(new Error('late offline'));await pending;
+ assert.deepEqual(notices,[]);
+});
+
+test('real column changes load missing financial detail once and discard stale enrichment',async()=>{
+ const f=mountedReleaseFixture();f.controller.salesView='all';f.list.get_checked_items=()=>[];
+ f.controller.preferences.columns=['name'];
+ const first=f.controller.setColumns(['name','dlp_receipts']);
+ assert.match(f.reads[0].request.method,/get_sales_display_details$/);
+ const duplicate=f.controller.setColumns(['name','dlp_receipts','dlp_last_confirmation']);
+ assert.equal(f.reads.length,1);
+ f.reads[0].resolve({message:{}});await new Promise(setImmediate);
+ f.reads[1].resolve({message:{orders:[{name:'SO-A',receipts:[{name:'PAY-1'}],last_confirmation:{user:'finance',creation:'today',status:'Success'}}]}});
+ await first;await duplicate;
+ assert.equal(f.list.data[0].dlp_finance.receipts[0].name,'PAY-1');
+ await f.controller.setColumns(['name','dlp_last_confirmation']);assert.equal(f.reads.length,2);
+ delete f.list.data[0].dlp_finance;
+ const stale=f.controller.setColumns(['name','dlp_receipts']);
+ f.reads[2].resolve({message:{}});await new Promise(setImmediate);
+ f.controller.requestId++;
+ f.reads[3].resolve({message:{orders:[{name:'SO-A',last_confirmation:{status:'Failed'}}]}});await stale;
+ assert.equal(f.list.data[0].dlp_finance,undefined);
+});
+
+test('missing source permission keeps selected release actions disabled without sending review requests',async()=>{
+ const f=releaseSelectionFixture();f.controller.allowed=new Set(['name']);f.controller.list.data=[{name:'denied'}];
+ await grid.updateReleaseSelection(f.controller);
+ assert.equal(f.reads.length,0);assert.equal(f.button().disabled,true);assert.match(f.summary().label,/无权/);
+});
+
+test('Sales export transforms match the selected order and translate only financial process cells',()=>{
+ const f=mountedReleaseFixture();
+ const options=f.config.exportOptions({fields:['grand_total','custom_process_status','name']});
+ assert.deepEqual(Object.keys(options.columnTransforms),['3']);
+ assert.equal(options.columnTransforms[3].header,'财务审核状态');
+ assert.equal(options.columnTransforms[3].value('Completed'),'已放行生产');
+ assert.equal(options.columnTransforms[3].value('Cancelled'),'—');
+ assert.deepEqual(Object.keys(f.config.exportOptions({fields:['name','grand_total']}).columnTransforms),[]);
 });
 
 test('native Select options have explicit empty labels and retain raw status values after refresh',()=>{

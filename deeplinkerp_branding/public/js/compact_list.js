@@ -287,6 +287,7 @@
 				list.set_rows_as_checked?.();
 				// Native restoration calls on_row_checked itself only when there were checked elements.
 				if (!hadSelection) list.on_row_checked?.();
+				return config.onColumnsChange?.(this);
 			},
 			async clearQuickFilters() {
 				if (this.resetting) return;
@@ -302,7 +303,7 @@
 				const args = buildRequests(list.get_args(), this.preferences.columns, allowed).export;
 				if (!root.DeepLinkERPPurchaseOrderExport?.exportExcel) await frappe.require("/assets/deeplinkerp_branding/js/purchase_order_export.js");
 				if (!root.DeepLinkERPPurchaseOrderExport?.exportExcel) throw new Error("Excel 导出组件加载失败，请刷新页面后重试。");
-				await root.DeepLinkERPPurchaseOrderExport.exportExcel(root, args);
+				await root.DeepLinkERPPurchaseOrderExport.exportExcel(root, args, config.exportOptions?.(args, this));
 			},
 			refresh() {
 				this.activate();

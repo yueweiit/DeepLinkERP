@@ -111,7 +111,73 @@ ERP 预付款汇总,Anticipos registrados en ERP
 正在核验订单…,Revisando pedidos…
 关联收款记录,Cobros registrados
 CRM/MES 同步中,Enviando a CRM/MES
+CRM/MES 同步失败,Error de sincronización con CRM/MES
 业务负责人,Responsable de ventas
 产品系列,Línea de producto
 CRM / ERP 订单号,Pedido CRM / ERP
 未选择订单,Selecciona los pedidos que quieras autorizar.
+待财务审核,Pendiente de aprobación
+Pending financial approval,Por aprobar
+已放行生产,Producción autorizada
+财务审核状态,Aprobación financiera
+全部审核状态,Todos los estados
+交付状态,Estado de entrega
+正在刷新订单，请稍候…,Actualizando pedidos…
+已选择：{0}；每次最多核验 100 单,Seleccionados: {0}; máximo 100 pedidos por revisión
+已选择：{0}；正在核验…,Seleccionados: {0}; revisando…
+已选择：{0} · 可放行：{1} · 不可放行：{2},Seleccionados: {0} · Autorizables: {1} · No autorizables: {2}
+放行资格核验失败，请重新选择或刷新后重试。,No se pudo verificar la autorización. Vuelve a seleccionar o actualiza e intenta de nuevo.
+无权查看财务审核状态，请联系管理员。,No tienes acceso al estado de aprobación financiera. Contacta al administrador.
+Excel 审核状态列必须为文本，已停止导出。,La columna de aprobación debe contener texto. Se detuvo la exportación.
+Excel 共享文本索引不符合预期。,El índice de texto compartido de Excel no es válido.
+确认付款,Confirmar pago
+保存草稿,Guardar borrador
+刷新抽屉,Actualizar panel
+完成,Terminar
+取消,Cancelar
+关闭,Cerrar
+正在读取…,Cargando…
+采购付款,Pago de compra
+采购付款 · 核对与确认,Pago de compra · revisar y confirmar
+付款已提交,Pago confirmado
+本次付款,Este pago
+正在刷新余额…,Actualizando saldo…
+采购付款记录,Pagos de compras
+整单银行金额,Importe total del pago
+草稿 · 未计已付,Borrador · sin contabilizar
+已取消 · 未计已付,Cancelado · sin contabilizar
+采购核销引用（各引用币种）,Referencias de aplicación (moneda de cada documento)
+高级处理,Opciones avanzadas
+高级处理 / 原生单据,Opciones avanzadas / documento ERP
+应付,Por pagar
+已付 / 核销,Pagado / aplicado
+未付,Pendiente
+处理订单草稿,Revisar borrador del pedido
+处理入库草稿,Revisar borrador de recepción
+先处理订单草稿,Revisar primero el borrador del pedido
+返回原采购列表,Volver a la lista de compras
+请核对并处理当前草稿，完成后返回原列表。,Revisa y procesa este borrador. Después vuelve a la lista anterior.
+当前单据已处理，可返回原列表继续采购流程。,El documento ya está procesado. Vuelve a la lista para continuar la compra.
+填完后点“确认付款”直接登记并提交 ERP 付款；可部分付款。需审批时会在这里显示下一步。,"Completa los datos y pulsa «Confirmar pago» para registrar el pago en ERP. Puedes pagar una parte. Si requiere aprobación, verás aquí el siguiente paso."
+核对后点“确认付款”，本次输入与提交一次完成。,Revisa los datos y pulsa «Confirmar pago» para guardar y confirmar en un solo paso.
+付款需按下方审批动作处理，审批完成前不计已付。,Este pago requiere las aprobaciones indicadas abajo. No se contabiliza hasta que se complete la aprobación.
+当前没有提交或审批权限，请由有权限的财务人员继续处理。,No tienes permiso para confirmar ni aprobar. Debe continuar una persona de Finanzas con los permisos necesarios.
+付款尚未提交，请按下方审批动作处理；没有可用动作时需有权限的财务人员继续。,"El pago todavía no está confirmado. Usa las acciones de aprobación. Si no hay ninguna, debe continuar Finanzas con los permisos necesarios."
+审批动作已完成，付款仍待后续审批，尚未计已付。,La acción de aprobación se completó. El pago sigue pendiente de aprobación y aún no se contabiliza.
+发现已有付款草稿，请核对金额、账户与引用后确认；没有新建付款单。,"Ya existe un borrador de pago. Revisa el importe, la cuenta y las referencias antes de confirmar. No se creó otro pago."
+付款草稿已保存，尚未计已付。,Borrador guardado. El pago aún no se contabiliza.
+关联采购应付单,Factura de compra relacionada
+本次付款金额（应付账户币种）,Importe de este pago (moneda de la cuenta por pagar)
+银行 / 现金记账账户,Cuenta bancaria / caja
+付款日期,Fecha de pago
+银行参考号（银行必填，现金可空）,Referencia bancaria (obligatoria para banco; opcional para caja)
+银行参考号,Referencia bancaria
+备注,Observaciones
+整单金额（银行币种）,Importe total (moneda del banco)
+查看来源单据,Ver documento de origen
+打开原生单据,Abrir documento ERP
+查看来源,Ver origen
+上次付款响应未确认，请核对后重试同一操作。,No se confirmó la respuesta del último pago. Revísalo y vuelve a intentar la misma operación.
+重试确认付款,Reintentar confirmar pago
+重试保存草稿,Reintentar guardar borrador
+付款未提交，请核对后重试。,El pago no se confirmó. Revisa los datos e intenta de nuevo.

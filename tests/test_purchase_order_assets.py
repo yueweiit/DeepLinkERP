@@ -43,11 +43,11 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 
 	def test_unified_adapter_loads_after_cache_busted_shared_engine(self):
 		scripts = hooks.app_include_js
-		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.12"
+		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.13"
 		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.4"
 		self.assertIn(engine, scripts)
 		self.assertLess(scripts.index(engine), scripts.index(adapter))
-		self.assertLess(scripts.index(engine), scripts.index("/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.8"))
+		self.assertLess(scripts.index(engine), scripts.index("/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.9"))
 
 	def test_desk_loads_compact_styles_without_changing_website_assets(self):
 		styles = hooks.app_include_css
@@ -112,6 +112,10 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		self.assertRegex(sales, r"body\.dlp-sales-order-grid-active \.dlp-po-grid \.result-container\{max-height:var\(--dlp-sales-result-max-height,")
 		viewbar = re.search(r"\.dlp-sales-viewbar\{([^}]+)\}", sales).group(1)
 		self.assertIn("position:static", viewbar)
+		mode_menu = re.search(r"body\.dlp-sales-order-grid-active:not\(\.dlp-mes-navigation-enabled\) \.dlp-interface-mode-menu\s*\{([^}]+)\}", sales)
+		self.assertIsNotNone(mode_menu, "The narrow classic Sales sidebar must keep its mode menu inside the viewport")
+		self.assertRegex(mode_menu.group(1), r"left:\s*0\s*;")
+		self.assertRegex(mode_menu.group(1), r"right:\s*auto\s*;")
 		inventory = (root / "inventory_detail.bundle.css").read_text()
 		mobile_inventory = inventory[inventory.index("@media (max-width: 767px)"):]
 		self.assertRegex(mobile_inventory, r"max-height:\s*var\(--dlp-inventory-result-max-height,\s*calc\(100vh - 230px\)\);")

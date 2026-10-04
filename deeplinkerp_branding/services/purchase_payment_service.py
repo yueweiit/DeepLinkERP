@@ -553,7 +553,7 @@ def _order_progress(names, warnings):
     rows=[]
     for name in names:
         try:
-            order=_related("Purchase Order", name, warnings, SOURCE_FIELDS)
+            order=_related("Purchase Order", name, warnings, SOURCE_FIELDS | {"docstatus"})
             if not order:
                 continue
             with _quiet_link_errors():
@@ -565,7 +565,7 @@ def _order_progress(names, warnings):
                 left=max(Decimal(0),qty-received);pending+=left*amount(item.rate)
                 unit=units.setdefault(item.uom,{"uom":item.uom,"ordered":Decimal(0),"received":Decimal(0),"pending":Decimal(0)})
                 unit["ordered"]+=qty;unit["received"]+=received;unit["pending"]+=left
-            rows.append({"name":name,"currency":order.currency,"grand_total":order.grand_total,
+            rows.append({"name":name,"docstatus":order.docstatus,"status":order.status,"currency":order.currency,"grand_total":order.grand_total,
                          "pending_net_amount":float(pending),"units":[{k:float(v) if isinstance(v,Decimal) else v for k,v in u.items()} for u in units.values()]})
         except frappe.PermissionError:
             if LINK_WARNING not in warnings:
@@ -628,6 +628,7 @@ def get_purchase_chain(source_doctype, source_name, include_payments=True):
             "currency": doc.currency, "grand_total": doc.grand_total, "status": doc.status,
             "docstatus": doc.docstatus, "orders": orders, "order_progress": progress, "invoices": invoices, "balances": [] if incomplete else summarize(invoices), "incomplete_links": incomplete,
             "can_create_invoice": can_invoice, "draft_invoices": drafts,
+            "draft_orders": [row["name"] for row in progress if row["docstatus"] == 0],
             "payments": payments, "warnings": warnings, "can_create": can_create and bool(eligible) and not incomplete, "reason": reason,
             "settlement_label": "已付/核销（含预付款抵扣、贷项等）"}
 
@@ -684,6 +685,7 @@ def _receipt_list(filters, start, page_length, native_filters, or_filters, order
             row.update({key: chain[key] for key in ("orders", "balances", "can_create", "reason", "warnings", "incomplete_links")})
             row["can_create_invoice"] = chain["can_create_invoice"]
             row["draft_invoices"] = chain["draft_invoices"]
+            row["draft_orders"] = chain["draft_orders"]
             row["shared_payable"] = bool(not chain["incomplete_links"] and any(invoice["shared"] for invoice in chain["invoices"]))
             row["settlement_state"] = "余额不可见" if chain["incomplete_links"] or (chain["warnings"] and not chain["balances"]) else "未形成应付"
             row["payment_state"] = ("关联缺失或无权读取" if chain["incomplete_links"] else "共享应付" if any(i["shared"] for i in chain["invoices"]) else "余额不可见" if chain["warnings"] else "未形成应付")
@@ -765,4 +767,5 @@ def create_payment_draft(source_doctype, source_name, purchase_invoice, amount_t
             frappe.throw("付款草稿状态异常")
         # A concurrent retry sees the same name, or 'pending', never creates another draft.
         cache.set_value(key, {"digest": digest, "name": entry.name}, expires_in_sec=86400)
+        frappe.db.after_rollback.add(lambda: cache.delete_value(key))
         return {"name": entry.name, "docstatus": 0, "reused": False}

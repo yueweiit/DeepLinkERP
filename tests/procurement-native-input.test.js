@@ -20,12 +20,12 @@ class Surface {
  async emit(type,value){if(value!==undefined)this.value=value;const event={type,target:this.node};for(const e of this.capture.filter(e=>e.type===type))e.fn(event);for(const e of this.events.filter(e=>e.type.split('.')[0]===type))await e.fn(event);await new Promise(resolve=>setImmediate(resolve));}
 }
 function projection(doctype='Purchase Invoice') {return {document:{doctype,name:null,docstatus:0,modified:'v1',company:'C',supplier:'S',currency:'USD',payment_type:'Pay',amount:100.1234,items:doctype==='Payment Entry'?[]:[{key:'ITEM',item_code:'I',item_name:'Native',qty:1.234567,rate:9.87654,max_qty:10,uom:'个',warehouse:'W'}],references:[]},editable_fields:doctype==='Payment Entry'?['amount']:[],editable_item_fields:doctype==='Payment Entry'?[]:['qty','rate'],allowed_actions:[]};}
-function harness({document=projection(), drafts=[], precision, floatPrecision=3, locale='#.###,##', metadata=()=>Promise.resolve(), missingField,submit=async()=>document,chain={can_create:true,company:'C',supplier:'S',balances:[],invoices:[{name:'PI',can_pay:true,outstanding:100,currency:'USD'}]}}={}) {
+function harness({document=projection(), drafts=[], precision, floatPrecision=3, locale='#.###,##', metadata=()=>Promise.resolve(), missingField,submit=async()=>({...document,document:{...document.document,docstatus:1}}),readChain,storage,record=async()=>({document:{doctype:'Payment Entry',name:'PE',amount:100,currency:'USD',docstatus:1}}),chain={can_create:true,company:'C',supplier:'S',balances:[],invoices:[{name:'PI',can_pay:true,outstanding:100,currency:'USD'}]}}={}) {
  const surfaces=[],controls=[],requests=[],loaded=[],listeners={},confirms=[];
  const $=value=>{const surface=new Surface(value);surfaces.push(surface);return surface;};
  const fields={qty:{fieldname:'qty',fieldtype:'Float',...(precision?{precision}:{})},rate:{fieldname:'rate',fieldtype:'Currency',options:'currency',...(precision?{precision}:{})},paid_amount:{fieldname:'paid_amount',fieldtype:'Currency',options:'paid_from_account_currency',...(precision?{precision}:{})},received_amount:{fieldname:'received_amount',fieldtype:'Currency',options:'paid_to_account_currency'}};
- const host={$,window:null,console,document:{body:new Surface(),addEventListener(){},removeEventListener(){}},crypto:{randomUUID:()=> 'uuid'},locals:{},__:v=>v,cint:(value,fallback=0)=>Number.isNaN(parseInt(value,10))?fallback:parseInt(value,10),replace_all:(value,from,to)=>value.split(from).join(to),is_null:v=>v==null,
-  frappe:{ui:{form:{}},provide(){},utils:{debounce:fn=>fn},boot:{sysdefaults:{float_precision:floatPrecision,currency_precision:2,number_format:locale}},defaults:{get_default:key=>key==='float_precision'?floatPrecision:undefined},meta:{get_docfield:(doctype,field)=>field===missingField?undefined:({...fields[field],fieldname:field,parent:doctype,fieldtype:fields[field]?.fieldtype||'Data'}),get_field_currency:(df,doc)=>doc[df.options]},model:{with_doctype:async doctype=>{loaded.push(doctype);await metadata(doctype);},get_value:()=>undefined},router:{on:(type,fn)=>listeners[type]=fn},datetime:{get_today:()=> '2026-10-04'},confirm:(_,fn)=>confirms.push(fn),show_alert(){},run_serially:fns=>{let result;for(const fn of fns)result=fn();return Promise.resolve(result);},call:async request=>{requests.push(request);if(request.method==='frappe.client.get_list')return {message:drafts};if(request.method.endsWith('.get_purchase_chain'))return {message:chain};if(request.method.endsWith('.create_payment_draft'))return {message:{name:'PE'}};if(request.method.endsWith('.submit_document'))return {message:await submit(request.args)};return {message:document};}}
+ const host={$,window:null,console,sessionStorage:storage,document:{body:new Surface(),addEventListener(){},removeEventListener(){}},crypto:{randomUUID:()=> 'uuid'},locals:{},__:v=>v,cint:(value,fallback=0)=>Number.isNaN(parseInt(value,10))?fallback:parseInt(value,10),replace_all:(value,from,to)=>value.split(from).join(to),is_null:v=>v==null,
+  frappe:{ui:{form:{}},provide(){},utils:{debounce:fn=>fn},boot:{sysdefaults:{float_precision:floatPrecision,currency_precision:2,number_format:locale}},defaults:{get_default:key=>key==='float_precision'?floatPrecision:undefined},meta:{get_docfield:(doctype,field)=>field===missingField?undefined:({...fields[field],fieldname:field,parent:doctype,fieldtype:fields[field]?.fieldtype||'Data'}),get_field_currency:(df,doc)=>doc[df.options]},model:{with_doctype:async doctype=>{loaded.push(doctype);await metadata(doctype);},get_value:()=>undefined},router:{on:(type,fn)=>listeners[type]=fn},datetime:{get_today:()=> '2026-10-04'},confirm:(_,fn)=>confirms.push(fn),show_alert(){},run_serially:fns=>{let result;for(const fn of fns)result=fn();return Promise.resolve(result);},call:async request=>{requests.push(request);if(request.method==='frappe.client.get_list')return {message:drafts};if(request.method.endsWith('.get_purchase_chain'))return {message:readChain?await readChain():chain};if(request.method.endsWith('.record_payment'))return {message:await record(request.args)};if(/submit_document|complete_payment/.test(request.method))return {message:await submit(request.args)};return {message:document};}}
  };
  host.window=host;host.globalThis=host;
  const context=vm.createContext(host);
@@ -100,7 +100,7 @@ for(const [precision,expected] of [[undefined,9.88],[6,9.87654]])test(`payment c
  const h=harness({precision});await h.api.pay('Purchase Receipt','PR');
  const amount=h.controls.find(c=>c.df.fieldname==='amount'),bank=h.controls.find(c=>c.df.fieldname==='bank');
  await amount.$input.emit('change','9,87654');await bank.set_value('Bank');assert.equal(amount.$input.val(),'9,88');await h.click('dlp-create');
- assert.equal(h.requests.find(r=>r.method.endsWith('.create_payment_draft')).args.amount_to_pay,expected);
+ assert.equal(h.requests.find(r=>r.method.endsWith('.record_payment')).args.amount_to_pay,expected);
  assert.deepEqual(h.loaded,['Payment Entry']);assert.equal(amount.$input.capture.length,0,'successful close releases own capture listeners');
 });
 for(const action of ['pay','paymentDrawer'])test(`${action} cannot create controls after awaited metadata completes on a closed route`,async()=>{
@@ -129,26 +129,69 @@ test('late refresh metadata rejection after close cannot re-enable or append to 
  const pending=h.click('dlp-reload');await new Promise(r=>setImmediate(r));assert.equal(typeof reject,'function');h.routeClose();const closedHTML=h.html();reject(new Error('network'));
  await assert.doesNotReject(()=>pending);assert.equal(h.controls.length,before);assert.equal(h.surfaces[0].removed,true);assert.equal(h.html(),closedHTML);assert.ok(h.controls.every(c=>c.$input.capture.length===0));
 });
-for(const doctype of ['Purchase Invoice','Payment Entry'])test(`${doctype} submit success followed by metadata refresh failure reports completed operation, not failed submit`,async()=>{
- let loads=0;const document=projection(doctype);document.document.name='DRAFT';document.allowed_actions=['Submit'];
+test('invoice submit success followed by metadata refresh failure reports completed operation',async()=>{
+ let loads=0;const document=projection();document.document.name='DRAFT';document.allowed_actions=['Submit'];
  const h=harness({document,metadata:async()=>{if(++loads>1)throw new Error('private network failure');}});
- if(doctype==='Payment Entry')await h.api.paymentDrawer('DRAFT');else await h.api.documentDrawer('Purchase Receipt','PR','Purchase Invoice','DRAFT');
- await h.click('dlp-submit');await h.confirm();assert.equal(h.requests.filter(r=>r.method.endsWith('.submit_document')).length,1);
+ await h.api.documentDrawer('Purchase Receipt','PR','Purchase Invoice','DRAFT');await h.click('dlp-submit');await h.confirm();
+ assert.equal(h.requests.filter(r=>r.method.endsWith('.submit_document')).length,1);
  assert.match(h.html(),/原生操作已完成.*刷新.*失败/);assert.doesNotMatch(h.html(),/提交未完成|private network failure/);
- assert.equal(h.surfaces[0].find('button').props.disabled,false,'refresh and close become usable');
 });
-test('successful native submit disables stale save/submit handlers until a fresh projection arrives',async()=>{
- let loads=0;const document=projection('Payment Entry');document.document.name='PE';document.allowed_actions=['Submit'];
- const h=harness({document,metadata:async()=>{if(++loads>1)throw new Error('network');}});await h.api.paymentDrawer('PE');
- await h.click('dlp-submit');await h.confirm();await h.click('dlp-submit');if(h.confirms.length)await h.confirm();await h.click('dlp-save');
- assert.equal(h.requests.filter(r=>r.method.endsWith('.submit_document')).length,1);assert.equal(h.requests.filter(r=>r.method.endsWith('.update_payment_draft')).length,0);
- assert.equal(h.surfaces[0].find('footer').find('.dlp-save,.dlp-submit').removals,1,'native write removes the old actionable buttons');
+test('confirmed edited payment submits input in one call and keeps durable payment link',async()=>{
+ const document=projection('Payment Entry');document.document.name='PE';document.allowed_actions=['Submit'];const h=harness({document});
+ await h.api.paymentDrawer('PE');await h.controls.find(c=>c.df.fieldname==='amount').$input.emit('change','19,87');
+ await h.click('dlp-submit');await h.click('dlp-submit');await h.click('dlp-save');
+ const writes=h.requests.filter(r=>/complete_payment|update_payment_draft/.test(r.method));assert.equal(writes.length,1);
+ assert.equal(writes[0].args.changes.amount,19.87);assert.equal(writes[0].args.workflow_action,'Submit');assert.match(h.html(),/付款已提交/);assert.match(h.html(),/payment-entry\/PE/);
+ assert.equal(h.confirms.length,0,'confirmation is the explicit main button');
 });
-test('native submit RPC failure remains visibly not completed and never automatically retries',async()=>{
- const document=projection('Payment Entry');document.document.name='PE';document.allowed_actions=['Submit'];const h=harness({document,submit:async()=>{throw new Error('permission denied');}});await h.api.paymentDrawer('PE');await h.click('dlp-submit');await h.confirm();
- assert.match(h.html(),/提交未完成/);assert.doesNotMatch(h.html(),/原生操作已完成/);assert.equal(h.requests.filter(r=>r.method.endsWith('.submit_document')).length,1);assert.equal(h.loaded.length,1);assert.equal(h.surfaces[0].find('button').props.disabled,false);
+test('payment RPC failure is visibly unconfirmed, permits only identical retry and never auto retries',async()=>{
+ const document=projection('Payment Entry');document.document.name='PE';document.allowed_actions=['Submit'];
+ const h=harness({document,submit:async()=>{throw new Error('permission denied');}});await h.api.paymentDrawer('PE');await h.click('dlp-submit');
+ assert.match(h.html(),/permission denied/);assert.doesNotMatch(h.html(),/付款已提交/);assert.equal(h.requests.filter(r=>r.method.endsWith('.complete_payment')).length,1);
+ assert.equal(h.surfaces[0].find('button').props.disabled,false);await h.click('dlp-submit');
+ const writes=h.requests.filter(r=>r.method.endsWith('.complete_payment'));assert.equal(writes.length,2);assert.equal(writes[0].args.request_id,writes[1].args.request_id);
 });
-test('submit success then delayed refresh failure on a closed route cannot append an incorrect result',async()=>{
- let loads=0,reject;const document=projection('Payment Entry');document.document.name='PE';document.allowed_actions=['Submit'];const h=harness({document,metadata:()=>++loads===1?Promise.resolve():new Promise((_,r)=>reject=r)});await h.api.paymentDrawer('PE');await h.click('dlp-submit');const pending=h.confirm();await new Promise(r=>setImmediate(r));h.routeClose();const closedHTML=h.html();reject(new Error('network'));await pending;
- assert.equal(h.html(),closedHTML);assert.equal(h.requests.filter(r=>r.method.endsWith('.submit_document')).length,1);assert.equal(h.surfaces[0].removed,true);
+test('successful payment with failed balance refresh still reports submitted and blocks stale writes',async()=>{
+ const document=projection('Payment Entry');document.document.name='PE';document.allowed_actions=['Submit'];
+ const h=harness({document,readChain:async()=>{throw new Error('private network');}});await h.api.paymentDrawer('PE',{sourceType:'Purchase Receipt',sourceName:'PR'});
+ await h.click('dlp-submit');await h.click('dlp-submit');await h.click('dlp-save');
+ assert.match(h.html(),/付款已提交.*余额刷新失败/);assert.doesNotMatch(h.html(),/付款未确认|private network/);
+ assert.equal(h.requests.filter(r=>r.method.endsWith('.complete_payment')).length,1);
+});
+test('late balance failure after route close cannot append a result to a removed drawer',async()=>{
+ let reject;const document=projection('Payment Entry');document.document.name='PE';document.allowed_actions=['Submit'];
+ const h=harness({document,readChain:()=>new Promise((_,r)=>reject=r)});await h.api.paymentDrawer('PE',{sourceType:'Purchase Receipt',sourceName:'PR'});
+ const pending=h.click('dlp-submit');await new Promise(r=>setImmediate(r));h.routeClose();const closedHTML=h.html();reject(new Error('network'));await pending;
+ assert.equal(h.html(),closedHTML);assert.equal(h.surfaces[0].removed,true);
+});
+test('source payment action resumes a visible existing draft without creating another',async()=>{
+ const document=projection('Payment Entry');document.document.name='EXISTING';document.allowed_actions=['Submit'];
+ const h=harness({document,chain:{payments:[{name:'EXISTING',payment_type:'Pay',docstatus:0}],invoices:[],balances:[]}});await h.api.pay('Purchase Receipt','PR');
+ assert.equal(h.requests.filter(r=>r.method.endsWith('.preview_payment')).length,1);assert.ok(!h.requests.some(r=>r.method.endsWith('.record_payment')));
+ assert.match(h.html(),/整单银行金额/);assert.match(h.html(),/采购核销引用/);
+});
+test('workflow actions stay explicit and no-submit user sees clear next step',async()=>{
+ for(const allowed_actions of [[],['Review']]){
+  const document=projection('Payment Entry');document.document.name='PE';document.allowed_actions=allowed_actions;const h=harness({document});await h.api.paymentDrawer('PE');
+  assert.match(h.html(),allowed_actions.length?/需按下方审批动作/:/没有提交或审批权限/);assert.ok(!h.requests.some(r=>r.method.endsWith('.complete_payment')));
+ }
+});
+
+test('consecutive payment clicks share one in-flight native request',async()=>{
+ let resolve,started;const waiting=new Promise(r=>started=r);const h=harness({record:()=>{started();return new Promise(r=>resolve=r);}});await h.api.pay('Purchase Receipt','PR');
+ await h.controls.find(c=>c.df.fieldname==='bank').set_value('Bank');const pending=h.click('dlp-create');await waiting;await h.click('dlp-create');
+ assert.equal(h.requests.filter(r=>r.method.endsWith('.record_payment')).length,1);resolve({document:{name:'PE',docstatus:1,amount:100,currency:'USD'}});await pending;
+});
+test('an uncertain payment survives close/reopen and retries the original payload and token',async()=>{
+ const values=new Map(),storage={getItem:k=>values.get(k),setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};let attempts=0;
+ const h=harness({storage,record:async()=>{if(++attempts===1)throw new Error('network lost');return {document:{name:'PE',docstatus:1,amount:100,currency:'USD'}};}});
+ await h.api.pay('Purchase Receipt','PR');await h.controls.find(c=>c.df.fieldname==='bank').set_value('Bank');await h.click('dlp-create');h.routeClose();
+ await h.api.pay('Purchase Receipt','PR');assert.match(h.html(),/上次付款响应未确认/);await h.click('dlp-retry-payment');
+ const writes=h.requests.filter(r=>r.method.endsWith('.record_payment'));assert.equal(writes.length,2);assert.deepEqual(writes[0].args,writes[1].args);assert.equal(values.size,0);
+});
+test('acknowledged native rollback permits correcting inputs and does not claim payment success',async()=>{
+ let attempts=0;const h=harness({record:async()=>++attempts===1?{failed:true,error:'Native bank validation'}:{document:{name:'PE',docstatus:1,amount:30,currency:'USD'}}});await h.api.pay('Purchase Receipt','PR');
+ await h.controls.find(c=>c.df.fieldname==='bank').set_value('Bank');await h.click('dlp-create');assert.match(h.html(),/Native bank validation/);assert.doesNotMatch(h.html(),/付款已提交/);
+ await h.controls.find(c=>c.df.fieldname==='amount').$input.emit('change','30');await h.click('dlp-create');
+ assert.equal(h.requests.filter(r=>r.method.endsWith('.record_payment'))[1].args.amount_to_pay,30);assert.match(h.html(),/付款已提交/);
 });

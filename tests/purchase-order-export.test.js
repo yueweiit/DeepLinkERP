@@ -54,6 +54,30 @@ function entries(xml) {
 const headers = ["序号", "创建人", "供应商名称", "已预付", "往来单位科目货币", "编号", "创建人"];
 const values = [[1, "buyer@example.com", '供应商 &\n<中文> "引号"', 0, "USD", "PO-1", "buyer@example.com"]];
 
+test('optional financial column transforms replace inline and shared text but preserve numeric cells and styles',()=>{
+ const options={expectedColumns:6,ownerLabels:['创建人'],columnTransforms:{2:{header:'财务审核状态',value:value=>value==='Pending Production'?'已放行生产':'—'}}};
+ const xml=worksheet(headers,[[1,'Pending Production','客户',125,'MXN','SO-1','owner']]);
+ const output=exporter.stripTrailingOwner(xml,options);
+ assert.match(output,/财务审核状态/);assert.match(output,/已放行生产/);
+ assert.ok(output.includes('<c r="D2" s="7" t="n"><v>125</v></c>'));
+ assert.ok(output.includes('<c r="B2" s="4" t="inlineStr">'));
+ const shared=xml.replace('<c r="B2" s="4" t="inlineStr"><is><t xml:space="preserve">Pending Production</t></is></c>','<c r="B2" s="4" t="s"><v>0</v></c>');
+ assert.match(exporter.stripTrailingOwner(shared,{...options,sharedStrings:['Pending Production']}),/已放行生产/);
+ assert.throws(()=>exporter.stripTrailingOwner(xml.replace('创建人</t></is></c></row>','unexpected</t></is></c></row>'),options),/owner|创建人/);
+});
+
+test('missing and styled blank financial cells become a dash while real numeric values remain errors',()=>{
+ const options={expectedColumns:6,ownerLabels:['创建人'],columnTransforms:{2:{header:'财务审核状态',value:()=> '—'}}};
+ const blank='<c r="B2" s="4" t="inlineStr"><is><t xml:space="preserve"></t></is></c>';
+ const xml=worksheet(headers,[[1,'','客户',125,'MXN','SO-1','owner']]);
+ const missing=exporter.stripTrailingOwner(xml.replace(blank,''),options);
+ assert.match(missing,/<c r="B2"[^>]*t="inlineStr"><is><t xml:space="preserve">—<\/t>/);
+ assert.ok(missing.indexOf('r="A2"') < missing.indexOf('r="B2"') && missing.indexOf('r="B2"') < missing.indexOf('r="C2"'));
+ assert.match(exporter.stripTrailingOwner(xml.replace(blank,'<c r="B2" s="9" t="n"></c>'),options),/<c r="B2" s="9" t="inlineStr"><is><t xml:space="preserve">—<\/t>/);
+ assert.throws(()=>exporter.stripTrailingOwner(xml.replace(blank,'<c r="B2" s="9" t="n"><v>5</v></c>'),options),/文本/);
+ assert.throws(()=>exporter.stripTrailingOwner(xml.replace(blank,'<c r="B2" s="9"><f>1+1</f><v>2</v></c>'),options),/文本/);
+});
+
 test("ZIP roundtrip preserves every entry's bytes and emits a standard CRC32", async () => {
 	assert.equal(production("crc32")(encoder.encode("123456789")), 0xcbf43926);
 	const source = entries(worksheet(headers, values));

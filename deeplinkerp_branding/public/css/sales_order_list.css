@@ -8,7 +8,8 @@ body.dlp-sales-order-grid-active .dlp-po-grid .result-container{max-height:var(-
 .dlp-sales-tabs,.dlp-sales-release-action{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0;max-width:100%}.dlp-sales-tabs .btn{white-space:normal;max-width:100%;overflow-wrap:anywhere}.dlp-sales-tabs [aria-pressed=true]{font-weight:600;background:var(--subtle-fg,#f3f3f3);border-color:var(--gray-500,#999)}
 .dlp-sales-release-action .btn-primary{min-height:38px;padding:9px 18px;font-size:14px;font-weight:600;white-space:normal;max-width:100%}.dlp-sales-selected{font-size:13px;color:var(--text-muted,#666)}
 .dlp-sales-notice{font-size:12px;margin:8px 15px}.dlp-sales-preset{width:auto;max-width:220px}
-body.dlp-sales-order-grid-active .dlp-po-filter:is([data-fieldname=custom_process_status],[data-fieldname=status]){width:180px}
+body.dlp-sales-order-grid-active .dlp-po-filter[data-fieldname=financial_status]{width:220px}
+body.dlp-sales-order-grid-active:not(.dlp-mes-navigation-enabled) .dlp-interface-mode-menu{left:0;right:auto;}
 body.dlp-sales-order-grid-active .dlp-po-grid-row{min-height:42px}body.dlp-sales-order-grid-active .dlp-po-grid-cell{line-height:1.35}body.dlp-sales-order-grid-active .dlp-po-grid-cell[data-fieldname=dlp_actions]{position:sticky;right:0;z-index:4;background:var(--fg-color,#fff);border-left:1px solid var(--border-color,#e2e2e2)}
 body.dlp-sales-order-grid-active .dlp-po-grid-header .dlp-po-grid-cell[data-fieldname=dlp_actions]{z-index:6;background:var(--subtle-fg,#f3f3f3)}
 body.dlp-sales-order-grid-active .dlp-po-grid-header{height:auto}

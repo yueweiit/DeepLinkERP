@@ -156,7 +156,8 @@ test "$(docker image inspect "$old_image" --format '{{.Id}}')" = "$old_image_id"
 release_key=${branding_sha:0:12}
 if [[ -n "$crm_archive" ]]; then release_key+="-crm-${crm_sha:0:12}"; fi
 if [[ -n "$finance_archive" ]]; then release_key+="-finance-${finance_sha:0:12}"; fi
-release_dir="backups/unified-purchase-$release_key"
+release_dir="private/release-evidence/unified-purchase-$release_key"
+mkdir -p private/release-evidence
 mkdir "$release_dir" # Refuse an ambiguous repeated cutover; retain previous evidence.
 cp compose.custom.yaml "$release_dir/compose.before.yaml"
 audit_args=(--purchase-payment-page-source /tmp/purchase-payment-records.json)
