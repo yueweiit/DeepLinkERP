@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import frappe
+
 from deeplinkerp_branding.services import purchase_document_actions as actions
 
 

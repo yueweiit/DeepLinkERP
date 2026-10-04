@@ -49,7 +49,7 @@ def _locked(doctype, name):
 
 
 def _workflow_actions(doc):
-    from frappe.model.workflow import get_workflow_name, get_workflow, get_transitions, has_approval_access
+    from frappe.model.workflow import get_transitions, get_workflow, get_workflow_name, has_approval_access
     if doc.doctype == "Purchase Receipt" or doc.is_new() or doc.docstatus != 0:
         return []
     if get_workflow_name(doc.doctype):
@@ -457,7 +457,7 @@ def submit_document(doctype, name, expected_modified, workflow_action=None):
             totals[row.pr_detail] = totals.get(row.pr_detail, service.amount(0)) + service.amount(row.qty)
         if any(qty <= 0 or qty > maximum.get(key, service.amount(0)) for key, qty in totals.items()):
             frappe.throw("应付数量超过最新剩余数量，请刷新")
-    from frappe.model.workflow import get_workflow_name, apply_workflow
+    from frappe.model.workflow import apply_workflow, get_workflow_name
     actions = _workflow_actions(doc)
     action = workflow_action or "Submit"
     if action not in actions:

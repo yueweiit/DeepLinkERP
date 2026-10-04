@@ -3,10 +3,14 @@ import json
 import uuid
 
 import frappe
-from frappe.utils import add_days, nowdate
-from deeplinkerp_branding.services import purchase_payment_service as service
 from erpnext.buying.doctype.purchase_order.purchase_order import make_purchase_receipt
-from erpnext.stock.doctype.purchase_receipt.purchase_receipt import make_purchase_invoice, make_purchase_return
+from erpnext.stock.doctype.purchase_receipt.purchase_receipt import (
+    make_purchase_invoice,
+    make_purchase_return,
+)
+from frappe.utils import add_days, nowdate
+
+from deeplinkerp_branding.services import purchase_payment_service as service
 
 SITE = "po-grid-qa.localhost"
 COMPANY = "QA Second Company"
@@ -40,8 +44,9 @@ def execute():
         assert chain["draft_invoices"] == [], "Submitted PI must not be a resume action"
         results.append("partial submitted invoice permits remaining native quantity")
 
-        from deeplinkerp_branding.services import purchase_document_actions as actions
         from unittest.mock import patch
+
+        from deeplinkerp_branding.services import purchase_document_actions as actions
         original_fields = service._require_fields
         for denied_doctype, denied_parent in (("Purchase Receipt", None), ("Purchase Taxes and Charges", "Purchase Receipt")):
             def protect_source_tax(doctype, fields, parenttype=None):
@@ -205,6 +210,7 @@ def execute():
             native_filters=[["name", "=", pr.name]], export_format="xlsx", page_length=20,
             columns=["name", "grand_total", "currency"])
         from io import BytesIO
+
         from openpyxl import load_workbook
         workbook = load_workbook(BytesIO(frappe.response["filecontent"]))
         assert workbook.active.max_row == 2

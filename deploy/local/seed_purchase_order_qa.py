@@ -18,9 +18,9 @@ def seed_finance_flow():
 	frappe.set_user("Administrator")
 	frappe.flags.in_test = True
 	frappe.flags.mute_emails = True
-	from frappe.utils import add_days, nowdate
 	from erpnext.buying.doctype.purchase_order.purchase_order import make_purchase_receipt
 	from erpnext.stock.doctype.purchase_receipt.purchase_receipt import make_purchase_invoice
+	from frappe.utils import add_days, nowdate
 	company = "QA Second Company"
 	if not all(frappe.db.exists(doctype, name) for doctype, name in (
 		("Company", company), ("Supplier", "QA Test Supplier"), ("Item", "QA-PO-ITEM"))):

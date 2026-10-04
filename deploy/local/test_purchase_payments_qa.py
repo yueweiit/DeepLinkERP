@@ -96,6 +96,7 @@ def execute():
   assert shared_row.get('shared_payable') and shared_row.get('settlement_state')=='未付款', 'Shared scope must be separate from settlement state'
   service.get_receipt_list(native_filters=[['name','=',receipts[0].name]],export_format='xlsx',columns=['name','settled','outstanding'])
   from io import BytesIO
+
   from openpyxl import load_workbook
   exported_shared=load_workbook(BytesIO(frappe.response['filecontent']))
   balance_scope=json.loads(exported_shared.active.cell(2,3).value)
