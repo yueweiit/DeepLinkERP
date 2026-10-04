@@ -290,16 +290,23 @@ def test_company_visibility_distinguishes_field_permissions_from_business_pendin
 class ReadBoundary:
 	PermissionError = PermissionError
 
-	def __init__(self, orders=(), requests=(), *, oa_installed=True, read=None, export=None, fields=None):
+	def __init__(self, orders=(), requests=(), *, oa_installed=True, read=None, export=None,
+		native_export=None, owner_export=(), fields=None, document_denied=()):
 		self.records = {"Purchase Order": list(orders), "OA Purchase Request": list(requests)}
 		self.installed = {"Purchase Order"} | ({"OA Purchase Request"} if oa_installed else set())
 		self.read = self.installed if read is None else set(read)
 		self.export = self.installed if export is None else set(export)
+		self.native_export = self.export if native_export is None else set(native_export)
+		self.owner_export = set(owner_export)
 		self.fields = fields or {key: set().union(*(row.keys() for row in value)) for key, value in self.records.items()}
 		self.calls = []
 		self.field_calls = []
 		self.response = {}
 		self.db = SimpleNamespace(exists=self.exists)
+		self.permissions = SimpleNamespace(can_export=self.can_export)
+		self.session = SimpleNamespace(user="buyer@example.test")
+		self.document_reads = []
+		self.document_denied = set(document_denied)
 
 	def exists(self, doctype, name):
 		if doctype == "DocType":
@@ -308,6 +315,17 @@ class ReadBoundary:
 
 	def has_permission(self, doctype, permission_type="read"):
 		return doctype in (self.read if permission_type == "read" else self.export)
+
+	def can_export(self, doctype, is_owner=False):
+		return doctype in (self.owner_export if is_owner else self.native_export)
+
+	def get_doc(self, doctype, name):
+		record = next(row for row in self.records[doctype] if row["name"] == name)
+		def check_permission(permission):
+			self.document_reads.append((doctype, name, permission))
+			if not self.has_permission(doctype, permission) or (doctype, name) in self.document_denied:
+				raise PermissionError
+		return SimpleNamespace(get=record.get, check_permission=check_permission)
 
 	def permitted_fields(self, doctype, **kwargs):
 		self.field_calls.append((doctype, kwargs))
@@ -328,6 +346,25 @@ def connect(monkeypatch, boundary):
 	monkeypatch.setattr(s, "frappe", boundary)
 	monkeypatch.setattr(s, "get_permitted_fields", boundary.permitted_fields)
 	return s
+
+
+@pytest.fixture
+def capture_xlsx(monkeypatch):
+	class WorkbookBoundary:
+		def __init__(self, output, options):
+			self.output = output
+			assert options["strings_to_formulas"] is False
+			assert options["strings_to_urls"] is False
+
+		def __enter__(self):
+			return self
+
+		def __exit__(self, *_args):
+			self.output.write(repr(self.data).encode())
+
+	module = SimpleNamespace(make_xlsx=lambda data, sheet_name, wb: setattr(wb, "data", (data, sheet_name)))
+	monkeypatch.setitem(__import__("sys").modules, "frappe.utils.xlsxutils", module)
+	monkeypatch.setitem(__import__("sys").modules, "xlsxwriter", SimpleNamespace(Workbook=WorkbookBoundary))
 
 
 def test_api_missing_oa_app_keeps_orders_and_reports_capability(monkeypatch):
@@ -407,10 +444,107 @@ def test_no_readable_doctype_is_explicit_permission_error(monkeypatch):
 
 
 @pytest.mark.parametrize("export_permissions", [{"Purchase Order"}, {"OA Purchase Request"}, set()])
-def test_export_requires_permissions_for_both_linked_metadata_and_order(monkeypatch, export_permissions):
-	b = ReadBoundary([po(custom_oa_purchase_expense="OA-1")], [oa()], export=export_permissions)
+def test_export_requires_permissions_for_both_linked_metadata_and_order(monkeypatch, capture_xlsx, export_permissions):
+	b = ReadBoundary([po(custom_oa_purchase_expense="OA-1")], [oa()], native_export=export_permissions)
 	with pytest.raises(PermissionError):
 		connect(monkeypatch, b).export_unified_purchase_list()
+	assert b.response == {}
+
+
+@pytest.mark.parametrize("sources", ["order", "oa", "linked"])
+def test_export_uses_native_capability_when_generic_export_is_false(monkeypatch, capture_xlsx, sources):
+	orders = [po(custom_oa_purchase_expense="OA-1" if sources == "linked" else None)] if sources != "oa" else []
+	requests = [oa()] if sources != "order" else []
+	b = ReadBoundary(orders, requests, export=set(), native_export={"Purchase Order", "OA Purchase Request"},
+		fields={"Purchase Order": set(po()), "OA Purchase Request": set(oa())})
+	s = connect(monkeypatch, b)
+	s.export_unified_purchase_list(columns=["name", "oa_references"])
+	assert b.response["type"] == "binary"
+	assert (b"OA-1" in b.response["filecontent"]) is (sources != "order")
+
+
+@pytest.mark.parametrize("sources", ["order", "oa", "linked"])
+def test_owner_only_export_allows_exact_user_for_every_selected_source(monkeypatch, capture_xlsx, sources):
+	orders = [po(custom_oa_purchase_expense="OA-1" if sources == "linked" else None)] if sources != "oa" else []
+	requests = [oa(owner="buyer@example.test")] if sources != "order" else []
+	b = ReadBoundary(orders, requests, native_export=set(), owner_export={"Purchase Order", "OA Purchase Request"},
+		fields={"Purchase Order": set(po()), "OA Purchase Request": set(oa())})
+	connect(monkeypatch, b).export_unified_purchase_list(columns=["name"])
+	assert b.response["type"] == "binary"
+
+
+@pytest.mark.parametrize("doctype", ["Purchase Order", "OA Purchase Request"])
+@pytest.mark.parametrize("owner", ["other@example.test", None])
+def test_owner_only_export_rejects_other_or_missing_owner(monkeypatch, capture_xlsx, doctype, owner):
+	orders, requests = ([po(owner=owner)], []) if doctype == "Purchase Order" else ([], [oa(owner=owner)])
+	b = ReadBoundary(orders, requests, native_export=set(), owner_export={doctype},
+		fields={"Purchase Order": set(po()), "OA Purchase Request": set(oa())})
+	with pytest.raises(PermissionError):
+		connect(monkeypatch, b).export_unified_purchase_list(columns=["name"])
+	assert b.response == {}
+
+
+@pytest.mark.parametrize("association", ["single", "multiple", "conflict"])
+@pytest.mark.parametrize("owner", ["other@example.test", None])
+def test_linked_oa_owner_boundary_covers_all_sources(monkeypatch, capture_xlsx, association, owner):
+	orders = [po(custom_oa_purchase_expense="OA-1")]
+	requests = [oa(owner=owner)]
+	if association == "multiple":
+		requests = [oa(owner="buyer@example.test"), oa("OA-2", purchase_order="PO-1", owner=owner)]
+	elif association == "conflict":
+		orders.append(po("PO-2"))
+		requests[0]["purchase_order"] = "PO-2"
+	b = ReadBoundary(orders, requests, native_export={"Purchase Order"}, owner_export={"OA Purchase Request"})
+	with pytest.raises(PermissionError):
+		connect(monkeypatch, b).export_unified_purchase_list(filters={"scope": "orders"}, columns=["name", "oa_references"])
+	assert b.response == {}
+
+
+def test_owner_only_export_checks_selected_rows_without_filtering_mixed_owners(monkeypatch, capture_xlsx):
+	b = ReadBoundary([po(), po("PO-2", owner="other@example.test", company="Other")], oa_installed=False,
+		native_export=set(), owner_export={"Purchase Order"})
+	s = connect(monkeypatch, b)
+	s.export_unified_purchase_list(filters={"company": "Yuewei"}, columns=["name"])
+	assert b"PO-1" in b.response["filecontent"] and b"PO-2" not in b.response["filecontent"]
+	b.response.clear()
+	with pytest.raises(PermissionError):
+		s.export_unified_purchase_list(columns=["name"])
+	assert b.response == {}
+
+
+@pytest.mark.parametrize("doctype", ["Purchase Order", "OA Purchase Request"])
+def test_owner_authority_read_never_restores_denied_display_fields(monkeypatch, capture_xlsx, doctype):
+	order, request = po(grand_total=99), oa(owner="buyer@example.test", detail_total_amount=99)
+	orders, requests = ([order], []) if doctype == "Purchase Order" else ([], [request])
+	b = ReadBoundary(orders, requests, native_export=set(), owner_export={doctype}, fields={
+		"Purchase Order": set(order) - {"owner", "grand_total"},
+		"OA Purchase Request": set(request) - {"owner", "detail_total_amount"},
+	})
+	s = connect(monkeypatch, b)
+	s.export_unified_purchase_list(columns=["name", "owner", "grand_total", "oa_amount"])
+	assert b.document_reads == [(doctype, "PO-1" if orders else "OA-1", "read")]
+	assert b"buyer@example.test" not in b.response["filecontent"] and b"99" not in b.response["filecontent"]
+	assert s.get_unified_purchase_list()["rows"][0]["owner"] is None
+
+
+def test_hidden_owner_authority_still_requires_document_read(monkeypatch, capture_xlsx):
+	order = po()
+	b = ReadBoundary([order], oa_installed=False, native_export=set(), owner_export={"Purchase Order"},
+		fields={"Purchase Order": set(order) - {"owner"}}, document_denied={("Purchase Order", "PO-1")})
+	with pytest.raises(PermissionError):
+		connect(monkeypatch, b).export_unified_purchase_list(columns=["name"])
+	assert b.response == {}
+
+
+@pytest.mark.parametrize("scope, denied_source", [
+	("orders", "Purchase Order"), ("oa", "OA Purchase Request"), ("all", "Purchase Order"),
+])
+def test_empty_export_still_requires_requested_native_authority(monkeypatch, capture_xlsx, scope, denied_source):
+	b = ReadBoundary(export={"Purchase Order", "OA Purchase Request"},
+		native_export={"Purchase Order", "OA Purchase Request"} - {denied_source},
+		fields={"Purchase Order": {"name"}, "OA Purchase Request": {"name"}})
+	with pytest.raises(PermissionError):
+		connect(monkeypatch, b).export_unified_purchase_list(filters={"scope": scope}, columns=["name"])
 	assert b.response == {}
 
 
@@ -479,24 +613,9 @@ def test_export_xlsx_preserves_literal_formula_and_url_strings(monkeypatch):
 	assert json.loads(sheet.cell(2, 6).value)[0]["number"] == request["oa_code"]
 
 
-def test_export_download_calls_frappe_xlsx_without_pagination_or_business_writes(monkeypatch):
+def test_export_download_calls_frappe_xlsx_without_pagination_or_business_writes(monkeypatch, capture_xlsx):
 	b = ReadBoundary([po("PO-2"), po("PO-1")], [], oa_installed=False)
 	s = connect(monkeypatch, b)
-	class WorkbookBoundary:
-		def __init__(self, output, options):
-			self.output = output
-			assert options["strings_to_formulas"] is False
-			assert options["strings_to_urls"] is False
-
-		def __enter__(self):
-			return self
-
-		def __exit__(self, *_args):
-			self.output.write(repr(self.data).encode())
-
-	module = SimpleNamespace(make_xlsx=lambda data, sheet_name, wb: setattr(wb, "data", (data, sheet_name)))
-	monkeypatch.setitem(__import__("sys").modules, "frappe.utils.xlsxutils", module)
-	monkeypatch.setitem(__import__("sys").modules, "xlsxwriter", SimpleNamespace(Workbook=WorkbookBoundary))
 	s.export_unified_purchase_list(columns='["name"]')
 	assert b.response["filename"].endswith(".xlsx")
 	assert b.response["type"] == "binary"

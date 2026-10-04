@@ -12,6 +12,8 @@ import frappe
 from frappe.model import get_permitted_fields
 from frappe.utils import getdate, nowdate
 
+from deeplinkerp_branding.services.unified_purchase_service import _require_export_permission
+
 SOURCES = {"Purchase Receipt", "Purchase Order"}
 PI_FIELDS = {"company", "supplier", "currency", "party_account_currency", "grand_total", "base_grand_total",
              "rounded_total", "base_rounded_total", "disable_rounded_total", "outstanding_amount", "items", "is_return"}
@@ -218,8 +220,8 @@ def _pagination(start, page_length):
 
 
 def _export(doctype, rows, columns, allowed):
-    if not frappe.has_permission(doctype, "export"):
-        frappe.throw("没有导出权限", frappe.PermissionError)
+    _require_export_permission(doctype, ({"name": row["name"], "owner": _read_doc(doctype, row["name"]).get("owner")}
+                                        for row in rows))
     columns = json.loads(columns) if isinstance(columns, str) else columns or list(allowed)
     if not isinstance(columns, list) or not columns or len(set(columns)) != len(columns) or any(column not in allowed for column in columns):
         frappe.throw("导出列无效")
@@ -229,7 +231,7 @@ def _export(doctype, rows, columns, allowed):
     if doctype == "Payment Entry" and "allocation_currency" not in columns:
         columns.append("allocation_currency")
     for row in rows:
-        _read_doc(doctype, row["name"]).check_permission("export")
+        _check_read(_read_doc(doctype, row["name"]))
     # Prevent spreadsheet formula interpretation of source text.
     def value(row, column):
         cell = row.get(column)

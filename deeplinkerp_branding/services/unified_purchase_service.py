@@ -11,6 +11,7 @@ from typing import Any
 
 try:
 	import frappe
+	import frappe.permissions
 	from frappe.model import get_permitted_fields
 except ImportError:  # Local pure tests do not require a Frappe installation.
 	frappe = None
@@ -364,9 +365,22 @@ def build_unified_purchase_export(purchase_orders, oa_requests, *, filters=None,
 	return _export_data(rows, columns)
 
 
-def _require_permission(doctype: str, permission_type: str) -> None:
-	if not frappe.has_permission(doctype, permission_type):
-		frappe.throw(f"没有权限{ '导出' if permission_type == 'export' else '查看' }{doctype}。", frappe.PermissionError)
+def _require_export_permission(doctype: str, records) -> None:
+	"""Match native report export authority, including its exact-owner fallback."""
+	if frappe.permissions.can_export(doctype):
+		return
+	if not frappe.permissions.can_export(doctype, is_owner=True):
+		frappe.throw(f"没有权限导出{doctype}。", frappe.PermissionError)
+	for record in records:
+		if "owner" in record:
+			owner = record.get("owner")
+		else:
+			# Authority-only read: never restore a denied owner field to the projection.
+			doc = frappe.get_doc(doctype, record["name"])
+			doc.check_permission("read")
+			owner = doc.get("owner")
+		if not owner or owner != frappe.session.user:
+			frappe.throw(f"没有权限导出{doctype}。", frappe.PermissionError)
 
 
 def _read_records() -> tuple[list, list, dict, list, set, bool]:
@@ -412,16 +426,22 @@ def get_unified_purchase_list(filters=None, start=0, page_length=DEFAULT_PAGE_LE
 
 @_whitelist
 def export_unified_purchase_list(filters=None, columns=None, order_by="transaction_date desc") -> None:
-	orders, requests, _, _, currencies, reverse_readable = _read_records()
+	orders, requests, capabilities, _, currencies, reverse_readable = _read_records()
 	rows, _ = _pipeline(orders, requests, filters=filters, order_by=order_by,
 		currency_codes=currencies, oa_reverse_link_readable=reverse_readable)
-	used = set()
+	records = {PURCHASE_ORDER: {row["name"]: row for row in orders}, OA_REQUEST: {row["name"]: row for row in requests}}
+	used = defaultdict(set)
 	for row in rows:
-		used.add(PURCHASE_ORDER if row["row_type"] == "purchase_order" else OA_REQUEST)
-		if row.get("_search_values") and row["row_type"] == "purchase_order":
-			used.add(OA_REQUEST)
-	for doctype in sorted(used):
-		_require_permission(doctype, "export")
+		used[PURCHASE_ORDER if row["row_type"] == "purchase_order" else OA_REQUEST].add(row["name"])
+		if row["oa_references"]:
+			used[OA_REQUEST].update(reference["name"] for reference in row["oa_references"])
+	if not rows:
+		scope = _filters(filters)["scope"]
+		for doctype, key in ((PURCHASE_ORDER, "purchase_order"), (OA_REQUEST, "oa_request")):
+			if capabilities[key] and (scope != "orders" or doctype == PURCHASE_ORDER):
+				used[doctype] = set()
+	for doctype, names in sorted(used.items()):
+		_require_export_permission(doctype, (records[doctype][name] for name in sorted(names)))
 	from frappe.utils.xlsxutils import make_xlsx
 	from xlsxwriter import Workbook
 	output = BytesIO()

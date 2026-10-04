@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from openpyxl import load_workbook
 
 import frappe
+import frappe.permissions
 from deeplinkerp_branding.services import purchase_payment_service as service
 
 
@@ -163,14 +164,42 @@ class PaymentRecordReaderTests(unittest.TestCase):
 class ProcurementExportTests(unittest.TestCase):
     """Read native XLSX files; isolate document access and the site-only default format."""
 
-    def export(self, doctype, rows, columns=None, can_export=True, check_export=None):
+    def export(self, doctype, rows, columns=None, can_export=True, check_read=None,
+               generic_export=True, owner_export=False, owner='buyer@example.test'):
         response = {}
-        doc = SimpleNamespace(check_permission=check_export or (lambda permission: None))
+        doc = SimpleNamespace(check_permission=check_read or (lambda permission: None),
+                              get=lambda field: owner if field == 'owner' else None)
         allowed = service.RECEIPT_COLUMNS if doctype == 'Purchase Receipt' else service.PAYMENT_COLUMNS
         from frappe.utils.xlsxutils import XLSXStyleBuilder
-        with patch.object(frappe, 'response', response), patch.object(frappe, 'has_permission', return_value=can_export), patch.object(service, '_read_doc', return_value=doc), patch.object(XLSXStyleBuilder, 'get_datetime_format', return_value='yyyy-mm-dd hh:mm:ss'):
+        capability = lambda doctype, is_owner=False: owner_export if is_owner else can_export
+        def throw_without_site(message, exception):
+            raise exception(message)
+        with patch.object(frappe, 'response', response), patch.object(frappe, 'has_permission', return_value=generic_export), patch.object(frappe.permissions, 'can_export', side_effect=capability), patch.object(frappe, 'session', SimpleNamespace(user='buyer@example.test')), patch.object(frappe, 'throw', side_effect=throw_without_site), patch.object(service, '_read_doc', return_value=doc), patch.object(XLSXStyleBuilder, 'get_datetime_format', return_value='yyyy-mm-dd hh:mm:ss'):
             service._export(doctype, rows, columns, allowed)
         return load_workbook(BytesIO(response['filecontent']))
+
+    def test_native_capability_allows_export_when_generic_and_document_export_are_false(self):
+        def readable(permission):
+            if permission == 'export':
+                raise frappe.PermissionError
+        for doctype in ('Purchase Receipt', 'Payment Entry'):
+            with self.subTest(doctype=doctype):
+                workbook = self.export(doctype, [{'name': 'DOC-1', 'references': []}], ['name'],
+                                       generic_export=False, check_read=readable)
+                self.assertEqual(workbook.active.cell(2, 1).value, 'DOC-1')
+
+    def test_owner_only_export_allows_exact_user_and_rejects_other_or_missing_owners(self):
+        for doctype in ('Purchase Receipt', 'Payment Entry'):
+            for owner in ('buyer@example.test', 'other@example.test', None):
+                with self.subTest(doctype=doctype, owner=owner):
+                    def export():
+                        return self.export(doctype, [{'name': 'DOC-1', 'references': []}], ['name'],
+                                           can_export=False, owner_export=True, owner=owner)
+                    if owner == 'buyer@example.test':
+                        self.assertEqual(export().active.cell(2, 1).value, 'DOC-1')
+                    else:
+                        with self.assertRaises(frappe.PermissionError):
+                            export()
 
     def test_selected_amount_columns_keep_order_and_append_distinct_currencies(self):
         cases = (
@@ -239,13 +268,17 @@ class ProcurementExportTests(unittest.TestCase):
             raise exception(message)
         with patch.object(frappe, 'throw', side_effect=throw_without_site), self.assertRaises(frappe.PermissionError):
             self.export('Purchase Receipt', [], ['name'], can_export=False)
+
+    def test_each_exported_document_still_requires_read_permission(self):
         checked = []
         def denied(permission):
             checked.append(permission)
-            raise frappe.PermissionError
-        with self.assertRaises(frappe.PermissionError):
-            self.export('Payment Entry', [{'name': 'PRIVATE'}], ['name'], check_export=denied)
-        self.assertEqual(checked, ['export'])
+            if permission == 'read':
+                raise frappe.PermissionError
+        for doctype in ('Purchase Receipt', 'Payment Entry'):
+            with self.subTest(doctype=doctype), self.assertRaises(frappe.PermissionError):
+                self.export(doctype, [{'name': 'PRIVATE', 'references': []}], ['name'], check_read=denied)
+        self.assertEqual(checked, ['read', 'read'])
 
 
 if __name__ == '__main__':
