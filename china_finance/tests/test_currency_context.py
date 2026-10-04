@@ -52,7 +52,10 @@ class TestCurrencyCoverage(UnitTestCase):
 		with patch.object(statements, "_execute", return_value=(columns, rows, "", {})), patch.object(
 			currency_context, "company_currency", return_value="CNY"
 		), patch.object(statements, "company_currency", return_value="CNY"):
-			result = statements.execute({"company": "Company"})
+			result = statements.execute({
+				"company": "Company", "fiscal_year": "2026",
+				"from_date": "2026-01-01", "to_date": "2026-12-31",
+			})
 		self.assertEqual(result[1][0]["currency"], "CNY")
 		self.assertEqual(result[3]["currency"], "CNY")
 		self.assertEqual(result[0][0]["options"], "currency")

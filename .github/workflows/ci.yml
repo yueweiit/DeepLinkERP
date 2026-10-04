@@ -66,6 +66,12 @@ jobs:
           bench --site test_site install-app erpnext
           bench --site test_site install-app china_finance
 
+      - name: Install native ERPNext test fixtures
+        working-directory: /home/runner/frappe-bench
+        run: |
+          # Company creation requires setup-wizard presets, including Warehouse Type Transit.
+          bench --site test_site execute erpnext.setup.setup_wizard.operations.install_fixtures.install --kwargs '{"country": "China"}'
+
       - name: Verify repeatable migration and assets
         working-directory: /home/runner/frappe-bench
         run: |

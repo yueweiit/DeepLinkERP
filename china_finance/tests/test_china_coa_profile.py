@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase, UnitTestCase
@@ -17,6 +18,7 @@ from china_finance.setup.templates import (
 	SMALL_ENTERPRISE_ROWS,
 	_classify_known_profile_fallback,
 	classify_account_number,
+	classify_company_account,
 	get_supplementary_row_code,
 	is_strictly_excluded_from_statement,
 	refine_classification_for_template,
@@ -151,7 +153,14 @@ class TestChinaCoaProfile(UnitTestCase):
 			if row["is_group"] or row["account_type"] in {"Cash", "Bank"}:
 				continue
 			if requires_manual_cash_flow_assignment(row["account_number"]):
-				self.assertIsNone(classify_account_number(row["account_number"], "Cash Flow", SimpleNamespace(account_type=row["account_type"], root_type=row["root_type"])))
+				account = SimpleNamespace(
+					account_number=row["account_number"],
+					account_type=row["account_type"],
+					root_type=row["root_type"],
+				)
+				with patch("china_finance.setup.china_coa_profile.is_profile_company", return_value=True):
+					classification, _basis = classify_company_account("Company", account, "Cash Flow")
+				self.assertIsNone(classification)
 				continue
 			account = SimpleNamespace(account_type=row["account_type"], root_type=row["root_type"])
 			self.assertIsNotNone(
