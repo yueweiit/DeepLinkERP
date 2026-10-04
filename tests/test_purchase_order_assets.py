@@ -43,7 +43,7 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 
 	def test_unified_adapter_loads_after_cache_busted_shared_engine(self):
 		scripts = hooks.app_include_js
-		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.11"
+		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.12"
 		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.4"
 		self.assertIn(engine, scripts)
 		self.assertLess(scripts.index(engine), scripts.index(adapter))

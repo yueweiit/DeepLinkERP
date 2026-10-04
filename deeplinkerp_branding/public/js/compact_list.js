@@ -79,12 +79,21 @@
 	}
 
 	function normalizePreferences(value, allowed, definitions = COLUMNS) {
+		if (definitions === COLUMNS && config.migratePreferences) value = config.migratePreferences(value, allowed);
 		const candidates = definitions.filter((col) => allowed.has(col.fieldname)).map((col) => col.fieldname);
 		const defaults = definitions === COLUMNS ? config.defaultColumns : config.provider?.defaultColumns;
 		const selected = Array.isArray(value?.columns) ? value.columns : (defaults || candidates);
 		const columns = [...new Set(selected.filter((field) => candidates.includes(field)))];
 		if (!columns.includes("name") && allowed.has("name")) columns.unshift("name");
-		return { density: value?.density === "standard" ? "standard" : "tight", columns };
+		return { density: value?.density === "standard" ? "standard" : "tight", columns, ...(config.preferenceVersion ? { version: config.preferenceVersion } : {}) };
+	}
+
+	function selectOptions(control, field, translate) {
+		const options = control.options || `\n${field?.options || ""}`;
+		const labels = config.optionLabels?.[control.fieldname];
+		if (!labels && !control.emptyLabel) return options;
+		const values = typeof options === "string" ? options.split("\n") : options;
+		return [...new Set(values)].map(value => typeof value === "object" ? value : ({ value, label: translate(value ? labels?.[value] || value : control.emptyLabel || "") }));
 	}
 
 	function fieldName(field) {
@@ -224,7 +233,7 @@
 		let saved;
 		try { saved = JSON.parse(root.localStorage?.getItem(key) || "null"); } catch (_) { /* Browsers may disable storage. */ }
 		const originals = {};
-		for (const name of ["get_args", "get_call_args", "no_change", "prepare_data", "reset_defaults", "get_header_html", "get_list_row_html", "render_list", "render_count", "toggle_result_area", "on_filter_change", "process_document_refreshes", "debounced_refresh", "get_checked_items", "set_rows_as_checked", "before_render", "after_render"]) originals[name] = list[name];
+		for (const name of ["get_args", "get_call_args", "no_change", "prepare_data", "reset_defaults", "get_header_html", "get_list_row_html", "render_list", "render_count", "toggle_result_area", "on_filter_change", "process_document_refreshes", "debounced_refresh", "get_checked_items", "set_rows_as_checked", "on_row_checked", "before_render", "after_render"]) originals[name] = list[name];
 		const providerAllowed = new Set(displayAllowed);
 		for (const field of config.provider?.virtualFields || []) providerAllowed.add(field);
 		let providerSaved;
@@ -360,7 +369,10 @@
 		list.no_change = function (call) {
 			const unchanged = originals.no_change.call(this, call);
 			// Only the native dispatch gate can distinguish duplicate checks from forced refreshes.
-			if (!unchanged && callRequests.has(call)) callRequests.get(call).id = ++controller.requestId;
+			if (!unchanged && callRequests.has(call)) {
+				callRequests.get(call).id = ++controller.requestId;
+				config.onRequestStart?.(controller);
+			}
 			return unchanged;
 		};
 		list.prepare_data = function (response) {
@@ -396,6 +408,16 @@
 		};
 		list.get_checked_items = function (...args) { return providerActive(controller) ? [] : originals.get_checked_items?.apply(this, args) || []; };
 		list.set_rows_as_checked = function (...args) { if (!providerActive(controller)) return originals.set_rows_as_checked?.apply(this, args); };
+		if (config.keepColumnHeader) list.on_row_checked = function (...args) {
+			const result = originals.on_row_checked?.apply(this, args);
+			// Keep native checks, bulk permissions and actions; only replace its header presentation.
+			this.$list_head_subject?.show();
+			this.$checkbox_actions?.hide();
+			const checked = this.$checks?.length || 0;
+			this.$list_head_subject?.find(".list-check-all").prop("checked", checked > 0 && checked === this.data.length).prop("indeterminate", checked > 0 && checked < this.data.length);
+			config.onSelectionChange?.(controller);
+			return result;
+		};
 		for (const name of ["before_render", "after_render"]) list[name] = function (...args) { if (!providerActive(controller)) return originals[name]?.apply(this, args); };
 		if (config.provider && list.setup_realtime_updates) {
 			const nativeSetupRealtime = list.setup_realtime_updates;
@@ -570,7 +592,7 @@
 		for (const control of controls) {
 			if (control.fieldname !== "search" && !controller.allowed.has(control.permission_field || control.fieldname)) continue;
 			const field = list.meta.fields.find((df) => df.fieldname === control.fieldname);
-			if (control.fieldtype === "Select" && !control.options) control.options = `\n${field?.options || ""}`;
+			if (control.fieldtype === "Select") control.options = selectOptions(control, field, t);
 			const holder = $(`<div class="dlp-po-filter" data-fieldname="${control.fieldname}"></div>`).appendTo(controller.$filters);
 			const input = root.frappe.ui.form.make_control({ parent: holder, df: { ...control, label: t(control.label), placeholder: t(control.label), change: () => {
 				if (controller.resetting) return;
@@ -579,9 +601,6 @@
 				controller.refresh();
 			} }, render_input: true });
 			input.$input?.attr("aria-label", t(control.label));
-			if (config.optionLabels?.[control.fieldname]) input.$input?.find("option").each(function () {
-				if (config.optionLabels[control.fieldname][this.value]) this.textContent = t(config.optionLabels[control.fieldname][this.value]);
-			});
 			controller.controls[control.fieldname] = input;
 			if (control.fieldname === "search") controller.searchControl = input;
 		}
@@ -784,5 +803,5 @@
 		frappe.router?.on('change', () => { c.activate(); if (!active()) { c.requestId++; c.stopInitialOnboarding?.(); } });
 		return c;
 	}
-	return { COLUMNS, escapeHTML, allowedFields, preferenceKey, normalizePreferences, buildQuery, buildRequests, currencyTotals, formatNumber, renderValue, mount, mountPage, install, dismissAutomaticOnboarding };
+	return { COLUMNS, escapeHTML, allowedFields, preferenceKey, normalizePreferences, selectOptions, buildQuery, buildRequests, currencyTotals, formatNumber, renderValue, mount, mountPage, install, dismissAutomaticOnboarding };
 });

@@ -7,13 +7,14 @@
 	"use strict";
 	const API = "deeplinkerp_branding.services.compact_sales_service.";
 	const statusLabels = { "Pending Confirmation": "待确认", "Pending Deposit Confirmation": "待财务放行", "Deposit Confirmation Processing": "CRM/MES 同步中", "Pending Production": "生产已放行", "Pending Final Payment": "待尾款确认", "Deliverable": "可发货", "Partially Delivered": "部分发货", "Completed": "已完成", "Rejected": "已驳回", "Cancelled": "已取消", "Closed": "已关闭" };
+	const orderStatusLabels = { Draft: "草稿", "To Deliver and Bill": "待交付及开票", "To Bill": "待开票", "To Deliver": "待交付", Completed: "已完成", Cancelled: "已取消", Closed: "已关闭", "On Hold": "已暂停" };
 	const COLUMNS = [
 		["name", "CRM / ERP 订单号", 190], ["customer_name", "客户", 165], ["custom_process_status", "ERP 业务状态", 145], ["dlp_product", "产品", 170], ["dlp_quantity", "数量", 105], ["grand_total", "ERP 订单金额", 145], ["delivery_date", "预计交付日期", 110], ["transaction_date", "订单日期", 105],
 		["title", "ERP 标题", 170], ["contact_display", "联系人", 160], ["contact_email", "联系人邮箱", 200], ["contact_mobile", "联系电话", 140], ["customer", "ERP 客户编码", 150], ["dlp_sales_person", "业务负责人", 155], ["dlp_rate", "ERP 单价", 125], ["custom_odt", "ODT", 130], ["custom_remark", "销售备注", 230], ["company", "公司", 180], ["currency", "币种", 70], ["status", "订单状态", 145], ["advance_paid", "ERP 预付款汇总", 150], ["owner", "ERP 创建人", 190], ["creation", "创建时间", 165], ["modified_by", "ERP 更新人", 190], ["modified", "更新时间", 165], ["per_delivered", "已交付", 85], ["per_billed", "已开票", 85], ["project", "项目", 130],
 		["dlp_receipts", "关联收款记录", 290], ["dlp_sync", "财务确认 / 同步", 200], ["dlp_last_confirmation", "最近确认人 / 时间", 235], ["dlp_actions", "操作", 110],
 	].map(([fieldname, label, width]) => ({ fieldname, label, width }));
 	const presets = {
-		main: ["name", "customer_name", "custom_process_status", "dlp_product", "dlp_quantity", "grand_total", "delivery_date", "dlp_actions"],
+		main: ["name", "customer_name", "custom_process_status", "status", "dlp_product", "dlp_quantity", "grand_total", "delivery_date", "dlp_actions"],
 		middle: ["name", "title", "contact_display", "dlp_sales_person", "customer", "transaction_date", "delivery_date", "custom_remark", "dlp_actions"],
 		tail: ["name", "custom_odt", "status", "per_delivered", "owner", "creation", "modified_by", "modified", "dlp_actions"],
 		finance: ["name", "customer_name", "grand_total", "dlp_receipts", "dlp_sync", "dlp_last_confirmation", "dlp_actions"],
@@ -45,6 +46,7 @@
 		const tr = formatters.translate || t;
 		if (field === "name") return `${esc(doc.custom_crm_order_no || doc.name)}${doc.custom_crm_order_no ? `<small class="dlp-sales-erp-number">ERP: ${esc(doc.name)}</small>` : ""}`;
 		if (field === "custom_process_status") return `<span class="dlp-sales-state">${esc(tr(statusLabels[doc[field]] || doc[field] || "—"))}</span>`;
+		if (field === "status") return `<span class="dlp-sales-state">${esc(tr(orderStatusLabels[doc[field]] || doc[field] || "—"))}</span>`;
 		if (field === "dlp_product") return esc(doc.dlp_product || "—") + (doc.dlp_item_count > 1 ? `<small> · ${doc.dlp_item_count} ${esc(tr("项"))}</small>` : "");
 		if (field === "dlp_quantity") return doc.dlp_multiple_units ? esc(tr("多单位明细")) : doc.dlp_quantity == null ? "—" : `${esc(doc.dlp_quantity)} ${esc(doc.dlp_uom)}`;
 		if (field === "dlp_rate") return doc.dlp_item_count > 1 ? esc(tr("多明细")) : money(doc.dlp_rate, doc.currency);
@@ -63,19 +65,77 @@
 		for (const [name, detail] of controller.salesExpanded || []) { const row = controller.list.data.find(item => item.name === name); if (!row || (row.modified && row.modified !== detail.header.modified)) controller.salesExpanded.delete(name); }
 	}
 	async function onRows(controller) {
+		if (!salesListActive(controller)) return;
 		invalidateExpandedDetails(controller);
 		const names = controller.list.data.map(row => row.name), generation = controller.requestId;
 		try {
 			const details = await call("get_sales_display_details", { sales_orders: names });
-			if (generation !== controller.requestId) return;
+			if (generation !== controller.requestId || !salesListActive(controller)) return;
 			controller.list.data.forEach(row => Object.assign(row, details[row.name] || {}));
 			if (controller.salesView === "finance") {
 				const finance = [];
-				for (let start = 0; start < names.length; start += 100) { const response = await root.frappe.call({ method: "crm_integration.crm_integration.finance_release.get_finance_release_review", args: { sales_orders: names.slice(start, start + 100) } }); if (generation !== controller.requestId) return; finance.push(...response.message.orders); }
+				for (let start = 0; start < names.length; start += 100) { const response = await root.frappe.call({ method: "crm_integration.crm_integration.finance_release.get_finance_release_review", args: { sales_orders: names.slice(start, start + 100) } }); if (generation !== controller.requestId || !salesListActive(controller)) return; finance.push(...response.message.orders); }
 				controller.list.data.forEach(row => { row.dlp_finance = finance.find(item => item.name === row.name); });
 			}
 			controller.list.render_list(); controller.list.set_rows_as_checked?.(); controller.list.on_row_checked?.();
 		} catch (_) { controller.$salesNotice?.text(t("补充信息读取失败；可打开原生订单核对。")); }
+	}
+	function migratePreferences(value, allowed) {
+		if (!value?.columns || value.version === 2 || !allowed.has("status") || value.columns.includes("status")) return value;
+		const columns = [...value.columns], after = columns.indexOf("custom_process_status");
+		columns.splice(after < 0 ? columns.length : after + 1, 0, "status");
+		return { ...value, columns };
+	}
+	function salesListActive(controller) {
+		const route = controller.root.frappe.get_route?.() || [];
+		return controller.salesRouteActive !== false && route[0] === "List" && route[1] === "Sales Order" && (!route[2] || route[2] === "List");
+	}
+	function releaseSelectionKey(controller) {
+		return JSON.stringify([controller.requestId, (controller.list.get_checked_items?.() || []).map(row => typeof row === "string" ? row : [row.name, row.modified, row.status, row.custom_process_status])]);
+	}
+	function invalidateReleaseSelection(controller, label = t("正在刷新订单，请稍候…")) {
+		controller.salesReleaseKey = null;
+		controller.salesReleaseVersion = (controller.salesReleaseVersion || 0) + 1;
+		controller.salesReleaseNames = [];
+		controller.$salesViewbar?.find(".dlp-sales-selected").text(label);
+		controller.$salesViewbar?.find(".dlp-sales-release").text(t("允许生产（{0}单）", [0])).prop("disabled", true);
+	}
+	function releaseSelectionCurrent(controller, version, key = controller.salesReleaseKey) {
+		return salesListActive(controller) && controller.salesReleaseVersion === version && key === controller.salesReleaseKey && key === releaseSelectionKey(controller);
+	}
+	function updateReleaseSelection(controller, force = false) {
+		if (!controller?.$salesViewbar) return Promise.resolve();
+		if (!salesListActive(controller)) { invalidateReleaseSelection(controller, t("未选择订单")); return Promise.resolve(); }
+		const selected = controller.list.get_checked_items?.() || [];
+		const names = [...new Set(selected.map(row => typeof row === "string" ? row : row.name).filter(Boolean))];
+		const key = releaseSelectionKey(controller);
+		if (!force && controller.salesReleaseKey === key) return controller.salesReleasePromise || Promise.resolve();
+		controller.salesReleaseKey = key;
+		const version = controller.salesReleaseVersion = (controller.salesReleaseVersion || 0) + 1;
+		controller.salesReleaseNames = [];
+		const bar = controller.$salesViewbar;
+		const paint = (label, eligible = []) => {
+			controller.salesReleaseNames = eligible;
+			bar.find(".dlp-sales-selected").text(label);
+			bar.find(".dlp-sales-release").text(t("允许生产（{0}单）", [eligible.length])).prop("disabled", !eligible.length);
+			controller.updateTableViewport?.();
+		};
+		paint(!names.length ? t("未选择订单") : names.length > 100 ? t("已选择：{0}；每次最多核验 100 单", [names.length]) : t("已选择：{0}；正在核验…", [names.length]));
+		if (!names.length || names.length > 100) return Promise.resolve();
+		const current = () => releaseSelectionCurrent(controller, version, key);
+		const promise = (async () => {
+			try {
+				const response = await controller.root.frappe.call({ method: "crm_integration.crm_integration.finance_release.get_finance_release_review", args: { sales_orders: names } });
+				if (!current()) return;
+				const permitted = new Set((response.message?.orders || []).filter(row => row.can_release === true).map(row => row.name));
+				const eligible = names.filter(name => permitted.has(name));
+				paint(t("已选择：{0} · 可放行：{1} · 不可放行：{2}", [names.length, eligible.length, names.length - eligible.length]), eligible);
+			} catch (_) {
+				if (current()) paint(t("放行资格核验失败，请重新选择或刷新后重试。"));
+			}
+		})();
+		controller.salesReleasePromise = promise;
+		return promise;
 	}
 	function mountControls(controller) {
 		if (!root.$ || !controller.$toolbar) return;
@@ -84,14 +144,18 @@
 		const bar = root.$(`<div class="dlp-sales-viewbar"><div class="dlp-sales-tabs">${[["all", "全部订单"], ["mine", "我的订单"], ["finance", "财务待放行"]].map(([value, label]) => `<button class="btn btn-default btn-sm" type="button" data-sales-view="${value}" aria-pressed="${value === "all"}">${esc(t(label))}</button>`).join("")}</div><div class="dlp-sales-release-action"><span class="dlp-sales-selected" role="status">${esc(t("未选择订单"))}</span><button type="button" class="btn btn-primary dlp-sales-release" disabled>${esc(t("允许生产"))} (0)</button></div></div>`).insertBefore(controller.list.$frappe_list);
 		controller.$salesViewbar = bar;
 		controller.$salesNotice = root.$(`<p class="dlp-sales-notice text-muted">${esc(t("展开产品行或查看明细；左右滚动查看全部字段。"))}</p>`).insertAfter(bar);
-		const updateSelection = () => {
-			const selected = controller.list.get_checked_items?.() || [];
-			bar.find(".dlp-sales-selected").text(selected.length ? t("已选择：{0}", [selected.length]) : t("未选择订单"));
-			bar.find(".dlp-sales-release").text(root.CRMFinanceRelease?.buttonLabel(selected.length) || t("允许生产（{0}单）", [selected.length])).prop("disabled", !selected.length || selected.length > 100);
-		};
-		controller.list.$result?.on("change.dlpSalesSelection", ".list-row-checkbox,.list-check-all", () => setTimeout(updateSelection, 0));
+		const updateSelection = () => updateReleaseSelection(controller);
 		controller.updateSalesSelection = updateSelection;
-		bar.find(".dlp-sales-release").on("click", async () => { const names = controller.list.get_checked_items().map(row => typeof row === "string" ? row : row.name); const open = () => root.CRMFinanceRelease.open(names, () => { controller.list.clear_checked_items?.(); updateSelection(); controller.refresh(); }); if (!root.CRMFinanceRelease) await root.frappe.require("/assets/crm_integration/js/finance_release.js"); open(); });
+		bar.find(".dlp-sales-release").on("click", async () => {
+			const pending = updateReleaseSelection(controller, true), version = controller.salesReleaseVersion;
+			await pending;
+			if (!releaseSelectionCurrent(controller, version)) return;
+			const names = [...controller.salesReleaseNames];
+			if (!names.length) return;
+			if (!root.CRMFinanceRelease) await root.frappe.require("/assets/crm_integration/js/finance_release.js");
+			if (!releaseSelectionCurrent(controller, version)) return;
+			root.CRMFinanceRelease.open(names, () => { controller.list.clear_checked_items?.(); updateSelection(); controller.refresh(); });
+		});
 		bar.find("[data-sales-view]").on("click", async event => {
 			controller.salesView = event.currentTarget.dataset.salesView;
 			bar.find("[data-sales-view]").attr("aria-pressed", "false"); root.$(event.currentTarget).attr("aria-pressed", "true");
@@ -123,17 +187,17 @@
 	function dismissAutomaticOnboarding(controller) {
 		return grid.dismissAutomaticOnboarding(controller, root);
 	}
-	const grid = engine.create({ doctype: "Sales Order", controllerKey: "dlpSalesOrderGrid", routeClass: "dlp-sales-order-grid-active", columns: COLUMNS, freezeUntil: "name", defaultColumns: presets.main,
+	const grid = engine.create({ doctype: "Sales Order", controllerKey: "dlpSalesOrderGrid", routeClass: "dlp-sales-order-grid-active", columns: COLUMNS, freezeUntil: "name", defaultColumns: presets.main, preferenceVersion: 2, migratePreferences, keepColumnHeader: true, onSelectionChange: updateReleaseSelection,
 		computedFields: ["dlp_product", "dlp_quantity", "dlp_rate", "dlp_sales_person", "dlp_receipts", "dlp_sync", "dlp_last_confirmation", "dlp_actions"], extraFields: ["customer", "custom_crm_order_no", "party_account_currency"],
-		numbers: ["grand_total", "advance_paid", "per_delivered", "per_billed"], dates: ["transaction_date", "delivery_date"], moneySummary: true, quickFields: ["company", "customer", "status", "custom_process_status"], searchFields: ["name", "custom_crm_order_no", "customer_name", "custom_odt"], optionLabels: { custom_process_status: statusLabels },
-		controls: [{ fieldname: "search", fieldtype: "Data", label: "订单号 / 客户 / ODT" }, { fieldname: "customer", fieldtype: "Link", options: "Customer", label: "客户" }, { fieldname: "custom_process_status", fieldtype: "Select", label: "ERP 业务状态" }, { fieldname: "from_date", permission_field: "transaction_date", fieldtype: "Date", label: "开始日期" }, { fieldname: "to_date", permission_field: "transaction_date", fieldtype: "Date", label: "结束日期" }, { fieldname: "product", permission_field: "items", fieldtype: "Link", options: "Item", label: "品目编码" }, { fieldname: "company", fieldtype: "Link", options: "Company", label: "公司" }],
+		numbers: ["grand_total", "advance_paid", "per_delivered", "per_billed"], dates: ["transaction_date", "delivery_date"], moneySummary: true, quickFields: ["company", "customer", "status", "custom_process_status"], searchFields: ["name", "custom_crm_order_no", "customer_name", "custom_odt"], optionLabels: { custom_process_status: statusLabels, status: orderStatusLabels },
+		controls: [{ fieldname: "search", fieldtype: "Data", label: "订单号 / 客户 / ODT" }, { fieldname: "customer", fieldtype: "Link", options: "Customer", label: "客户" }, { fieldname: "custom_process_status", fieldtype: "Select", label: "ERP 业务状态", emptyLabel: "全部业务状态" }, { fieldname: "status", fieldtype: "Select", label: "订单状态", emptyLabel: "全部订单状态" }, { fieldname: "from_date", permission_field: "transaction_date", fieldtype: "Date", label: "开始日期" }, { fieldname: "to_date", permission_field: "transaction_date", fieldtype: "Date", label: "结束日期" }, { fieldname: "product", permission_field: "items", fieldtype: "Link", options: "Item", label: "品目编码" }, { fieldname: "company", fieldtype: "Link", options: "Company", label: "公司" }],
 		searchConflictMessage: "现有 OR 筛选已保留；清除后可使用订单 / 客户搜索。",
-		transformQuery, onRows, mountControls, renderValue,
-		onRouteChange: (controller, active) => { fitViewport(controller, active); if (!active) controller?.stopInitialOnboarding?.(); },
+		transformQuery, onRows, mountControls, renderValue, onRequestStart: invalidateReleaseSelection,
+		onRouteChange: (controller, active) => { if (controller) controller.salesRouteActive = active; fitViewport(controller, active); if (!active && controller) { invalidateReleaseSelection(controller, t("未选择订单")); controller.stopInitialOnboarding?.(); } else controller?.updateSalesSelection?.(); },
 		renderLink: (controller, doc, value) => `<button type="button" class="dlp-sales-name dlp-sales-detail" data-name="${esc(doc.name)}">${value}</button>`,
 		renderSequence: (controller, doc, sequence) => `<button class="dlp-sales-expand" type="button" data-name="${esc(doc.name)}" aria-expanded="${controller.salesExpanded?.has(doc.name) || false}" aria-label="${esc(t("展开产品明细"))}">${controller.salesExpanded?.has(doc.name) ? "⌄" : "›"} ${sequence}</button>`,
 		rowExtra: (controller, doc) => controller.salesExpanded?.has(doc.name) ? `<section class="dlp-sales-expanded"><strong>${esc(t("订单产品明细"))}</strong>${itemTable(controller.salesExpanded.get(doc.name))}</section>` : "",
 		afterRender: controller => { controller.updateSalesSelection?.(); controller.updateTableViewport?.(); },
 	});
-	return { ...grid, COLUMNS, presets, itemTable, detailsHTML, transformQuery, statusLabels, invalidateExpandedDetails, dismissAutomaticOnboarding, fitViewport };
+	return { ...grid, COLUMNS, presets, itemTable, detailsHTML, transformQuery, statusLabels, orderStatusLabels, updateReleaseSelection, invalidateExpandedDetails, dismissAutomaticOnboarding, fitViewport };
 });

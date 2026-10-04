@@ -41,6 +41,130 @@ test("sales presets retain an explicit details action and ERP account identity f
  assert.ok(!grid.COLUMNS.some(c=>/deposit_required|deposit_difference/.test(c.fieldname)));
 });
 
+test('main sales columns show native order status separately from the business process',()=>{
+ assert.ok(grid.presets.main.includes('status'));
+ assert.ok(grid.presets.main.includes('custom_process_status'));
+ const query=grid.buildQuery({filters:[],or_filters:[]},{status:'Closed',custom_process_status:'Pending Production'},new Set(['status','custom_process_status']));
+ assert.deepEqual(query.filters,[['Sales Order','status','=','Closed'],['Sales Order','custom_process_status','=','Pending Production']]);
+});
+
+test('old sales column preferences gain order status once without discarding their order or density',()=>{
+ const allowed=new Set(grid.COLUMNS.map(col=>col.fieldname));
+ const upgraded=grid.normalizePreferences({density:'standard',columns:['name','customer_name','custom_process_status','grand_total']},allowed);
+ assert.deepEqual(upgraded.columns,['name','customer_name','custom_process_status','status','grand_total']);
+ assert.equal(upgraded.density,'standard');
+ const hidden=grid.normalizePreferences({...upgraded,columns:['name','customer_name']},allowed);
+ assert.deepEqual(hidden.columns,['name','customer_name'],'a deliberate hide after the upgrade remains respected');
+});
+
+test('native Select options have explicit empty labels and retain raw status values after refresh',()=>{
+ assert.equal(typeof grid.selectOptions,'function');
+ const options=grid.selectOptions({fieldname:'custom_process_status',emptyLabel:'全部业务状态'},{options:'\nPending Deposit Confirmation\nPending Production'},x=>x);
+ assert.deepEqual(options,[{value:'',label:'全部业务状态'},{value:'Pending Deposit Confirmation',label:'待财务放行'},{value:'Pending Production',label:'生产已放行'}]);
+ const status=grid.selectOptions({fieldname:'status',emptyLabel:'全部订单状态'},{options:'\nDraft\nTo Deliver and Bill\nClosed'},x=>x);
+ assert.deepEqual(status,[{value:'',label:'全部订单状态'},{value:'Draft',label:'草稿'},{value:'To Deliver and Bill',label:'待交付及开票'},{value:'Closed',label:'已关闭'}]);
+});
+
+function releaseSelectionFixture() {
+ const reads=[],nodes=new Map(),controller={requestId:1,list:{data:[],get_checked_items(){return this.data;}}};
+ controller.root={frappe:{get_route:()=>['List','Sales Order','List'],call:request=>new Promise((resolve,reject)=>reads.push({request,resolve,reject}))}};
+ controller.$salesViewbar={find(selector){if(!nodes.has(selector))nodes.set(selector,{text(value){this.label=value;return this;},prop(key,value){this[key]=value;return this;}});return nodes.get(selector);}};
+ return {controller,reads,button:()=>nodes.get('.dlp-sales-release'),summary:()=>nodes.get('.dlp-sales-selected')};
+}
+
+test('release action stays disabled until authoritative review and excludes released or unauthorized rows',async()=>{
+ assert.equal(typeof grid.updateReleaseSelection,'function');
+ const f=releaseSelectionFixture();f.controller.list.data=[{name:'released'},{name:'pending'},{name:'denied'}];
+ const pending=grid.updateReleaseSelection(f.controller);
+ assert.equal(f.button().disabled,true);
+ assert.equal(f.reads[0].request.method,'crm_integration.crm_integration.finance_release.get_finance_release_review');
+ f.reads[0].resolve({message:{orders:[{name:'released',can_release:false,process_status:'Pending Production'},{name:'pending',can_release:true},{name:'denied',can_release:false,reason:'no permission'},{name:'foreign',can_release:true}]}});
+ await pending;
+ assert.deepEqual(f.controller.salesReleaseNames,['pending']);
+ assert.equal(f.button().disabled,false);assert.match(f.button().label,/1单/);assert.match(f.summary().label,/3.*1.*2/);
+ await grid.updateReleaseSelection(f.controller);assert.equal(f.reads.length,1,'repeat rendering does not repeat the unchanged review');
+});
+
+test('all released and incomplete or failed review responses never enable production',async()=>{
+ assert.equal(typeof grid.updateReleaseSelection,'function');
+ for(const response of [{message:{orders:[{name:'A',can_release:false,process_status:'Pending Production'}]}},{message:{orders:[]}},new Error('offline')]){
+  const f=releaseSelectionFixture();f.controller.list.data=[{name:'A'}];const pending=grid.updateReleaseSelection(f.controller);
+  if(response instanceof Error)f.reads[0].reject(response);else f.reads[0].resolve(response);
+  await pending;assert.equal(f.button().disabled,true);assert.deepEqual(f.controller.salesReleaseNames,[]);
+ }
+});
+
+test('an old review cannot enable a changed selection or a refreshed order',async()=>{
+ assert.equal(typeof grid.updateReleaseSelection,'function');
+ const f=releaseSelectionFixture();f.controller.list.data=[{name:'A',modified:'old'}];const older=grid.updateReleaseSelection(f.controller);
+ f.controller.list.data=[{name:'A',modified:'new'}];f.controller.requestId++;const newer=grid.updateReleaseSelection(f.controller);
+ f.reads[1].resolve({message:{orders:[{name:'A',can_release:false}]}});await newer;
+ f.reads[0].resolve({message:{orders:[{name:'A',can_release:true}]}});await older;
+ assert.equal(f.button().disabled,true);assert.deepEqual(f.controller.salesReleaseNames,[]);
+ f.controller.list.data=[];await grid.updateReleaseSelection(f.controller);assert.match(f.summary().label,/未选择/);
+});
+
+function mountedReleaseFixture() {
+ const engine=require('../deeplinkerp_branding/public/js/compact_list.js'),vm=require('node:vm');
+ const f=releaseSelectionFixture();let config,route=['List','Sales Order','List'];
+ const env={frappe:{...f.controller.root.frappe,get_route:()=>route,model:{std_fields_list:['name','owner','docstatus']},perm:{has_perm:()=>true},session:{user:'qa'},boot:{sitename:'qa'}},DeepLinkERPCompactList:{...engine,create(value){config=value;return engine.create(value);}}};
+ vm.runInNewContext(fs.readFileSync(require.resolve('../deeplinkerp_branding/public/js/sales_order_list.js'),'utf8'),env);
+ const list={doctype:'Sales Order',view_name:'List',view:'List',page:{},meta:{fields:grid.COLUMNS.map(col=>({fieldname:col.fieldname,permlevel:0}))},fields:[],data:[{name:'SO-A',modified:'old'}],settings:{},get_args:()=>({filters:[],or_filters:[]}),get_call_args(){return {args:this.get_args()};},no_change:()=>false,render_header(){},refresh(){},get_checked_items(){return this.data;},on_row_checked(){}};
+ const controller=env.DeepLinkERPSalesWorkspace.mount(list,env);
+ controller.$salesViewbar=f.controller.$salesViewbar;controller.salesExpanded=new Map();
+ return {...f,controller,list,config,grid:env.DeepLinkERPSalesWorkspace,setRoute(value){route=value;}};
+}
+
+test('native dispatch invalidates release eligibility immediately and rejects an earlier response',async()=>{
+ const f=mountedReleaseFixture(),older=f.grid.updateReleaseSelection(f.controller);
+ f.list.no_change(f.list.get_call_args());
+ f.reads[0].resolve({message:{orders:[{name:'SO-A',can_release:true}]}});await older;
+ assert.equal(f.button().disabled,true);assert.equal(f.controller.salesReleaseNames.length,0);
+ const current=f.grid.updateReleaseSelection(f.controller);
+ f.reads[1].resolve({message:{orders:[{name:'SO-A',can_release:true}]}});await current;
+ assert.equal(f.button().disabled,false);
+ f.list.no_change(f.list.get_call_args());
+ assert.equal(f.button().disabled,true,'already eligible selection is disabled at the real dispatch gate');
+ assert.equal(f.controller.salesReleaseNames.length,0);
+});
+
+test('departed sales list ignores late display details without starting another release review',async()=>{
+ const f=mountedReleaseFixture(),details=f.config.onRows(f.controller);
+ assert.match(f.reads[0].request.method,/get_sales_display_details$/);
+ f.setRoute(['List','Purchase Order','List']);f.config.onRouteChange(f.controller,false);
+ f.reads[0].resolve({message:{'SO-A':{dlp_product:'Late product'}}});await details;
+ assert.equal(f.reads.length,1,'late details must not render or re-start selection review');
+ await f.grid.updateReleaseSelection(f.controller,true);
+ assert.equal(f.reads.length,1);assert.equal(f.button().disabled,true);
+ assert.equal(f.controller.salesReleaseNames.length,0);
+});
+
+test('review response verifies live selection even before the next selection callback runs',async()=>{
+ const f=releaseSelectionFixture();f.controller.list.data=[{name:'A',modified:'old'}];
+ const pending=grid.updateReleaseSelection(f.controller);f.controller.list.data=[{name:'B'}];
+ f.reads[0].resolve({message:{orders:[{name:'A',can_release:true}]}});await pending;
+ assert.equal(f.button().disabled,true);assert.deepEqual(f.controller.salesReleaseNames,[]);
+});
+
+test('empty and over-limit selections make no release-review request',async()=>{
+ assert.equal(typeof grid.updateReleaseSelection,'function');
+ const f=releaseSelectionFixture();await grid.updateReleaseSelection(f.controller);
+ f.controller.list.data=Array.from({length:101},(_,i)=>({name:`SO-${i}`}));await grid.updateReleaseSelection(f.controller);
+ assert.equal(f.reads.length,0);assert.equal(f.button().disabled,true);assert.deepEqual(f.controller.salesReleaseNames,[]);
+});
+
+test('native selection still updates bulk actions and select-all while sales field headers remain visible',()=>{
+ const surface=()=>({visible:true,checked:false,indeterminate:false,toggle(value){this.visible=value;return this;},show(){this.visible=true;return this;},hide(){this.visible=false;return this;},find(){return this;},prop(key,value){this[key]=value;return this;}});
+ const subject=surface(),actions=surface();let selected=0,nativeCalls=0;
+ const list={doctype:'Sales Order',view_name:'List',view:'List',meta:{fields:grid.COLUMNS.map(col=>({fieldname:col.fieldname,permlevel:0}))},fields:[],data:[{name:'A'},{name:'B'}],settings:{},
+  get_args:()=>({filters:[],or_filters:[]}),get_call_args(){return {args:this.get_args()};},render_header(){},refresh(){},
+  on_row_checked(){nativeCalls++;this.$list_head_subject=subject;this.$checkbox_actions=actions;this.$checks={length:selected};subject.toggle(!selected);actions.toggle(Boolean(selected));this.bulkVisible=Boolean(selected);}};
+ const root={frappe:{get_route:()=>['List','Sales Order','List'],model:{std_fields_list:['name','owner','docstatus']},perm:{has_perm:()=>true},session:{user:'test'},boot:{sitename:'qa'}}};
+ grid.mount(list,root);
+ for(selected of [1,2,0]){list.on_row_checked();assert.equal(subject.visible,true);assert.equal(actions.visible,false);assert.equal(list.bulkVisible,Boolean(selected));assert.equal(subject.checked,selected===2);assert.equal(subject.indeterminate,selected===1);}
+ assert.equal(nativeCalls,3);
+});
+
 test("expanded detail cache expires when an order changes or disappears from the current result", () => {
  const controller={list:{data:[{name:"SO-1",modified:"new"}]},salesExpanded:new Map([["SO-1",{header:{modified:"old"}}],["SO-2",{header:{modified:"old"}}]])};
  grid.invalidateExpandedDetails(controller);
