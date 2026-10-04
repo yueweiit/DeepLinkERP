@@ -112,7 +112,7 @@
 	}
 
 	function formatNumber(root, value, field) {
-		const configured = root.frappe?.boot?.sysdefaults?.currency_precision;
+		const configured = config.moneyPrecision ?? root.frappe?.boot?.sysdefaults?.currency_precision;
 		const currencyPrecision = configured !== undefined && configured !== null && configured !== "" ? Number(configured) : 2;
 		const precision = field.startsWith("per_") ? 2 : (Number.isInteger(currencyPrecision) && currencyPrecision >= 0 && currencyPrecision <= 9 ? currencyPrecision : 2);
 		return root.format_number ? root.format_number(value, null, precision) : value.toLocaleString(undefined, { minimumFractionDigits: field.startsWith("per_") ? 0 : precision, maximumFractionDigits: precision });
@@ -147,10 +147,10 @@
 	}
 
 	function requestKey(args) {
-		return JSON.stringify([args.filters, args.or_filters, args.order_by, args.group_by, args.start, args.page_length, args.fields]);
+		return JSON.stringify(args);
 	}
 
-	function providerActive(controller) { return Boolean(config.provider && controller.providerScope !== "orders"); }
+	function providerActive(controller) { return Boolean(config.provider && (controller.pageSurface || controller.providerScope !== "orders")); }
 	function displayColumns(controller) { return providerActive(controller) ? config.provider.columns : COLUMNS; }
 	function displayPermissions(controller) { return providerActive(controller) ? controller.providerAllowed : controller.displayAllowed; }
 	function currentRows(controller) { return providerActive(controller) ? controller.providerRows : controller.list.data; }
@@ -260,13 +260,18 @@
 
 		list.get_args = function () {
 			if (providerActive(controller)) {
-				const args = config.provider.request(controller).args;
-				const signature = JSON.stringify([args.filters, args.order_by]);
+				let args;
+				try { args = config.provider.request(controller).args; }
+				catch (error) { if (config.provider.onQueryError?.(controller, error)) return this.get_args(); throw error; }
+				const { start, page_length, ...scope } = args;
+				const signature = JSON.stringify(scope);
 				if (controller.querySignature !== null && signature !== controller.querySignature) {
 					controller.setPage(0); controller.total = null; controller.providerPayload = null;
 					args.start = 0;
 				}
 				controller.querySignature = signature;
+				args.start = controller.page * controller.pageSize;
+				args.page_length = controller.pageSize;
 				return args;
 			}
 			const nativeArgs = originals.get_args.call(this);
@@ -475,8 +480,9 @@
 			let value = (readonly ? config.provider.renderValue?.(col.fieldname, doc, formatters, escapeHTML) : undefined) ?? renderValue(col.fieldname, doc, formatters);
 			if (col.fieldname === "name") value = config.renderLink?.(controller, doc, value) ?? `<a href="${escapeHTML(readonly ? config.provider.formLink(doc) : list.get_form_link(doc))}" data-name="${escapeHTML(doc.name)}">${value}</a>`;
 			if (col.fieldname === "supplier_name" && doc.supplier) value = `<a href="/desk/supplier/${encodeURIComponent(doc.supplier)}">${value}</a>`;
-			if (col.fieldname === "status" && !readonly) value = list.get_indicator_html(doc, Boolean(list.workflow_state_fieldname)) || value;
-			return cellHTML(col, value, controller.allowed.has(col.fieldname) ? doc[col.fieldname] ?? "—" : "");
+			if (col.fieldname === "status" && (!readonly || config.provider.useNativeIndicator?.(doc))) value = list.get_indicator_html?.(doc, Boolean(list.workflow_state_fieldname)) || value;
+			const raw = doc[col.fieldname];
+			return cellHTML(col, value, controller.allowed.has(col.fieldname) && (raw === null || typeof raw !== 'object') ? raw ?? "—" : "");
 		}).join("");
 		const sequence = controller.page * controller.pageSize + (doc._idx || 0) + 1;
 		return `<div class="list-row-container" tabindex="0"><div class="level ${readonly ? "dlp-po-readonly-row" : "list-row"} dlp-po-grid-row" style="--dlp-po-columns:${template(controller)}">${selectionCell(checkbox, config.renderSequence?.(controller, doc, sequence) ?? sequence)}${cells}</div>${config.rowExtra?.(controller, doc) || ""}</div>`;
@@ -502,7 +508,14 @@
 				finally { button.prop("disabled", false); }
 			});
 		}
-		controller.$filters = $('<div class="dlp-po-filters"></div>').prependTo(list.page.wrapper.find(".page-form").first());
+		let filterHost = list.page.wrapper.find(".page-form").first();
+		if (controller.pageSurface) {
+			list.page.show_form?.();
+			filterHost = list.page.page_form || filterHost;
+			if (!filterHost.length) filterHost = $('<div class="page-form row"></div>').prependTo(list.page.main);
+			filterHost.removeClass('hide').show();
+		}
+		controller.$filters = $('<div class="dlp-po-filters"></div>').prependTo(filterHost);
 		const controls = (config.controls || []).map((control) => ({ ...control }));
 		for (const control of controls) {
 			if (control.fieldname !== "search" && !controller.allowed.has(control.permission_field || control.fieldname)) continue;
@@ -539,7 +552,38 @@
 		controller.savePreferences();
 		config.provider?.mountControls?.(controller);
 		config.mountControls?.(controller);
+		if (config.dismissInitialOnboarding) dismissAutomaticOnboarding(controller, root);
 		paintSummary(controller);
+	}
+
+	function dismissAutomaticOnboarding(controller, root) {
+		if (controller.initialOnboardingDismissed || controller.stopInitialOnboarding || !root.document || !root.MutationObserver) return;
+		let observer, timer, stopped = false;
+		const cleanup = () => {
+			if (stopped) return;
+			stopped = true; observer?.disconnect();
+			if (timer !== undefined) (root.clearTimeout || clearTimeout)(timer);
+			root.document.removeEventListener?.('click', manualStart, true);
+			controller.stopInitialOnboarding = null;
+		};
+		controller.stopInitialOnboarding = cleanup;
+		const manualStart = event => {
+			if (event.target.closest?.('.onboarding-sidebar')) { controller.initialOnboardingDismissed = true; cleanup(); }
+		};
+		const closeInitial = () => {
+			if (stopped) return;
+			const active = config.pageRoute ? (root.frappe.get_route?.() || [])[0] === config.pageRoute : isListRoute(root.frappe);
+			if (!active) return cleanup();
+			const close = root.document.querySelector('.user-onboarding')?.querySelector('.onb-header-actions button:has(use[href="#icon-x"])');
+			if (close) { controller.initialOnboardingDismissed = true; close.click(); cleanup(); }
+		};
+		// Observe only a bounded initial load, including delayed native mount.
+		// Capture the real Getting Started entry before native code opens it.
+		observer = new root.MutationObserver(closeInitial);
+		observer.observe(root.document.querySelector('.user-onboarding') || root.document.body, { childList: true, subtree: true });
+		root.document.addEventListener?.('click', manualStart, true);
+		timer = (root.setTimeout || setTimeout)(() => { controller.initialOnboardingDismissed = true; cleanup(); }, 5000);
+		closeInitial();
 	}
 
 	function paintSummary(controller) {
@@ -634,9 +678,59 @@
 			root.document?.body?.classList.toggle(`${config.routeClass}-readonly`, isListRoute(frappe) && Boolean(current?.[config.controllerKey] && providerActive(current[config.controllerKey])));
 			const list = frappe.views?.list_view?.[DOCTYPE] || root.cur_list;
 			config.onRouteChange?.(list?.[config.controllerKey], isListRoute(frappe));
+			if (!isListRoute(frappe)) list?.[config.controllerKey]?.stopInitialOnboarding?.();
 			if (isListRoute(frappe) && isNativeList(list)) mount(list, root);
 		});
 	}
 
-	return { COLUMNS, escapeHTML, allowedFields, preferenceKey, normalizePreferences, buildQuery, buildRequests, currencyTotals, formatNumber, renderValue, mount, install };
+	// Standalone Page surface uses the same renderer, preferences and controls. It
+	// is not a native ListView and never participates in native business selection.
+	function mountPage(page, root) {
+		const $ = root.$, frappe = root.frappe;
+		const meta = frappe.get_meta?.(DOCTYPE) || { fields: config.controls || [] };
+		const surface = { page, meta, data: [],
+			$frappe_list: $('<div class="frappe-list dlp-page-grid"></div>').appendTo(page.main) };
+		surface.$result = $('<div class="result"></div>').appendTo($('<div class="result-container"></div>').appendTo(surface.$frappe_list));
+		surface.$paging_area = $('<div></div>').appendTo(surface.$frappe_list);
+		const nativeAllowed = allowedFields(meta, level => frappe.perm?.has_perm ? frappe.perm.has_perm(DOCTYPE, level, 'read') : true, frappe.model.std_fields_list || ['name','owner','docstatus','creation','modified','modified_by','idx']);
+		const permitted = new Set(nativeAllowed);
+		for (const col of COLUMNS) {
+			const source = config.pageFieldMap?.[col.fieldname];
+			if (!source || nativeAllowed.has(source)) permitted.add(col.fieldname);
+		}
+		const key = preferenceKey(frappe.boot?.sitename || root.location?.host, frappe.session?.user);
+		let saved; try { saved = JSON.parse(root.localStorage?.getItem(key) || 'null'); } catch (_) { /* Optional preferences. */ }
+		const c = { pageSurface: true, root, list: surface, nativeAllowed, allowed: permitted, displayAllowed: permitted, providerAllowed: permitted,
+			preferences: normalizePreferences(saved, permitted, config.provider.columns), controls: {}, quick: {}, resetting: false,
+			providerRows: [], providerPayload: null, providerOrderBy: config.defaultSort || 'posting_date desc', page: 0, pageSize: 100, total: null, requestId: 0, querySignature: null,
+			translate: root.__ || (x => x),
+			setPage(value) { this.page = Math.max(0, Number(value) || 0); },
+			activate() { root.document.body.classList.toggle(config.routeClass, active()); },
+			savePreferences() { this.preferences = normalizePreferences(this.preferences, permitted, config.provider.columns); try { root.localStorage?.setItem(key, JSON.stringify(this.preferences)); } catch (_) {} surface.$frappe_list.toggleClass('dlp-po-standard', this.preferences.density === 'standard'); },
+			setColumns(columns) { this.preferences.columns = columns; this.savePreferences(); render(); },
+			async clearQuickFilters() { this.resetting = true; this.quick = {}; this.setPage(0); try { this.resetAdvancedFilters?.(); await Promise.all(Object.values(this.controls).map(control => control.set_value(''))); } finally { this.resetting = false; } return this.refresh(); },
+			exportCurrent() { return config.provider.exportCurrent(this); },
+			async refresh() {
+				this.activate(); if (!active()) return;
+				const request = config.provider.request(this), { start, page_length, ...scope } = request.args;
+				const signature = JSON.stringify(scope);
+				if (this.querySignature !== null && signature !== this.querySignature) this.setPage(0);
+				this.querySignature = signature; request.args.start = this.page * this.pageSize; request.args.page_length = this.pageSize;
+				const generation = ++this.requestId;
+				try {
+					const response = await frappe.call(request);
+					if (generation !== this.requestId || !active() || requestKey(config.provider.request(this).args) !== requestKey(request.args)) return;
+					this.providerPayload = response.message || {}; this.providerRows = this.providerPayload.rows || []; this.total = Number(this.providerPayload.total_count || 0);
+					render(); config.provider.onPayload?.(this); paintSummary(this);
+				} catch (error) { if (generation === this.requestId && active()) this.$summary.text('无权读取或加载失败，请核对系统提示。'); }
+			},
+		};
+		function active() { return (frappe.get_route?.() || [])[0] === config.pageRoute; }
+		function render() { surface.$result.html(headerHTML(c) + c.providerRows.map((row, index) => { row._idx = index; return rowHTML(c, row); }).join('')); if (!c.providerRows.length) surface.$result.append('<div class="dlp-provider-empty text-muted" role="status">没有符合条件的采购付款记录</div>'); config.afterRender?.(c); paintSummary(c); }
+		surface.render_list = render; surface.refresh = () => c.refresh();
+		mountControls(c); render(); c.activate();
+		frappe.router?.on('change', () => { c.activate(); if (!active()) { c.requestId++; c.stopInitialOnboarding?.(); } });
+		return c;
+	}
+	return { COLUMNS, escapeHTML, allowedFields, preferenceKey, normalizePreferences, buildQuery, buildRequests, currencyTotals, formatNumber, renderValue, mount, mountPage, install, dismissAutomaticOnboarding };
 });

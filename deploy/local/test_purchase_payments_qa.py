@@ -92,6 +92,24 @@ def execute():
   results.append('shared payable is labelled whole-invoice scope for both receipts; no fictitious receipt allocation')
   listing=service.get_receipt_list(filters={'company':COMPANY})
   assert any(row['payment_state']=='共享应付' for row in listing['rows'])
+  shared_row=next(row for row in listing['rows'] if row['name']==receipts[0].name)
+  assert shared_row.get('shared_payable') and shared_row.get('settlement_state')=='未付款', 'Shared scope must be separate from settlement state'
+  service.get_receipt_list(native_filters=[['name','=',receipts[0].name]],export_format='xlsx',columns=['name','settled','outstanding'])
+  from io import BytesIO
+  from openpyxl import load_workbook
+  exported_shared=load_workbook(BytesIO(frappe.response['filecontent']))
+  balance_scope=json.loads(exported_shared.active.cell(2,3).value)
+  assert balance_scope==[{'currency':'CNY','outstanding':2000.0,'scope_label':'共享应付整单余额'}]
+  receipt_filter=[['name','in',[r.name for r in receipts]]]
+  receipt_page=service.get_receipt_list(native_filters=receipt_filter,page_length=1)
+  service.get_receipt_list(native_filters=receipt_filter,page_length=1,export_format='xlsx',columns=['posting_date','grand_total','name'])
+  receipt_sheet=load_workbook(BytesIO(frappe.response['filecontent'])).active
+  assert [cell.value for cell in receipt_sheet[1]]==['入库日期','入库金额','采购入库单号','入库币种']
+  assert receipt_sheet.max_row==receipt_page['total_count']+1==3, 'Export must include all filtered rows, not the first page'
+  assert {receipt_sheet.cell(row,3).value for row in range(2,receipt_sheet.max_row+1)}=={r.name for r in receipts}
+  assert all(receipt_sheet.cell(row,1).is_date and receipt_sheet.cell(row,1).number_format=='yyyy-mm-dd' for row in range(2,receipt_sheet.max_row+1))
+  assert all(receipt_sheet.cell(row,2).number_format=='#,##0.00' and receipt_sheet.cell(row,4).value=='CNY' for row in range(2,receipt_sheet.max_row+1))
+  results.append('receipt XLSX preserves selected order, typed dates, amount currency and all filtered rows beyond page one')
   results.append('list balance and shared-payable state use permission-aware invoice ledger balance')
   from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
   advance=get_payment_entry('Purchase Order',po2.name,bank_account='Cash - QAB',bank_amount=500)
@@ -103,6 +121,14 @@ def execute():
   results.append('order advance traces from receipt; unallocated advance never falsely reduces receipt payable')
   shared_draft=service.create_payment_draft(source_doctype='Purchase Receipt',source_name=receipts[0].name,purchase_invoice=shared.name,amount_to_pay=1,bank_account='Cash - QAB',request_id=str(uuid.uuid4()))
   shared_pe=frappe.get_doc('Payment Entry',shared_draft['name'])
+  payment_page=service.get_payment_records(purchase_order=po2.name,page_length=1)
+  service.get_payment_records(purchase_order=po2.name,page_length=1,export_format='xlsx',columns=['posting_date','amount','name'])
+  payment_sheet=load_workbook(BytesIO(frappe.response['filecontent'])).active
+  assert [cell.value for cell in payment_sheet[1]]==['付款日期','金额','付款单','付款币种','核销币种']
+  assert payment_sheet.max_row==payment_page['total_count']+1 and payment_page['total_count']>=2
+  assert all(payment_sheet.cell(row,1).is_date and payment_sheet.cell(row,1).number_format=='yyyy-mm-dd' for row in range(2,payment_sheet.max_row+1))
+  assert all(payment_sheet.cell(row,2).number_format=='#,##0.00' and payment_sheet.cell(row,4).value=='CNY' and payment_sheet.cell(row,5).value=='CNY' for row in range(2,payment_sheet.max_row+1))
+  results.append('payment XLSX includes bank and allocation currencies separately and exports all filtered rows with typed dates')
   # Dirty links are created only inside savepoints in this allowlisted synthetic site.
   def dirty_case(label, mutate, check):
    frappe.db.savepoint('dirty_links')

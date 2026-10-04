@@ -1,7 +1,11 @@
 """Optional link privacy and availability contracts, without a database."""
 import unittest
+from datetime import date, datetime
+from io import BytesIO
 from unittest.mock import patch
 from types import SimpleNamespace
+
+from openpyxl import load_workbook
 
 import frappe
 from deeplinkerp_branding.services import purchase_payment_service as service
@@ -12,6 +16,12 @@ class PurchaseLinkTests(unittest.TestCase):
         self.flags_patch = patch.object(frappe, 'flags', frappe._dict())
         self.flags_patch.start()
         self.addCleanup(self.flags_patch.stop)
+        query = patch.object(service, '_query_fields', return_value=set(service.RECEIPT_FIELDS) | {'owner', 'creation', 'modified'})
+        query.start()
+        self.addCleanup(query.stop)
+        normalize = patch.object(service, '_normalize_filter', side_effect=lambda dt, field, operator, value: [dt, field, operator, value])
+        normalize.start()
+        self.addCleanup(normalize.stop)
 
     def test_caught_framework_throw_does_not_queue_private_messages(self):
         frappe.local.message_log = []
@@ -74,18 +84,24 @@ class PurchaseLinkTests(unittest.TestCase):
             self.assertEqual(warnings, [service.LINK_WARNING])
 
     def test_unreadable_receipt_row_does_not_break_other_rows_or_show_balance(self):
-        rows = [frappe._dict(name='unreadable'), frappe._dict(name='visible')]
+        rows = [frappe._dict(name=name, company='C', currency='CNY', grand_total=10) for name in ('unreadable', 'visible')]
         def chain(doctype, name, include_payments):
             if name == 'unreadable':
                 raise frappe.PermissionError
             return {'orders': [], 'balances': [{'outstanding': 10, 'settled': 2}],
-                    'can_create': True, 'reason': '', 'warnings': [], 'incomplete_links': False, 'invoices': []}
-        with patch.object(service, '_require_fields'), patch.object(frappe, 'get_list', return_value=rows), patch.object(service, 'get_purchase_chain', side_effect=chain):
+                    'can_create': True, 'can_create_invoice': False, 'draft_invoices': [], 'reason': '', 'warnings': [], 'incomplete_links': False, 'invoices': []}
+        with patch.object(service, '_require_fields'), patch.object(service._RecordReader, 'preload'), patch.object(service, '_read'), patch.object(frappe, 'get_list', return_value=rows), patch.object(service, 'get_purchase_chain', side_effect=chain):
             result = service.get_receipt_list(page_length=2)
         self.assertEqual(result['total_count'], 2)
         self.assertFalse(result['rows'][0]['can_create'])
         self.assertEqual(result['rows'][0]['balances'], [])
         self.assertTrue(result['rows'][1]['can_create'])
+
+    def test_denied_receipt_source_is_excluded_from_count_totals_and_rows(self):
+        rows = [frappe._dict(name='private', company='C', currency='CNY', grand_total=100)]
+        with patch.object(service, '_require_fields'), patch.object(service._RecordReader, 'preload'), patch.object(service, '_read', side_effect=frappe.PermissionError), patch.object(frappe, 'get_list', return_value=rows):
+            result = service.get_receipt_list()
+        self.assertEqual(result, {'rows': [], 'total_count': 0, 'totals': []})
 
 
 class PaymentRecordReaderTests(unittest.TestCase):
@@ -93,6 +109,12 @@ class PaymentRecordReaderTests(unittest.TestCase):
         flags = patch.object(frappe, 'flags', frappe._dict())
         flags.start()
         self.addCleanup(flags.stop)
+        query = patch.object(service, '_query_fields', return_value={'name', 'party', 'party_type', 'payment_type', 'posting_date', 'creation', 'modified'})
+        query.start()
+        self.addCleanup(query.stop)
+        normalize = patch.object(service, '_normalize_filter', side_effect=lambda dt, field, operator, value: [dt, field, operator, value])
+        normalize.start()
+        self.addCleanup(normalize.stop)
 
     def test_bulk_hydration_preserves_children_and_masks_parent(self):
         reader = service._RecordReader()
@@ -136,6 +158,94 @@ class PaymentRecordReaderTests(unittest.TestCase):
         self.assertEqual(result['total_count'], 0)
         self.assertEqual(result['rows'], [])
         vouchers.assert_not_called()
+
+
+class ProcurementExportTests(unittest.TestCase):
+    """Read native XLSX files; isolate document access and the site-only default format."""
+
+    def export(self, doctype, rows, columns=None, can_export=True, check_export=None):
+        response = {}
+        doc = SimpleNamespace(check_permission=check_export or (lambda permission: None))
+        allowed = service.RECEIPT_COLUMNS if doctype == 'Purchase Receipt' else service.PAYMENT_COLUMNS
+        from frappe.utils.xlsxutils import XLSXStyleBuilder
+        with patch.object(frappe, 'response', response), patch.object(frappe, 'has_permission', return_value=can_export), patch.object(service, '_read_doc', return_value=doc), patch.object(XLSXStyleBuilder, 'get_datetime_format', return_value='yyyy-mm-dd hh:mm:ss'):
+            service._export(doctype, rows, columns, allowed)
+        return load_workbook(BytesIO(response['filecontent']))
+
+    def test_selected_amount_columns_keep_order_and_append_distinct_currencies(self):
+        cases = (
+            ('Purchase Receipt', 'grand_total', ['入库日期', '入库金额', '采购入库单号', '入库币种'], ['USD']),
+            ('Payment Entry', 'amount', ['付款日期', '金额', '付款单', '付款币种', '核销币种'], ['USD', 'CNY']),
+        )
+        for doctype, amount_field, headers, currencies in cases:
+            with self.subTest(doctype=doctype):
+                row = {'name': 'DOC-1', 'posting_date': '2026-10-04', amount_field: 4000.123456,
+                       'currency': 'USD', 'references': [{'currency': 'CNY'}]}
+                selected = ['posting_date', amount_field, 'name']
+                workbook = self.export(doctype, [row], selected)
+                self.assertEqual([cell.value for cell in workbook.active[1]], headers)
+                self.assertEqual([cell.value for cell in workbook.active[2]][3:], currencies)
+                self.assertEqual(selected, ['posting_date', amount_field, 'name'])
+                self.assertEqual(workbook.active.cell(2, 2).value, 4000.123456)
+                self.assertEqual(workbook.active.cell(2, 2).number_format, '#,##0.00')
+
+    def test_dates_are_typed_and_formatted_without_filling_missing_dates(self):
+        for doctype in ('Purchase Receipt', 'Payment Entry'):
+            for source_date in (date(2026, 10, 4), datetime(2026, 10, 4, 12, 30), '2026-10-04', None):
+                with self.subTest(doctype=doctype, source_date=source_date):
+                    row = {'name': 'DOC-1', 'posting_date': source_date, 'references': []}
+                    workbook = self.export(doctype, [row], ['name', 'posting_date'])
+                    cell = workbook.active.cell(2, 2)
+                    self.assertEqual(cell.value, datetime(2026, 10, 4) if source_date else None)
+                    if source_date:
+                        self.assertEqual(cell.number_format, 'yyyy-mm-dd')
+                        self.assertTrue(cell.is_date)
+                    else:
+                        # Native XLSXWriter omits empty cells; Excel inherits the column format.
+                        self.assertEqual(workbook.active.column_dimensions['B'].number_format, 'yyyy-mm-dd')
+
+    def test_default_and_explicit_currency_columns_are_not_duplicated(self):
+        expected_receipt_labels = {
+            'name': '采购入库单号', 'supplier_name': '供应商名称', 'supplier': '供应商编码',
+            'posting_date': '入库日期', 'status': '入库状态', 'company': '公司',
+            'currency': '入库币种', 'grand_total': '入库金额', 'docstatus': '单据状态', 'is_return': '是否退货',
+        }
+        for doctype, amount_field in (('Purchase Receipt', 'grand_total'), ('Payment Entry', 'amount')):
+            allowed = service.RECEIPT_COLUMNS if doctype == 'Purchase Receipt' else service.PAYMENT_COLUMNS
+            row = {'name': 'DOC-1', amount_field: 0, 'currency': 'CNY', 'references': []}
+            for selected in (None, ['currency', amount_field, 'name']):
+                with self.subTest(doctype=doctype, selected=selected):
+                    workbook = self.export(doctype, [row], selected)
+                    labels = [cell.value for cell in workbook.active[1]]
+                    self.assertEqual(labels.count(allowed['currency']), 1)
+                    if selected:
+                        self.assertEqual(labels[:3], [allowed[column] for column in selected])
+                    elif doctype == 'Purchase Receipt':
+                        self.assertEqual(labels[:len(service.RECEIPT_FIELDS)],
+                                         [expected_receipt_labels[column] for column in service.RECEIPT_FIELDS])
+                    if doctype == 'Payment Entry':
+                        self.assertEqual(labels.count('核销币种'), 1)
+
+    def test_export_permissions_and_formula_protection_remain_native(self):
+        for prefix in ('=', '+', '-', '@'):
+            with self.subTest(prefix=prefix):
+                row = {'name': 'DOC-1', 'supplier_name': '<span>' + prefix + 'unsafe</span>'}
+                workbook = self.export('Purchase Receipt', [row], ['supplier_name'])
+                cell = workbook.active.cell(2, 1)
+                self.assertEqual(cell.value, "'" + prefix + 'unsafe')
+                self.assertEqual(cell.data_type, 's')
+        # Pure CI has no site-bound message flags; the native QA script tests real throws.
+        def throw_without_site(message, exception):
+            raise exception(message)
+        with patch.object(frappe, 'throw', side_effect=throw_without_site), self.assertRaises(frappe.PermissionError):
+            self.export('Purchase Receipt', [], ['name'], can_export=False)
+        checked = []
+        def denied(permission):
+            checked.append(permission)
+            raise frappe.PermissionError
+        with self.assertRaises(frappe.PermissionError):
+            self.export('Payment Entry', [{'name': 'PRIVATE'}], ['name'], check_export=denied)
+        self.assertEqual(checked, ['export'])
 
 
 if __name__ == '__main__':

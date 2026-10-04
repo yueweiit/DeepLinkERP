@@ -3,15 +3,17 @@
  const unified = typeof module === "object" && module.exports ? require("./unified_purchase_list.js") : root.DeepLinkERPUnifiedPurchase;
 	const COLUMNS = [
 		["transaction_date", "订单日期", 96], ["name", "采购订单号", 166],
-		["supplier_name", "供应商名称", 205], ["status", "订单状态", 120],
-		["schedule_date", "需求日期", 96], ["company", "公司", 100],
+		["supplier_name", "供应商名称", 190], ["status", "订单状态", 120],
+		["schedule_date", "需求日期", 96], ["company", "公司", 90],
 		["currency", "币种", 56], ["grand_total", "订单金额", 140],
 		["advance_paid", "已预付", 140], ["advance_payment_status", "预付款状态", 94],
 		["per_received", "已收货%", 70], ["per_billed", "已开票%", 70],
-		["project", "项目", 96], ["owner", "创建人", 96],
+		["project", "项目", 96], ["owner", "创建人", 86], ["receipt_action", "操作", 112],
 	].map(([fieldname, label, width]) => ({ fieldname, label, width }));
 
- const grid = engine.create({ doctype: "Purchase Order", columns: COLUMNS, provider: unified?.configure(COLUMNS), controllerKey: "dlpPurchaseOrderGrid", routeClass: "dlp-purchase-order-grid-active", freezeUntil: "supplier_name", moneySummary: true, numbers: ["grand_total", "advance_paid", "per_received", "per_billed"], dates: ["transaction_date", "schedule_date"], quickFields: ["company", "status", "advance_payment_status"], searchFields: ["name", "supplier_name"], extraFields: ["supplier", "party_account_currency"], controls: [
+ const provider = unified?.configure(COLUMNS);
+ if (provider) provider.virtualFields.push('receipt_action');
+ const grid = engine.create({ doctype: "Purchase Order", dismissInitialOnboarding:true, columns: COLUMNS, provider, computedFields:['receipt_action'], renderValue:(field,doc)=>field==='receipt_action' ? root.DeepLinkERPPurchasePayments?.orderReceiptAction(doc) || '—' : undefined, controllerKey: "dlpPurchaseOrderGrid", routeClass: "dlp-purchase-order-grid-active", freezeUntil: "supplier_name", moneySummary: true, numbers: ["grand_total", "advance_paid", "per_received", "per_billed"], dates: ["transaction_date", "schedule_date"], quickFields: ["company", "status", "advance_payment_status"], searchFields: ["name", "supplier_name"], extraFields: ["supplier", "party_account_currency", "docstatus"], controls: [
  {fieldname:"search",fieldtype:"Data",label:"采购订单号 / 供应商名称"},
  {fieldname:"from_date",fieldtype:"Date",label:"订单开始日期",permission_field:"transaction_date"},
  {fieldname:"to_date",fieldtype:"Date",label:"订单结束日期",permission_field:"transaction_date"},

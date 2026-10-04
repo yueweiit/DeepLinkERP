@@ -1,3 +1,42 @@
-.dlp-purchase-chain{padding:12px;border:1px solid var(--border-color,#e1e8f0);border-radius:5px;font-size:13px}.dlp-purchase-chain p{margin:6px 0}.dlp-purchase-chain details{margin-top:10px}.dlp-payment-overlay{position:fixed;inset:0;z-index:1050;background:rgba(15,23,42,.22)}.dlp-payment-drawer{position:absolute;right:0;top:0;bottom:0;width:min(480px,100vw);background:var(--fg-color,#fff);display:flex;flex-direction:column;box-shadow:-5px 0 25px #0002}.dlp-payment-drawer header,.dlp-payment-drawer footer{padding:14px 18px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border-color,#ddd)}.dlp-payment-drawer header h3{margin:0;font-size:19px}.dlp-payment-body{flex:1;overflow:auto;padding:18px}.dlp-payment-drawer footer{border-top:1px solid var(--border-color,#ddd);justify-content:flex-end;gap:8px}.dlp-payment-balances{padding:12px;background:var(--control-bg,#f4f7fb);margin-bottom:12px}.dlp-payment-body details{margin:14px 0}.dlp-purchase-records{padding:12px;font-size:13px}.dlp-records-table{overflow:auto}.dlp-records-table td{padding:5px 8px;vertical-align:top}.dlp-records-table a{white-space:nowrap}.dlp-records-paging{display:flex;gap:8px;align-items:center}
-
-.dlp-payment-drawer [data-fieldname="remarks"] textarea{height:76px;min-height:76px}.dlp-payment-drawer .help-box,.dlp-payment-drawer .fieldname,.dlp-purchase-records .help-box{display:none}.dlp-purchase-chain{margin:0 0 12px}.dlp-payment-balances span{display:flex;flex-wrap:wrap;gap:6px}.dlp-purchase-records .dlp-notice{margin-bottom:8px} body.dlp-purchase-receipt-grid-active .dlp-po-filter[data-fieldname="supplier"]{width:190px} body.dlp-purchase-receipt-grid-active-readonly .standard-filter-section,body.dlp-purchase-receipt-grid-active-readonly .sort-selector,body.dlp-purchase-receipt-grid-active-readonly .list-sidebar{display:none!important}
+.dlp-purchase-chain { padding: 12px; border: 1px solid var(--border-color,#e1e8f0); border-radius: 5px; font-size: 13px; margin: 0 0 12px; }
+.dlp-purchase-chain p { margin: 6px 0; }
+.dlp-purchase-chain details { margin-top: 10px; }
+.dlp-payment-overlay { position: fixed; inset: 0; z-index: 1050; background: rgba(15,23,42,.22); }
+.dlp-payment-drawer { position: absolute; right: 0; top: 0; bottom: 0; width: min(480px,100vw); background: var(--fg-color,#fff); display: flex; flex-direction: column; box-shadow: -5px 0 25px #0002; font-size: 13px; }
+.dlp-document-drawer { width: min(840px,100vw); }
+.dlp-payment-drawer header, .dlp-payment-drawer footer { padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border-color,#e1e8f0); flex-shrink: 0; }
+.dlp-payment-drawer header h3 { margin: 0; font-size: 18px; }
+.dlp-payment-body { flex: 1; overflow: auto; padding: 16px; }
+.dlp-payment-drawer.dlp-busy .dlp-payment-body { pointer-events: none; }
+.dlp-payment-drawer footer { border-top: 1px solid var(--border-color,#e1e8f0); justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.dlp-payment-balances { padding: 10px; background: #edf5ff; margin-bottom: 12px; }
+.dlp-payment-balances span { display: flex; flex-wrap: wrap; gap: 6px; }
+.dlp-payment-body details { margin: 14px 0; }
+.dlp-payment-drawer [data-fieldname="remarks"] textarea { height: 68px; min-height: 68px; }
+.dlp-payment-drawer .help-box, .dlp-payment-drawer .fieldname { display: none; }
+.dlp-payment-drawer .frappe-control { margin-bottom: 10px; }
+.dlp-payment-drawer .control-label { font-size: 12px; }
+.dlp-document-info { display: flex; gap: 8px 18px; flex-wrap: wrap; padding: 10px; background: #edf5ff; margin-bottom: 8px; }
+.dlp-document-fields { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 0 12px; }
+.dlp-document-fields > :last-child:has(textarea) { grid-column: 1 / -1; }
+.dlp-document-items { max-width: 100%; overflow: auto; }
+.dlp-document-items table { min-width: 620px; font-size: 13px; }
+.dlp-document-items th { background: #f4f7fb; font-weight: 500; }
+.dlp-document-items td, .dlp-document-items th { padding: 5px 7px; vertical-align: middle; }
+.dlp-document-items [data-edit] { min-width: 110px; }
+.dlp-document-items [data-edit="warehouse"] { min-width: 160px; }
+.dlp-document-items .control-label { display: none; }
+.dlp-document-items .frappe-control { margin-bottom: 0; }
+.dlp-document-items [data-edit] small { display: block; }
+.dlp-error:empty { display: none; }
+.dlp-error { padding: 8px 0; }
+.dlp-payment-drawer :focus-visible { outline: 2px solid var(--primary,#1677ff); outline-offset: 2px; }
+body.dlp-purchase-receipt-grid-active .dlp-po-filter[data-fieldname="supplier"] { width: 150px; }
+body.dlp-purchase-receipt-grid-active-readonly .list-sidebar { display: none !important; }
+body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active,.dlp-purchase-payment-grid-active) .dlp-po-grid-cell[data-fieldname="payment_action"] { gap: 4px; }
+body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active,.dlp-purchase-payment-grid-active) .dlp-po-grid-cell .btn { font-size: 12px; min-height: 23px; padding: 1px 4px; }
+body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active,.dlp-purchase-payment-grid-active) .dlp-po-grid:not(.dlp-po-standard) .dlp-po-grid-cell .btn { min-height: 20px; height: 20px; line-height: 16px; padding: 0 4px; }
+body.dlp-purchase-payment-grid-active .dlp-po-grid-cell[data-fieldname="references"], body.dlp-purchase-payment-grid-active .dlp-po-grid-cell[data-fieldname="vouchers"] { gap: 4px; }
+body.dlp-purchase-payment-grid-active .dlp-po-provider-notice, body.dlp-purchase-receipt-grid-active .dlp-po-provider-notice { font-size: 12px; margin: 6px 0; }
+body.dlp-purchase-payment-grid-active .dlp-payment-native-filters { width: 100%; padding: 8px; border: 1px solid var(--border-color,#dce4ef); border-radius: 4px; }
+@media (max-width:767px) { .dlp-document-fields { grid-template-columns: 1fr; } .dlp-document-drawer { width: 100vw; } .dlp-payment-drawer header, .dlp-payment-drawer footer { padding: 10px; } }

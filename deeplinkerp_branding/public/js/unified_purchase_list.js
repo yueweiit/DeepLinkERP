@@ -24,7 +24,7 @@
 	}
 	function formLink(doc) { return `/desk/${doc.row_type === "oa_request" ? "oa-purchase-request" : "purchase-order"}/${encodeURIComponent(doc.name)}`; }
 	function exportColumns(columns) {
-		const fields = [...columns];
+		const fields = columns.filter(field => field !== 'receipt_action');
 		for (const [amount, metadata] of [["grand_total", ["currency"]], ["oa_amount", ["oa_currency", "oa_amount_basis"]], ["advance_paid", ["party_account_currency"]]]) {
 			if (fields.includes(amount)) fields.splice(fields.indexOf(amount) + 1, 0, ...metadata.filter((field) => !fields.includes(field)));
 		}
@@ -132,7 +132,7 @@
 		columns.splice(2, 0, ...additions.slice(0, 3));
 		columns.splice(columns.findIndex((c) => c.fieldname === "grand_total") + 1, 0, additions[4]);
 		columns.splice(columns.findIndex((c) => c.fieldname === "status") + 1, 0, additions[3]);
-		return { columns: columns.map((c) => ({ ...c, label: c.fieldname === "transaction_date" ? "单据日期" : c.fieldname === "name" ? "单据编号" : c.label })), freezeUntil: "name", virtualFields, newColumns: virtualFields, request, formLink, renderValue, summary, exportCurrent, mountControls, onActivate, onPayload, sortFields: ["transaction_date", "name", "company", "status", "grand_total", "oa_amount", "approval_status"] };
+		return { columns: columns.map((c) => ({ ...c, label: c.fieldname === "transaction_date" ? "单据日期" : c.fieldname === "name" ? "单据编号" : c.label })), freezeUntil: "supplier_name", virtualFields, newColumns: virtualFields, useNativeIndicator: doc => doc.row_type === "purchase_order", request, formLink, renderValue, summary, exportCurrent, mountControls, onActivate, onPayload, sortFields: ["transaction_date", "name", "company", "status", "grand_total", "oa_amount", "approval_status"] };
 	}
 	return { configure, request, formLink, renderValue, summary, exportColumns, exportCurrent, shouldHideOANavigation, installNavigation };
 });

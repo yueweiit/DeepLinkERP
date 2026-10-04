@@ -111,21 +111,7 @@
 		});
 	}
 	function dismissAutomaticOnboarding(controller) {
-		const wrapper = root.document?.querySelector(".user-onboarding");
-		if (!wrapper || !root.MutationObserver) return;
-		let observer;
-		const cleanup = () => { observer?.disconnect(); controller.stopInitialOnboarding = null; };
-		controller.stopInitialOnboarding = cleanup;
-		const closeInitial = () => {
-			const route = root.frappe.get_route?.() || [];
-			if (String(route[0]).toLowerCase() !== "list" || route[1] !== "Sales Order") return cleanup();
-			const close = wrapper.querySelector('.onb-header-actions button:has(use[href="#icon-x"])');
-			if (close) { close.click(); cleanup(); }
-		};
-		// Dismiss only the initial automatic native overlay. The existing Getting Started entry can reopen it.
-		observer = new root.MutationObserver(closeInitial);
-		observer.observe(wrapper, { childList: true, subtree: true });
-		closeInitial();
+		return grid.dismissAutomaticOnboarding(controller, root);
 	}
 	const grid = engine.create({ doctype: "Sales Order", controllerKey: "dlpSalesOrderGrid", routeClass: "dlp-sales-order-grid-active", columns: COLUMNS, freezeUntil: "name", defaultColumns: presets.main,
 		computedFields: ["dlp_product", "dlp_quantity", "dlp_rate", "dlp_sales_person", "dlp_receipts", "dlp_sync", "dlp_last_confirmation", "dlp_actions"], extraFields: ["customer", "custom_crm_order_no", "party_account_currency"],

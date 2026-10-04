@@ -27,10 +27,11 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 
 	def test_unified_adapter_loads_after_cache_busted_shared_engine(self):
 		scripts = hooks.app_include_js
-		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.6"
-		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.1"
+		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.10"
+		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.4"
 		self.assertIn(engine, scripts)
 		self.assertLess(scripts.index(engine), scripts.index(adapter))
+		self.assertLess(scripts.index(engine), scripts.index("/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.8"))
 
 	def test_desk_loads_compact_styles_without_changing_website_assets(self):
 		styles = hooks.app_include_css
@@ -42,12 +43,21 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		)
 		self.assertNotIn("purchase_order_list", str(hooks.web_include_css))
 
+	def test_classic_purchase_order_narrow_sidebar_keeps_mode_menu_in_viewport(self):
+		css = (Path(__file__).resolve().parents[1] / "deeplinkerp_branding/public/css/purchase_order_list.css").read_text()
+		selector = r"body\.dlp-purchase-order-grid-active:not\(\.dlp-mes-navigation-enabled\) \.dlp-interface-mode-menu"
+		rule = re.search(selector + r"\s*\{([^}]+)\}", css)
+		self.assertIsNotNone(rule, "Only the classic PO menu should override the global right anchor")
+		self.assertRegex(rule.group(1), r"left:\s*0\s*;")
+		self.assertRegex(rule.group(1), r"right:\s*auto\s*;")
+		self.assertIn("/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.10", hooks.app_include_css)
+
 	def test_header_and_rows_do_not_distribute_extra_width_between_columns(self):
 		css = (
 			Path(__file__).resolve().parents[1]
 			/ "deeplinkerp_branding/public/css/purchase_order_list.css"
 		).read_text()
-		css = css.replace("body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active)", "body.dlp-purchase-order-grid-active")
+		css = css.replace("body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active)", "body.dlp-purchase-order-grid-active")
 		shared_grid_rule = re.search(
 			r"\.dlp-po-grid-header-columns,\s*"
 			r"body\.dlp-purchase-order-grid-active \.dlp-po-grid-row\s*\{([^}]+)\}",

@@ -117,6 +117,148 @@ def _read(doctype, name, fields=()):
 
 LINK_WARNING = "关联缺失或无权读取，请在原生单据核对；快捷付款/确认应付已禁用"
 SOURCE_FIELDS = {"company", "supplier", "currency", "grand_total", "items", "status"}
+RECEIPT_FIELDS = ["name", "supplier_name", "supplier", "posting_date", "status", "company", "currency", "grand_total", "docstatus", "is_return"]
+RECEIPT_COLUMNS = {"name": "采购入库单号", "supplier_name": "供应商名称", "supplier": "供应商编码",
+                   "posting_date": "入库日期", "status": "入库状态", "company": "公司", "currency": "入库币种",
+                   "grand_total": "入库金额", "docstatus": "单据状态", "is_return": "是否退货",
+                   "orders": "采购订单", "payment_state": "付款状态",
+                   "shared_payable": "共享应付整单范围", "settlement_state": "已付/核销状态",
+                   "settled": "已付/核销（各币种及整单范围）", "outstanding": "未付（各币种及整单范围）"}
+PAYMENT_COLUMNS = {"name": "付款单", "posting_date": "付款日期", "supplier": "供应商", "company": "公司",
+                   "payment_type": "付款类型", "amount": "金额", "currency": "付款币种", "bank_account": "记账账户",
+                   "state": "付款状态", "remarks": "摘要", "references": "核销引用", "allocation_currency": "核销币种",
+                   "vouchers": "会计凭证", "sync_issues": "凭证同步状态"}
+BANK_WARNING = "银行或现金账户不可用或无权读取，请在原生单据核对"
+
+
+def _query_fields(doctype):
+    """Native stored parent fields; permission checks still apply to each requested field."""
+    meta = frappe.get_meta(doctype)
+    excluded = {"Table", "Table MultiSelect", "HTML", "Section Break", "Column Break", "Tab Break", "Button", "Heading", "Image", "Fold"}
+    fields = set(meta.default_fields)
+    fields.update(df.fieldname for df in meta.fields if df.fieldtype not in excluded and not df.get("is_virtual"))
+    return fields & set(meta.get_valid_columns())
+
+
+def _bank_account(name, company, currency, for_update=False):
+    """One bank guard for reads and drawer writes; framework account names stay private."""
+    fields = {"company", "account_currency", "is_group", "account_type", "disabled"}
+    denied = False
+    with _quiet_link_errors():
+        try:
+            if for_update:
+                doc = frappe.get_doc("Account", name, for_update=True)
+                _check_read(doc)
+                _require_fields("Account", fields)
+                _read("Company", doc.company)
+            else:
+                doc = _read("Account", name, fields)
+        except (frappe.DoesNotExistError, frappe.PermissionError):
+            denied = True
+    if denied:
+        frappe.throw(BANK_WARNING, frappe.PermissionError)
+    if doc.company != company or doc.is_group or doc.disabled or doc.account_type not in ("Bank", "Cash") or doc.account_currency != currency:
+        frappe.throw(BANK_WARNING)
+    return doc
+
+
+def _normalize_filter(doctype, field, operator, value):
+    from frappe.utils.data import get_filter
+    normalized = get_filter(doctype, [doctype, field, operator, value])
+    if normalized.doctype != doctype or normalized.fieldname != field:
+        frappe.throw("跨单据或明细筛选请在原生高级列表处理")
+    return [doctype, field, normalized.operator.lower(), normalized.value]
+
+
+def _native_filters(doctype, value, allowed):
+    value = json.loads(value) if isinstance(value, str) else value or []
+    if isinstance(value, dict):
+        value = [[field, *(condition if isinstance(condition, (list, tuple)) else ["=", condition])]
+                 for field, condition in value.items()]
+    if not isinstance(value, list):
+        frappe.throw("原生筛选条件必须为列表或对象")
+    result = []
+    for entry in value:
+        if not isinstance(entry, (list, tuple)) or len(entry) not in (3, 4):
+            frappe.throw("原生筛选条件格式无效")
+        if len(entry) == 4 and entry[0] != doctype:
+            frappe.throw("不支持跨单据筛选")
+        field, operator, operand = entry[-3:]
+        if field not in allowed:
+            frappe.throw("不支持此父单据字段；明细筛选请在原生高级列表处理")
+        _require_fields(doctype, {field})
+        result.append(_normalize_filter(doctype, field, str(operator).lower(), operand))
+    return result
+
+
+def _order_by(doctype, value, allowed):
+    clauses = []
+    for part in str(value or "posting_date desc, creation desc").split(","):
+        match = re.fullmatch(r"\s*(?:(?:`([^`]+)`|([a-z_][a-z0-9_ ]*))\s*\.\s*)?(?:`([a-z_][a-z0-9_]*)`|([a-z_][a-z0-9_]*))\s*(asc|desc)?\s*", part, re.I)
+        if not match:
+            frappe.throw("排序字段无效")
+        table, field = match[1] or match[2], match[3] or match[4]
+        if (table and table != "tab" + doctype) or field not in allowed:
+            frappe.throw("排序字段无效")
+        _require_fields(doctype, {field})
+        clauses.append(field + " " + (match[5] or "asc").lower())
+    if not any(clause.startswith("name ") for clause in clauses):
+        clauses.append("name asc")
+    return ", ".join(clauses)
+
+
+def _pagination(start, page_length):
+    try:
+        start, page_length = int(start), int(page_length)
+    except (TypeError, ValueError):
+        frappe.throw("分页参数无效")
+    if start < 0 or not 1 <= page_length <= 2500:
+        frappe.throw("分页参数无效")
+    return start, page_length
+
+
+def _export(doctype, rows, columns, allowed):
+    if not frappe.has_permission(doctype, "export"):
+        frappe.throw("没有导出权限", frappe.PermissionError)
+    columns = json.loads(columns) if isinstance(columns, str) else columns or list(allowed)
+    if not isinstance(columns, list) or not columns or len(set(columns)) != len(columns) or any(column not in allowed for column in columns):
+        frappe.throw("导出列无效")
+    columns = list(columns)
+    if {"grand_total", "amount"}.intersection(columns) and "currency" not in columns:
+        columns.append("currency")
+    if doctype == "Payment Entry" and "allocation_currency" not in columns:
+        columns.append("allocation_currency")
+    for row in rows:
+        _read_doc(doctype, row["name"]).check_permission("export")
+    # Prevent spreadsheet formula interpretation of source text.
+    def value(row, column):
+        cell = row.get(column)
+        if column == "posting_date":
+            cell = getdate(cell) if cell else None
+        elif column == "allocation_currency":
+            cell = ", ".join(sorted({ref["currency"] for ref in row["references"] if ref.get("currency")}))
+        elif column in ("settled", "outstanding"):
+            cell = [{"currency": balance["currency"], column: balance[column],
+                     "scope_label": "共享应付整单余额" if row.get("shared_payable") else "关联应付余额"}
+                    for balance in row.get("balances", [])]
+        if isinstance(cell, (list, dict)):
+            cell = json.dumps(cell, ensure_ascii=False, default=str)
+        if isinstance(cell, str):
+            from frappe.utils.xlsxutils import handle_html
+            cell = handle_html(cell)
+            if cell.startswith(("=", "+", "-", "@")):
+                cell = "'" + cell
+        return cell
+    from frappe.utils.xlsxutils import make_xlsx
+    column_styles = {index: (1,) if column == "posting_date" else (0,)
+                     for index, column in enumerate(columns) if column in {"posting_date", "grand_total", "amount"}}
+    styles = {"styles": [{"num_format": "#,##0.00"}, {"num_format": "yyyy-mm-dd"}],
+              "column_styles": column_styles} if column_styles else {}
+    workbook = make_xlsx([[allowed[column] for column in columns]] + [[value(row, column) for column in columns] for row in rows], "采购记录", styles=styles)
+    frappe.response["filename"] = doctype.replace(" ", "_") + ".xlsx"
+    frappe.response["filecontent"] = workbook.getvalue()
+    frappe.response["type"] = "binary"
+    return None
 
 
 @contextmanager
@@ -210,9 +352,52 @@ def summarize(invoices):
 def _vouchers(payment_names):
     if not frappe.db.exists("DocType", "China Accounting Voucher") or not frappe.has_permission("China Accounting Voucher", "read"):
         return []
-    _require_fields("China Accounting Voucher", {"source_doctype", "source_name", "source_event", "status", "statutory_number"})
-    return frappe.get_list("China Accounting Voucher", filters={"source_doctype": "Payment Entry", "source_name": ["in", payment_names]},
-                           fields=["name", "source_name", "statutory_number", "source_event", "status", "docstatus"], limit_page_length=0)
+    fields = {"source_doctype", "source_name", "source_event", "status", "statutory_number", "company"}
+    _require_fields("China Accounting Voucher", fields)
+    result = []
+    for row in frappe.get_list("China Accounting Voucher", filters={"source_doctype": "Payment Entry", "source_name": ["in", payment_names]},
+            fields=["name", "source_name", "statutory_number", "source_event", "status", "docstatus", "company"], limit_page_length=0):
+        if _related("China Accounting Voucher", row.name, [], fields):
+            result.append(row)
+    return result
+
+
+def _decorate_payments(rows):
+    from deeplinkerp_branding.services.purchase_document_actions import _workflow_actions, _payment_editable
+    by_name = {row["name"]: row for row in rows}
+    for row in rows:
+        doc = _read_doc("Payment Entry", row["name"])
+        row["sync_issues"] = []
+        row["can_edit"] = False
+        row["allowed_actions"] = []
+        try:
+            with _quiet_link_errors():
+                _require_fields("Payment Entry", {"deductions", "unallocated_amount"})
+                simple = (not row["warnings"] and doc.payment_type == "Pay" and doc.party_type == "Supplier"
+                          and not doc.get("deductions") and not doc.unallocated_amount
+                          and doc.paid_from_account_currency == doc.paid_to_account_currency
+                          and all(ref.reference_doctype == "Purchase Invoice" for ref in doc.references))
+                row["can_edit"] = bool(simple and doc.docstatus == 0 and _payment_editable(doc))
+                row["allowed_actions"] = _workflow_actions(doc) if simple else []
+        except frappe.PermissionError:
+            pass
+    doctype = "China Voucher Sync Issue"
+    if not frappe.db.exists("DocType", doctype) or not frappe.has_permission(doctype, "read"):
+        return
+    fields = {"company", "source_doctype", "source_name", "status", "posting_date"}
+    try:
+        with _quiet_link_errors():
+            _require_fields(doctype, fields)
+            issues = frappe.get_list(doctype, filters={"source_doctype": "Payment Entry", "source_name": ["in", list(by_name)], "status": "Pending"},
+                                     fields=["name", *sorted(fields)], limit_page_length=0)
+            for issue in issues:
+                payment = by_name[issue.source_name]
+                if issue.company != payment["company"] or not _related(doctype, issue.name, [], fields, payment["company"]):
+                    continue
+                # Status only: do not leak last_error or unavailable cancellation-voucher names.
+                payment["sync_issues"].append({"name": issue.name, "status": issue.status, "posting_date": issue.posting_date})
+    except frappe.PermissionError:
+        pass
 
 
 def _procurement_references(payment, warnings):
@@ -243,23 +428,35 @@ def _payment_row(doc):
     refs = _procurement_references(doc, warnings)
     if not refs:
         return None
+    bank_account = doc.paid_to if doc.payment_type == "Receive" else doc.paid_from
+    currency = doc.paid_to_account_currency if doc.payment_type == "Receive" else doc.paid_from_account_currency
+    try:
+        with _quiet_link_errors():
+            _bank_account(bank_account, doc.company, currency)
+    except (frappe.PermissionError, frappe.ValidationError):
+        bank_account = None
+        warnings.append(BANK_WARNING)
     return {"name": doc.name, "company": doc.company, "supplier": doc.party, "posting_date": doc.posting_date,
             "docstatus": doc.docstatus, "payment_type": doc.payment_type, "amount": doc.received_amount if doc.payment_type == "Receive" else doc.paid_amount,
-            "currency": doc.paid_to_account_currency if doc.payment_type == "Receive" else doc.paid_from_account_currency, "bank_account": doc.paid_to if doc.payment_type == "Receive" else doc.paid_from, "remarks": doc.remarks,
+            "currency": currency, "bank_account": bank_account, "remarks": doc.remarks,
             "references": refs, "vouchers": [], "warnings": warnings,
             "state": {0: "草稿 · 未计已付", 1: "已提交", 2: "已取消 · 未计已付"}[doc.docstatus]}
 
 
 @frappe.whitelist()
-def get_payment_records(company=None, supplier=None, purchase_order=None, purchase_receipt=None, search=None, start=0, page_length=50):
+def get_payment_records(company=None, supplier=None, purchase_order=None, purchase_receipt=None, search=None, start=0, page_length=100,
+                        from_date=None, to_date=None, status=None, native_filters=None, or_filters=None, order_by=None, export_format=None, columns=None):
     token = _record_reader.set(_RecordReader())
     try:
-        return _payment_records(company, supplier, purchase_order, purchase_receipt, search, start, page_length)
+        return _payment_records(company, supplier, purchase_order, purchase_receipt, search, start, page_length,
+                                from_date=from_date, to_date=to_date, status=status, native_filters=native_filters,
+                                or_filters=or_filters, order_by=order_by, export_format=export_format, columns=columns)
     finally:
         _record_reader.reset(token)
 
 
-def _payment_records(company, supplier, purchase_order, purchase_receipt, search, start, page_length):
+def _payment_records(company, supplier, purchase_order, purchase_receipt, search, start, page_length,
+                     from_date=None, to_date=None, status=None, native_filters=None, or_filters=None, order_by=None, export_format=None, columns=None):
     if purchase_order:
         _source("Purchase Order", purchase_order)
     receipt_orders = set()
@@ -267,21 +464,34 @@ def _payment_records(company, supplier, purchase_order, purchase_receipt, search
         receipt = _source("Purchase Receipt", purchase_receipt)
         _require_fields("Purchase Receipt Item", {"purchase_order"}, "Purchase Receipt")
         receipt_orders = set(_source_links(receipt, "Purchase Order", "purchase_order", []))
-    start, page_length = int(start), int(page_length)
-    if start < 0 or not 1 <= page_length <= 100:
-        frappe.throw("分页参数无效")
+    start, page_length = _pagination(start, page_length)
     _require_fields("Payment Entry", {"party_type", "references"})
     filters = {"party_type": "Supplier", "payment_type": ["in", ["Pay", "Receive"]]}
     for field, value in (("company", company), ("party", supplier)):
         if value:
             filters[field] = value
+    if from_date or to_date:
+        filters["posting_date"] = ["between", [from_date or "1900-01-01", to_date or "2999-12-31"]]
+    if status is not None and status != "":
+        state = {"Draft": 0, "Submitted": 1, "Cancelled": 2}.get(str(status), status)
+        try:
+            state = int(state)
+        except (TypeError, ValueError):
+            frappe.throw("付款状态无效")
+        if state not in (0, 1, 2):
+            frappe.throw("付款状态无效")
+        filters["docstatus"] = state
+    allowed = _query_fields("Payment Entry")
+    query = _native_filters("Payment Entry", filters, allowed | {"party_type"}) + _native_filters("Payment Entry", native_filters, allowed)
+    ors = _native_filters("Payment Entry", or_filters, allowed)
+    sorting = _order_by("Payment Entry", order_by, allowed)
     try:
         with _quiet_link_errors():
             _require_fields("Payment Entry", {"party"})
     except frappe.PermissionError:
         candidates = []
     else:
-        candidates = frappe.get_list("Payment Entry", filters=filters, fields=["name", "party"], order_by="posting_date desc, creation desc", limit_page_length=0)
+        candidates = frappe.get_list("Payment Entry", filters=query, or_filters=ors, fields=["name", "party"], order_by=sorting, limit_page_length=0)
     # Preserve Python casefold and literal substring semantics (SQL LIKE/collations differ).
     names = [row.name for row in candidates if not search or str(search).casefold() in (row.name + " " + (row.party or "")).casefold()]
     reader = _record_reader.get()
@@ -308,7 +518,7 @@ def _payment_records(company, supplier, purchase_order, purchase_receipt, search
         if purchase_receipt and not any(purchase_receipt in ref["receipts"] or (ref["doctype"] == "Purchase Order" and receipt_orders.intersection(ref["orders"])) for ref in refs):
             continue
         rows.append(row)
-    page = rows[start:start + page_length]
+    page = rows if export_format else rows[start:start + page_length]
     if page:
         try:
             with _quiet_link_errors():
@@ -316,11 +526,24 @@ def _payment_records(company, supplier, purchase_order, purchase_receipt, search
             by_name = {row["name"]: row for row in page}
             for voucher in vouchers:
                 parent = voucher.pop("source_name")
-                by_name[parent]["vouchers"].append(voucher)
+                if voucher.pop("company") == by_name[parent]["company"]:
+                    by_name[parent]["vouchers"].append(voucher)
         except frappe.PermissionError:
             pass
-    # No monetary total: refunds and mixed-purpose/multi-currency payments must not be silently summed.
+        _decorate_payments(page)
+    if export_format:
+        if export_format != "xlsx":
+            frappe.throw("仅支持 XLSX 导出")
+        return _export("Payment Entry", rows, columns, PAYMENT_COLUMNS)
+    groups = {}
+    for row in rows:
+        group = (row["payment_type"], row["docstatus"], row["currency"])
+        groups[group] = groups.get(group, Decimal(0)) + amount(row["amount"])
+    totals = [{"payment_type": payment_type, "docstatus": status, "currency": currency, "amount": float(value)}
+              for (payment_type, status, currency), value in sorted(groups.items())]
+    # Whole bank-document amounts, never represented as procurement settlement.
     return {"rows": page, "total_count": len(rows),
+            "totals": totals, "totals_label": "整张付款单银行币种金额（按付款类型、单据状态、币种分组）",
             "notice": "关联缺失或无权读取的单据不会作为可用链接；请在原生单据核对。仅显示有权查看的订单预付款或关联采购应付付款；草稿、取消不计已付。金额为整张付款单银行币种金额，核销见引用。关联订单预付款尚未核销时不计本入库已付。"}
 
 
@@ -387,16 +610,37 @@ def get_purchase_chain(source_doctype, source_name, include_payments=True):
         reason = LINK_WARNING
         for row in invoices:
             row["can_pay"] = False
+    drafts = [{"name": row["name"], "docstatus": 0} for row in invoices if row["docstatus"] == 0]
+    can_invoice = bool(not incomplete and source_doctype == "Purchase Receipt" and doc.docstatus == 1
+                       and not doc.get("is_return") and not drafts
+                       and frappe.has_permission("Purchase Invoice", "read")
+                       and frappe.has_permission("Purchase Invoice", "create"))
+    if can_invoice:
+        from deeplinkerp_branding.services.purchase_document_actions import _native
+        try:
+            with _quiet_link_errors():
+                can_invoice = bool(_native(doc, "Purchase Invoice").items)
+        except (frappe.ValidationError, frappe.PermissionError):
+            can_invoice = False
     return {"source_doctype": source_doctype, "name": doc.name, "company": doc.company, "supplier": doc.supplier,
             "currency": doc.currency, "grand_total": doc.grand_total, "status": doc.status,
             "docstatus": doc.docstatus, "orders": orders, "order_progress": progress, "invoices": invoices, "balances": [] if incomplete else summarize(invoices), "incomplete_links": incomplete,
-            "can_create_invoice": bool(not incomplete and source_doctype == "Purchase Receipt" and doc.docstatus == 1 and not doc.get("is_return") and frappe.has_permission("Purchase Invoice", "read") and frappe.has_permission("Purchase Invoice", "create") and not any(i["docstatus"] in (0, 1) for i in invoices)),
+            "can_create_invoice": can_invoice, "draft_invoices": drafts,
             "payments": payments, "warnings": warnings, "can_create": can_create and bool(eligible) and not incomplete, "reason": reason,
             "settlement_label": "已付/核销（含预付款抵扣、贷项等）"}
 
 
 @frappe.whitelist()
-def get_receipt_list(filters=None, start=0, page_length=100, **unused):
+def get_receipt_list(filters=None, start=0, page_length=100, native_filters=None, or_filters=None, order_by=None,
+                     search=None, export_format=None, columns=None, **unused):
+    token = _record_reader.set(_RecordReader())
+    try:
+        return _receipt_list(filters, start, page_length, native_filters, or_filters, order_by, search, export_format, columns)
+    finally:
+        _record_reader.reset(token)
+
+
+def _receipt_list(filters, start, page_length, native_filters, or_filters, order_by, search, export_format, columns):
     filters = json.loads(filters) if isinstance(filters, str) else filters or {}
     if not isinstance(filters, dict):
         frappe.throw("筛选条件必须为对象")
@@ -404,27 +648,55 @@ def get_receipt_list(filters=None, start=0, page_length=100, **unused):
     for field in ("company", "supplier", "status"):
         if filters.get(field):
             query[field] = filters[field]
-    if filters.get("search"):
-        query["name"] = ["like", "%" + str(filters["search"]) + "%"]
     if filters.get("from_date") or filters.get("to_date"):
         query["posting_date"] = ["between", [filters.get("from_date") or "1900-01-01", filters.get("to_date") or "2999-12-31"]]
-    fields = ["name", "supplier_name", "supplier", "posting_date", "status", "company", "currency", "grand_total", "docstatus", "is_return"]
+    fields = RECEIPT_FIELDS
     _require_fields("Purchase Receipt", fields)
-    start, page_length = int(start), min(100, max(1, int(page_length)))
-    rows = frappe.get_list("Purchase Receipt", filters=query, fields=fields, order_by="posting_date desc, creation desc", start=start, limit_page_length=page_length)
+    start, page_length = _pagination(start, page_length)
+    allowed = _query_fields("Purchase Receipt")
+    query = _native_filters("Purchase Receipt", query, allowed) + _native_filters("Purchase Receipt", native_filters, allowed)
+    ors = _native_filters("Purchase Receipt", or_filters, allowed)
+    sorting = _order_by("Purchase Receipt", order_by, allowed)
+    candidates = frappe.get_list("Purchase Receipt", filters=query, or_filters=ors, fields=fields, order_by=sorting, limit_page_length=0)
+    keyword = str(search or filters.get("search") or "").casefold()
+    candidates = [row for row in candidates if not keyword or keyword in " ".join(str(row.get(field) or "") for field in ("name", "supplier", "supplier_name")).casefold()]
+    reader = _record_reader.get()
+    reader.preload("Purchase Receipt", [row.name for row in candidates])
+    reader.preload("Company", {row.company for row in candidates})
+    visible = []
+    for row in candidates:
+        try:
+            with _quiet_link_errors():
+                _read("Purchase Receipt", row.name, fields)
+            visible.append(row)
+        except (frappe.PermissionError, frappe.DoesNotExistError):
+            continue
+    totals = {}
+    for row in visible:
+        totals[row.currency] = totals.get(row.currency, Decimal(0)) + amount(row.grand_total)
+    rows = visible if export_format else visible[start:start + page_length]
     for row in rows:
         try:
             with _quiet_link_errors():
                 chain = get_purchase_chain("Purchase Receipt", row.name, include_payments=False)
             row.update({key: chain[key] for key in ("orders", "balances", "can_create", "reason", "warnings", "incomplete_links")})
+            row["can_create_invoice"] = chain["can_create_invoice"]
+            row["draft_invoices"] = chain["draft_invoices"]
+            row["shared_payable"] = bool(not chain["incomplete_links"] and any(invoice["shared"] for invoice in chain["invoices"]))
+            row["settlement_state"] = "余额不可见" if chain["incomplete_links"] or (chain["warnings"] and not chain["balances"]) else "未形成应付"
             row["payment_state"] = ("关联缺失或无权读取" if chain["incomplete_links"] else "共享应付" if any(i["shared"] for i in chain["invoices"]) else "余额不可见" if chain["warnings"] else "未形成应付")
-            if chain["balances"] and not chain["warnings"]:
+            if chain["balances"] and not chain["incomplete_links"]:
                 balances = chain["balances"]
-                row["payment_state"] = "已付清" if all(b["outstanding"] <= 0 for b in balances) else "部分付款/核销" if any(b["settled"] > 0 for b in balances) else "未付款"
+                row["settlement_state"] = "已付清" if all(b["outstanding"] <= 0 for b in balances) else "部分付款/核销" if any(b["settled"] > 0 for b in balances) else "未付款"
+                if not chain["warnings"]:
+                    row["payment_state"] = row["settlement_state"]
         except (frappe.PermissionError, frappe.DoesNotExistError):
-            row.update(balances=[], orders=[], can_create=False, reason=LINK_WARNING, payment_state="关联缺失或无权读取", warnings=[LINK_WARNING], incomplete_links=True)
-    total = len(frappe.get_list("Purchase Receipt", filters=query, fields=["name"], limit_page_length=0))
-    return {"rows": rows, "total_count": total}
+            row.update(balances=[], orders=[], can_create=False, can_create_invoice=False, draft_invoices=[], shared_payable=False, settlement_state="余额不可见", reason=LINK_WARNING, payment_state="关联缺失或无权读取", warnings=[LINK_WARNING], incomplete_links=True)
+    if export_format:
+        if export_format != "xlsx":
+            frappe.throw("仅支持 XLSX 导出")
+        return _export("Purchase Receipt", rows, columns, RECEIPT_COLUMNS)
+    return {"rows": rows, "total_count": len(visible), "totals": [{"currency": currency, "grand_total": float(value)} for currency, value in sorted(totals.items())]}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -468,11 +740,7 @@ def create_payment_draft(source_doctype, source_name, purchase_invoice, amount_t
         balance = invoice_balance(invoice)
         if value > amount(balance["outstanding"]):
             frappe.throw("本次金额超过最新未付余额，请刷新")
-        account = _read("Account", bank_account, {"company", "account_type", "is_group", "account_currency"})
-        if account.company != source.company or account.is_group or account.account_type not in ("Bank", "Cash"):
-            frappe.throw("请选择同公司银行或现金记账账户")
-        if account.account_currency != balance["currency"]:
-            frappe.throw("跨币种付款请在原生付款单处理汇率；当前抽屉只支持同币种")
+        account = _bank_account(bank_account, source.company, balance["currency"])
         from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
         entry = get_payment_entry("Purchase Invoice", invoice.name, bank_account=bank_account, bank_amount=float(value))
         entry.check_permission("create")

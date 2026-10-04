@@ -6,9 +6,13 @@ const engine = require("../deeplinkerp_branding/public/js/compact_list.js");
 const adapterPath = path.join(__dirname, "../deeplinkerp_branding/public/js/unified_purchase_list.js");
 const adapter = fs.existsSync(adapterPath) ? require(adapterPath) : {};
 
-function fixture() {
-	const native = [{ fieldname: "name", label: "采购订单号", width: 166 }];
-	const provider = {
+test('unified purchase view preserves freezing through supplier like native purchase list',()=>{
+ assert.equal(adapter.configure([{fieldname:'name'},{fieldname:'supplier_name'}]).freezeUntil,'supplier_name');
+});
+
+function fixture(options={}) {
+	const native = options.columns || [{ fieldname: "name", label: "采购订单号", width: 166 }];
+	const provider = options.provider || {
 		virtualFields: ["source"],
 		columns: [...native, { fieldname: "source", label: "来源", width: 100 }],
 		request: (c) => ({ method: "test.unified", args: { filters: JSON.stringify({ ...c.quick, scope: c.providerScope }), start: c.page * c.pageSize, page_length: c.pageSize, order_by: "transaction_date desc" } }),
@@ -18,7 +22,7 @@ function fixture() {
 	};
 	const grid = engine.create({ doctype: "Purchase Order", controllerKey: "grid", routeClass: "test", columns: native, provider });
 	const list = {
-		doctype: "Purchase Order", view_name: "List", meta: { fields: [] }, fields: [["name", "Purchase Order"]], data: [],
+		doctype: "Purchase Order", view_name: "List", meta: options.meta || { fields: [] }, fields: [["name", "Purchase Order"]], data: [],
 		get_args() { return { filters: [], fields: ["name"], start: this.start, page_length: this.page_length }; },
 		get_call_args() { return { method: "native", args: this.get_args() }; },
 		no_change() { return false; }, prepare_data(r) { this.data = r.message; }, reset_defaults() {},
@@ -30,6 +34,17 @@ function fixture() {
 	const controller = grid.mount(list, root);
 	return { grid, list, controller };
 }
+
+test('real unified provider PO rows reuse native workflow indicator while OA rows keep their own status',()=>{
+ const columns=[{fieldname:'name',label:'单据号',width:166},{fieldname:'supplier_name',label:'供应商',width:190},{fieldname:'status',label:'状态',width:120}];
+ const {list,controller}=fixture({columns,provider:adapter.configure(columns),meta:{fields:[{fieldname:'status'},{fieldname:'supplier_name'}]}});
+ const calls=[];list.workflow_state_fieldname='workflow_state';list.get_indicator_html=(doc,workflow)=>{calls.push([doc,workflow]);return '<span class="indicator-pill blue">待收货待开票</span>';};
+ controller.setProviderScope('all',false);
+ const po={name:'PO',row_type:'purchase_order',status:'To Receive and Bill',docstatus:1,supplier_name:'S'};
+ const html=list.get_list_row_html(po);assert.match(html,/indicator-pill blue/);assert.match(html,/待收货待开票/);assert.equal(calls[0][0],po);assert.equal(calls[0][1],true);
+ const oa=list.get_list_row_html({name:'OA',row_type:'oa_request',status:'OA 待办',supplier_name:'S'});assert.match(oa,/OA 待办/);assert.doesNotMatch(oa,/indicator-pill/);assert.equal(calls.length,1);
+ assert.equal(controller.providerScope,'all');assert.equal(controller.list.data.length,0);
+});
 
 test("optional provider keeps OA rows outside native PO data and selection", () => {
 	const { list, controller } = fixture();

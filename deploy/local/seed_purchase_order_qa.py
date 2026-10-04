@@ -2,12 +2,79 @@
 
 import json
 import os
+import sys
 
 import frappe
 
 
 QA_SITE = "po-grid-qa.localhost"
 QA_READER = "qa-po-reader@example.invalid"
+
+
+def seed_finance_flow():
+	"""Native, disposable browser fixtures; the old display-only seed is unchanged."""
+	if frappe.local.site != QA_SITE:
+		raise RuntimeError("Financial browser fixtures require the isolated QA site")
+	frappe.set_user("Administrator")
+	frappe.flags.in_test = True
+	frappe.flags.mute_emails = True
+	from frappe.utils import add_days, nowdate
+	from erpnext.buying.doctype.purchase_order.purchase_order import make_purchase_receipt
+	from erpnext.stock.doctype.purchase_receipt.purchase_receipt import make_purchase_invoice
+	company = "QA Second Company"
+	if not all(frappe.db.exists(doctype, name) for doctype, name in (
+		("Company", company), ("Supplier", "QA Test Supplier"), ("Item", "QA-PO-ITEM"))):
+		raise RuntimeError("Expected existing isolated QA master data")
+	# Never turn the display-only 130 orders into native submitted transactions.
+	def order(index, item_code="QA-PO-ITEM"):
+		name = f"QA-FIN-PO-{index:02}"
+		if frappe.db.exists("Purchase Order", name):
+			return frappe.get_doc("Purchase Order", name)
+		doc = frappe.get_doc({"doctype": "Purchase Order", "company": company,
+			"supplier": "QA Test Supplier", "currency": "CNY", "schedule_date": add_days(nowdate(), 1),
+			"items": [{"item_code": item_code, "qty": 10, "rate": 1000,
+				"schedule_date": add_days(nowdate(), 1)}]}).insert(set_name=name)
+		doc.submit()
+		return doc
+	def receipt(po, name, qty, submit=False):
+		if frappe.db.exists("Purchase Receipt", name):
+			return frappe.get_doc("Purchase Receipt", name)
+		doc = make_purchase_receipt(po.name)
+		doc.items[0].qty = qty
+		doc.insert(set_name=name)
+		if submit:
+			doc.submit()
+		return doc
+	po = order(1)
+	ready = receipt(po, "QA-FIN-PR-READY", 4, submit=True)
+	# Real drafts give the 100-row pagination control a second page without posting.
+	for index in range(1, 102):
+		receipt(po, f"QA-FIN-PR-DRAFT-{index:03}", 1)
+	shared_receipts = [receipt(order(index + 2), f"QA-FIN-PR-SHARED-{index + 1}", 1, submit=True)
+		for index in range(2)]
+	shared_name = "QA-FIN-PI-SHARED"
+	if not frappe.db.exists("Purchase Invoice", shared_name):
+		shared = make_purchase_invoice(shared_receipts[0].name)
+		shared = make_purchase_invoice(shared_receipts[1].name, target_doc=shared)
+		shared.insert(set_name=shared_name)
+		shared.submit()
+	pending_order = order(4)
+	# Nos correctly rejects fractions. A separate non-stock material/UOM tests
+	# display rounding without weakening any existing UOM or native validation.
+	if not frappe.db.exists("UOM", "QA-FIN Fraction Unit"):
+		frappe.get_doc({"doctype": "UOM", "uom_name": "QA-FIN Fraction Unit", "must_be_whole_number": 0}).insert()
+	if not frappe.db.exists("Item", "QA-FIN-FRACTION-ITEM"):
+		frappe.get_doc({"doctype": "Item", "item_code": "QA-FIN-FRACTION-ITEM",
+			"item_name": "QA小数数量原生解析物料", "item_group": "Services",
+			"stock_uom": "QA-FIN Fraction Unit", "is_stock_item": 0}).insert()
+	fraction_receipt = receipt(order(5, "QA-FIN-FRACTION-ITEM"), "QA-FIN-PR-FRACTION", 4, submit=True)
+	frappe.db.commit()
+	return {"site": QA_SITE, "prefix": "QA-FIN-", "purchase_order": po.name,
+		"pending_order": pending_order.name,
+		"fraction_receipt": fraction_receipt.name,
+		"ready_receipt": ready.name, "shared_receipts": [doc.name for doc in shared_receipts],
+		"shared_invoice": shared_name, "draft_receipts": 101,
+		"stock_item": bool(frappe.db.get_value("Item", "QA-PO-ITEM", "is_stock_item"))}
 
 
 def seed():
@@ -67,7 +134,12 @@ if __name__ == "__main__":
 	frappe.init(site=QA_SITE, sites_path=".")
 	frappe.connect()
 	try:
-		seed()
+		if sys.argv[1:] == ["--finance-flow"]:
+			print(json.dumps(seed_finance_flow(), ensure_ascii=False))
+		elif not sys.argv[1:]:
+			seed()
+		else:
+			raise RuntimeError("Unknown QA seed arguments")
 	finally:
 		frappe.db.rollback()
 		frappe.destroy()

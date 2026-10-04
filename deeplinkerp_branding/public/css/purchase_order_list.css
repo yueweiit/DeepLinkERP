@@ -1,5 +1,5 @@
 /* Purchase Order display adapter only. Removing the route class restores Desk. */
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) {
 	--dlp-po-border: #e1e8f0;
 	--dlp-po-header-bg: #f4f7fb;
 	--dlp-po-row-bg: var(--fg-color, #fff);
@@ -7,41 +7,41 @@ body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp
 	--dlp-po-hover: #edf5ff;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .layout-main-section-wrapper {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .layout-main-section-wrapper {
 	min-width: 0;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .layout-main-section,
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .frappe-list {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .layout-main-section,
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .frappe-list {
 	min-width: 0;
 	border-radius: 4px;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .page-head-content {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .page-head-content {
 	min-height: 42px;
 	padding: 4px 12px;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .page-title h3 {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .page-title h3 {
 	font-size: 18px;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-grid {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid {
 	font-size: 13px;
 	--dlp-po-row-height: 30px;
 	--dlp-po-cell-padding: 4px 7px;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-standard,
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-standard .dlp-po-grid {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-standard,
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-standard .dlp-po-grid {
 	--dlp-po-row-height: 40px;
 	--dlp-po-cell-padding: 7px 9px;
 	font-size: 14px;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-filters,
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-toolbar,
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-paging {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-filters,
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-toolbar,
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-paging {
 	display: flex;
 	align-items: center;
 	flex-wrap: wrap;
@@ -50,26 +50,26 @@ body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp
 	font-size: 13px;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-filters .form-group,
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-filters .frappe-control {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-filters .form-group,
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-filters .frappe-control {
 	margin-bottom: 0;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .page-form .standard-filter-section {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .page-form .standard-filter-section {
 	display: none;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .page-form {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .page-form {
 	align-items: center;
 	gap: 6px;
 	padding: 6px 15px;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .page-form .dlp-po-filters {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .page-form .dlp-po-filters {
 	padding: 0;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-filters .control-label {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-filters .control-label {
 	position: absolute;
 	width: 1px;
 	height: 1px;
@@ -80,14 +80,14 @@ body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp
 	white-space: nowrap;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-filter { width: 125px; }
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-filter[data-fieldname="search"] { width: 230px; }
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-filter[data-fieldname="from_date"],
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-filter[data-fieldname="to_date"] { width: 135px; }
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-filter[data-fieldname="company"] { width: 150px; }
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-filter { width: 125px; }
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-filter[data-fieldname="search"] { width: 230px; }
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-filter[data-fieldname="from_date"],
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-filter[data-fieldname="to_date"] { width: 135px; }
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-filter[data-fieldname="company"] { width: 150px; }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-toolbar label,
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-paging label {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-toolbar label,
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-paging label {
 	display: inline-flex;
 	align-items: center;
 	gap: 6px;
@@ -95,32 +95,32 @@ body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp
 	white-space: nowrap;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-toolbar label select,
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-paging label select {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-toolbar label select,
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-paging label select {
 	width: auto;
 	flex: 0 0 auto;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-column-option {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-column-option {
 	display: flex;
 	align-items: center;
 	gap: 6px;
 	padding: 4px 0;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-column-option label {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-column-option label {
 	flex: 1;
 	margin: 0;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-filters input,
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-filters select,
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-toolbar select,
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-paging select,
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-filters .btn,
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-toolbar .btn,
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-paging .btn,
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .page-actions .btn {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-filters input,
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-filters select,
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-toolbar select,
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-paging select,
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-filters .btn,
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-toolbar .btn,
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-paging .btn,
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .page-actions .btn {
 	min-height: 30px;
 	height: 30px;
 	padding: 3px 8px;
@@ -128,15 +128,15 @@ body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp
 	font-size: 13px;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-filters .input-with-feedback {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-filters .input-with-feedback {
 	background: var(--control-bg, #f6f8fa);
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-toolbar {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-toolbar {
 	border-top: 1px solid var(--dlp-po-border);
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-grid .result-container {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid .result-container {
 	max-width: 100%;
 	/* Reserve the wrapped filters, toolbar, totals and fixed-page controls. */
 	max-height: calc(100dvh - 320px);
@@ -147,7 +147,7 @@ body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp
 	border-radius: 2px;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-grid .result {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid .result {
 	min-width: 100%;
 	/* Override native mobile clipping; the outer result-container owns scrolling. */
 	width: max-content !important;
@@ -156,12 +156,12 @@ body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp
 	min-height: 32px;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-grid .no-result {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid .no-result {
 	height: 200px !important;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-grid-header-columns,
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-grid-row {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid-header-columns,
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid-row {
 	display: grid;
 	grid-template-columns: var(--dlp-po-columns);
 	/* Native .level uses space-between; keep the same track origin as the header. */
@@ -179,21 +179,21 @@ body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp
 	border-radius: 0;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-grid-row {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid-row {
 	min-height: var(--dlp-po-row-height);
 	position: static;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .result > .list-row-container:nth-child(odd) .dlp-po-grid-row {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .result > .list-row-container:nth-child(odd) .dlp-po-grid-row {
 	--dlp-po-row-bg: var(--dlp-po-row-alt);
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-grid-row:hover,
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-grid-row:focus-within {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid-row:hover,
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid-row:focus-within {
 	--dlp-po-row-bg: var(--dlp-po-hover);
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-grid-header {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid-header {
 	display: block;
 	font-size: inherit;
 	position: sticky;
@@ -210,25 +210,25 @@ body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp
 	background: var(--dlp-po-header-bg);
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-grid .list-row-container {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid .list-row-container {
 	width: max-content;
 	min-width: 100%;
 	margin: 0;
 	padding: 0;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .result > .list-row-container:has(> .dlp-po-grid-header) {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .result > .list-row-container:has(> .dlp-po-grid-header) {
 	position: sticky;
 	top: 0;
 	z-index: 4;
 	background: var(--dlp-po-header-bg);
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-native-paging {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-native-paging {
 	display: none !important;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-grid-cell {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid-cell {
 	display: flex;
 	align-items: center;
 	min-width: 0;
@@ -243,59 +243,59 @@ body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp
 	background: var(--dlp-po-row-bg);
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-grid-cell:last-child {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid-cell:last-child {
 	border-right: 0;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-grid-cell > a,
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-grid-cell > span {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid-cell > a,
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid-cell > span {
 	min-width: 0;
 	overflow: hidden;
 	text-overflow: ellipsis;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-grid-cell a {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid-cell a {
 	color: var(--primary, #1677ff);
 	font-weight: 400;
 	text-decoration: none;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-grid-cell a:hover {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid-cell a:hover {
 	text-decoration: underline;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-frozen {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-frozen {
 	position: sticky;
 	left: var(--dlp-po-left, 0px);
 	z-index: 2;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-grid-header .dlp-po-frozen {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid-header .dlp-po-frozen {
 	z-index: 5;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-frozen[data-fieldname="supplier_name"] {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-frozen[data-fieldname="supplier_name"] {
 	box-shadow: 2px 0 0 var(--dlp-po-border);
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-number {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-number {
 	justify-content: flex-end;
 	font-variant-numeric: tabular-nums;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-date {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-date {
 	justify-content: center;
 	font-variant-numeric: tabular-nums;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-status {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-status {
 	display: inline-flex;
 	align-items: center;
 	gap: 5px;
 	font-size: inherit;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-status .indicator-pill::before {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-status .indicator-pill::before {
 	display: inline-block;
 	content: "";
 	width: 6px;
@@ -305,7 +305,7 @@ body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp
 	flex-shrink: 0;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-status .indicator-pill {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-status .indicator-pill {
 	background: transparent;
 	border: 0;
 	border-radius: 0;
@@ -314,28 +314,28 @@ body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp
 	font-size: inherit;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-status.green {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-status.green {
 	color: var(--green-600, #198754);
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-status.orange {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-status.orange {
 	color: var(--orange-600, #b86e09);
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-status.red {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-status.red {
 	color: var(--red-600, #d23b3b);
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-status.blue {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-status.blue {
 	color: var(--blue-600, #1677ff);
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-status.gray,
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-status.grey {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-status.gray,
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-status.grey {
 	color: var(--text-muted, #65758b);
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-summary {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-summary {
 	display: flex;
 	flex-wrap: wrap;
 	gap: 12px;
@@ -348,95 +348,100 @@ body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp
 	font-variant-numeric: tabular-nums;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-paging {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-paging {
 	justify-content: space-between;
 	min-height: 36px;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-grid input[type="checkbox"] {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid input[type="checkbox"] {
 	width: 14px;
 	height: 14px;
 	margin: 0;
 	flex-shrink: 0;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-grid [data-sort-by] {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid [data-sort-by] {
 	cursor: pointer;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-grid :focus-visible {
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid :focus-visible {
 	outline: 2px solid var(--primary, #1677ff);
 	outline-offset: -2px;
 }
 
 @media (min-width: 768px) {
-	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active):not(.dlp-mes-navigation-enabled) {
+	body.dlp-purchase-order-grid-active:not(.dlp-mes-navigation-enabled) .dlp-interface-mode-menu {
+		left: 0;
+		right: auto;
+	}
+
+	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active):not(.dlp-mes-navigation-enabled) {
 		--sidebar-width: 132px;
 	}
 
-	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active):not(.dlp-mes-navigation-enabled) .body-sidebar {
+	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active):not(.dlp-mes-navigation-enabled) .body-sidebar {
 		padding: 6px;
 		gap: 8px;
 	}
 
-	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active):not(.dlp-mes-navigation-enabled) .body-sidebar .header-subtitle,
-	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active):not(.dlp-mes-navigation-enabled) .body-sidebar .sidebar-user-button .text-secondary {
+	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active):not(.dlp-mes-navigation-enabled) .body-sidebar .header-subtitle,
+	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active):not(.dlp-mes-navigation-enabled) .body-sidebar .sidebar-user-button .text-secondary {
 		display: none;
 	}
 
-	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active):not(.dlp-mes-navigation-enabled) .body-sidebar .sidebar-item-label {
+	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active):not(.dlp-mes-navigation-enabled) .body-sidebar .sidebar-item-label {
 		font-size: 13px;
 	}
 
-	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active):not(.dlp-mes-navigation-enabled) .custom-filters-right-sidebar-container,
-	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active):not(.dlp-mes-navigation-enabled) .custom-filters-right-sidebar {
+	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active):not(.dlp-mes-navigation-enabled) .custom-filters-right-sidebar-container,
+	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active):not(.dlp-mes-navigation-enabled) .custom-filters-right-sidebar {
 		width: 56px;
 	}
 
-	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active):not(.dlp-mes-navigation-enabled) .custom-filters-right-sidebar-item {
+	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active):not(.dlp-mes-navigation-enabled) .custom-filters-right-sidebar-item {
 		width: 48px;
 		min-height: 48px;
 	}
 }
 
 @media (max-width: 767.98px) {
-	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .page-form {
+	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .page-form {
 		flex-wrap: wrap;
 	}
 
-	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-filters {
+	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-filters {
 		width: 100%;
 	}
 
-	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-frozen {
+	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-frozen {
 		position: static;
 		box-shadow: none;
 	}
 
-	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-filters > * {
+	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-filters > * {
 		max-width: 100%;
 	}
 
-	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-filters input,
-	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-filters select {
+	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-filters input,
+	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-filters select {
 		min-width: 0;
 	}
 
-	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-grid .result-container {
+	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid .result-container {
 		max-height: 55dvh;
 	}
 }
 
-[data-theme="dark"] body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active),
-body[data-theme="dark"]:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) {
+[data-theme="dark"] body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active),
+body[data-theme="dark"]:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) {
 	--dlp-po-border: #384456;
 	--dlp-po-header-bg: #263346;
 	--dlp-po-row-alt: #202c3d;
 	--dlp-po-hover: #223b59;
 }
 
-[data-theme="dark"] body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-summary,
-body[data-theme="dark"]:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active) .dlp-po-summary {
+[data-theme="dark"] body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-summary,
+body[data-theme="dark"]:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-summary {
 	background: #223b59;
 }
 
