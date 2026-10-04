@@ -38,6 +38,7 @@
    if(field==='payment_state') return `<span title="${escape((doc.warnings || []).join('；'))}">${escape(doc.settlement_state || doc.payment_state || '—')}${doc.shared_payable?' · 共享整单':''}</span>`;
    if(['settled','outstanding'].includes(field)) return(doc.balances || []).map(b=>`<span title="${doc.shared_payable?'共享应付整单余额':'关联应付余额'}">${escape(Number(b[field]).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}))} ${escape(b.currency)}</span>`).join(' · ') || '—';
    if(field==='payment_action') {
+    if(doc.docstatus===0){const actions=root.DeepLinkERPPurchasePayments;return (doc.draft_orders || []).length?(doc.draft_orders || []).map(name=>actions?.nativeAction('Purchase Order',name,'先处理订单草稿') || '').join(' '):actions?.nativeAction('Purchase Receipt',doc.name,'处理入库草稿') || '—';}
     const button=(cls,label,target='')=>`<button type="button" class="btn btn-xs btn-default ${cls}" data-name="${escape(doc.name)}"${target?` data-target="${escape(target)}"`:''}>${label}</button>`;
     return [(doc.draft_invoices || []).map(invoice=>button('dlp-receipt-invoice','继续应付草稿',typeof invoice==='string'?invoice:invoice.name)).join(' '), doc.can_create_invoice?button('dlp-receipt-invoice','确认应付'):'',doc.can_create?button('dlp-receipt-pay','付款 / 继续付款'):''].filter(Boolean).join(' ') || `<span title="${escape(doc.reason || '')}">—</span>`;
    }

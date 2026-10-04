@@ -72,5 +72,35 @@ class NativeQueryTests(unittest.TestCase):
                 self.assertEqual(actions.service._order_by(doctype, "`tab" + doctype + "`.`posting_date` desc", {"posting_date", "name"}), "posting_date desc, name asc")
 
 
+class PaymentCompletionTests(unittest.TestCase):
+    def test_configured_workflow_never_guesses_a_submit_action(self):
+        doc = SimpleNamespace(name="PE", modified="v1")
+        with patch("frappe.model.workflow.get_workflow_name", return_value="Approval"), patch.object(actions, "_payment", return_value={"document": {"docstatus": 0}}), patch.object(actions, "submit_document") as submit:
+            self.assertEqual(actions._confirm_payment(doc)["document"]["docstatus"], 0)
+        submit.assert_not_called()
+
+    def test_no_submit_permission_returns_native_pending_projection(self):
+        doc = SimpleNamespace(name="PE", modified="v1")
+        with patch("frappe.model.workflow.get_workflow_name", return_value=""), patch.object(actions, "_workflow_actions", return_value=[]), patch.object(actions, "_payment", return_value={"document": {"docstatus": 0}}), patch.object(actions, "submit_document") as submit:
+            self.assertEqual(actions._confirm_payment(doc)["document"]["docstatus"], 0)
+        submit.assert_not_called()
+
+    def test_explicit_approval_reuses_native_submit_endpoint_and_version(self):
+        doc = SimpleNamespace(name="PE", modified="v1")
+        with patch("frappe.model.workflow.get_workflow_name", return_value="Approval"), patch.object(actions, "submit_document", return_value={"document": {"docstatus": 1}}) as submit:
+            self.assertEqual(actions._confirm_payment(doc, "Approve")["document"]["docstatus"], 1)
+        submit.assert_called_once_with("Payment Entry", "PE", "v1", "Approve")
+
+    def test_native_failure_acknowledges_only_after_database_rollback(self):
+        from contextlib import nullcontext
+
+        cache = SimpleNamespace(lock=lambda *args, **kwargs: nullcontext(), get_value=lambda key: None)
+        rollback = Mock()
+        with patch.object(frappe, "session", SimpleNamespace(user="QA")), patch.object(frappe, "cache", return_value=cache), patch.object(frappe, "db", SimpleNamespace(rollback=rollback)):
+            result = actions._payment_request("12345678-1234-1234-1234-123456789abc", [], Mock(side_effect=frappe.ValidationError("Native failure")))
+        rollback.assert_called_once_with()
+        self.assertEqual(result, {"failed": True, "error": "Native failure"})
+
+
 if __name__ == "__main__":
     unittest.main()

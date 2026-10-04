@@ -424,6 +424,99 @@ def update_payment_draft(name, changes, expected_modified):
     return _payment(doc)
 
 
+def _payment_request(request_id, payload, operation):
+    """Keep an acknowledged native operation retryable without repeating its write."""
+    if not re.fullmatch(r"[a-zA-Z0-9-]{16,80}", str(request_id or "")):
+        frappe.throw("缺少有效请求标识，请刷新付款抽屉")
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
+    key = "dlp-payment-action:" + hashlib.sha256((frappe.session.user + ":" + request_id).encode()).hexdigest()
+    cache = frappe.cache()
+    with cache.lock(key + ":lock", timeout=60, blocking_timeout=5):
+        previous = cache.get_value(key)
+        if previous:
+            if previous["digest"] != digest:
+                frappe.throw("同一请求内容已改变，请先核对付款记录")
+            result = _payment(_locked("Payment Entry", previous["name"]))
+            result.update(reused=True, needs_review=previous.get("needs_review", False))
+            return result
+        try:
+            result = operation()
+        except (frappe.ValidationError, frappe.PermissionError) as error:
+            # A known native rejection is acknowledged only after full rollback.
+            # The client may then correct inputs; network failures retain their token.
+            frappe.db.rollback()
+            return {"failed": True, "error": str(error)}
+        cache.set_value(key, {"digest": digest, "name": result["document"]["name"],
+                              "needs_review": result.get("needs_review", False)}, expires_in_sec=86400)
+        frappe.db.after_rollback.add(lambda: cache.delete_value(key))
+        return result
+
+
+def _confirm_payment(doc, workflow_action=None):
+    from frappe.model.workflow import get_workflow_name
+    # A configured workflow must be shown in the drawer, never guessed as Submit.
+    if not workflow_action and (get_workflow_name("Payment Entry") or "Submit" not in _workflow_actions(doc)):
+        return _payment(doc)
+    return submit_document("Payment Entry", doc.name, doc.modified, workflow_action)
+
+
+@frappe.whitelist(methods=["POST"])
+def complete_payment(name, changes, expected_modified, request_id, workflow_action=None):
+    changes = _changes(changes)
+
+    def operation():
+        doc = _locked("Payment Entry", name)
+        _version(doc, expected_modified)
+        if changes:
+            update_payment_draft(name, changes, expected_modified)
+            doc = _locked("Payment Entry", name)
+        return _confirm_payment(doc, workflow_action)
+
+    return _payment_request(request_id, [name, changes, expected_modified, workflow_action], operation)
+
+
+@frappe.whitelist(methods=["POST"])
+def record_payment(source_doctype, source_name, purchase_invoice, amount_to_pay, bank_account,
+                   request_id, posting_date=None, remarks=None, reference_no=None, confirm=1):
+    """Save/submit the existing native PE flow; a discovered draft requires review first."""
+    args = dict(source_doctype=source_doctype, source_name=source_name, purchase_invoice=purchase_invoice,
+                amount_to_pay=amount_to_pay, bank_account=bank_account, posting_date=posting_date,
+                remarks=remarks, reference_no=reference_no, request_id=request_id)
+    confirm = confirm in (True, 1, "1", "true")
+
+    def operation():
+        invoice = _locked("Purchase Invoice", purchase_invoice)
+        source = service._source(source_doctype, source_name)
+        service._require_fields("Purchase Invoice", service.PI_FIELDS)
+        if source.docstatus != 1 or source.get("is_return"):
+            frappe.throw("来源必须为已提交且非退货的采购单据")
+        if service.get_purchase_chain(source_doctype, source_name, include_payments=False)["incomplete_links"]:
+            frappe.throw(service.LINK_WARNING)
+        if (purchase_invoice not in service._invoice_names(source_doctype, source_name)
+                or invoice.company != source.company or invoice.supplier != source.supplier):
+            frappe.throw("应付单与当前采购单据没有明确关联")
+        # Current DB lock serializes different request IDs and overlapping PO/PR sources.
+        # Permission-checked discovery does not select or mutate an unseen business draft.
+        candidates = frappe.get_list("Payment Entry", filters=[
+            ["Payment Entry", "docstatus", "=", 0],
+            ["Payment Entry", "payment_type", "=", "Pay"],
+            ["Payment Entry", "company", "=", source.company],
+            ["Payment Entry", "party_type", "=", "Supplier"],
+            ["Payment Entry", "party", "=", source.supplier],
+            ["Payment Entry Reference", "reference_doctype", "=", "Purchase Invoice"],
+            ["Payment Entry Reference", "reference_name", "=", purchase_invoice]],
+            fields=["name"], order_by="modified desc", limit_page_length=0)
+        if candidates:
+            result = _payment(service._read("Payment Entry", candidates[0].name))
+            result.update(needs_review=True, reused=True)
+            return result
+        saved = service.create_payment_draft(**args)
+        doc = _locked("Payment Entry", saved["name"])
+        return _confirm_payment(doc) if confirm else _payment(doc)
+
+    return _payment_request(request_id, [args, confirm], operation)
+
+
 @frappe.whitelist(methods=["POST"])
 def submit_document(doctype, name, expected_modified, workflow_action=None):
     if doctype not in ("Purchase Invoice", "Payment Entry"):

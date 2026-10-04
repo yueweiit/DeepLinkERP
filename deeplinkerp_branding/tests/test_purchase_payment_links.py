@@ -90,7 +90,7 @@ class PurchaseLinkTests(unittest.TestCase):
             if name == 'unreadable':
                 raise frappe.PermissionError
             return {'orders': [], 'balances': [{'outstanding': 10, 'settled': 2}],
-                    'can_create': True, 'can_create_invoice': False, 'draft_invoices': [], 'reason': '', 'warnings': [], 'incomplete_links': False, 'invoices': []}
+                    'can_create': True, 'can_create_invoice': False, 'draft_invoices': [], 'draft_orders': [], 'reason': '', 'warnings': [], 'incomplete_links': False, 'invoices': []}
         with patch.object(service, '_require_fields'), patch.object(service._RecordReader, 'preload'), patch.object(service, '_read'), patch.object(frappe, 'get_list', return_value=rows), patch.object(service, 'get_purchase_chain', side_effect=chain):
             result = service.get_receipt_list(page_length=2)
         self.assertEqual(result['total_count'], 2)
