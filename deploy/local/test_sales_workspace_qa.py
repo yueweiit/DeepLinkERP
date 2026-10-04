@@ -19,14 +19,14 @@ def execute():
 	try:
 		from frappe.permissions import setup_custom_perms
 		setup_custom_perms('Sales Order')
-		frappe.get_doc({'doctype':'Custom DocPerm','parent':'Sales Order','role':'Purchase User','permlevel':0,'read':1}).insert(ignore_permissions=True)
+		read_permission = frappe.get_doc({'doctype':'Custom DocPerm','parent':'Sales Order','role':'Purchase User','permlevel':0,'read':1}).insert(ignore_permissions=True)
 		frappe.clear_cache(doctype='Sales Order')
 		template = frappe.get_doc('Sales Order', frappe.db.get_value('Sales Order', {}, 'name'))
 		doc = frappe.copy_doc(template); doc.docstatus = 0; doc.company = 'Yuewei'; doc.cost_center = None; doc.taxes_and_charges = None; doc.set('taxes', [])
 		for item in doc.items:
 			for field in ['warehouse','cost_center','income_account','expense_account']: item.set(field, None)
 		doc.transaction_date = '2026-10-04'; doc.delivery_date = '2026-10-20'; doc.custom_crm_order_no = None
-		doc.custom_process_status = release.PENDING; doc.insert()
+		doc.custom_process_status = "Pending Confirmation"; doc.insert()
 		frappe.db.set_value('Sales Order', doc.name, {'docstatus':1,'status':'To Deliver and Bill','custom_process_status':release.PENDING})
 		frappe.db.set_value('Company', 'Yuewei', 'custom_enable_crm_integration', 1)
 		frappe.set_user(user)
@@ -64,6 +64,14 @@ def execute():
 		except frappe.ValidationError: pass
 		else: raise AssertionError('processing order entered production')
 		checks.append('actual production gate blocks processing order')
+		frappe.set_user('Administrator'); read_permission.db_set({'write':1,'submit':1}); frappe.clear_cache(doctype='Sales Order'); frappe.set_user(user)
+		from frappe.client import set_value
+		try: set_value('Sales Order', doc.name, 'custom_process_status', 'Pending Production')
+		except frappe.ValidationError: pass
+		else: raise AssertionError('native REST write bypassed production authorization')
+		assert frappe.db.get_value('Sales Order', doc.name, 'custom_process_status') == release.PROCESSING
+		frappe.set_user('Administrator'); read_permission.db_set({'write':0,'submit':0}); frappe.clear_cache(doctype='Sales Order'); frappe.set_user(user)
+		checks.append('native submitted-order writes cannot forge released state even with order write permission')
 		release.update_finance_audit(audits[0].name,doc.name,'Success','Pending Production')
 		assert frappe.db.get_value('CRM Integration Log',audits[0].name,'status')=='Success'
 		frappe.set_user('Administrator'); frappe.delete_doc('Custom DocPerm',permission.name,ignore_permissions=True)

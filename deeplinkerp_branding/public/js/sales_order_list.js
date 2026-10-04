@@ -50,7 +50,7 @@
 		if (field === "dlp_rate") return doc.dlp_item_count > 1 ? esc(tr("多明细")) : money(doc.dlp_rate, doc.currency);
 		if (field === "dlp_actions") return `<button type="button" class="btn btn-default btn-xs dlp-sales-detail" data-name="${esc(doc.name)}">${esc(tr("查看明细"))}</button>`;
 		if (field === "dlp_receipts") return (doc.dlp_finance?.receipts || []).map(payment => `${esc(payment.name)} · ${esc(tr(payment.docstatus === 1 ? "已提交" : payment.docstatus === 2 ? "已取消" : "草稿"))}<br>${money(payment.allocated_amount, payment.currency)}`).join("<br>") || esc(tr("未找到可见的关联收款记录"));
-		if (field === "dlp_sync") return doc.dlp_finance ? `<span>${esc(doc.dlp_finance.reason || tr("待人工确认允许生产"))}</span>` : esc(tr("正在核验订单…"));
+		if (field === "dlp_sync") return doc.dlp_finance ? `<span>${esc(root.CRMFinanceRelease?.stateLabel(doc.dlp_finance) || doc.dlp_finance.reason || tr("待人工确认允许生产"))}</span>` : esc(tr("正在核验订单…"));
 		if (field === "dlp_last_confirmation") { const audit = doc.dlp_finance?.last_confirmation; return audit ? `${esc(audit.user)}<br>${esc(audit.creation)}` : "—"; }
 	}
 	function transformQuery(args, controller) {
