@@ -229,13 +229,25 @@ def execute():
         assert settled[0]["currency"] == "CNY" and settled[0]["settled"] == 1500
         assert outstanding[0]["currency"] == "CNY" and outstanding[0]["outstanding"] == 2500
         actual_permission = frappe.has_permission
+        assert "System Manager" in frappe.get_roles(), "QA must exercise the installed System Manager export exception"
         with patch.object(frappe, "has_permission", side_effect=lambda doctype, ptype="read", *a, **kw: False if doctype == "Purchase Receipt" and ptype == "export" else actual_permission(doctype, ptype, *a, **kw)):
+            assert not frappe.has_permission("Purchase Receipt", "export")
+            assert frappe.permissions.can_export("Purchase Receipt"), "Native export capability must remain real"
+            service.get_receipt_list(native_filters=[["name", "=", pr.name]], export_format="xlsx",
+                columns=["name", "grand_total", "currency"])
+            native_book = load_workbook(BytesIO(frappe.response["filecontent"]))
+            assert native_book.active.max_row == 2
+            assert [cell.value for cell in native_book.active[2]] == [pr.name, 4000, "CNY"]
+        with patch.object(frappe.permissions, "can_export", return_value=False) as native_export:
+            assert frappe.has_permission("Purchase Receipt", "read"), "Export denial must preserve real read permission"
             try:
                 service.get_receipt_list(filters={"company": COMPANY}, export_format="xlsx")
             except frappe.PermissionError:
                 pass
             else:
                 raise AssertionError("Read permission must not imply export permission")
+            native_export.assert_any_call("Purchase Receipt")
+            native_export.assert_any_call("Purchase Receipt", is_owner=True)
         records = service.get_payment_records(company=COMPANY, from_date=nowdate(), to_date=nowdate(),
             status=1, search=pe_name, page_length=2500, order_by="`tabPayment Entry`.`posting_date` asc", native_filters=[["owner", "=", "Administrator"]])
         assert records["total_count"] == 1 and records["rows"][0]["name"] == pe_name
@@ -274,7 +286,7 @@ def execute():
             hidden_issues = service.get_payment_records(search=pe_name)
         assert hidden_issues["rows"][0]["sync_issues"] == [] and issue.name not in json.dumps(hidden_issues, default=str)
         results.append("whole bank totals separate native payment states; ordered payment export and sync privacy")
-        results.append("native receipt filters/count/currency totals/export and payment record filters/capabilities")
+        results.append("native receipt filters/count/currency totals/export allow and deny; payment record filters/capabilities")
         pi.reload()
         pi.cancel()
         returned = make_purchase_return(pr.name)
