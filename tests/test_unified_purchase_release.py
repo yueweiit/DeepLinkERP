@@ -52,14 +52,25 @@ class ReleaseRecoveryTests(unittest.TestCase):
 			)
 		return source, page
 
-	def page_validator(self, page):
+	def page_validator(self, page, raw_roles=None):
 		def get_doc(doctype, name):
 			self.assertEqual((doctype, name), ("Page", "purchase-payment-records"))
 			if page is None:
 				raise LookupError("Missing Page")
 			return page
 
-		module = self.audit_module(types.SimpleNamespace(get_doc=get_doc, DoesNotExistError=LookupError))
+		def sql(query, values, *, as_dict):
+			self.assertEqual(
+				query,
+				"select role, parent, parenttype, parentfield, idx from `tabHas Role` where parent = %s order by idx, name",
+			)
+			self.assertEqual(values, ("purchase-payment-records",))
+			self.assertTrue(as_dict)
+			return page["roles"] if raw_roles is None else raw_roles
+
+		module = self.audit_module(
+			types.SimpleNamespace(get_doc=get_doc, DoesNotExistError=LookupError, db=types.SimpleNamespace(sql=sql))
+		)
 		self.assertTrue("verify_purchase_payment_page" in module, "Read-only Page verification is required")
 		return module["verify_purchase_payment_page"]
 
@@ -78,12 +89,24 @@ class ReleaseRecoveryTests(unittest.TestCase):
 		with self.assertRaisesRegex(AssertionError, "Missing Page: purchase-payment-records"):
 			verify(source)
 
+	def test_purchase_payment_page_rejects_raw_values_normalized_by_document_loading(self):
+		source, normalized = self.purchase_payment_page_fixture()
+		for field, value in (("idx", 0), ("idx", None), ("parenttype", "User"), ("parentfield", "other")):
+			with self.subTest(field=field, value=value):
+				raw_roles = json.loads(json.dumps(normalized["roles"]))
+				raw_roles[0][field] = value
+				before = json.dumps(raw_roles, sort_keys=True)
+				verify = self.page_validator(normalized, raw_roles)
+				with self.assertRaisesRegex(AssertionError, "Page metadata drift: purchase-payment-records"):
+					verify(source)
+				self.assertEqual(json.dumps(raw_roles, sort_keys=True), before)
+
 	def test_purchase_payment_page_verification_rejects_metadata_and_permission_drift(self):
 		source, original = self.purchase_payment_page_fixture()
 		for scenario in (
 			"doctype", "name", "module", "title", "standard",
 			"missing-role", "extra-role", "role", "role-order",
-			"child-doctype", "parent", "parenttype", "parentfield", "idx",
+			"parent", "parenttype", "parentfield", "idx",
 		):
 			with self.subTest(scenario=scenario):
 				page = json.loads(json.dumps(original))
@@ -96,8 +119,7 @@ class ReleaseRecoveryTests(unittest.TestCase):
 				elif scenario == "role-order":
 					page["roles"].reverse()
 				else:
-					field = "doctype" if scenario == "child-doctype" else scenario
-					page["roles"][0][field] = "different"
+					page["roles"][0][scenario] = "different"
 				verify = self.page_validator(page)
 				with self.assertRaisesRegex(AssertionError, "Page metadata drift: purchase-payment-records"):
 					verify(source)

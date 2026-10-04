@@ -44,14 +44,18 @@ def verify_purchase_payment_page(source):
 		raise AssertionError(f"Missing Page: {name}") from None
 	for field in ("doctype", "name", "module", "title", "standard"):
 		assert page.get(field) == source[field], f"Page metadata drift: {name} ({field})"
-	roles = page.get("roles") or []
+	# Child Document initialization repairs falsy idx and parent links; inspect stored rows directly.
+	roles = frappe.db.sql(
+		"select role, parent, parenttype, parentfield, idx from `tabHas Role` where parent = %s order by idx, name",
+		(name,),
+		as_dict=True,
+	)
 	assert [role.get("role") for role in roles] == [role["role"] for role in source["roles"]], (
 		f"Page metadata drift: {name} (roles)"
 	)
 	for index, role in enumerate(roles, 1):
 		assert (
-			role.get("doctype") == "Has Role"
-			and role.get("parent") == name
+			role.get("parent") == name
 			and role.get("parenttype") == "Page"
 			and role.get("parentfield") == "roles"
 			and role.get("idx") == index
