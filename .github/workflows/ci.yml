@@ -58,7 +58,8 @@ jobs:
         run: |
           # The China CoA JSON lives in the DeepLinkERP fork. Testing against upstream
           # would silently omit the template that production images contain.
-          bench get-app --branch version-16 erpnext https://github.com/yueweiit/DeepLinkERP.git
+          bench get-app --branch erpnext erpnext https://github.com/yueweiit/DeepLinkERP.git
+          test -f apps/erpnext/erpnext/accounts/doctype/account/chart_of_accounts/unverified/cn_l10n_chart_china.json
           bench get-app china_finance "$GITHUB_WORKSPACE"
           bench setup requirements --dev
           bench new-site --db-root-password root --admin-password admin test_site
