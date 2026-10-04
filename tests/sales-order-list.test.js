@@ -46,3 +46,31 @@ test("expanded detail cache expires when an order changes or disappears from the
  grid.invalidateExpandedDetails(controller);
  assert.equal(controller.salesExpanded.size,0);
 });
+
+test("initial native onboarding closes once and later deliberate opening remains untouched", () => {
+ let callback, button, clicks=0, disconnects=0;
+ const previous={document:global.document,MutationObserver:global.MutationObserver,frappe:global.frappe};
+ global.document={querySelector:()=>({querySelector:()=>button})};
+ global.MutationObserver=class {constructor(fn){callback=fn;} observe(){} disconnect(){disconnects++;}};
+ global.frappe={get_route:()=>["List","Sales Order","List"]};
+ const controller={};
+ try {
+  grid.dismissAutomaticOnboarding(controller);
+  assert.equal(clicks,0);
+  button={click:()=>{clicks++;}}; callback();
+  assert.equal(clicks,1); assert.equal(disconnects,1); assert.equal(controller.stopInitialOnboarding,null);
+ } finally {Object.assign(global,previous);}
+});
+
+test("leaving sales before native onboarding arrives disconnects its scoped observer", () => {
+ let callback, disconnects=0, route=["List","Sales Order","List"];
+ const previous={document:global.document,MutationObserver:global.MutationObserver,frappe:global.frappe};
+ global.document={querySelector:()=>({querySelector:()=>null})};
+ global.MutationObserver=class {constructor(fn){callback=fn;} observe(){} disconnect(){disconnects++;}};
+ global.frappe={get_route:()=>route};
+ const controller={};
+ try {
+  grid.dismissAutomaticOnboarding(controller); route=["List","Purchase Order","List"]; callback();
+  assert.equal(disconnects,1); assert.equal(controller.stopInitialOnboarding,null);
+ } finally {Object.assign(global,previous);}
+});

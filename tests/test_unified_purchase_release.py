@@ -2,9 +2,46 @@
 from pathlib import Path
 import subprocess
 import unittest
+import hashlib
+import runpy
+import sys
+import tempfile
+import types
+from unittest.mock import patch
 
 
 class ReleaseRecoveryTests(unittest.TestCase):
+	def source_validator(self, root):
+		with patch.dict(sys.modules, {"frappe": types.ModuleType("frappe")}):
+			module = runpy.run_path(str(Path(__file__).parents[1] / "deploy/production/audit_unified_purchase.py"))
+		module["verify_sources"].__globals__["BENCH"] = root
+		return module["verify_sources"]
+
+	def test_release_source_manifest_accepts_expected_new_file_and_version(self):
+		with tempfile.TemporaryDirectory() as tmp:
+			root = Path(tmp); target = root / "apps/crm_integration/crm_integration/new.py"
+			verify = self.source_validator(root)
+			manifest = {"apps": {"crm_integration": {"new.py": {"before": None, "after": hashlib.sha256(b"new").hexdigest()}}}}
+			verify(manifest, "before")
+			target.parent.mkdir(parents=True); target.write_bytes(b"new")
+			verify(manifest, "after")
+
+	def test_release_source_manifest_rejects_an_unexpected_running_edit(self):
+		with tempfile.TemporaryDirectory() as tmp:
+			root = Path(tmp); target = root / "apps/crm_integration/crm_integration/order.py"
+			target.parent.mkdir(parents=True); target.write_bytes(b"other task")
+			manifest = {"apps": {"crm_integration": {"order.py": {"before": hashlib.sha256(b"baseline").hexdigest(), "after": "candidate"}}}}
+			with self.assertRaisesRegex(AssertionError, "Source drift: crm_integration/order.py"):
+				self.source_validator(root)(manifest, "before")
+
+	def test_release_source_manifest_rejects_incomplete_candidate_copy(self):
+		with tempfile.TemporaryDirectory() as tmp:
+			root = Path(tmp); target = root / "apps/deeplinkerp_branding/deeplinkerp_branding/grid.js"
+			target.parent.mkdir(parents=True); target.write_bytes(b"old")
+			manifest = {"apps": {"deeplinkerp_branding": {"grid.js": {"before": hashlib.sha256(b"old").hexdigest(), "after": hashlib.sha256(b"new").hexdigest()}}}}
+			with self.assertRaisesRegex(AssertionError, "Source drift: deeplinkerp_branding/grid.js"):
+				self.source_validator(root)(manifest, "after")
+
 	def test_copied_audit_is_readable_despite_private_release_umask(self):
 		source = (Path(__file__).parents[1] / "deploy/production/deploy_unified_purchase.sh").read_text()
 		permission_fix = 'chmod 644 "$build_dir/deploy/production/audit_unified_purchase.py"'

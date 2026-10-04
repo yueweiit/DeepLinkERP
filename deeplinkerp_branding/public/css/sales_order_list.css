@@ -1,8 +1,10 @@
 body.dlp-sales-order-grid-active{--dlp-po-border:var(--border-color,#e2e2e2);--dlp-po-header-bg:var(--subtle-fg,#f3f3f3);--dlp-po-row-alt:var(--fg-color,#fff);--dlp-po-hover:var(--subtle-fg,#f3f3f3)}
-/* Keep native Getting Started visible beside the list, without covering its controls. */
-body.dlp-sales-order-grid-active:has(.user-onboarding .onb-panel) .layout-main-section-wrapper{padding-right:330px}
+body.dlp-sales-order-grid-active .layout-main-section-wrapper{width:100%;max-width:100%;flex:1 1 0;min-width:0}
+body.dlp-sales-order-grid-active .page-head-content{height:auto;flex-wrap:wrap;gap:8px}
+body.dlp-sales-order-grid-active .page-actions,body.dlp-sales-order-grid-active .page-actions .standard-actions{display:flex;flex-wrap:wrap;gap:6px;min-width:0;max-width:100%}
+body.dlp-sales-order-grid-active .page-actions .btn{max-width:100%;height:auto;min-height:30px;white-space:normal;overflow-wrap:anywhere}
 .dlp-sales-viewbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 0;position:sticky;top:var(--navbar-height,48px);background:var(--fg-color,#fff);z-index:12;border-bottom:1px solid var(--border-color,#e2e2e2)}
-.dlp-sales-tabs,.dlp-sales-release-action{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.dlp-sales-tabs [aria-pressed=true]{font-weight:600;background:var(--subtle-fg,#f3f3f3);border-color:var(--gray-500,#999)}
+.dlp-sales-tabs,.dlp-sales-release-action{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0;max-width:100%}.dlp-sales-tabs .btn{white-space:normal;max-width:100%;overflow-wrap:anywhere}.dlp-sales-tabs [aria-pressed=true]{font-weight:600;background:var(--subtle-fg,#f3f3f3);border-color:var(--gray-500,#999)}
 .dlp-sales-release-action .btn-primary{min-height:38px;padding:9px 18px;font-size:14px;font-weight:600;white-space:normal;max-width:100%}.dlp-sales-selected{font-size:13px;color:var(--text-muted,#666)}
 .dlp-sales-notice{font-size:12px;margin:8px 0}.dlp-sales-preset{width:auto;max-width:220px}
 body.dlp-sales-order-grid-active .dlp-po-grid-row{min-height:42px}body.dlp-sales-order-grid-active .dlp-po-grid-cell{line-height:1.35}body.dlp-sales-order-grid-active .dlp-po-grid-cell[data-fieldname=dlp_actions]{position:sticky;right:0;z-index:4;background:var(--fg-color,#fff);border-left:1px solid var(--border-color,#e2e2e2)}

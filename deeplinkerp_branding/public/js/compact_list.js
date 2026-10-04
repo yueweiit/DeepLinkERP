@@ -633,6 +633,7 @@
 			const current = frappe.views?.list_view?.[DOCTYPE] || root.cur_list;
 			root.document?.body?.classList.toggle(`${config.routeClass}-readonly`, isListRoute(frappe) && Boolean(current?.[config.controllerKey] && providerActive(current[config.controllerKey])));
 			const list = frappe.views?.list_view?.[DOCTYPE] || root.cur_list;
+			config.onRouteChange?.(list?.[config.controllerKey], isListRoute(frappe));
 			if (isListRoute(frappe) && isNativeList(list)) mount(list, root);
 		});
 	}

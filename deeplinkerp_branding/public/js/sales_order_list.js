@@ -79,6 +79,7 @@
 	}
 	function mountControls(controller) {
 		if (!root.$ || !controller.$toolbar) return;
+		dismissAutomaticOnboarding(controller);
 		controller.salesView = "all"; controller.salesExpanded = new Map();
 		const bar = root.$(`<div class="dlp-sales-viewbar"><div class="dlp-sales-tabs">${[["all", "全部订单"], ["mine", "我的订单"], ["finance", "财务待放行"]].map(([value, label]) => `<button class="btn btn-default btn-sm" type="button" data-sales-view="${value}" aria-pressed="${value === "all"}">${esc(t(label))}</button>`).join("")}</div><div class="dlp-sales-release-action"><span class="dlp-sales-selected" role="status">${esc(t("未选择订单"))}</span><button type="button" class="btn btn-primary dlp-sales-release" disabled>${esc(t("允许生产"))} (0)</button></div></div>`).insertBefore(controller.list.$frappe_list);
 		controller.$salesNotice = root.$(`<p class="dlp-sales-notice text-muted">${esc(t("展开产品行或查看明细；左右滚动查看全部字段。"))}</p>`).insertAfter(bar);
@@ -109,16 +110,34 @@
 			} } finally { button.prop("disabled", false); }
 		});
 	}
+	function dismissAutomaticOnboarding(controller) {
+		const wrapper = root.document?.querySelector(".user-onboarding");
+		if (!wrapper || !root.MutationObserver) return;
+		let observer;
+		const cleanup = () => { observer?.disconnect(); controller.stopInitialOnboarding = null; };
+		controller.stopInitialOnboarding = cleanup;
+		const closeInitial = () => {
+			const route = root.frappe.get_route?.() || [];
+			if (String(route[0]).toLowerCase() !== "list" || route[1] !== "Sales Order") return cleanup();
+			const close = wrapper.querySelector('.onb-header-actions button:has(use[href="#icon-x"])');
+			if (close) { close.click(); cleanup(); }
+		};
+		// Dismiss only the initial automatic native overlay. The existing Getting Started entry can reopen it.
+		observer = new root.MutationObserver(closeInitial);
+		observer.observe(wrapper, { childList: true, subtree: true });
+		closeInitial();
+	}
 	const grid = engine.create({ doctype: "Sales Order", controllerKey: "dlpSalesOrderGrid", routeClass: "dlp-sales-order-grid-active", columns: COLUMNS, freezeUntil: "name", defaultColumns: presets.main,
 		computedFields: ["dlp_product", "dlp_quantity", "dlp_rate", "dlp_sales_person", "dlp_receipts", "dlp_sync", "dlp_last_confirmation", "dlp_actions"], extraFields: ["customer", "custom_crm_order_no", "party_account_currency"],
 		numbers: ["grand_total", "advance_paid", "per_delivered", "per_billed"], dates: ["transaction_date", "delivery_date"], moneySummary: true, quickFields: ["company", "customer", "status", "custom_process_status"], searchFields: ["name", "custom_crm_order_no", "customer_name", "custom_odt"], optionLabels: { custom_process_status: statusLabels },
 		controls: [{ fieldname: "search", fieldtype: "Data", label: "订单号 / 客户 / ODT" }, { fieldname: "customer", fieldtype: "Link", options: "Customer", label: "客户" }, { fieldname: "custom_process_status", fieldtype: "Select", label: "ERP 业务状态" }, { fieldname: "from_date", permission_field: "transaction_date", fieldtype: "Date", label: "开始日期" }, { fieldname: "to_date", permission_field: "transaction_date", fieldtype: "Date", label: "结束日期" }, { fieldname: "product", permission_field: "items", fieldtype: "Link", options: "Item", label: "品目编码" }, { fieldname: "company", fieldtype: "Link", options: "Company", label: "公司" }],
 		searchConflictMessage: "现有 OR 筛选已保留；清除后可使用订单 / 客户搜索。",
 		transformQuery, onRows, mountControls, renderValue,
+		onRouteChange: (controller, active) => { if (!active) controller?.stopInitialOnboarding?.(); },
 		renderLink: (controller, doc, value) => `<button type="button" class="dlp-sales-name dlp-sales-detail" data-name="${esc(doc.name)}">${value}</button>`,
 		renderSequence: (controller, doc, sequence) => `<button class="dlp-sales-expand" type="button" data-name="${esc(doc.name)}" aria-expanded="${controller.salesExpanded?.has(doc.name) || false}" aria-label="${esc(t("展开产品明细"))}">${controller.salesExpanded?.has(doc.name) ? "⌄" : "›"} ${sequence}</button>`,
 		rowExtra: (controller, doc) => controller.salesExpanded?.has(doc.name) ? `<section class="dlp-sales-expanded"><strong>${esc(t("订单产品明细"))}</strong>${itemTable(controller.salesExpanded.get(doc.name))}</section>` : "",
 		afterRender: controller => controller.updateSalesSelection?.(),
 	});
-	return { ...grid, COLUMNS, presets, itemTable, detailsHTML, transformQuery, statusLabels, invalidateExpandedDetails };
+	return { ...grid, COLUMNS, presets, itemTable, detailsHTML, transformQuery, statusLabels, invalidateExpandedDetails, dismissAutomaticOnboarding };
 });
