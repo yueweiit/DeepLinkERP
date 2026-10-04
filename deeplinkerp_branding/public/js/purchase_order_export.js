@@ -6,7 +6,7 @@
 	"use strict";
 
 	// A narrow adapter for the single worksheet returned by reportview.export_query.
-	// It preserves native XML/styles and removes only the permission-check owner appended by Frappe.
+	// Preserve native XML/styles, strip Frappe's permission-check owner and optionally relabel text columns.
 	const LIMITS = { maxArchiveBytes: 64 * 1024 * 1024, maxEntryBytes: 64 * 1024 * 1024, maxExpandedBytes: 128 * 1024 * 1024, maxEntries: 64 };
 	const encoder = new TextEncoder();
 	const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -157,7 +157,7 @@
 		});
 	}
 
-	function stripTrailingOwner(xml, { expectedColumns, ownerLabels = ["Owner", "Created By", "创建人"], sharedStrings = [] }) {
+	function stripTrailingOwner(xml, { expectedColumns, ownerLabels = ["Owner", "Created By", "创建人"], sharedStrings = [], columnTransforms = {} }) {
 		if (!Number.isInteger(expectedColumns) || expectedColumns < 1 || expectedColumns >= 16384) fail("Excel 列数量不符合预期。");
 		if (/<!DOCTYPE|<!ENTITY/i.test(xml) || !/<worksheet\b[^>]*xmlns="http:\/\/schemas.openxmlformats.org\/spreadsheetml\/2006\/main"/.test(xml)) fail("Excel 工作表格式不符合原生导出结构。");
 		const actualColumns = expectedColumns + 1, removed = columnLabel(actualColumns), retained = columnLabel(expectedColumns);
@@ -174,13 +174,25 @@
 			lastRow = number;
 			const seen = new Set();
 			let extraHeader;
-			const cells = body.replace(/<c\b[^>]*(?:\/>|>[\s\S]*?<\/c>)/g, (cell) => {
+			let cells = body.replace(/<c\b[^>]*(?:\/>|>[\s\S]*?<\/c>)/g, (cell) => {
 				const tag = cell.match(/^<c\b[^>]*>/)?.[0], reference = attribute(tag || cell, "r")?.match(/^([A-Z]+)([1-9]\d*)$/);
 				if (!reference || Number(reference[2]) !== number) fail("Excel 单元格引用不符合预期。");
 				const column = columnIndex(reference[1]);
 				if (column > actualColumns || seen.has(column)) fail("Excel 工作表 column shape 不符合预期。");
 				seen.add(column);
-				if (column !== actualColumns) return cell;
+				if (column !== actualColumns) {
+					const transform = columnTransforms[column];
+					if (!transform) return cell;
+					const type = attribute(tag || cell, "t");
+					const blank = [undefined, "n"].includes(type) && !cell.match(/<v\b[^>]*>([\s\S]*?)<\/v>/)?.[1]?.trim();
+					if (/<f\b/.test(cell) || (!blank && !["s", "inlineStr"].includes(type))) fail("Excel 审核状态列必须为文本，已停止导出。");
+					const value = blank ? "" : type === "s" ? sharedStrings[Number(cell.match(/<v>(\d+)<\/v>/)?.[1])] : xmlText(cell);
+					if (value === undefined) fail("Excel 共享文本索引不符合预期。");
+					const text = String(number === 1 ? transform.header : transform.value(value)).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+					let opening = (tag || cell).replace(/\/>$/, ">");
+					opening = type ? setAttribute(opening, "t", "inlineStr") : opening.replace(/>$/, ' t="inlineStr">');
+					return `${opening}<is><t xml:space="preserve">${text}</t></is></c>`;
+				}
 				if (number === 1) {
 					const type = attribute(tag || cell, "t");
 					extraHeader = type === "s" ? sharedStrings[Number(cell.match(/<v>(\d+)<\/v>/)?.[1])] : type === "inlineStr" ? xmlText(cell) : null;
@@ -191,6 +203,18 @@
 			if (number === 1) {
 				if (seen.size !== actualColumns || !ownerLabels.includes(extraHeader)) fail("Excel 尾列不是预期 owner / 创建人，已停止导出。");
 				header = true;
+			}
+			if (number > 1) for (const key of Object.keys(columnTransforms).map(Number).sort((a, b) => a - b)) {
+				if (key < 1 || key > expectedColumns || seen.has(key)) continue;
+				const text = String(columnTransforms[key].value("")).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+				const missing = `<c r="${columnLabel(key)}${number}" t="inlineStr"><is><t xml:space="preserve">${text}</t></is></c>`;
+				let inserted = false;
+				cells = cells.replace(/<c\b[^>]*(?:\/>|>[\s\S]*?<\/c>)/g, cell => {
+					const label = attribute(cell.match(/^<c\b[^>]*>/)?.[0] || cell, "r")?.match(/^([A-Z]+)/)?.[1];
+					if (!inserted && columnIndex(label) > key) { inserted = true; return missing + cell; }
+					return cell;
+				});
+				if (!inserted) cells += missing;
 			}
 			const spans = attribute(attrs, "spans");
 			if (spans) {
@@ -243,9 +267,9 @@
 		return bytes;
 	}
 
-	async function exportExcel(root, args) {
+	async function exportExcel(root, args, options = {}) {
 		const native = await fetchNativeWorkbook(root, args);
-		const bytes = await removeNativeOwner(native, { expectedColumns: args.fields.length + 1, ownerLabels: [...new Set(["Owner", "Created By", "创建人", root.__("Owner"), root.__("Created By")])] });
+		const bytes = await removeNativeOwner(native, { ...options, expectedColumns: args.fields.length + 1, ownerLabels: [...new Set(["Owner", "Created By", "创建人", root.__("Owner"), root.__("Created By")])] });
 		downloadWorkbook(root, bytes, args.title === "Purchase Order" ? "采购订单" : args.title === "Material Request" ? "物料申请" : args.title || args.doctype || "Export");
 	}
 

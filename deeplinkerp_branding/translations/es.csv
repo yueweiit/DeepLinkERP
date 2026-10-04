@@ -111,7 +111,22 @@ ERP 预付款汇总,Anticipos registrados en ERP
 正在核验订单…,Revisando pedidos…
 关联收款记录,Cobros registrados
 CRM/MES 同步中,Enviando a CRM/MES
+CRM/MES 同步失败,Error de sincronización con CRM/MES
 业务负责人,Responsable de ventas
 产品系列,Línea de producto
 CRM / ERP 订单号,Pedido CRM / ERP
 未选择订单,Selecciona los pedidos que quieras autorizar.
+待财务审核,Pendiente de aprobación
+Pending financial approval,Por aprobar
+已放行生产,Producción autorizada
+财务审核状态,Aprobación financiera
+全部审核状态,Todos los estados
+交付状态,Estado de entrega
+正在刷新订单，请稍候…,Actualizando pedidos…
+已选择：{0}；每次最多核验 100 单,Seleccionados: {0}; máximo 100 pedidos por revisión
+已选择：{0}；正在核验…,Seleccionados: {0}; revisando…
+已选择：{0} · 可放行：{1} · 不可放行：{2},Seleccionados: {0} · Autorizables: {1} · No autorizables: {2}
+放行资格核验失败，请重新选择或刷新后重试。,No se pudo verificar la autorización. Vuelve a seleccionar o actualiza e intenta de nuevo.
+无权查看财务审核状态，请联系管理员。,No tienes acceso al estado de aprobación financiera. Contacta al administrador.
+Excel 审核状态列必须为文本，已停止导出。,La columna de aprobación debe contener texto. Se detuvo la exportación.
+Excel 共享文本索引不符合预期。,El índice de texto compartido de Excel no es válido.
