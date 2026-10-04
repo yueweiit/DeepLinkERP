@@ -384,12 +384,19 @@ def recreate_cash_flow_assignment(name):
 
 
 def cancel_assignments_for_source(doc):
-	for name in frappe.get_all(
-		"China Cash Flow Assignment",
-		filters={"source_doctype": doc.doctype, "source_name": doc.name, "status": ["!=", "Cancelled"]},
-		pluck="name",
-	):
-		assignment = frappe.get_doc("China Cash Flow Assignment", name)
+	from china_finance.services.voucher import GL_SOURCE_DOCTYPES
+
+	# Only a persisted, cancelled GL source authorizes this audit transition.
+	# Do not trust an in-memory docstatus or relax ordinary assignment saves.
+	if doc.doctype not in GL_SOURCE_DOCTYPES or frappe.db.get_value(doc.doctype, doc.name, "docstatus", for_update=True) != 2:
+		frappe.throw(_("来源单据尚未取消或不是支持的总账来源，不能作废现金流量指定单"))
+	assignments = frappe.db.sql(
+		"""SELECT name FROM `tabChina Cash Flow Assignment`
+		WHERE source_doctype=%s AND source_name=%s AND status!='Cancelled' FOR UPDATE""",
+		(doc.doctype, doc.name),
+	)
+	for (name,) in assignments:
+		assignment = frappe.get_doc("China Cash Flow Assignment", name, for_update=True)
 		assignment.flags.ignore_permissions = True
 		reason = _("来源单据已取消：{0}").format(doc.name)
 		assignment.status = "Cancelled"
@@ -398,6 +405,10 @@ def cancel_assignments_for_source(doc):
 		assignment.cancellation_reason = reason
 		assignment.flags.ignore_cash_flow_assignment_status = True
 		if assignment.docstatus == 0:
+			# Preserve the historical source and GL links verbatim. ERPNext may
+			# remove GL rows at cancellation; drafts still validate links unlike
+			# Frappe's native cancel operation for submitted assignments.
+			assignment.flags.ignore_links = True
 			assignment.save()
 		else:
 			assignment.cancel()

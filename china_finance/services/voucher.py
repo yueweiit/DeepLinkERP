@@ -1,5 +1,6 @@
 import hashlib
 import json
+from contextlib import contextmanager
 from decimal import Decimal
 
 import frappe
@@ -349,25 +350,63 @@ def on_gl_source_submit(doc, method=None):
 	create_voucher_from_source(doc, "Posting")
 
 
+@contextmanager
+def _mute_audit_messages():
+	previous = frappe.flags.mute_messages
+	frappe.flags.mute_messages = True
+	try:
+		yield
+	finally:
+		frappe.flags.mute_messages = previous
+
+
+@_mute_audit_messages()
 def on_gl_source_cancel(doc, method=None):
 	"""Do not let an audit snapshot failure roll back an ERPNext cancellation."""
 	# The snapshot and its cash-flow assignment dynamically link back to the
 	# source document. They are audit records, not business dependants, so they
 	# must not trigger Frappe's "cancel all linked documents" flow.
 	_ignore_snapshot_backlinks(doc)
-	settings = get_company_settings(get_company(doc))
-	if not settings or getdate(get_posting_date(doc)) < getdate(settings.activation_date):
+	save_point = f"china_cancellation_issue_{frappe.generate_hash(length=10)}"
+	frappe.db.savepoint(save_point)
+	retryable_failure = False
+	try:
+		settings = get_company_settings(get_company(doc))
+		if not settings or getdate(get_posting_date(doc)) < getdate(settings.activation_date):
+			return
+		issue = _ensure_cancellation_sync_issue(doc)
+	except (frappe.QueryDeadlockError, frappe.QueryTimeoutError):
+		# The database may already have rolled back a deadlock victim. Preserve
+		# the original error so the native transaction owner can retry safely.
+		retryable_failure = True
+		raise
+	except Exception:
+		# Undo only audit creation work performed inside this hook, preserving
+		# ERPNext's stock/payment/GL cancellation before this savepoint.
+		try:
+			frappe.db.rollback(save_point=save_point)
+			frappe.log_error(
+				title=_("中国会计凭证冲销同步记录创建失败"), message=frappe.get_traceback(),
+				reference_doctype=doc.doctype, reference_name=doc.name,
+			)
+		except (frappe.QueryDeadlockError, frappe.QueryTimeoutError):
+			retryable_failure = True
+			raise
 		return
-	issue = _ensure_cancellation_sync_issue(doc)
+	finally:
+		if not retryable_failure:
+			frappe.db.release_savepoint(save_point)
 	try:
 		frappe.enqueue(
-			"china_finance.services.voucher.process_cancellation_snapshot",
+			"china_finance.services.voucher.process_cancellation_snapshot_job",
 			queue="short",
 			enqueue_after_commit=True,
 			source_doctype=doc.doctype,
 			source_name=doc.name,
 			issue_name=issue.name,
 		)
+	except (frappe.QueryDeadlockError, frappe.QueryTimeoutError):
+		raise
 	except Exception as exc:
 		_record_sync_failure(issue.name, exc)
 		frappe.log_error(title=_("中国会计凭证冲销快照排队失败"), message=frappe.get_traceback())
@@ -394,10 +433,12 @@ def _cancellation_issue_key(doc):
 
 
 def _ensure_cancellation_sync_issue(doc):
+	if doc.doctype not in GL_SOURCE_DOCTYPES or frappe.db.get_value(doc.doctype, doc.name, "docstatus", for_update=True) != 2:
+		frappe.throw(_("来源单据尚未取消或不是支持的总账来源，不能创建冲销同步记录"))
 	issue_key = _cancellation_issue_key(doc)
-	name = frappe.db.get_value("China Voucher Sync Issue", {"issue_key": issue_key}, "name")
+	name = frappe.db.get_value("China Voucher Sync Issue", {"issue_key": issue_key}, "name", for_update=True)
 	if name:
-		return frappe.get_doc("China Voucher Sync Issue", name)
+		return frappe.get_doc("China Voucher Sync Issue", name, for_update=True)
 	issue = frappe.get_doc(
 		{
 			"doctype": "China Voucher Sync Issue",
@@ -410,10 +451,14 @@ def _ensure_cancellation_sync_issue(doc):
 		}
 	)
 	issue.flags.ignore_permissions = True
+	# This audit record exists precisely to retain its cancelled source link;
+	# the persisted-source guard above scopes this exception to cancellation.
+	issue.flags.ignore_links = True
 	try:
 		issue.insert()
 	except frappe.DuplicateEntryError:
-		issue = frappe.get_doc("China Voucher Sync Issue", {"issue_key": issue_key})
+		name = frappe.db.get_value("China Voucher Sync Issue", {"issue_key": issue_key}, "name", for_update=True)
+		issue = frappe.get_doc("China Voucher Sync Issue", name, for_update=True)
 	return issue
 
 
@@ -426,17 +471,56 @@ def _record_sync_failure(issue_name, exc):
 	)
 
 
+def _cancellation_audit_complete(doc, voucher_name):
+	if not voucher_name or doc.docstatus != 2:
+		return False
+	filters = {
+		"name": voucher_name, "docstatus": 1, "company": get_company(doc),
+		"source_doctype": doc.doctype, "source_name": doc.name,
+		"source_event": "Cancellation", "source_key": _cancellation_issue_key(doc),
+	}
+	cancellation = frappe.db.get_value("China Accounting Voucher", filters, ["name", "reversal_of"], for_update=True)
+	if not cancellation:
+		return False
+	posting = frappe.db.get_value(
+		"China Accounting Voucher", {"source_key": f"Posting|{doc.doctype}|{doc.name}", "docstatus": 1},
+		["name", "status", "reversed_by"], for_update=True,
+	)
+	if posting and (cancellation[1] != posting[0] or tuple(posting[1:]) != ("Reversed", voucher_name)):
+		return False
+	if not posting and cancellation[1]:
+		return False
+	return not frappe.db.get_value(
+		"China Cash Flow Assignment",
+		{"source_doctype": doc.doctype, "source_name": doc.name, "status": ["!=", "Cancelled"]},
+		"name", for_update=True,
+	)
+
+
+@_mute_audit_messages()
 def process_cancellation_snapshot(source_doctype, source_name, issue_name=None):
 	"""Idempotently create the cancellation snapshot after the source cancellation commits."""
-	if source_doctype not in GL_SOURCE_DOCTYPES or not frappe.db.exists(source_doctype, source_name):
+	if source_doctype not in GL_SOURCE_DOCTYPES or not frappe.db.get_value(source_doctype, source_name, "name", for_update=True):
 		return {"status": "skipped", "reason": "source_not_found"}
-	doc = frappe.get_doc(source_doctype, source_name)
-	issue = frappe.get_doc("China Voucher Sync Issue", issue_name) if issue_name else _ensure_cancellation_sync_issue(doc)
+	doc = frappe.get_doc(source_doctype, source_name, for_update=True)
+	issue = frappe.get_doc("China Voucher Sync Issue", issue_name, for_update=True) if issue_name else _ensure_cancellation_sync_issue(doc)
+	if (issue.source_doctype, issue.source_name, issue.company) != (doc.doctype, doc.name, get_company(doc)):
+		frappe.throw(_("冲销同步记录与来源单据不匹配"))
+	# A locking source read alone does not refresh an older REPEATABLE READ
+	# snapshot. Every audit read below must see the preceding worker's commit.
+	if issue.status == "Resolved" and _cancellation_audit_complete(doc, issue.cancellation_voucher):
+		return {"status": "resolved", "issue": issue.name, "voucher": issue.cancellation_voucher}
 	frappe.db.set_value(
 		"China Voucher Sync Issue", issue.name,
 		{"retry_count": cint(issue.retry_count) + 1, "last_attempted_on": now_datetime(), "last_error": None},
 		update_modified=False,
 	)
+	# Keep the attempt counter outside the savepoint, but undo every audit
+	# transition on failure before recording the pending retry. Native source
+	# cancellation has already committed and is never rolled back here.
+	save_point = f"china_cancellation_sync_{frappe.generate_hash(length=10)}"
+	frappe.db.savepoint(save_point)
+	retryable_failure = False
 	try:
 		if doc.docstatus != 2:
 			raise frappe.ValidationError(_("来源单据尚未取消，不能生成冲销审计快照"))
@@ -446,6 +530,8 @@ def process_cancellation_snapshot(source_doctype, source_name, issue_name=None):
 		voucher_name = create_voucher_from_source(doc, "Cancellation")
 		if not voucher_name:
 			raise frappe.ValidationError(_("未找到可生成冲销审计快照的总账分录"))
+		if not _cancellation_audit_complete(doc, voucher_name):
+			raise frappe.ValidationError(_("冲销审计快照或来源凭证状态不完整，不能标记同步完成"))
 		frappe.db.set_value(
 			"China Voucher Sync Issue",
 			issue.name,
@@ -456,10 +542,32 @@ def process_cancellation_snapshot(source_doctype, source_name, issue_name=None):
 			update_modified=False,
 		)
 		return {"status": "resolved", "issue": issue.name, "voucher": voucher_name}
+	except (frappe.QueryDeadlockError, frappe.QueryTimeoutError):
+		# MariaDB may invalidate a transaction's older snapshot or roll back
+		# a deadlock victim completely. Its owner must retry the transaction;
+		# do not overwrite newer audit state or replace the original exception.
+		retryable_failure = True
+		raise
 	except Exception as exc:
-		_record_sync_failure(issue.name, exc)
-		frappe.log_error(title=_("中国会计凭证冲销快照补齐失败"), message=frappe.get_traceback())
+		try:
+			frappe.db.rollback(save_point=save_point)
+			_record_sync_failure(issue.name, exc)
+			frappe.log_error(title=_("中国会计凭证冲销快照补齐失败"), message=frappe.get_traceback())
+		except (frappe.QueryDeadlockError, frappe.QueryTimeoutError):
+			retryable_failure = True
+			raise
 		return {"status": "pending", "issue": issue.name, "error": str(exc)}
+	finally:
+		if not retryable_failure:
+			frappe.db.release_savepoint(save_point)
+
+
+def process_cancellation_snapshot_job(source_doctype, source_name, issue_name=None):
+	"""Adapt concurrency failures to Frappe's bounded, transaction-owning worker retry."""
+	try:
+		return process_cancellation_snapshot(source_doctype, source_name, issue_name)
+	except (frappe.QueryDeadlockError, frappe.QueryTimeoutError) as exc:
+		raise frappe.RetryBackgroundJobError(str(exc)) from exc
 
 
 def get_pending_cancellation_sync_issues(company, from_date, to_date):
@@ -603,7 +711,9 @@ def create_voucher_from_source(doc, source_event="Posting", force=False):
 		return None
 
 	source_key = f"{source_event}|{doc.doctype}|{doc.name}"
-	existing = frappe.db.get_value("China Accounting Voucher", {"source_key": source_key}, "name")
+	existing = frappe.db.get_value(
+		"China Accounting Voucher", {"source_key": source_key}, "name", for_update=source_event == "Cancellation",
+	)
 	if existing:
 		return existing
 
