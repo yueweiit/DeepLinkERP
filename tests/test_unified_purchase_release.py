@@ -23,13 +23,124 @@ class ReleaseRecoveryTests(unittest.TestCase):
 		self.assertIn(name + "() {", source)
 		return name + "() {" + source.split(name + "() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
 
-	def source_validator(self, root):
-		with patch.dict(sys.modules, {"frappe": types.ModuleType("frappe")}):
-			module = runpy.run_path(
+	def audit_module(self, fake_frappe):
+		with patch.dict(sys.modules, {"frappe": fake_frappe}):
+			return runpy.run_path(
 				str(Path(__file__).parents[1] / "deploy/production/audit_unified_purchase.py")
 			)
+
+	def source_validator(self, root):
+		module = self.audit_module(types.ModuleType("frappe"))
 		module["verify_sources"].__globals__["BENCH"] = root
 		return module["verify_sources"]
+
+	def purchase_payment_page_fixture(self):
+		path = (
+			Path(__file__).parents[1]
+			/ "deeplinkerp_branding/deeplinkerp_branding/page/purchase_payment_records/purchase_payment_records.json"
+		)
+		source = json.loads(path.read_text())
+		page = json.loads(json.dumps(source))
+		for index, role in enumerate(page["roles"], 1):
+			role.update(
+				doctype="Has Role",
+				name=f"existing-child-{index}",
+				idx=index,
+				parent=page["name"],
+				parenttype="Page",
+				parentfield="roles",
+			)
+		return source, page
+
+	def page_validator(self, page):
+		def get_doc(doctype, name):
+			self.assertEqual((doctype, name), ("Page", "purchase-payment-records"))
+			if page is None:
+				raise LookupError("Missing Page")
+			return page
+
+		module = self.audit_module(types.SimpleNamespace(get_doc=get_doc, DoesNotExistError=LookupError))
+		self.assertTrue("verify_purchase_payment_page" in module, "Read-only Page verification is required")
+		return module["verify_purchase_payment_page"]
+
+	def test_matching_purchase_payment_page_verification_preserves_permission_child_ids(self):
+		source, page = self.purchase_payment_page_fixture()
+		before = json.dumps(page, sort_keys=True)
+		verify = self.page_validator(page)
+		verify(source)
+		verify(source)
+		self.assertEqual(json.dumps(page, sort_keys=True), before)
+		self.assertEqual([role["name"] for role in page["roles"]], [f"existing-child-{i}" for i in range(1, 6)])
+
+	def test_purchase_payment_page_verification_rejects_missing_page(self):
+		source, _ = self.purchase_payment_page_fixture()
+		verify = self.page_validator(None)
+		with self.assertRaisesRegex(AssertionError, "Missing Page: purchase-payment-records"):
+			verify(source)
+
+	def test_purchase_payment_page_verification_rejects_metadata_and_permission_drift(self):
+		source, original = self.purchase_payment_page_fixture()
+		for scenario in (
+			"doctype", "name", "module", "title", "standard",
+			"missing-role", "extra-role", "role", "role-order",
+			"child-doctype", "parent", "parenttype", "parentfield", "idx",
+		):
+			with self.subTest(scenario=scenario):
+				page = json.loads(json.dumps(original))
+				if scenario in {"doctype", "name", "module", "title", "standard"}:
+					page[scenario] = "different"
+				elif scenario == "missing-role":
+					page["roles"].pop()
+				elif scenario == "extra-role":
+					page["roles"].append(dict(page["roles"][-1], name="extra-child", idx=6))
+				elif scenario == "role-order":
+					page["roles"].reverse()
+				else:
+					field = "doctype" if scenario == "child-doctype" else scenario
+					page["roles"][0][field] = "different"
+				verify = self.page_validator(page)
+				with self.assertRaisesRegex(AssertionError, "Page metadata drift: purchase-payment-records"):
+					verify(source)
+
+	def test_release_verifies_frozen_page_before_and_after_without_reloading_it(self):
+		source = self.release_source()
+		self.assertFalse(
+			"reload-doc deeplinkerp_branding page purchase_payment_records" in source,
+			"Page reload recreates permission children",
+		)
+		self.assertIn("reload-doc crm_integration doctype sales_production_release_permission", source)
+		self.assertLess(
+			source.index('capture_release_audit before "$release_dir/before.json"'), source.index("switched=1")
+		)
+		self.assertLess(
+			source.index('capture_release_audit after "$release_dir/after.json"'),
+			source.index("maintenance=0", source.index("switched=1")),
+		)
+		page_path = "deeplinkerp_branding/deeplinkerp_branding/page/purchase_payment_records/purchase_payment_records.json"
+		self.assertIn(f'chmod 644 "$build_dir/{page_path}"', source)
+		args = source.split("audit_args=", 1)[1].split("\n# The private release umask", 1)[0]
+		mock = self.shell_function("capture_release_audit") + f"""
+build_dir="$1"
+dc=(docker compose)
+audit_args={args}
+docker() {{ printf '%s\\n' "$*"; }}
+capture_release_audit before "$build_dir/before.json"
+capture_release_audit after "$build_dir/after.json"
+"""
+		with tempfile.TemporaryDirectory() as tmp:
+			root = Path(tmp)
+			(root / "release-source-manifest.json").write_text('{"apps": {}}')
+			result = subprocess.run(["bash", "-c", mock, "page-release-test", tmp], capture_output=True, text=True)
+			self.assertEqual(result.returncode, 0, result.stderr)
+			self.assertEqual(
+				result.stdout.count(f"cp {tmp}/{page_path} frappe_docker-backend-1:/tmp/purchase-payment-records.json"),
+				2,
+			)
+			for phase in ("before", "after"):
+				output = (root / (phase + ".json")).read_text()
+				self.assertIn("--purchase-payment-page-source /tmp/purchase-payment-records.json", output)
+				self.assertIn("--release-manifest /tmp/release-source-manifest.json", output)
+				self.assertIn("--phase " + phase, output)
 
 	def test_release_source_manifest_accepts_expected_new_file_and_version(self):
 		with tempfile.TemporaryDirectory() as tmp:
@@ -220,6 +331,7 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 			}
 		}
 		before = {
+			"tables": {"Has Role": {"count": 5, "sha256": "original-child-identities"}},
 			"preserved_apps": {"crm_integration": "crm", "china_finance": "old"},
 			"release_sources": {
 				"deeplinkerp_branding": {"page.js": "old"},
@@ -231,10 +343,12 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 		for app in manifest["apps"]:
 			after["release_sources"][app][next(iter(manifest["apps"][app]))] = "new"
 		self.assertEqual(self.compare_audits(before, after, manifest).returncode, 0)
-		for change in ("unlisted", "listed", "crm"):
+		for change in ("unlisted", "listed", "crm", "page-role-identities"):
 			with self.subTest(change=change):
 				bad = json.loads(json.dumps(after))
-				if change == "crm":
+				if change == "page-role-identities":
+					bad["tables"]["Has Role"]["sha256"] = "recreated-child-identities"
+				elif change == "crm":
 					bad["preserved_apps"]["crm_integration"] = "drift"
 				else:
 					bad["release_sources"]["china_finance"][
@@ -252,6 +366,8 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 			config = root / "sites/deeplinkerp.com/site_config.json"
 			config.write_text('{"maintenance_mode": 1, "mes_callback_url": "updated"}')
 			queried = []
+			_, page = self.purchase_payment_page_fixture()
+			roles = page["roles"]
 			settings = {"CRM Integration Settings", "MES Integration Settings", "China Finance Settings"}
 
 			def meta(name):
@@ -262,6 +378,9 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 
 			def sql(query, **kwargs):
 				queried.append(query)
+				if "tabHas Role`" in query:
+					self.assertEqual(query, "select * from `tabHas Role` order by name")
+					return roles
 				return (
 					[{"doctype": "MES Integration Settings", "field": "callback_url", "value": "updated"}]
 					if "tabSingles" in query
@@ -273,14 +392,25 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 				db=types.SimpleNamespace(exists=lambda *args: True, sql=sql),
 				get_meta=meta,
 			)
-			with patch.dict(sys.modules, {"frappe": fake}):
-				module = runpy.run_path(
-					str(Path(__file__).parents[1] / "deploy/production/audit_unified_purchase.py")
-				)
+			module = self.audit_module(fake)
 			capture = module["capture_audit"]
 			capture.__globals__["BENCH"] = root
 			capture.__globals__["source_digest"] = lambda app: "source"
 			before = capture()
+			self.assertEqual(
+				before["tables"]["Has Role"],
+				{
+					"count": 5,
+					"sha256": hashlib.sha256(
+						json.dumps(roles, sort_keys=True, default=str, ensure_ascii=False).encode()
+					).hexdigest(),
+				},
+			)
+			for role in roles:
+				role["name"] = "recreated-" + role["name"]
+			recreated = capture()["tables"]["Has Role"]
+			self.assertEqual(recreated["count"], before["tables"]["Has Role"]["count"])
+			self.assertNotEqual(recreated["sha256"], before["tables"]["Has Role"]["sha256"])
 			for parent in ("China Cash Flow Assignment", "China Voucher Sync Issue", "Company", *settings):
 				self.assertIn(parent + " Child", before["tables"])
 			self.assertTrue(any("tabSingles" in query for query in queried))
@@ -427,6 +557,7 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 			"tables": {
 				"GL Entry": {"count": 2, "sha256": "business"},
 				"User Permission": {"count": 1, "sha256": "permissions"},
+				"Has Role": {"count": 5, "sha256": "original-child-identities"},
 			},
 			"singles": {"count": 3, "sha256": "settings"},
 			"preserved_apps": {"crm_integration": "crm", "china_finance": "finance"},
@@ -445,6 +576,8 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 			rollback["tables"]["GL Entry"]["sha256"] = "changed"
 		elif audit_change == "permissions":
 			rollback["tables"]["User Permission"]["sha256"] = "changed"
+		elif audit_change == "page-role-identities":
+			rollback["tables"]["Has Role"]["sha256"] = "recreated-child-identities"
 		elif audit_change == "settings":
 			rollback["singles"]["sha256"] = "changed"
 		elif audit_change == "source":
@@ -521,6 +654,7 @@ recover
 		for scenario in (
 			"business",
 			"permissions",
+			"page-role-identities",
 			"settings",
 			"source",
 			"branding-source",

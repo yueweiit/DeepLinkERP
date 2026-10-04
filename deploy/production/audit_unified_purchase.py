@@ -34,6 +34,30 @@ def verify_sources(manifest, phase):
 			assert current.get(path) == versions[phase], f"Source drift: {app}/{path} ({phase})"
 
 
+def verify_purchase_payment_page(source):
+	"""Require existing metadata; reloading a Page would recreate its Has Role children."""
+	name = "purchase-payment-records"
+	assert source.get("doctype") == "Page" and source.get("name") == name, "Unexpected Page source"
+	try:
+		page = frappe.get_doc("Page", name)
+	except frappe.DoesNotExistError:
+		raise AssertionError(f"Missing Page: {name}") from None
+	for field in ("doctype", "name", "module", "title", "standard"):
+		assert page.get(field) == source[field], f"Page metadata drift: {name} ({field})"
+	roles = page.get("roles") or []
+	assert [role.get("role") for role in roles] == [role["role"] for role in source["roles"]], (
+		f"Page metadata drift: {name} (roles)"
+	)
+	for index, role in enumerate(roles, 1):
+		assert (
+			role.get("doctype") == "Has Role"
+			and role.get("parent") == name
+			and role.get("parenttype") == "Page"
+			and role.get("parentfield") == "roles"
+			and role.get("idx") == index
+		), f"Page metadata drift: {name} (role child links)"
+
+
 def source_digest(app):
 	root = BENCH / "apps" / app / app
 	assert root.is_dir(), f"Missing preserved app: {app}"
@@ -163,10 +187,13 @@ def main():
 	parser = argparse.ArgumentParser()
 	parser.add_argument("--release-manifest")
 	parser.add_argument("--phase", choices=["before", "after"])
+	parser.add_argument("--purchase-payment-page-source")
 	args = parser.parse_args()
 	frappe.init(site=SITE, sites_path=str(BENCH / "sites"))
 	frappe.connect()
 	try:
+		if args.purchase_payment_page_source:
+			verify_purchase_payment_page(json.loads(Path(args.purchase_payment_page_source).read_text()))
 		result = capture_audit()
 		if args.phase:
 			assert result["maintenance_mode"] == 1, "Release audit requires maintenance mode on"

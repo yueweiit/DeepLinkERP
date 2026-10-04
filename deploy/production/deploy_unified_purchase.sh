@@ -159,13 +159,14 @@ if [[ -n "$finance_archive" ]]; then release_key+="-finance-${finance_sha:0:12}"
 release_dir="backups/unified-purchase-$release_key"
 mkdir "$release_dir" # Refuse an ambiguous repeated cutover; retain previous evidence.
 cp compose.custom.yaml "$release_dir/compose.before.yaml"
-audit_args=()
+audit_args=(--purchase-payment-page-source /tmp/purchase-payment-records.json)
 if [[ -f "$build_dir/release-source-manifest.json" ]]; then
   chmod 644 "$build_dir/release-source-manifest.json"
-  audit_args=(--release-manifest /tmp/release-source-manifest.json)
+  audit_args+=(--release-manifest /tmp/release-source-manifest.json)
 fi
 # The private release umask is right for backups, not for a script copied as root to a non-root container.
 chmod 644 "$build_dir/deploy/production/audit_unified_purchase.py"
+chmod 644 "$build_dir/deeplinkerp_branding/deeplinkerp_branding/page/purchase_payment_records/purchase_payment_records.json"
 new_image="deeplinkerp-custom:unified-purchase-$release_key"
 frozen_base="deeplinkerp-custom:unified-base-$release_key"
 docker image tag "$old_image_id" "$frozen_base"
@@ -186,6 +187,7 @@ Path(sys.argv[3], 'compose.rollback.yaml').write_text(source.replace(sys.argv[1]
 PY
 capture_release_audit() {
   docker cp "$build_dir/deploy/production/audit_unified_purchase.py" frappe_docker-backend-1:/tmp/audit-unified-purchase.py || return 1
+  docker cp "$build_dir/deeplinkerp_branding/deeplinkerp_branding/page/purchase_payment_records/purchase_payment_records.json" frappe_docker-backend-1:/tmp/purchase-payment-records.json || return 1
   if [[ -f "$build_dir/release-source-manifest.json" ]]; then
     docker cp "$build_dir/release-source-manifest.json" frappe_docker-backend-1:/tmp/release-source-manifest.json || return 1
   fi
@@ -281,7 +283,6 @@ if [[ -n "$crm_archive" ]]; then
   # Register only the new empty capability metadata; do not run unrelated app migrations.
   "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend bench --site deeplinkerp.com reload-doc crm_integration doctype sales_production_release_permission
 fi
-"${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend bench --site deeplinkerp.com reload-doc deeplinkerp_branding page purchase_payment_records
 # Frappe's lazy require cache version is the manifest mtime. Preserve its contents/bundles.
 "${dc[@]}" exec -T backend touch /home/frappe/frappe-bench/sites/assets/assets.json
 "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend bench --site deeplinkerp.com clear-cache
