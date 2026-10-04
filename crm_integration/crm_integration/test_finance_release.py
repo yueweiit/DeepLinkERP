@@ -37,6 +37,19 @@ class TestFinanceRelease(UnitTestCase):
 		with patch.object(release, "is_crm_integration_enabled", return_value=False):
 			self.assertFalse(release.review_order(self.doc)["can_release"])
 
+	def test_order_release_capability_does_not_disclose_unreadable_confirmation_history(self):
+		with patch.object(frappe.db, "exists", return_value=True), patch.object(frappe, "has_permission", return_value=False), patch.object(frappe, "get_list") as logs:
+			review = release.review_order(self.doc)
+		self.assertTrue(review["can_release"])
+		self.assertIsNone(review["last_confirmation"])
+		logs.assert_not_called()
+
+	def test_confirmation_history_uses_native_list_and_field_read_permissions(self):
+		with patch.object(frappe.db, "exists", return_value=True), patch.object(frappe, "has_permission", return_value=True), patch.object(release, "readable_fields", return_value={"user", "creation", "status"}), patch.object(frappe, "get_list", return_value=[{"user": "visible-user", "creation": "time", "status": "Pending"}]) as logs:
+			review = release.review_order(self.doc)
+		self.assertEqual(review["last_confirmation"]["user"], "visible-user")
+		self.assertEqual(logs.call_args.kwargs["filters"]["reference_name"], "SO-1")
+
 	def payment(self, **values):
 		return frappe._dict(name="PE-1", company="MX", party_type="Customer", party="C-1", docstatus=1, payment_type="Receive", posting_date="2026-10-04", paid_from_account_currency="MXN",
 			references=[frappe._dict(reference_doctype="Sales Order", reference_name="SO-1", allocated_amount=123)], **values)

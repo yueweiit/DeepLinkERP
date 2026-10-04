@@ -73,8 +73,10 @@ def review_order(doc):
 		if field in fields:
 			data[field] = doc.get(field)
 	data.update(recorded_receipts(doc))
-	if frappe.db.exists("DocType", "CRM Integration Log"):
-		logs = frappe.get_all("CRM Integration Log", filters={"event": AUDIT_EVENT, "reference_doctype": "Sales Order", "reference_name": doc.name},
+	data["last_confirmation"] = None
+	if (frappe.db.exists("DocType", "CRM Integration Log") and frappe.has_permission("CRM Integration Log", "read")
+		and {"user", "creation", "status"} <= readable_fields("CRM Integration Log")):
+		logs = frappe.get_list("CRM Integration Log", filters={"event": AUDIT_EVENT, "reference_doctype": "Sales Order", "reference_name": doc.name},
 			fields=["user", "creation", "status"], order_by="creation desc", limit_page_length=1)
 		data["last_confirmation"] = logs[0] if logs else None
 	if not has_release_permission():
