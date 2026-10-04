@@ -9,6 +9,7 @@ body.dlp-sales-order-grid-active .page-actions .btn{max-width:100%;height:auto;m
 .dlp-sales-notice{font-size:12px;margin:8px 0}.dlp-sales-preset{width:auto;max-width:220px}
 body.dlp-sales-order-grid-active .dlp-po-grid-row{min-height:42px}body.dlp-sales-order-grid-active .dlp-po-grid-cell{line-height:1.35}body.dlp-sales-order-grid-active .dlp-po-grid-cell[data-fieldname=dlp_actions]{position:sticky;right:0;z-index:4;background:var(--fg-color,#fff);border-left:1px solid var(--border-color,#e2e2e2)}
 body.dlp-sales-order-grid-active .dlp-po-grid-header .dlp-po-grid-cell[data-fieldname=dlp_actions]{z-index:6;background:var(--subtle-fg,#f3f3f3)}
+body.dlp-sales-order-grid-active .dlp-po-grid-header{height:auto}
 body.dlp-sales-order-grid-active .dlp-po-grid-header .dlp-po-grid-cell{display:block;white-space:normal;overflow-wrap:anywhere;text-overflow:clip}
 body.dlp-sales-order-grid-active .dlp-po-grid-header .dlp-po-number{text-align:right}
 body.dlp-sales-order-grid-active .dlp-po-grid-header .dlp-po-date{text-align:center}
