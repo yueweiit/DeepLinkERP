@@ -71,6 +71,10 @@ jobs:
         run: |
           # Company creation requires setup-wizard presets, including Warehouse Type Transit.
           bench --site test_site execute erpnext.setup.setup_wizard.operations.install_fixtures.install --kwargs '{"country": "China"}'
+          # Native GL validation requires fiscal years for fixed test dates and today's date.
+          for test_year in $(printf '%s\n' 2026 "$(date +%Y)" | sort -u); do
+            bench --site test_site execute erpnext.setup.setup_wizard.operations.company_setup.create_fiscal_year_and_company --kwargs "{\"args\": {\"fy_start_date\": \"${test_year}-01-01\", \"fy_end_date\": \"${test_year}-12-31\"}}"
+          done
 
       - name: Verify repeatable migration and assets
         working-directory: /home/runner/frappe-bench
