@@ -1,4 +1,6 @@
 body.dlp-sales-order-grid-active{--dlp-po-border:var(--border-color,#e2e2e2);--dlp-po-header-bg:var(--subtle-fg,#f3f3f3);--dlp-po-row-alt:var(--fg-color,#fff);--dlp-po-hover:var(--subtle-fg,#f3f3f3)}
+/* Keep native Getting Started visible beside the list, without covering its controls. */
+body.dlp-sales-order-grid-active:has(.user-onboarding .onb-panel) .layout-main-section-wrapper{padding-right:330px}
 .dlp-sales-viewbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 0;position:sticky;top:var(--navbar-height,48px);background:var(--fg-color,#fff);z-index:12;border-bottom:1px solid var(--border-color,#e2e2e2)}
 .dlp-sales-tabs,.dlp-sales-release-action{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.dlp-sales-tabs [aria-pressed=true]{font-weight:600;background:var(--subtle-fg,#f3f3f3);border-color:var(--gray-500,#999)}
 .dlp-sales-release-action .btn-primary{min-height:38px;padding:9px 18px;font-size:14px;font-weight:600;white-space:normal;max-width:100%}.dlp-sales-selected{font-size:13px;color:var(--text-muted,#666)}
