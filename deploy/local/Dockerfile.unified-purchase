@@ -1,9 +1,12 @@
-# Overlay frozen app sources; an empty CRM overlay preserves the existing app.
+# Overlay frozen app sources; empty optional overlays preserve the existing apps.
 ARG BASE_IMAGE=deeplinkerp-local:requests-d7e83ae7-a5eb0608
 FROM ${BASE_IMAGE}
 ARG BRANDING_SHA=local-preview
-ARG CRM_SHA=preserved
+ARG CRM_SHA
+ARG FINANCE_SHA
 LABEL org.deeplinkerp.branding.revision=${BRANDING_SHA}
 LABEL org.deeplinkerp.crm.revision=${CRM_SHA}
+LABEL org.deeplinkerp.finance.revision=${FINANCE_SHA}
 COPY --chown=frappe:frappe deeplinkerp_branding /home/frappe/frappe-bench/apps/deeplinkerp_branding/deeplinkerp_branding
 COPY --chown=frappe:frappe crm-overlay/ /home/frappe/frappe-bench/apps/crm_integration/
+COPY --chown=frappe:frappe finance-overlay/ /home/frappe/frappe-bench/apps/china_finance/
