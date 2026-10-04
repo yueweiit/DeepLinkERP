@@ -165,6 +165,6 @@
   }
 
   .inventory-detail .id-table-wrap {
-    max-height: calc(100vh - 230px);
+    max-height: var(--dlp-inventory-result-max-height, calc(100vh - 230px));
   }
 }

@@ -28,9 +28,9 @@ add_to_apps_screen = [
 app_include_css = [
 	"/assets/deeplinkerp_branding/css/deeplinkerp_navigation.css?v=0.0.10",
 	"/assets/deeplinkerp_branding/css/purchase_payments.css?v=0.0.3",
-	"/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.11",
+	"/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.12",
 	"/assets/deeplinkerp_branding/css/sales_order_list.css?v=0.0.5",
-	"/assets/deeplinkerp_branding/css/inventory_detail.bundle.css?v=0.0.2",
+	"/assets/deeplinkerp_branding/css/inventory_detail.bundle.css?v=0.0.3",
 ]
 app_include_js = [
 	"/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.11",

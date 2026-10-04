@@ -5,6 +5,22 @@ from pathlib import Path
 from deeplinkerp_branding import hooks
 
 
+def selector_specificity(selector):
+	"""Count the selectors used here, including native :not ID and pseudo-element rules."""
+	return (
+		len(re.findall(r"#[\w-]+", selector)),
+		len(re.findall(r"\.[\w-]+|\[[^]]+\]", selector)) + selector.count(":first-child"),
+		len(re.findall(r"(?:^|\s)body(?=[.\[:]|$)|::[\w-]+", selector)),
+	)
+
+
+def table_style_rules():
+	css = (Path(__file__).resolve().parents[1] / "deeplinkerp_branding/public/css/purchase_order_list.css").read_text()
+	css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+	css = re.sub(r":is\([^)]*\)", ".dlp-purchase-order-grid-active", css)
+	return [(selector.strip(), rule) for selectors, rule in re.findall(r"([^{}]+)\{([^}]+)\}", css) for selector in selectors.split(",")]
+
+
 class PurchaseOrderAssetsTest(unittest.TestCase):
 	def test_ci_runs_navigation_and_purchase_order_regressions(self):
 		workflow = (
@@ -50,7 +66,7 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		self.assertIsNotNone(rule, "Only the classic PO menu should override the global right anchor")
 		self.assertRegex(rule.group(1), r"left:\s*0\s*;")
 		self.assertRegex(rule.group(1), r"right:\s*auto\s*;")
-		self.assertIn("/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.11", hooks.app_include_css)
+		self.assertIn("/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.12", hooks.app_include_css)
 
 	def test_header_and_rows_do_not_distribute_extra_width_between_columns(self):
 		css = (
@@ -80,9 +96,7 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		css = re.sub(r"body:is\([^)]*\)", "body.dlp-purchase-order-grid-active", css)
 		selector, rule = next((selector.strip(), rule) for selector, rule in re.findall(r"([^{}]+)\{([^}]+)\}", css) if ":has(> .dlp-po-grid-header)" in selector)
 		native = ".layout-main-section-wrapper:not(.disable-scrolling) .frappe-list .result-container .result .list-row-container:first-child"
-		def specificity(value):
-			return (0, len(re.findall(r"\.[\w-]+", value)) + value.count(":first-child"), len(re.findall(r"(?:^|\s)body(?:\.|$)", value)))
-		self.assertGreater(specificity(selector), specificity(native), "The outer header stacking context must override the deployed native selector")
+		self.assertGreater(selector_specificity(selector), selector_specificity(native), "The outer header stacking context must override the deployed native selector")
 		self.assertGreater(int(re.search(r"z-index:\s*(\d+)", rule).group(1)), 4, "The body action column uses z-index 4")
 		self.assertRegex(rule, r"position:\s*sticky\s*;")
 		self.assertRegex(rule, r"top:\s*0\s*;")
@@ -98,6 +112,9 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		self.assertRegex(sales, r"body\.dlp-sales-order-grid-active \.dlp-po-grid \.result-container\{max-height:var\(--dlp-sales-result-max-height,")
 		viewbar = re.search(r"\.dlp-sales-viewbar\{([^}]+)\}", sales).group(1)
 		self.assertIn("position:static", viewbar)
+		inventory = (root / "inventory_detail.bundle.css").read_text()
+		mobile_inventory = inventory[inventory.index("@media (max-width: 767px)"):]
+		self.assertRegex(mobile_inventory, r"max-height:\s*var\(--dlp-inventory-result-max-height,\s*calc\(100vh - 230px\)\);")
 
 	def test_compact_and_inventory_tables_offer_normal_width_mouse_scrollbar_tracks(self):
 		css = (Path(__file__).resolve().parents[1] / "deeplinkerp_branding/public/css/purchase_order_list.css").read_text()
@@ -106,15 +123,40 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		self.assertIsNotNone(base, "Existing compact and inventory scrollers should share visible scrollbar styles")
 		self.assertRegex(base.group(1), r"scrollbar-width:\s*auto;")
 		self.assertRegex(base.group(1), r"scrollbar-gutter:\s*stable;")
-		bar = re.search(shared.replace(".result-container", ".result-container::-webkit-scrollbar").replace(".id-table-wrap", ".id-table-wrap::-webkit-scrollbar") + r"\s*\{([^}]+)\}", css)
+		guard = r"(?::not\(#page-form-builder \*\))?"
+		bar = re.search(shared.replace(".result-container", ".result-container" + guard + "::-webkit-scrollbar").replace(".id-table-wrap", ".id-table-wrap" + guard + "::-webkit-scrollbar") + r"\s*\{([^}]+)\}", css)
 		self.assertIsNotNone(bar)
 		self.assertRegex(bar.group(1), r"width:\s*12px;")
 		self.assertRegex(bar.group(1), r"height:\s*12px;")
 		for part in ("track", "thumb"):
-			rule = re.search(r"\.inventory-detail \.id-table-wrap::-webkit-scrollbar-" + part + r"\s*\{([^}]+)\}", css)
+			rule = re.search(r"\.inventory-detail \.id-table-wrap" + guard + "::-webkit-scrollbar-" + part + r"\s*\{([^}]+)\}", css)
 			self.assertIsNotNone(rule)
 			self.assertRegex(rule.group(1), r"background:\s*var\(--dlp-table-scrollbar-" + part)
 		self.assertNotRegex(css, r"(?:^|\})\s*\.result-container::-webkit-scrollbar", "No unrelated native list scrollbar overrides")
+
+	def test_mouse_scrollbar_selectors_outrank_the_actual_native_form_builder_guard(self):
+		rules = table_style_rules()
+		for component in (".dlp-po-grid .result-container", ".inventory-detail .id-table-wrap"):
+			for suffix in ("", "-track", "-thumb"):
+				pseudo = "::-webkit-scrollbar" + suffix
+				selector, rule = next((selector, rule) for selector, rule in rules if component in selector and selector.endswith(pseudo))
+				native = ":not(#page-form-builder *)" + pseudo if not suffix else pseudo
+				self.assertGreater(selector_specificity(selector), selector_specificity(native), f"{component} {pseudo} must win native dimensions/colours")
+				if not suffix:
+					self.assertRegex(rule, r"width:\s*12px;")
+					self.assertRegex(rule, r"height:\s*12px;")
+
+	def test_dark_table_scrollbar_colours_outrank_the_light_component_defaults(self):
+		rules = table_style_rules()
+		for component in (".dlp-po-grid .result-container", ".inventory-detail .id-table-wrap"):
+			colour_rules = [(selector, rule) for selector, rule in rules if component in selector and "--dlp-table-scrollbar-track:" in rule]
+			light = max(selector_specificity(selector) for selector, _ in colour_rules if "[data-theme=" not in selector)
+			dark = [(selector, rule) for selector, rule in colour_rules if '[data-theme="dark"]' in selector]
+			self.assertTrue(dark, "Each table component must retain its dark scrollbar colours")
+			for selector, rule in dark:
+				self.assertGreater(selector_specificity(selector), light, "Dark colours must win the body-scoped light defaults")
+				self.assertIn("--dlp-table-scrollbar-track: #263346;", rule)
+				self.assertIn("--dlp-table-scrollbar-thumb: #8ca0b8;", rule)
 
 
 if __name__ == "__main__":
