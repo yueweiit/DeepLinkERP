@@ -98,6 +98,17 @@ class TestMESSalesOrderPayload(UnitTestCase):
 
 
 class TestSalesOrderPermissions(UnitTestCase):
+	def setUp(self):
+		super().setUp()
+		def scoped_read(name):
+			doc = frappe.get_doc("Sales Order", name)
+			doc.check_permission("read")
+			return doc
+		self.enterContext(patch("crm_integration.crm_integration.finance_release.read_order", side_effect=scoped_read))
+		self.enterContext(patch("crm_integration.crm_integration.finance_release.has_release_permission", return_value=True))
+		self.enterContext(patch("crm_integration.crm_integration.finance_release.review_order", return_value={"can_release": True, "receipts": [], "receipts_complete": True}))
+		self.enterContext(patch.object(frappe.db, "get_value", return_value="SO-001"))
+
 	def test_duplicate_crm_order_no_is_rejected_before_insert(self):
 		doc = frappe._dict(custom_crm_order_no="CRM-001")
 
@@ -130,7 +141,7 @@ class TestSalesOrderPermissions(UnitTestCase):
 		doc.check_permission.assert_called_once_with("cancel")
 		push_status.assert_not_called()
 
-	def test_confirm_deposit_checks_write_permission_before_push(self):
+	def test_confirm_deposit_checks_read_scope_before_push(self):
 		doc = self.make_sales_order()
 		doc.check_permission.side_effect = frappe.PermissionError
 
@@ -147,7 +158,7 @@ class TestSalesOrderPermissions(UnitTestCase):
 		):
 			confirm_deposit_and_push_to_mes("SO-001")
 
-		doc.check_permission.assert_called_once_with("write")
+		doc.check_permission.assert_called_once_with("read")
 		push_status.assert_not_called()
 
 	def test_order_cannot_be_cancelled_while_deposit_confirmation_is_processing(self):
@@ -167,6 +178,7 @@ class TestSalesOrderPermissions(UnitTestCase):
 
 		with (
 			patch.object(frappe, "get_doc", return_value=doc),
+			patch("crm_integration.crm_integration.sales_order.create_crm_log", return_value=frappe._dict(name="AUDIT-1")),
 			patch(
 				"crm_integration.crm_integration.sales_order.is_crm_integration_enabled",
 				return_value=True,
@@ -183,7 +195,7 @@ class TestSalesOrderPermissions(UnitTestCase):
 		):
 			result = confirm_deposit_and_push_to_mes("SO-001")
 
-		enqueue_sync.assert_called_once_with("SO-001")
+		enqueue_sync.assert_called_once_with("SO-001", "AUDIT-1")
 		set_status.assert_called_once_with(doc, DEPOSIT_CONFIRMATION_PROCESSING)
 		push_status.assert_not_called()
 		push_mes.assert_not_called()
@@ -237,6 +249,7 @@ class TestSalesOrderPermissions(UnitTestCase):
 			job_id="crm-confirm-deposit-SO-001",
 			deduplicate=True,
 			sales_order_name="SO-001",
+			audit_log=None,
 		)
 
 	def test_confirm_deposit_job_advances_status_only_after_external_sync(self):

@@ -2,12 +2,15 @@ import json
 
 import frappe
 from pypika.terms import ExistsCriterion
+from crm_integration.crm_integration.finance_release import production_order_condition
 
 from erpnext.selling.doctype.sales_order.sales_order import make_production_plan as native_make_production_plan
 
 
 @frappe.whitelist()
 def make_production_plan(source_name, target_doc=None):
+	from crm_integration.crm_integration.finance_release import assert_production_released
+	assert_production_released(source_name)
 	return native_make_production_plan(source_name, target_doc)
 
 
@@ -45,7 +48,9 @@ def sales_order_query(doctype=None, txt=None, searchfield=None, start=None, page
 	if filters.get("company"):
 		query = query.where(so_table.company == filters.get("company"))
 
-	query = query.where(so_table.status.notin(["Stopped", "Closed", "On Hold"]))
+	allowed = frappe.get_list("Sales Order", fields=["name"], pluck="name", limit_page_length=0)
+	query = query.where(so_table.name.isin(allowed))
+	query = query.where(so_table.status.notin(["Stopped", "Closed", "On Hold"]) & production_order_condition(so_table))
 
 	if filters.get("sales_orders"):
 		query = query.where(so_table.name.isin(filters.get("sales_orders")))
@@ -97,7 +102,8 @@ def get_sales_orders(doc):
 		.where(
 			(so_item.parent == so.name)
 			& (so.docstatus == 1)
-			& (so.status.notin(["Stopped", "Closed"]))
+			& (so.status.notin(["Stopped", "Closed", "On Hold"]))
+			& production_order_condition(so)
 			& (so.company == doc.company)
 			& (so_item.qty > so_item.production_plan_qty)
 		)
@@ -125,6 +131,8 @@ def get_sales_orders(doc):
 			doc.get_bom_item_condition() or bom.item == so_item.item_code
 		)
 
+	allowed = frappe.get_list("Sales Order", fields=["name", "transaction_date", "customer", "base_grand_total"], limit_page_length=0)
+	open_so_query = open_so_query.where(so.name.isin([row.name for row in allowed]))
 	open_so_query = open_so_query.where(
 		ExistsCriterion(open_so_subquery1) | ExistsCriterion(open_so_subquery2)
 	)

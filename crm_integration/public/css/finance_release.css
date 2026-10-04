@@ -1,0 +1,7 @@
+.crm-release-overlay{position:fixed;inset:0;background:rgba(0,0,0,.18);z-index:1055;display:flex;justify-content:flex-end}
+.crm-release-drawer{width:min(920px,95vw);height:100%;background:var(--fg-color,#fff);display:flex;flex-direction:column;box-shadow:-6px 0 24px #0002}
+.crm-release-drawer header,.crm-release-drawer footer{padding:14px 20px;border-bottom:1px solid var(--border-color,#e2e2e2);display:flex;align-items:center;gap:10px;flex-shrink:0}
+.crm-release-drawer header h3{flex:1;margin:0;font-size:18px}.crm-release-drawer footer{border-top:1px solid var(--border-color,#e2e2e2);border-bottom:0;justify-content:flex-end;flex-wrap:wrap}
+.crm-release-body{padding:18px 20px;overflow:auto;flex:1}.crm-release-table{overflow:auto}.crm-release-table table{min-width:680px;font-size:13px}
+.crm-release-table th{font-weight:500;background:var(--subtle-fg,#f3f3f3)}.crm-release-table td{vertical-align:top}.crm-release-table small{display:block;color:var(--text-muted,#777);margin-top:3px}.crm-release-table hr{margin:7px 0}
+.crm-release-drawer [hidden]{display:none!important}

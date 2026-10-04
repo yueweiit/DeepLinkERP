@@ -808,10 +808,15 @@ def prevent_deposit_confirmation_processing_cancel(doc, method=None):
 @frappe.whitelist(methods=["POST"])
 def confirm_deposit_and_push_to_mes(sales_order_name):
 	"""Validate the action and queue external synchronization after commit."""
-	sales_order = frappe.get_doc("Sales Order", sales_order_name)
+	from crm_integration.crm_integration.finance_release import AUDIT_EVENT, has_release_permission, read_order, review_order
+
+	# Recheck under the row lock so simultaneous confirmations share the existing job.
+	frappe.db.get_value("Sales Order", sales_order_name, "name", for_update=True)
+	sales_order = read_order(sales_order_name)
 	if not is_crm_integration_enabled(sales_order.get("company")):
 		throw_crm_integration_disabled(sales_order.get("company"))
-	sales_order.check_permission("write")
+	if not has_release_permission():
+		frappe.throw(_("未获得生产放行权限；管理员可在角色权限管理中配置。"), frappe.PermissionError)
 	assert_sales_order_not_closed(sales_order)
 
 	if sales_order.docstatus != 1:
@@ -831,9 +836,17 @@ def confirm_deposit_and_push_to_mes(sales_order_name):
 	if process_status != PENDING_DEPOSIT_CONFIRMATION:
 		frappe.throw(_("只有待确认定金的销售订单可以推送至MES。"))
 
+	review = review_order(sales_order)
+	if not review["can_release"]:
+		frappe.throw(review["reason"])
 	validate_mes_sync_available(sales_order)
+	audit = create_crm_log(direction="Outbound", event=AUDIT_EVENT, status="Pending",
+		reference_doctype="Sales Order", reference_name=sales_order.name, source="Desk",
+		request_payload={"manual_confirmation": True, "receipts": review["receipts"], "receipts_complete": review["receipts_complete"]})
+	if not audit:
+		frappe.throw(_("无法保存逐单确认记录，未执行放行。"))
 	set_process_status(sales_order, DEPOSIT_CONFIRMATION_PROCESSING)
-	enqueue_confirm_deposit_and_push_to_mes(sales_order.name)
+	enqueue_confirm_deposit_and_push_to_mes(sales_order.name, audit.name)
 
 	return {
 		"status": "success",
@@ -844,7 +857,7 @@ def confirm_deposit_and_push_to_mes(sales_order_name):
 	}
 
 
-def enqueue_confirm_deposit_and_push_to_mes(sales_order_name):
+def enqueue_confirm_deposit_and_push_to_mes(sales_order_name, audit_log=None):
 	frappe.enqueue(
 		"crm_integration.crm_integration.sales_order.confirm_deposit_and_push_to_mes_job",
 		queue="short",
@@ -852,21 +865,29 @@ def enqueue_confirm_deposit_and_push_to_mes(sales_order_name):
 		job_id=f"crm-confirm-deposit-{sales_order_name}",
 		deduplicate=True,
 		sales_order_name=sales_order_name,
+		audit_log=audit_log,
 	)
 
 
-def confirm_deposit_and_push_to_mes_job(sales_order_name):
+def confirm_deposit_and_push_to_mes_job(sales_order_name, audit_log=None):
 	"""Synchronize the confirmed order; retries are safe through stable external identities."""
 	sales_order = frappe.get_doc("Sales Order", sales_order_name)
 	if not is_crm_integration_enabled(sales_order.get("company")):
 		return None
 
 	try:
-		return run_confirm_deposit_sync(sales_order)
+		result = run_confirm_deposit_sync(sales_order)
+		if audit_log:
+			from crm_integration.crm_integration.finance_release import update_finance_audit
+			update_finance_audit(audit_log, sales_order_name, "Success", result["process_status"])
+		return result
 	except Exception:
 		error_message = frappe.get_traceback()
 		frappe.db.rollback()
 		restore_deposit_confirmation_after_failure(sales_order_name)
+		if audit_log:
+			from crm_integration.crm_integration.finance_release import update_finance_audit
+			update_finance_audit(audit_log, sales_order_name, "Failed", PENDING_DEPOSIT_CONFIRMATION)
 		create_crm_log(
 			direction="Outbound",
 			event="Confirm Deposit External Sync",

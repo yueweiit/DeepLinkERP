@@ -25,8 +25,8 @@ app_license = "mit"
 # ------------------
 
 # include js, css files in header of desk.html
-# app_include_css = "/assets/crm_integration/css/crm_integration.css"
-# app_include_js = "/assets/crm_integration/js/crm_integration.js"
+app_include_css = ["/assets/crm_integration/css/finance_release.css?v=0.0.1"]
+app_include_js = ["/assets/crm_integration/js/finance_release.js?v=0.0.1"]
 
 # include js in doctype views
 doctype_js = {
@@ -156,6 +156,8 @@ after_migrate = "crm_integration.setup.after_migrate"
 # Hook on document methods and events
 
 doc_events = {
+	"Work Order": {"validate": "crm_integration.crm_integration.finance_release.validate_production_sources"},
+	"Production Plan": {"validate": "crm_integration.crm_integration.finance_release.validate_production_sources"},
 	"Sales Order": {
 		"before_insert": "crm_integration.crm_integration.sales_order.prevent_duplicate_crm_order_no",
 		"after_insert": "crm_integration.crm_integration.integration_log.log_inbound_sales_order",

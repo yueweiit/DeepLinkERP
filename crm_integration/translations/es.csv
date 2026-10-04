@@ -52,7 +52,7 @@ Update Items,Actualizar
 确认,Confirmar
 确认保存并提交此收付款凭证？,¿Confirmar guardar y enviar este comprobante de pago?
 确认定金已到账，并将此销售订单推送至MES开始生产？,¿Confirmar que el anticipo fue recibido y enviar este pedido de venta a MES para iniciar producción?
-确认定金并推送至MES,Confirmar anticipo y enviar a MES
+确认定金并推送至MES,Autorizar producción
 确认该客户可以不用支付定金吗？,¿Confirmar que este cliente puede no pagar anticipo?
 确认驳回此销售订单？,¿Confirmar el rechazo de este pedido de venta?
 缺少 CRM 状态推送接口配置：crm_status_api_key,Falta la configuración de la clave del endpoint de estado de CRM: crm_status_api_key
@@ -68,8 +68,8 @@ Update Items,Actualizar
 销售订单必须提交后才能确认定金。,El pedido de venta debe estar enviado antes de confirmar el anticipo.
 销售订单缺少可推送到 MES 的明细行。,El pedido de venta no tiene líneas disponibles para enviar a MES.
 驳回,Rechazar
-"以下销售订单状态不允许创建或保存销售出库草稿：<br>{0}","Los siguientes pedidos de venta no permiten crear o guardar borradores de nota de entrega:<br>{0}"
-"以下销售订单未放行发货，不能提交销售出库：<br>{0}","Los siguientes pedidos de venta no están liberados para entrega y no pueden enviarse:<br>{0}"
+以下销售订单状态不允许创建或保存销售出库草稿：<br>{0},Los siguientes pedidos de venta no permiten crear o guardar borradores de nota de entrega:<br>{0}
+以下销售订单未放行发货，不能提交销售出库：<br>{0},Los siguientes pedidos de venta no están liberados para entrega y no pueden enviarse:<br>{0}
 业务员,Vendedor
 产品,Producto
 确认核销尾款？{0}/{1},¿Confirmar la conciliación del pago final? {0}/{1}
@@ -96,3 +96,50 @@ Partially Delivered,Parcialmente entregado
 显示 {0}-{1} / 共 {2} 行,Mostrando {0}-{1} / {2} filas
 Item Tax Amount,Impuesto del artículo
 Total Taxes and Charges,Total de impuestos y cargos
+已提交,Confirmado
+订单 / 客户,Pedido / cliente
+下方只显示系统中可见的收款凭证分配记录；未录入或不可见不代表未收款。,"Aquí ves los cobros registrados a los que tienes acceso. Si un cobro no aparece, no significa que el cliente no haya pagado."
+允许生产（1单）,Autorizar producción (1 pedido)
+允许生产（{0}单）,Autorizar producción ({0} pedidos)
+收款与订单的公司或客户关联异常，请先核对原生单据。,El cobro corresponde a otra empresa o cliente. Revisa los documentos en ERP.
+Pay,Reembolso al cliente
+取消,Cancelar
+响应未确认，请关闭后重新核验；处理中订单不会重复提交。,No se confirmó la respuesta. Cierra y revisa otra vez; los pedidos en proceso no se enviarán dos veces.
+收款记录可能不完整,Puede haber cobros que no aparecen aquí.
+生产单据与销售订单的公司不一致。,El documento de producción y el pedido pertenecen a empresas distintas.
+该公司未启用 CRM 集成。,Esta empresa no tiene activa la conexión con CRM.
+暂不可处理,No disponibles por ahora
+定金确认任务正在后台处理，请勿重复提交。,Este pedido se está enviando a CRM/MES. No lo autorices otra vez.
+同步失败，可重新核验后重试,Falló el envío. Revisa el pedido e intenta de nuevo.
+Receive,Cobro
+财务生产放行,Autorizar producción
+可确认,Listos para autorizar
+未找到可见的关联收款记录,No aparecen cobros registrados para este pedido.
+仅可放行已提交且未关闭、未取消、未暂停的订单。,"El pedido debe estar confirmado y no estar cerrado, cancelado ni en pausa."
+草稿,Borrador
+Internal Transfer,Transferencia interna
+本单未完成确认，请重新核验后重试。,No se autorizó este pedido. Revísalo e intenta de nuevo.
+无权读取放行所需的订单字段。,No tienes acceso a los datos necesarios para autorizar este pedido.
+正在核验订单…,Revisando pedidos…
+CRM/MES 同步处理中，请勿重复确认。,Se está enviando a CRM/MES. No vuelvas a autorizar este pedido.
+本单当前不处于待财务放行状态。,Este pedido no está pendiente de autorización financiera.
+ERP 订单金额,Importe del pedido en ERP
+不可处理,No se puede autorizar
+待人工确认允许生产,Pendiente de autorización para producir
+允许生产,Autorizar producción
+无法读取核验结果，请刷新后重试。,No se pudo revisar el pedido. Actualiza e intenta de nuevo.
+核验与同步结果,Revisión y envío a producción
+销售订单尚未完成财务放行及 CRM/MES 同步，不能安排生产。,El pedido aún no tiene autorización financiera o no terminó de enviarse a CRM/MES. Todavía no se puede programar su producción.
+已完成生产放行同步,Autorizado y enviado a producción
+已取消,Cancelado
+财务确认记录与订单不一致。,La autorización financiera no corresponde a este pedido.
+定金确认任务已提交，系统将在后台同步 CRM 和 MES。,Autorización registrada. Se está enviando a CRM y MES.
+关闭,Cerrar
+请选择 1 至 100 张订单。,Selecciona entre 1 y 100 pedidos.
+定金按线下约定人工判断；系统不计算应付定金或是否收足。,El anticipo se acuerda por fuera del sistema. Tú decides si el pedido puede pasar a producción.
+订单不存在或不在当前可见范围内。,El pedido no existe o no tienes acceso.
+仅重新核验失败订单,Revisar solo los pedidos que fallaron
+关联收款（分配额 / 账户币种）,Cobros del pedido (importe aplicado / moneda)
+未获得生产放行权限；管理员可在角色权限管理中配置。,No tienes permiso para autorizar producción. El administrador puede asignarlo en los permisos de roles.
+CRM/MES 同步处理中,Enviando a CRM/MES
+待定金确认,Pendiente de autorización financiera

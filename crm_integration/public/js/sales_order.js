@@ -445,65 +445,9 @@ function reconcile_final_payment(frm) {
 }
 
 function confirm_deposit_and_push_to_mes(frm) {
-	get_payment_entry_link_count(frm).then(function(count_info) {
-		show_confirm_deposit_dialog(frm, count_info.count);
-	});
-}
-
-function show_confirm_deposit_dialog(frm, payment_entry_count) {
-	const has_payment_entry = cint(payment_entry_count) > 0;
-	const message = has_payment_entry
-		? __("请确认定金金额：{0}/{1}", [
-			format_sales_order_currency(frm, frm.doc.advance_paid),
-			format_sales_order_currency(frm, frm.doc.grand_total)
-		])
-		: __("确认该客户可以不用支付定金吗？");
-
-	const dialog = new frappe.ui.Dialog({
-		title: __("确认定金并推送至MES"),
-		fields: [
-			{
-				fieldname: "message",
-				fieldtype: "HTML",
-				options: `
-					<div class="crm-confirm-deposit-message">${frappe.utils.escape_html(message)}</div>
-					${has_payment_entry ? "" : `<div style="margin-top: 12px;"><button type="button" class="btn btn-primary btn-sm primary-action crm-add-payment-entry">${__("添加收付款凭证")}</button></div>`}
-				`
-			}
-		],
-		primary_action_label: __("确认"),
-		primary_action: function() {
-			dialog.hide();
-			push_confirm_deposit_to_mes(frm);
-		}
-	});
-
-	dialog.show();
-	dialog.$wrapper.find(".crm-add-payment-entry").on("click", function(e) {
-		e.preventDefault();
-		dialog.hide();
-		make_payment_entry_from_sales_order(frm);
-	});
-}
-
-function push_confirm_deposit_to_mes(frm) {
-	frappe.call({
-		method: "crm_integration.crm_integration.sales_order.confirm_deposit_and_push_to_mes",
-		args: {
-			sales_order_name: frm.doc.name
-		},
-		freeze: true,
-		freeze_message: __("正在确认定金并推送至MES..."),
-		callback: function(r) {
-			if (r.message && r.message.status === "success") {
-				frm.doc.custom_process_status = r.message.process_status;
-				frm.remove_custom_button(__("确认定金并推送至MES"));
-				refresh_crm_integration_ui(frm);
-				frappe.show_alert({ message: r.message.message, indicator: "green" });
-				frm.reload_doc();
-			}
-		}
-	});
+	const open = () => window.CRMFinanceRelease.open([frm.doc.name], () => frm.reload_doc());
+	if (window.CRMFinanceRelease) return open();
+	return frappe.require("/assets/crm_integration/js/finance_release.js").then(open);
 }
 
 function format_sales_order_currency(frm, value) {

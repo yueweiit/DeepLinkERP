@@ -1,0 +1,18 @@
+{
+  "doctype": "DocType",
+  "name": "Sales Production Release Permission",
+  "module": "CRM Integration",
+  "issingle": 1,
+  "field_order": [
+    "description"
+  ],
+  "fields": [
+    {
+      "fieldname": "description",
+      "fieldtype": "HTML",
+      "options": "Grant Read on this DocType through Role Permission Manager to authorize manual production release. Sales Order and Company read permissions still apply."
+    }
+  ],
+  "permissions": [],
+  "track_changes": 1
+}
