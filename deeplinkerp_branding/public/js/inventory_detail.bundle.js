@@ -604,6 +604,17 @@
 				: renderCategorizedRows(this.currentGroups, keys);
 			this.$root.find("tbody").html(html);
 			this.updateSelectionUi();
+			this.updateTableViewport?.();
+		}
+
+		fitViewport(active) {
+			if (!active) return this.stopTableViewport?.();
+			const host = this.wrapper?.ownerDocument?.defaultView || globalThis;
+			return globalThis.DeepLinkERPCompactList?.fitViewport?.(this, {
+				active, root: host, scrollElement: this.$root.find(".id-table-wrap")[0], layoutTailElement: this.$root[0],
+				property: "--dlp-inventory-result-max-height", headerSelector: "thead", rowSelector: "tbody tr",
+				observeTargets: [this.$root.find(".id-actions")[0], this.$root.find(".id-summary")[0], this.$root.find(".id-pager")[0], this.page.wrapper?.find?.(".page-head")[0], this.page.wrapper?.find?.(".page-form")[0]],
+			});
 		}
 
 		async refresh(resetStart = false) {
@@ -962,7 +973,14 @@
 	}
 
 	function bootstrap(wrapper, config) {
-		return new InventoryDetailPage(wrapper, config);
+		const route = frappe.get_route?.()[0] || config.route;
+		const page = new InventoryDetailPage(wrapper, config);
+		if (route) {
+			const sync = () => page.fitViewport(frappe.get_route?.()[0] === route);
+			frappe.router?.on("change", sync);
+			sync();
+		}
+		return page;
 	}
 
 	const api = {

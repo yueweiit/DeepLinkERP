@@ -27,7 +27,7 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 
 	def test_unified_adapter_loads_after_cache_busted_shared_engine(self):
 		scripts = hooks.app_include_js
-		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.10"
+		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.11"
 		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.4"
 		self.assertIn(engine, scripts)
 		self.assertLess(scripts.index(engine), scripts.index(adapter))
@@ -50,7 +50,7 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		self.assertIsNotNone(rule, "Only the classic PO menu should override the global right anchor")
 		self.assertRegex(rule.group(1), r"left:\s*0\s*;")
 		self.assertRegex(rule.group(1), r"right:\s*auto\s*;")
-		self.assertIn("/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.10", hooks.app_include_css)
+		self.assertIn("/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.11", hooks.app_include_css)
 
 	def test_header_and_rows_do_not_distribute_extra_width_between_columns(self):
 		css = (
@@ -73,6 +73,48 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		header_rule = re.search(r"\.dlp-po-grid-header\s*\{([^}]+)\}", css)
 		self.assertIsNotNone(header_rule)
 		self.assertRegex(header_rule.group(1), r"font-size:\s*inherit\s*;")
+
+	def test_header_outer_stack_beats_native_first_row_and_both_body_sticky_columns(self):
+		css = (Path(__file__).resolve().parents[1] / "deeplinkerp_branding/public/css/purchase_order_list.css").read_text()
+		css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+		css = re.sub(r"body:is\([^)]*\)", "body.dlp-purchase-order-grid-active", css)
+		selector, rule = next((selector.strip(), rule) for selector, rule in re.findall(r"([^{}]+)\{([^}]+)\}", css) if ":has(> .dlp-po-grid-header)" in selector)
+		native = ".layout-main-section-wrapper:not(.disable-scrolling) .frappe-list .result-container .result .list-row-container:first-child"
+		def specificity(value):
+			return (0, len(re.findall(r"\.[\w-]+", value)) + value.count(":first-child"), len(re.findall(r"(?:^|\s)body(?:\.|$)", value)))
+		self.assertGreater(specificity(selector), specificity(native), "The outer header stacking context must override the deployed native selector")
+		self.assertGreater(int(re.search(r"z-index:\s*(\d+)", rule).group(1)), 4, "The body action column uses z-index 4")
+		self.assertRegex(rule, r"position:\s*sticky\s*;")
+		self.assertRegex(rule, r"top:\s*0\s*;")
+		self.assertRegex(css, r"\.dlp-po-grid \.result-container[^{}]*,\s*\.inventory-detail \.id-table-wrap\s*\{[^}]*isolation:\s*isolate;")
+
+	def test_clear_button_and_sales_viewport_styles_remain_scoped_and_mobile_freezing_is_cancelled(self):
+		root = Path(__file__).resolve().parents[1] / "deeplinkerp_branding/public/css"
+		css = (root / "purchase_order_list.css").read_text()
+		self.assertRegex(css, r"body\.dlp-purchase-order-grid-active-readonly \.filter-section,")
+		self.assertRegex(css, r"\.dlp-po-filters \.dlp-po-clear-filters\s*\{[^}]*display:\s*inline-flex\s*!important;")
+		self.assertRegex(css[css.index("@media (max-width: 767.98px)"):], r"\.dlp-po-frozen\s*\{\s*position:\s*static;")
+		sales = (root / "sales_order_list.css").read_text()
+		self.assertRegex(sales, r"body\.dlp-sales-order-grid-active \.dlp-po-grid \.result-container\{max-height:var\(--dlp-sales-result-max-height,")
+		viewbar = re.search(r"\.dlp-sales-viewbar\{([^}]+)\}", sales).group(1)
+		self.assertIn("position:static", viewbar)
+
+	def test_compact_and_inventory_tables_offer_normal_width_mouse_scrollbar_tracks(self):
+		css = (Path(__file__).resolve().parents[1] / "deeplinkerp_branding/public/css/purchase_order_list.css").read_text()
+		shared = r"[^{}]*\.dlp-po-grid \.result-container[^{}]*,\s*\.inventory-detail \.id-table-wrap"
+		base = re.search(shared + r"\s*\{([^}]+)\}", css)
+		self.assertIsNotNone(base, "Existing compact and inventory scrollers should share visible scrollbar styles")
+		self.assertRegex(base.group(1), r"scrollbar-width:\s*auto;")
+		self.assertRegex(base.group(1), r"scrollbar-gutter:\s*stable;")
+		bar = re.search(shared.replace(".result-container", ".result-container::-webkit-scrollbar").replace(".id-table-wrap", ".id-table-wrap::-webkit-scrollbar") + r"\s*\{([^}]+)\}", css)
+		self.assertIsNotNone(bar)
+		self.assertRegex(bar.group(1), r"width:\s*12px;")
+		self.assertRegex(bar.group(1), r"height:\s*12px;")
+		for part in ("track", "thumb"):
+			rule = re.search(r"\.inventory-detail \.id-table-wrap::-webkit-scrollbar-" + part + r"\s*\{([^}]+)\}", css)
+			self.assertIsNotNone(rule)
+			self.assertRegex(rule.group(1), r"background:\s*var\(--dlp-table-scrollbar-" + part)
+		self.assertNotRegex(css, r"(?:^|\})\s*\.result-container::-webkit-scrollbar", "No unrelated native list scrollbar overrides")
 
 
 if __name__ == "__main__":

@@ -556,6 +556,31 @@ test("clearing quick filters resets all controls and page with one adapter refre
 	assert.equal(nativeRefreshes(), 1);
 });
 
+test('mounted native clear button stays in quick filters and clears native and quick conditions in both scopes once',async()=>{
+ const {list,env}=bareList(),handlers=new Map(),attrs=new Map();let nativeClears=0;
+ class Surface {
+  constructor(){this.length=1;}
+  find(selector){return selector==='.page-form .filter-x-button'?button:new Surface();}first(){return this;}
+  appendTo(parent){this.parent=parent;return this;}prependTo(){return this;}insertBefore(){return this;}insertAfter(){return this;}
+  addClass(){return this;}removeClass(){return this;}toggleClass(){return this;}toggle(){return this;}show(){return this;}hide(){return this;}remove(){return this;}append(){return this;}html(){return this;}
+  text(value){this.label=value;return this;}val(){return this;}prop(){return this;}each(){return this;}attr(name,value){if(this===button)attrs.set(name,value);return this;}
+  off(event){if(this===button)handlers.delete(event);return this;}on(event,handler){if(this===button)handlers.set(event,handler);return this;}
+ }
+ const button=new Surface();handlers.set('click.native',()=>{nativeClears++;list.filters=[];});
+ env.$=()=>new Surface();env.document={body:{classList:{toggle(){}}}};
+ env.frappe.model.can_export=()=>false;env.frappe.ui={form:{make_control:()=>({set_value:async()=>{},get_value:()=>''})}};
+ list.$frappe_list=new Surface();list.$result=new Surface();list.$paging_area=new Surface();list.page={wrapper:new Surface()};
+ const controller=production('mount')(list,env);
+ assert.equal(button.parent,controller.$filters);assert.equal(button.label,'清空筛选');assert.equal(attrs.get('aria-label'),'清空筛选');
+ production('mount')(list,env);assert.equal(handlers.size,2,'cached mounting retains one native handler and one quick handler');
+ for(const scope of ['all','orders']) {
+  controller.setProviderScope(scope,false);controller.quick={search:'supplier',source:'OA'};controller.setPage(2);list.filters=[['Purchase Order','company','=','A']];
+  await Promise.all([...handlers.values()].map(handler=>handler()));
+  assert.deepEqual(list.filters,[]);assert.deepEqual(controller.quick,{});assert.equal(controller.page,0);
+ }
+ assert.equal(nativeClears,2);assert.equal(handlers.size,2);
+});
+
 function savedFilterPage() {
 	const groups = [];
 	const collection = (matches) => ({

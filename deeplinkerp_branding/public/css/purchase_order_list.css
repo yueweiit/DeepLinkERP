@@ -69,6 +69,14 @@ body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp
 	padding: 0;
 }
 
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-filters .dlp-po-clear-filters {
+	display: inline-flex !important;
+	align-items: center;
+	flex: 0 0 auto;
+	margin: 0;
+	white-space: nowrap;
+}
+
 body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-filters .control-label {
 	position: absolute;
 	width: 1px;
@@ -142,9 +150,45 @@ body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp
 	max-height: calc(100dvh - 320px);
 	height: auto !important;
 	overflow: auto;
-	scrollbar-width: thin;
 	border: 1px solid var(--dlp-po-border);
 	border-radius: 2px;
+}
+
+/* Both existing table surfaces keep visible, mouse-draggable scrollbar tracks. */
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid .result-container,
+.inventory-detail .id-table-wrap {
+	--dlp-table-scrollbar-track: #e7edf3;
+	--dlp-table-scrollbar-thumb: #687b91;
+	scrollbar-width: auto;
+	scrollbar-color: auto;
+	scrollbar-gutter: stable;
+	isolation: isolate;
+}
+
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid .result-container::-webkit-scrollbar,
+.inventory-detail .id-table-wrap::-webkit-scrollbar {
+	width: 12px;
+	height: 12px;
+}
+
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid .result-container::-webkit-scrollbar-track,
+.inventory-detail .id-table-wrap::-webkit-scrollbar-track {
+	background: var(--dlp-table-scrollbar-track);
+}
+
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid .result-container::-webkit-scrollbar-thumb,
+.inventory-detail .id-table-wrap::-webkit-scrollbar-thumb {
+	background: var(--dlp-table-scrollbar-thumb);
+	border: 2px solid var(--dlp-table-scrollbar-track);
+	border-radius: 6px;
+	min-height: 24px;
+	min-width: 24px;
+}
+
+[data-theme="dark"] .dlp-po-grid .result-container,
+[data-theme="dark"] .inventory-detail .id-table-wrap {
+	--dlp-table-scrollbar-track: #263346;
+	--dlp-table-scrollbar-thumb: #8ca0b8;
 }
 
 body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .dlp-po-grid .result {
@@ -217,10 +261,11 @@ body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp
 	padding: 0;
 }
 
-body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .result > .list-row-container:has(> .dlp-po-grid-header) {
+/* Outrank native .layout-main-section-wrapper:not(.disable-scrolling) first-row stacking. */
+body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active) .frappe-list.dlp-po-grid .result-container .result > .list-row-container:first-child:has(> .dlp-po-grid-header) {
 	position: sticky;
 	top: 0;
-	z-index: 4;
+	z-index: 7;
 	background: var(--dlp-po-header-bg);
 }
 
@@ -451,6 +496,7 @@ body[data-theme="dark"]:is(.dlp-purchase-order-grid-active, .dlp-material-reques
 
 /* The optional union is read-only; native PO controls remain in the orders view. */
 body.dlp-purchase-order-grid-active-readonly .standard-filter-section,
+body.dlp-purchase-order-grid-active-readonly .filter-section,
 body.dlp-purchase-order-grid-active-readonly .filter-button,
 body.dlp-purchase-order-grid-active-readonly .sort-selector,
 body.dlp-purchase-order-grid-active-readonly .list-sidebar,

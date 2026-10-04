@@ -27,7 +27,7 @@
 .inventory-detail .id-table-wrap {
   border: 1px solid var(--id-border);
   border-radius: 8px;
-  max-height: calc(100vh - 250px);
+  max-height: var(--dlp-inventory-result-max-height, calc(100vh - 250px));
   overflow: auto;
 }
 

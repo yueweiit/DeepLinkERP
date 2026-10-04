@@ -1,5 +1,55 @@
 (function (root, factory) {
- const engine = { create: factory };
+ const engine = { create: factory, fitViewport };
+ // Opt-in sizing shared by Sales and inventory; other list heights stay native.
+ function fitViewport(owner, options) {
+  if (!owner) return;
+  if (!options.active) return owner.stopTableViewport?.();
+  if (owner.updateTableViewport) return owner.updateTableViewport();
+  const {root:host,scrollElement:result,layoutTailElement:list,property,headerSelector,rowSelector,observeTargets=[]}=options;
+  if (!result?.getBoundingClientRect || !list?.getBoundingClientRect || !host.requestAnimationFrame || !host.getComputedStyle) return;
+  let frame, stopped=false, observedHeader, observedRow;
+  const schedule=()=>{if(!stopped && frame===undefined)frame=host.requestAnimationFrame(measure);};
+  const observer=host.ResizeObserver ? new host.ResizeObserver(schedule) : null;
+  const number=value=>parseFloat(value)||0;
+  function measure() {
+   frame=undefined;
+   if(stopped)return;
+   const ancestors=[];
+   for(let node=result.parentElement;node;node=node.parentElement)ancestors.push(node);
+   // Normalize geometry to the unscrolled layout so an outer scroll cannot grow the table.
+   const top=result.getBoundingClientRect().top+ancestors.reduce((sum,node)=>sum+(node.scrollTop||0),0);
+   let bottom=host.innerHeight,spacing=number(host.getComputedStyle(list).marginBottom),reachedScroller=false;
+   ancestors.forEach((node,index)=>{
+    const style=host.getComputedStyle(node),scrollable=/^(auto|scroll|overlay)$/.test(style.overflowY);
+    if(scrollable){
+     const above=ancestors.slice(index+1).reduce((sum,parent)=>sum+(parent.scrollTop||0),0);
+     bottom=Math.min(bottom,node.getBoundingClientRect().top+(node.clientTop||0)+node.clientHeight+above);
+    }
+    if(node!==list && !reachedScroller)spacing+=number(style.paddingBottom)+(scrollable?0:number(style.marginBottom));
+    reachedScroller ||= scrollable;
+   });
+   const header=result.querySelector(headerSelector),row=result.querySelector(rowSelector);
+   for(const [previous,current] of [[observedHeader,header],[observedRow,row]]){
+    if(previous!==current){if(previous)observer?.unobserve?.(previous);if(current)observer?.observe(current);}
+   }
+   observedHeader=header;observedRow=row;
+   const rowHeight=row ? number(host.getComputedStyle(row).minHeight)||row.getBoundingClientRect?.().height||0 : 0;
+   const minimum=(header?.getBoundingClientRect().height||0)+rowHeight+Math.max(0,result.offsetHeight-result.clientHeight);
+   const tail=Math.max(0,list.getBoundingClientRect().bottom-result.getBoundingClientRect().bottom);
+   const height=`${Math.floor(Math.max(minimum,bottom-top-tail-spacing))}px`;
+   if(result.style.getPropertyValue(property)!==height)result.style.setProperty(property,height);
+  }
+  owner.updateTableViewport=schedule;
+  owner.stopTableViewport=()=>{
+   stopped=true;observer?.disconnect();
+   if(frame!==undefined)host.cancelAnimationFrame(frame);
+   host.removeEventListener('resize',schedule);result.style.removeProperty(property);
+   owner.updateTableViewport=null;owner.stopTableViewport=null;
+  };
+  for(const node of new Set([list,result,...observeTargets]))if(node)observer?.observe(node);
+  host.addEventListener('resize',schedule);
+  schedule();
+ }
  if (typeof module === "object" && module.exports) module.exports = engine;
  root.DeepLinkERPCompactList = engine;
 })(typeof globalThis !== "undefined" ? globalThis : this, function (config) {
@@ -535,7 +585,9 @@
 			controller.controls[control.fieldname] = input;
 			if (control.fieldname === "search") controller.searchControl = input;
 		}
-		list.page.wrapper.find(".page-form .filter-x-button").off("click.dlpPOFilters").on("click.dlpPOFilters", () => controller.clearQuickFilters()).attr("title", t("清空筛选"));
+		// Move the native button itself so its advanced/saved-filter handlers survive.
+		list.page.wrapper.find(".page-form .filter-x-button").off("click.dlpPOFilters").on("click.dlpPOFilters", () => controller.clearQuickFilters())
+			.text(t("清空筛选")).attr("title", t("清空筛选")).attr("aria-label", t("清空筛选")).addClass("dlp-po-clear-filters").appendTo(controller.$filters);
 		controller.$summary = $('<div class="dlp-po-summary" aria-live="polite"></div>').insertBefore(list.$paging_area);
 		controller.$paging = $(`<div class="dlp-po-paging"><label>${escapeHTML(t("每页"))} <select class="form-control input-xs dlp-po-page-size">${[20, 100, 500, 2500].map((size) => `<option value="${size}">${size}</option>`).join("")}</select></label><span class="dlp-po-page-info"></span><button class="btn btn-default btn-sm dlp-po-previous" type="button">${escapeHTML(t("上一页"))}</button><button class="btn btn-default btn-sm dlp-po-next" type="button">${escapeHTML(t("下一页"))}</button></div>`).appendTo(list.$frappe_list);
 		controller.$paging.find(".dlp-po-page-size").val(100).on("change.dlpPO", (event) => {

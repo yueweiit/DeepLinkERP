@@ -82,6 +82,7 @@
 		dismissAutomaticOnboarding(controller);
 		controller.salesView = "all"; controller.salesExpanded = new Map();
 		const bar = root.$(`<div class="dlp-sales-viewbar"><div class="dlp-sales-tabs">${[["all", "全部订单"], ["mine", "我的订单"], ["finance", "财务待放行"]].map(([value, label]) => `<button class="btn btn-default btn-sm" type="button" data-sales-view="${value}" aria-pressed="${value === "all"}">${esc(t(label))}</button>`).join("")}</div><div class="dlp-sales-release-action"><span class="dlp-sales-selected" role="status">${esc(t("未选择订单"))}</span><button type="button" class="btn btn-primary dlp-sales-release" disabled>${esc(t("允许生产"))} (0)</button></div></div>`).insertBefore(controller.list.$frappe_list);
+		controller.$salesViewbar = bar;
 		controller.$salesNotice = root.$(`<p class="dlp-sales-notice text-muted">${esc(t("展开产品行或查看明细；左右滚动查看全部字段。"))}</p>`).insertAfter(bar);
 		const updateSelection = () => {
 			const selected = controller.list.get_checked_items?.() || [];
@@ -109,6 +110,15 @@
 				const dialog = new root.frappe.ui.Dialog({ title: `${t("订单详情")} · ${name}`, size: "extra-large", fields: [{ fieldname: "details", fieldtype: "HTML", options: detailsHTML(detail) }] }); dialog.$wrapper.addClass("dlp-sales-detail-dialog"); dialog.show(); dialog.$wrapper.find(".dlp-sales-all-items").on("click", e => { const expanded = e.currentTarget.getAttribute("aria-expanded") !== "true"; e.currentTarget.setAttribute("aria-expanded", String(expanded)); e.currentTarget.textContent = t(expanded ? "收起额外字段" : "显示全部明细字段"); dialog.$wrapper.find(".dlp-sales-items").toggleClass("dlp-sales-items-overview", !expanded); });
 			} } finally { button.prop("disabled", false); }
 		});
+		fitViewport(controller, true);
+	}
+	function fitViewport(controller, active) {
+		if (!controller) return;
+		return engine.fitViewport(controller, { active, root: controller.root,
+			scrollElement: controller.list.$result?.parent(".result-container")?.[0], layoutTailElement: controller.list.$frappe_list?.[0],
+			property: "--dlp-sales-result-max-height", headerSelector: ".dlp-po-grid-header", rowSelector: ".dlp-po-grid-row",
+			observeTargets: [controller.$filters?.[0]?.parentElement, controller.$toolbar?.[0], controller.$salesViewbar?.[0], controller.$salesNotice?.[0], controller.$summary?.[0], controller.$paging?.[0], controller.list.page.wrapper?.find?.(".page-head")?.[0]],
+		});
 	}
 	function dismissAutomaticOnboarding(controller) {
 		return grid.dismissAutomaticOnboarding(controller, root);
@@ -119,11 +129,11 @@
 		controls: [{ fieldname: "search", fieldtype: "Data", label: "订单号 / 客户 / ODT" }, { fieldname: "customer", fieldtype: "Link", options: "Customer", label: "客户" }, { fieldname: "custom_process_status", fieldtype: "Select", label: "ERP 业务状态" }, { fieldname: "from_date", permission_field: "transaction_date", fieldtype: "Date", label: "开始日期" }, { fieldname: "to_date", permission_field: "transaction_date", fieldtype: "Date", label: "结束日期" }, { fieldname: "product", permission_field: "items", fieldtype: "Link", options: "Item", label: "品目编码" }, { fieldname: "company", fieldtype: "Link", options: "Company", label: "公司" }],
 		searchConflictMessage: "现有 OR 筛选已保留；清除后可使用订单 / 客户搜索。",
 		transformQuery, onRows, mountControls, renderValue,
-		onRouteChange: (controller, active) => { if (!active) controller?.stopInitialOnboarding?.(); },
+		onRouteChange: (controller, active) => { fitViewport(controller, active); if (!active) controller?.stopInitialOnboarding?.(); },
 		renderLink: (controller, doc, value) => `<button type="button" class="dlp-sales-name dlp-sales-detail" data-name="${esc(doc.name)}">${value}</button>`,
 		renderSequence: (controller, doc, sequence) => `<button class="dlp-sales-expand" type="button" data-name="${esc(doc.name)}" aria-expanded="${controller.salesExpanded?.has(doc.name) || false}" aria-label="${esc(t("展开产品明细"))}">${controller.salesExpanded?.has(doc.name) ? "⌄" : "›"} ${sequence}</button>`,
 		rowExtra: (controller, doc) => controller.salesExpanded?.has(doc.name) ? `<section class="dlp-sales-expanded"><strong>${esc(t("订单产品明细"))}</strong>${itemTable(controller.salesExpanded.get(doc.name))}</section>` : "",
-		afterRender: controller => controller.updateSalesSelection?.(),
+		afterRender: controller => { controller.updateSalesSelection?.(); controller.updateTableViewport?.(); },
 	});
-	return { ...grid, COLUMNS, presets, itemTable, detailsHTML, transformQuery, statusLabels, invalidateExpandedDetails, dismissAutomaticOnboarding };
+	return { ...grid, COLUMNS, presets, itemTable, detailsHTML, transformQuery, statusLabels, invalidateExpandedDetails, dismissAutomaticOnboarding, fitViewport };
 });

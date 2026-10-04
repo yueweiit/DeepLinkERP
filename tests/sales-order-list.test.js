@@ -74,3 +74,82 @@ test("leaving sales before native onboarding arrives disconnects its scoped obse
   assert.equal(disconnects,1); assert.equal(controller.stopInitialOnboarding,null);
  } finally {Object.assign(global,previous);}
 });
+
+function viewportFixture() {
+ const state={top:318.18,tail:75.5,header:32,height:720,scroll:0}, frames=new Map(), listeners=new Map(), observers=[];
+ const values=new Map(), style={getPropertyValue:key=>values.get(key)||'',setProperty:(key,value)=>values.set(key,value),removeProperty:key=>values.delete(key)};
+ const main={scrollTop:0,clientTop:0,get clientHeight(){return state.height;},getBoundingClientRect:()=>({top:0,bottom:state.height}),parentElement:null};
+ const tableHeight=()=>Math.min(800,parseFloat(values.get('--dlp-sales-result-max-height'))||400);
+ const list={scrollTop:0,parentElement:main,getBoundingClientRect:()=>({top:state.top-state.scroll-43,bottom:state.top-state.scroll+tableHeight()+state.tail})};
+ const header={getBoundingClientRect:()=>({height:state.header})}, row={};
+ const result={style,scrollTop:0,parentElement:list,get offsetHeight(){return tableHeight();},get clientHeight(){return tableHeight()-17;},getBoundingClientRect:()=>({top:state.top-state.scroll,bottom:state.top-state.scroll+tableHeight()}),querySelector:selector=>selector==='.dlp-po-grid-header'?header:row};
+ const root={get innerHeight(){return state.height;},getComputedStyle:node=>({overflowY:node===main?'auto':'visible',minHeight:node===row?'42px':'0px',paddingBottom:'0px',marginBottom:'0px',borderBottomWidth:'0px'}),
+  requestAnimationFrame:fn=>{const id=frames.size+1;frames.set(id,fn);return id;},cancelAnimationFrame:id=>frames.delete(id),
+  addEventListener:(event,fn)=>listeners.set(event,fn),removeEventListener:(event,fn)=>{if(listeners.get(event)===fn)listeners.delete(event);},
+  ResizeObserver:class {constructor(callback){this.callback=callback;this.targets=[];observers.push(this);}observe(node){this.targets.push(node);}disconnect(){this.disconnected=true;}}};
+ const controller={root,list:{$result:{parent:()=>[result]},$frappe_list:[list],page:{wrapper:{find:()=>[{}]}}},$toolbar:[{}],$filters:[{parentElement:{}}],$summary:[{}],$paging:[{}],$salesViewbar:[{}],$salesNotice:[{}]};
+ return {controller,state,main,result,list,header,row,root,values,frames,listeners,observers,flush(){const callbacks=[...frames.values()];frames.clear();callbacks.forEach(fn=>fn());}};
+}
+
+test('sales table reserves its measured footer and recalculates after wrapping, resize and existing outer scroll',()=>{
+ const fixture=viewportFixture(),{controller,state,main,values,listeners,observers}=fixture;
+ assert.equal(typeof grid.fitViewport,'function');grid.fitViewport(controller,true);fixture.flush();
+ assert.equal(values.get('--dlp-sales-result-max-height'),'326px');
+ state.scroll=73.5;main.scrollTop=73.5;observers[0].callback();fixture.flush();
+ assert.equal(values.get('--dlp-sales-result-max-height'),'326px','outer scrolling must not make the table grow');
+ state.height=860;state.top=400;state.tail=95;listeners.get('resize')();fixture.flush();
+ assert.equal(values.get('--dlp-sales-result-max-height'),'365px');
+ state.height=360;state.top=260;state.header=80;state.tail=75;observers[0].callback();fixture.flush();
+ assert.equal(values.get('--dlp-sales-result-max-height'),'139px','short screens keep a header and row, with outer scrolling available');
+});
+
+test('sales viewport fitting cleans up on departure and resumes once on a cached route return',()=>{
+ const fixture=viewportFixture(),{controller,values,frames,listeners,observers}=fixture;
+ assert.equal(typeof grid.fitViewport,'function');grid.fitViewport(controller,true);grid.fitViewport(controller,true);
+ assert.equal(observers.length,1);assert.equal(frames.size,1);fixture.flush();
+ observers[0].callback();assert.equal(frames.size,1);grid.fitViewport(controller,false);
+ assert.equal(frames.size,0);assert.equal(listeners.size,0);assert.equal(observers[0].disconnected,true);assert.equal(values.size,0);
+ observers[0].callback();assert.equal(frames.size,0,'a delivered stale observer callback must stay inert');
+ grid.fitViewport(controller,true);grid.fitViewport(controller,true);fixture.flush();
+ assert.equal(observers.length,2);assert.equal(listeners.size,1);assert.equal(values.get('--dlp-sales-result-max-height'),'326px');
+ grid.fitViewport(controller,false);
+});
+
+test('all four cached inventory pages share viewport fitting without stale loads reactivating departed owners',async()=>{
+ const engine=require('../deeplinkerp_branding/public/js/compact_list.js'),inventory=require('../deeplinkerp_branding/public/js/inventory_detail.bundle.js');
+ assert.equal(typeof engine.fitViewport,'function');
+ const previous={$:global.$,frappe:global.frappe}, callbacks=[], pending=[], owners=[];let route,current;
+ // Replace only native UI/network boundaries; constructor, bootstrap, refresh and fitting remain real.
+ class Surface {
+  constructor(node){this[0]=node||{};this.length=1;}
+  find(selector){return new Surface(selector==='.id-table-wrap'?current.result:undefined);}
+  children(){return this;}remove(){return this;}append(){return this;}on(){return this;}html(){return this;}text(){return this;}prop(){return this;}attr(){return this;}addClass(){return this;}removeClass(){return this;}
+ }
+ global.$=value=>new Surface(typeof value==='string'?current.list:value);
+ global.frappe={get_route:()=>[route],router:{on:(event,fn)=>callbacks.push(fn)},defaults:{get_default:()=> 'MX'},call:request=>new Promise(resolve=>pending.push({request,resolve})),
+  ui:{make_app_page:({parent})=>({body:parent,wrapper:new Surface(),add_field:df=>({df,value:df.default??'',get_value(){return this.value;},async set_value(value){this.value=value;},refresh(){}}),set_primary_action(){},add_inner_button(){}})}};
+ try {
+  for(const [category,pageRoute] of [['material','inventory-location-detail'],['semi_finished','semi-finished-inventory-detail'],['finished','finished-goods-inventory-detail'],['mold','mold-inventory-detail']]) {
+   route=pageRoute;callbacks.forEach(fn=>fn());current=viewportFixture();
+   const fixture=current;fixture.state.top=272;fixture.state.tail=64;fixture.result.querySelector=selector=>selector==='thead'?fixture.header:fixture.row;
+   const page=inventory.bootstrap({ownerDocument:{defaultView:fixture.root}},{category,title:category});
+   // DOM lookup belongs to this cached owner after other inventories mount.
+   page.$root.find=selector=>new Surface(selector==='.id-table-wrap'?fixture.result:undefined);
+   await page.fields.keyword.set_value('saved');page.selected.set('A',{item_code:'A'});page.start=200;
+   fixture.flush();assert.equal(fixture.values.get('--dlp-inventory-result-max-height'),'384px');assert.equal(fixture.observers.length,1);
+   owners.push({page,fixture,pageRoute});
+  }
+  route='Item';callbacks.forEach(fn=>fn());
+  for(const {fixture} of owners) {assert.equal(fixture.values.size,0);assert.equal(fixture.frames.size,0);assert.equal(fixture.listeners.size,0);assert.equal(fixture.observers[0].disconnected,true);}
+  for(const {resolve} of pending)resolve({message:{company:'MX',groups:[],total_count:0,page_count:0,snapshot_options:[],item_group_options:[],can_create_stock_entry:false}});
+  await new Promise(resolve=>setImmediate(resolve));
+  for(const {fixture} of owners) {assert.equal(fixture.observers.length,1);assert.equal(fixture.frames.size,0,'late read/render must not reattach a departed owner');}
+  for(const {page,fixture,pageRoute} of owners) {
+   route=pageRoute;callbacks.forEach(fn=>fn());callbacks.forEach(fn=>fn());fixture.flush();
+   assert.equal(fixture.observers.length,2);assert.equal(fixture.listeners.size,1);assert.equal(fixture.values.get('--dlp-inventory-result-max-height'),'384px');
+   fixture.state.top=320;fixture.state.tail=80;fixture.observers[1].callback();fixture.flush();assert.equal(fixture.values.get('--dlp-inventory-result-max-height'),'320px');
+   assert.equal(page.selected.size,1);assert.equal(page.fields.keyword.get_value(),'saved');assert.equal(page.start,200);
+  }
+  assert.equal(callbacks.length,4);assert.equal(pending.length,4,'returning to a cached page does not issue another read');
+ } finally {route='Item';callbacks.forEach(fn=>fn());Object.assign(global,previous);}
+});
