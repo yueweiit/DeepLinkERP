@@ -706,7 +706,7 @@
 			translate: root.__ || (x => x),
 			setPage(value) { this.page = Math.max(0, Number(value) || 0); },
 			activate() { root.document.body.classList.toggle(config.routeClass, active()); },
-			savePreferences() { this.preferences = normalizePreferences(this.preferences, permitted, config.provider.columns); try { root.localStorage?.setItem(key, JSON.stringify(this.preferences)); } catch (_) {} surface.$frappe_list.toggleClass('dlp-po-standard', this.preferences.density === 'standard'); },
+			savePreferences() { this.preferences = normalizePreferences(this.preferences, permitted, config.provider.columns); try { root.localStorage?.setItem(key, JSON.stringify(this.preferences)); } catch (_) { /* Rendering must work without storage. */ } surface.$frappe_list.toggleClass('dlp-po-standard', this.preferences.density === 'standard'); },
 			setColumns(columns) { this.preferences.columns = columns; this.savePreferences(); render(); },
 			async clearQuickFilters() { this.resetting = true; this.quick = {}; this.setPage(0); try { this.resetAdvancedFilters?.(); await Promise.all(Object.values(this.controls).map(control => control.set_value(''))); } finally { this.resetting = false; } return this.refresh(); },
 			exportCurrent() { return config.provider.exportCurrent(this); },

@@ -363,7 +363,7 @@ def _vouchers(payment_names):
 
 
 def _decorate_payments(rows):
-    from deeplinkerp_branding.services.purchase_document_actions import _workflow_actions, _payment_editable
+    from deeplinkerp_branding.services.purchase_document_actions import _payment_editable, _workflow_actions
     by_name = {row["name"]: row for row in rows}
     for row in rows:
         doc = _read_doc("Payment Entry", row["name"])
@@ -740,7 +740,7 @@ def create_payment_draft(source_doctype, source_name, purchase_invoice, amount_t
         balance = invoice_balance(invoice)
         if value > amount(balance["outstanding"]):
             frappe.throw("本次金额超过最新未付余额，请刷新")
-        account = _bank_account(bank_account, source.company, balance["currency"])
+        _bank_account(bank_account, source.company, balance["currency"])
         from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
         entry = get_payment_entry("Purchase Invoice", invoice.name, bank_account=bank_account, bank_amount=float(value))
         entry.check_permission("create")
