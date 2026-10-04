@@ -60,6 +60,9 @@ def execute():
 		audits = frappe.get_all('CRM Integration Log',filters={'event':release.AUDIT_EVENT,'reference_name':doc.name},fields=['name','user','creation','status'])
 		assert len(audits)==1 and audits[0].user==user and audits[0].status=='Pending'
 		checks.append('each order audit stores actual confirmer/time, while async sync stays pending')
+		assert not frappe.has_permission('CRM Integration Log', 'read')
+		assert release.get_finance_release_review([doc.name])['orders'][0]['last_confirmation'] is None
+		checks.append('release capability does not disclose confirmation history without native audit read permission')
 		try: release.assert_production_released(doc.name,'Yuewei')
 		except frappe.ValidationError: pass
 		else: raise AssertionError('processing order entered production')
