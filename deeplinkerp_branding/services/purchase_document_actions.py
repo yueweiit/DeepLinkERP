@@ -41,22 +41,20 @@ def _version(doc, expected):
 
 
 def _locked(doctype, name):
-    doc = frappe.get_doc(doctype, name, for_update=True)
-    doc.check_permission("read")
-    if doc.get("company"):
-        service._read("Company", doc.company)
-    return doc
+    return service._current(doctype, name)
 
 
 def _workflow_actions(doc):
     from frappe.model.workflow import get_transitions, get_workflow, get_workflow_name, has_approval_access
-    if doc.doctype == "Purchase Receipt" or doc.is_new() or doc.docstatus != 0:
+    if doc.docstatus != 0:
         return []
+    if doc.is_new():
+        return ["Submit"] if doc.doctype == "Purchase Receipt" and not get_workflow_name(doc.doctype) and doc.has_permission("submit") else []
     if get_workflow_name(doc.doctype):
         _fields(doc.doctype, {get_workflow(doc.doctype).workflow_state_field})
         return [row.action for row in get_transitions(doc)
                 if has_approval_access(frappe.session.user, doc, row)]
-    return ["Submit"] if doc.has_permission("submit") and doc.doctype in ("Purchase Invoice", "Payment Entry") else []
+    return ["Submit"] if doc.has_permission("submit") and doc.doctype in ("Purchase Receipt", "Purchase Invoice", "Payment Entry") else []
 
 
 def _editable_fields(doc, fields, parenttype=None):
@@ -80,6 +78,10 @@ def _native(source, target):
         frappe.throw("不支持此来源和目标单据")
     if source.docstatus != 1 or source.get("is_return"):
         frappe.throw("来源必须已提交且非退货")
+    if source.doctype == "Purchase Order":
+        reason = service.order_execution_reason(source)
+        if reason:
+            frappe.throw(reason)
     _fields(source.doctype, HEADER_FIELDS)
     _fields("Purchase Taxes and Charges", TAX_FIELDS, parenttype=source.doctype)
     _fields(target, HEADER_FIELDS | HEADERS[target])
@@ -134,14 +136,16 @@ def _current_maximum(source, target):
 
 
 def _current_drafts(source):
-    service._require_fields("Purchase Invoice", {"items"})
-    service._require_fields("Purchase Invoice Item", {"purchase_receipt"}, "Purchase Invoice")
-    parents = frappe.db.get_values("Purchase Invoice Item", {"purchase_receipt": source.name, "docstatus": 0},
+    target = "Purchase Receipt" if source.doctype == "Purchase Order" else "Purchase Invoice"
+    link = "purchase_order" if source.doctype == "Purchase Order" else "purchase_receipt"
+    service._require_fields(target, {"items"})
+    service._require_fields(target + " Item", {link}, target)
+    parents = frappe.db.get_values(target + " Item", {link: source.name, "docstatus": 0},
                                   ["parent"], as_dict=True, distinct=True, for_update=True)
     for row in parents:
         with service._quiet_link_errors():
             try:
-                doc = _locked("Purchase Invoice", row.parent)
+                doc = _locked(target, row.parent)
             except (frappe.DoesNotExistError, frappe.PermissionError):
                 frappe.throw(service.LINK_WARNING)
         if doc.docstatus == 0:
@@ -240,6 +244,10 @@ def _edit_document(doc, changes, maximum):
         row = by_key[key]
         for field in ITEM_EDITS[doc.doctype] & edit.keys():
             row.set(field, float(service.amount(edit[field])) if field in ("qty", "rate") else edit[field])
+        if doc.doctype == "Purchase Receipt" and "qty" in edit:
+            _fields("Purchase Receipt Item", {"received_qty"}, "write", doc.doctype)
+            # Native validate_accepted_rejected_qty owns accepted + rejected totals.
+            row.received_qty = 0
     for row in doc.items:
         if service.amount(row.qty) <= 0 or service.amount(row.qty) > service.amount(maximum.get(_key(row, doc.doctype), 0)):
             frappe.throw("数量超过最新剩余数量或不是正数，请刷新")
@@ -255,13 +263,16 @@ def _edit_document(doc, changes, maximum):
 
 
 @frappe.whitelist(methods=["POST"])
-def save_document_draft(source_doctype, source_name, target_doctype, changes, request_id, target_name=None, expected_modified=None):
+def save_document_draft(source_doctype, source_name, target_doctype, changes, request_id, target_name=None, expected_modified=None, allow_another_draft=0):
     changes = _changes(changes)
     if not re.fullmatch(r"[a-zA-Z0-9-]{16,80}", str(request_id or "")):
         frappe.throw("缺少有效请求标识")
     if (source_doctype, target_doctype) not in TARGETS:
         frappe.throw("不支持此来源和目标单据")
+    allow_another_draft = allow_another_draft in (True, 1, "1", "true")
     payload = [source_doctype, source_name, target_doctype, target_name, expected_modified, changes]
+    if allow_another_draft:
+        payload.append(True)
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
     key = "dlp-document-draft:" + hashlib.sha256((frappe.session.user + ":" + request_id).encode()).hexdigest()
     cache = frappe.cache()
@@ -281,8 +292,8 @@ def save_document_draft(source_doctype, source_name, target_doctype, changes, re
             return result
         source = _locked(source_doctype, source_name)
         _source(source_doctype, source_name)
-        if target_doctype == "Purchase Invoice" and not target_name and _current_drafts(source):
-            frappe.throw("已有应付草稿，请选择继续编辑")
+        if not target_name and not allow_another_draft and _current_drafts(source):
+            frappe.throw("已有入库或应付草稿，请选择继续编辑；新建另一张需明确确认")
         native = _native(source, target_doctype)
         maximum = _current_maximum(source, target_doctype)
         doc = _locked(target_doctype, target_name) if target_name else native
@@ -300,6 +311,7 @@ def save_document_draft(source_doctype, source_name, target_doctype, changes, re
         if doc.docstatus != 0:
             frappe.throw("保存必须保持草稿状态")
         cache.set_value(key, {"digest": digest, "name": doc.name}, expires_in_sec=86400)
+        frappe.db.after_rollback.add(lambda: cache.delete_value(key))
         result = _projection(doc, maximum, source)
         result["reused"] = False
         return result
@@ -313,9 +325,11 @@ def _payment(doc):
     service._require_fields("Payment Entry Reference", {"reference_doctype", "reference_name", "allocated_amount", "outstanding_amount", "payment_term"}, "Payment Entry")
     warnings = []
     references = service._procurement_references(doc, warnings)
+    kinds = {row.reference_doctype for row in doc.references}
+    simple_references = kinds == {"Purchase Invoice"} or (kinds == {"Purchase Order"} and len({row.reference_name for row in doc.references}) == 1)
     advanced = bool(warnings or doc.payment_type != "Pay" or doc.party_type != "Supplier" or doc.get("deductions")
                     or doc.paid_from_account_currency != doc.paid_to_account_currency or doc.unallocated_amount
-                    or not doc.references or any(row.reference_doctype != "Purchase Invoice" for row in doc.references))
+                    or not doc.references or not simple_references)
     receive = doc.payment_type == "Receive"
     service._bank_account(doc.paid_to if receive else doc.paid_from, doc.company,
                           doc.paid_to_account_currency if receive else doc.paid_from_account_currency)
@@ -325,7 +339,8 @@ def _payment(doc):
            "amount": doc.received_amount if receive else doc.paid_amount,
            "bank_account": doc.paid_to if receive else doc.paid_from,
            "currency": doc.paid_to_account_currency if receive else doc.paid_from_account_currency,
-           "references": references, "allowed_actions": [] if advanced else _workflow_actions(doc)}
+           "references": references, "payment_kind": "advance" if kinds == {"Purchase Order"} else "invoice",
+           "allowed_actions": [] if advanced else _workflow_actions(doc)}
     return {"document": out, "allowed_actions": out["allowed_actions"],
             "editable_fields": _payment_editable(doc) if not advanced and doc.docstatus == 0 else [],
             "advanced_reason": ADVANCED if advanced else ""}
@@ -351,6 +366,15 @@ def preview_payment(name):
 def _payment_balance(doc, validate_allocations=True):
     balances = {}
     for row in doc.references:
+        if row.reference_doctype == "Purchase Order":
+            _, order, balance = service.payment_target("Purchase Order", row.reference_name)
+            if order.company != doc.company or order.supplier != doc.party:
+                frappe.throw("预付来源公司或供应商已改变")
+            service._advance_account(doc)
+            if balance["currency"] != doc.paid_from_account_currency:
+                frappe.throw("跨币种预付款请在原生付款单核对")
+            balances[order.name] = balance
+            continue
         if row.reference_doctype != "Purchase Invoice":
             frappe.throw(ADVANCED)
         invoice = _locked("Purchase Invoice", row.reference_name)
@@ -398,8 +422,8 @@ def update_payment_draft(name, changes, expected_modified):
         # Reuse native term schedules; do not invent or remove reference rows.
         from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
         plans = {}
-        for invoice in balances:
-            native = get_payment_entry("Purchase Invoice", invoice, bank_account=account.name)
+        for invoice, balance in balances.items():
+            native = get_payment_entry(balance.get("reference_doctype", "Purchase Invoice"), invoice, bank_account=account.name)
             for row in native.references:
                 plans[(row.reference_name, row.payment_term or "")] = service.amount(row.outstanding_amount)
         remaining = value
@@ -424,7 +448,7 @@ def update_payment_draft(name, changes, expected_modified):
     return _payment(doc)
 
 
-def _payment_request(request_id, payload, operation):
+def _native_request(request_id, payload, operation):
     """Keep an acknowledged native operation retryable without repeating its write."""
     if not re.fullmatch(r"[a-zA-Z0-9-]{16,80}", str(request_id or "")):
         frappe.throw("缺少有效请求标识，请刷新付款抽屉")
@@ -436,7 +460,8 @@ def _payment_request(request_id, payload, operation):
         if previous:
             if previous["digest"] != digest:
                 frappe.throw("同一请求内容已改变，请先核对付款记录")
-            result = _payment(_locked("Payment Entry", previous["name"]))
+            doc = _locked(previous.get("doctype", "Payment Entry"), previous["name"])
+            result = _payment(doc) if doc.doctype == "Payment Entry" else _projection(doc)
             result.update(reused=True, needs_review=previous.get("needs_review", False))
             return result
         try:
@@ -446,10 +471,34 @@ def _payment_request(request_id, payload, operation):
             # The client may then correct inputs; network failures retain their token.
             frappe.db.rollback()
             return {"failed": True, "error": str(error)}
-        cache.set_value(key, {"digest": digest, "name": result["document"]["name"],
+        cache.set_value(key, {"digest": digest, "name": result["document"]["name"], "doctype": result["document"]["doctype"],
                               "needs_review": result.get("needs_review", False)}, expires_in_sec=86400)
         frappe.db.after_rollback.add(lambda: cache.delete_value(key))
         return result
+
+
+def _payment_request(request_id, payload, operation):
+    return _native_request(request_id, payload, operation)
+
+
+@frappe.whitelist(methods=["POST"])
+def record_receipt(source_name, changes, request_id, target_name=None, expected_modified=None,
+                   confirm=1, workflow_action=None, allow_another_draft=0):
+    """One explicit PO receipt operation, reusing draft mapping and native submission."""
+    confirm = confirm in (True, 1, "1", "true")
+    args = dict(source_doctype="Purchase Order", source_name=source_name, target_doctype="Purchase Receipt",
+                changes=_changes(changes), request_id=request_id, target_name=target_name,
+                expected_modified=expected_modified, allow_another_draft=allow_another_draft)
+
+    def operation():
+        result = save_document_draft(**args)
+        doc = _locked("Purchase Receipt", result["document"]["name"])
+        from frappe.model.workflow import get_workflow_name
+        if not confirm or (not workflow_action and (get_workflow_name(doc.doctype) or "Submit" not in _workflow_actions(doc))):
+            return _projection(doc)
+        return _submit_document(doc.doctype, doc.name, doc.modified, workflow_action)
+
+    return _native_request(request_id, [args, confirm, workflow_action], operation)
 
 
 def _confirm_payment(doc, workflow_action=None):
@@ -481,8 +530,8 @@ def complete_payment(name, changes, expected_modified, request_id, workflow_acti
 
 
 @frappe.whitelist(methods=["POST"])
-def record_payment(source_doctype, source_name, purchase_invoice, amount_to_pay, bank_account,
-                   request_id, posting_date=None, remarks=None, reference_no=None, confirm=1, attachment_session=None, attachments=None):
+def record_payment(source_doctype, source_name, purchase_invoice=None, amount_to_pay=None, bank_account=None,
+                   request_id=None, posting_date=None, remarks=None, reference_no=None, confirm=1, attachment_session=None, attachments=None):
     """Save/submit the existing native PE flow; a discovered draft requires review first."""
     args = dict(source_doctype=source_doctype, source_name=source_name, purchase_invoice=purchase_invoice,
                 amount_to_pay=amount_to_pay, bank_account=bank_account, posting_date=posting_date,
@@ -490,16 +539,9 @@ def record_payment(source_doctype, source_name, purchase_invoice, amount_to_pay,
     confirm = confirm in (True, 1, "1", "true")
 
     def operation():
-        invoice = _locked("Purchase Invoice", purchase_invoice)
-        source = service._source(source_doctype, source_name)
-        service._require_fields("Purchase Invoice", service.PI_FIELDS)
-        if source.docstatus != 1 or source.get("is_return"):
-            frappe.throw("来源必须为已提交且非退货的采购单据")
-        if service.get_purchase_chain(source_doctype, source_name, include_payments=False)["incomplete_links"]:
-            frappe.throw(service.LINK_WARNING)
-        if (purchase_invoice not in service._invoice_names(source_doctype, source_name)
-                or invoice.company != source.company or invoice.supplier != source.supplier):
-            frappe.throw("应付单与当前采购单据没有明确关联")
+        if not frappe.has_permission("Payment Entry", "create"):
+            frappe.throw("没有创建付款单权限", frappe.PermissionError)
+        source, target, _ = service.payment_target(source_doctype, source_name, purchase_invoice)
         # Current DB lock serializes different request IDs and overlapping PO/PR sources.
         # Permission-checked discovery does not select or mutate an unseen business draft.
         candidates = frappe.get_list("Payment Entry", filters=[
@@ -508,8 +550,8 @@ def record_payment(source_doctype, source_name, purchase_invoice, amount_to_pay,
             ["Payment Entry", "company", "=", source.company],
             ["Payment Entry", "party_type", "=", "Supplier"],
             ["Payment Entry", "party", "=", source.supplier],
-            ["Payment Entry Reference", "reference_doctype", "=", "Purchase Invoice"],
-            ["Payment Entry Reference", "reference_name", "=", purchase_invoice]],
+            ["Payment Entry Reference", "reference_doctype", "=", target.doctype],
+            ["Payment Entry Reference", "reference_name", "=", target.name]],
             fields=["name"], order_by="modified desc", limit_page_length=0)
         if candidates:
             result = _payment(service._read("Payment Entry", candidates[0].name))
@@ -528,9 +570,16 @@ def record_payment(source_doctype, source_name, purchase_invoice, amount_to_pay,
 
 
 @frappe.whitelist(methods=["POST"])
-def submit_document(doctype, name, expected_modified, workflow_action=None):
-    if doctype not in ("Purchase Invoice", "Payment Entry"):
-        frappe.throw("此抽屉仅支持应付和付款明确提交；入库请在原生单据处理")
+def submit_document(doctype, name, expected_modified, workflow_action=None, request_id=None):
+    if request_id or doctype == "Purchase Receipt":
+        return _native_request(request_id, [doctype, name, expected_modified, workflow_action],
+                               lambda: _submit_document(doctype, name, expected_modified, workflow_action))
+    return _submit_document(doctype, name, expected_modified, workflow_action)
+
+
+def _submit_document(doctype, name, expected_modified, workflow_action=None):
+    if doctype not in ("Purchase Receipt", "Purchase Invoice", "Payment Entry"):
+        frappe.throw("此抽屉仅支持采购入库、应付和付款明确提交")
     doc = _locked(doctype, name)
     _version(doc, expected_modified)
     if doc.docstatus != 0:
@@ -542,6 +591,22 @@ def submit_document(doctype, name, expected_modified, workflow_action=None):
         _payment_balance(doc)
         if service.amount(doc.paid_amount) <= 0 or service.amount(doc.paid_amount) != sum((service.amount(row.allocated_amount) for row in doc.references), service.amount(0)):
             frappe.throw("付款金额必须完整分配到原生引用")
+    elif doctype == "Purchase Receipt":
+        service._require_fields("Purchase Receipt Item", {"purchase_order", "purchase_order_item", "qty"}, "Purchase Receipt")
+        names = {row.purchase_order for row in doc.items if row.purchase_order}
+        if len(names) != 1:
+            frappe.throw(ADVANCED)
+        source = _locked("Purchase Order", next(iter(names)))
+        _source("Purchase Order", source.name)
+        if source.company != doc.company or source.supplier != doc.supplier or _advanced(doc, source):
+            frappe.throw(ADVANCED)
+        _native(source, "Purchase Receipt")
+        maximum = _current_maximum(source, "Purchase Receipt")
+        totals = {}
+        for row in doc.items:
+            totals[row.purchase_order_item] = totals.get(row.purchase_order_item, service.amount(0)) + service.amount(row.qty)
+        if any(qty <= 0 or qty > maximum.get(key, service.amount(0)) for key, qty in totals.items()):
+            frappe.throw("入库数量超过最新剩余数量，请刷新")
     else:
         service._require_fields("Purchase Invoice", HEADER_FIELDS)
         service._require_fields("Purchase Invoice Item", {"purchase_receipt", "pr_detail", "qty"}, "Purchase Invoice")

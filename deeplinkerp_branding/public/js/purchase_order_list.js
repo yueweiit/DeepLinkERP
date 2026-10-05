@@ -9,7 +9,7 @@
 		["advance_paid", "已预付", 140], ["advance_payment_status", "预付款状态", 94],
 		["order_settled", "已付 / 核销", 140], ["order_unpaid", "订单未付", 140],
 		["per_received", "已收货%", 70], ["per_billed", "已开票%", 70],
-		["project", "项目", 96], ["owner", "创建人", 86], ["receipt_action", "操作", 112],
+		["project", "项目", 96], ["owner", "创建人", 86], ["receipt_action", "操作", 176],
 	].map(([fieldname, label, width]) => ({ fieldname, label, width }));
 
  const defaults=['name','supplier_name','grand_total','order_settled','order_unpaid','per_received','status','receipt_action'];

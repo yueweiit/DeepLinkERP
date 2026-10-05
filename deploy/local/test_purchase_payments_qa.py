@@ -35,7 +35,7 @@ def execute():
    except (frappe.ValidationError,ValueError):pass
    else:raise AssertionError('invalid payment accepted')
   try:service.create_payment_draft(**dict(args,bank_account='100201 - 基本存款账户 - Y',request_id=str(uuid.uuid4())))
-  except frappe.ValidationError:pass
+  except (frappe.ValidationError,frappe.PermissionError):pass
   else:raise AssertionError('cross-company account accepted')
   bank=frappe.get_doc({'doctype':'Account','account_name':'QA Payment Bank','company':COMPANY,'account_type':'Bank','account_currency':'CNY','parent_account':frappe.db.get_value('Account',{'company':COMPANY,'is_group':1,'root_type':'Asset'},'name')}).insert()
   try:service.create_payment_draft(**dict(args,bank_account=bank.name,request_id=str(uuid.uuid4())))
@@ -194,7 +194,7 @@ def execute():
   assert service.get_purchase_chain('Purchase Receipt',receipts[0].name)['balances'][0]['outstanding']==2000
   results.append('normal balances and payment pagination remain exact after dirty-link rollback')
   stock_item=frappe.get_doc({'doctype':'Item','item_code':'QA-PAYMENT-STOCK','item_name':'QA Synthetic Stock Payment Item','item_group':'Services','stock_uom':'Nos','is_stock_item':1}).insert()
-  warehouse=frappe.get_doc({'doctype':'Warehouse','warehouse_name':'QA Payment Stock','company':COMPANY,'parent_warehouse':frappe.db.get_value('Warehouse',{'company':COMPANY,'is_group':1},'name')}).insert()
+  warehouse=frappe.get_doc('Warehouse','Stores - QAB')
   stock_po=frappe.get_doc({'doctype':'Purchase Order','company':COMPANY,'supplier':supplier,'currency':'CNY','schedule_date':add_days(nowdate(),1),'items':[{'item_code':stock_item.name,'qty':10,'rate':1000,'warehouse':warehouse.name,'schedule_date':add_days(nowdate(),1)}]}).insert();stock_po.submit()
   stock_pr=make_purchase_receipt(stock_po.name);stock_pr.items[0].qty=4;stock_pr.insert();stock_pr.submit()
   stock_pi=make_purchase_invoice(stock_pr.name);stock_pi.insert();stock_pi.submit()
