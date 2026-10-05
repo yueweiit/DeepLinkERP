@@ -30,7 +30,7 @@ class OperatingExpenseAssetsTest(unittest.TestCase):
 		self.assertIn(provider, files)
 		self.assertLess(files.index(shell), files.index(drawer))
 		self.assertLess(files.index(drawer), files.index(provider))
-		self.assertIn(drawer + "?v=0.0.8", hooks.app_include_js)
+		self.assertIn(drawer + "?v=0.0.9", hooks.app_include_js)
 		self.assertNotIn("Operating Expense Source", hooks.doctype_list_js)
 		self.assertEqual(len([p for p in hooks.app_include_css if "operating_expenses.css" in p]), 1)
 

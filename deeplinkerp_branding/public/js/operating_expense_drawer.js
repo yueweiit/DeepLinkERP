@@ -659,8 +659,13 @@
 		return drawer;
 	}
 	async function makeControl(drawer, holder, df, value, touched, query) {
-		const load = drawer.loadId;
-		if (!drawer.alive()) return null;
+		const load = drawer.loadId,
+			generation = drawer.operatingControlGeneration;
+		const current = () =>
+			drawer.alive() &&
+			load === drawer.loadId &&
+			generation === drawer.operatingControlGeneration;
+		if (!current()) return null;
 		let initialized = false;
 		const control = root.frappe.ui.form.make_control({
 			parent: holder,
@@ -668,12 +673,7 @@
 				...df,
 				label: t(df.label),
 				change: () => {
-					if (
-						initialized &&
-						!control.df?.read_only &&
-						drawer.alive() &&
-						load === drawer.loadId
-					)
+					if (initialized && !control.df?.read_only && current())
 						touched?.(control.get_value());
 				},
 			},
@@ -691,7 +691,7 @@
 		) {
 			const renderDisplay = control.set_disp_area.bind(control);
 			control.set_disp_area = (displayValue) => {
-				if (!drawer.alive() || load !== drawer.loadId) return;
+				if (!current()) return;
 				renderDisplay(displayValue);
 				// Native readonly Check formatter supplies a CSS class but no checked attribute.
 				root.$(control.disp_area)
@@ -702,7 +702,7 @@
 			};
 		}
 		await control.set_value(df.fieldtype === "Check" ? (boolean(value) ? 1 : 0) : value ?? "");
-		if (!drawer.alive() || load !== drawer.loadId) {
+		if (!current()) {
 			root.DeepLinkERPPurchasePayments.disposeControls([control]);
 			return null;
 		}
@@ -720,8 +720,7 @@
 		control.$input?.prop("disabled", drawer.busy || Boolean(control.df.read_only));
 		initialized = true;
 		control.$input?.on("input.dlpDrawer change.dlpDrawer", () => {
-			if (initialized && !control.df?.read_only && drawer.alive() && load === drawer.loadId)
-				touched?.(control.get_value());
+			if (initialized && !control.df?.read_only && current()) touched?.(control.get_value());
 		});
 		return control;
 	}
@@ -1400,6 +1399,7 @@
 			},
 			async load() {
 				drawer.loadId++;
+				this.invalidate();
 				return task(async (current) => {
 					const result = await call("get_sync_settings");
 					if (!current()) return;
@@ -1542,6 +1542,7 @@
 			drawer.panel.find(".dlp-operating-sync-confirm").show();
 		}
 		async function renderSettings() {
+			drawer.operatingControlGeneration = (drawer.operatingControlGeneration || 0) + 1;
 			const load = drawer.loadId,
 				settings = w.settings;
 			root.DeepLinkERPPurchasePayments.disposeControls(drawer.controls);

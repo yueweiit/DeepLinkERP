@@ -890,6 +890,218 @@ test("late settings preview after token or mapping edits cannot restore enable e
 	w.confirm(true);
 	assert.equal(w.canEnable(), false);
 });
+test("a settings refresh invalidates confirmed preview immediately and failure cannot restore enable eligibility", async () => {
+	let loads = 0,
+		rejectRefresh;
+	const requests = [];
+	const settings = {
+		enabled: 0,
+		token_configured: true,
+		company_mappings: { LegalB: "CompanyB" },
+	};
+	const a = create({
+		frappe: {
+			...host().frappe,
+			session: { user: "Administrator" },
+			call: (req) => {
+				requests.push(req);
+				if (req.method.endsWith("get_sync_settings")) {
+					if (++loads === 1) return Promise.resolve({ message: settings });
+					return new Promise((_resolve, reject) => {
+						rejectRefresh = reject;
+					});
+				}
+				return Promise.resolve({
+					message: { preview_fingerprint: "current-preview", sources: [] },
+				});
+			},
+		},
+	});
+	const d = drawer(),
+		w = a.settingsWorkflow(d);
+	await w.load();
+	await w.preview();
+	w.confirm(true);
+	assert.equal(w.canEnable(), true);
+	const refresh = w.load();
+	assert.equal(
+		w.canEnable(),
+		false,
+		"The old preview is unusable before the refresh RPC finishes"
+	);
+	assert.equal(w.previewResult, null);
+	rejectRefresh(new Error("settings refresh failed"));
+	await assert.rejects(() => refresh, /settings refresh failed/);
+	assert.equal(d.busy, false);
+	assert.deepEqual(w.rows, [{ source_company: "LegalB", company: "CompanyB" }]);
+	w.confirm(true);
+	assert.equal(w.canEnable(), false);
+	await assert.rejects(() => w.enable(), /预览|确认/);
+	assert.ok(requests.every((req) => !req.method.endsWith("enable_sync")));
+	await w.preview();
+	assert.equal(
+		w.canEnable(),
+		false,
+		"A new successful preview still requires a new confirmation"
+	);
+	w.confirm(true);
+	assert.equal(w.canEnable(), true);
+});
+test("every settings controls rebuild isolates deleted added and saved native Link callbacks without losing current mappings", async () => {
+	const controls = [],
+		buttons = new Map(),
+		saved = [],
+		errors = [];
+	class Surface {
+		constructor(html = "") {
+			this.length = 1;
+			this.handlers = {};
+			if (html.includes("<button")) {
+				const label = html.replace(/<[^>]+>/g, "");
+				buttons.set(label, [...(buttons.get(label) || []), this]);
+			}
+		}
+		addClass() {
+			return this;
+		}
+		find() {
+			return new Surface();
+		}
+		html() {
+			return this;
+		}
+		on(name, fn) {
+			this.handlers[name] = fn;
+			return this;
+		}
+		off() {
+			return this;
+		}
+		append() {
+			return this;
+		}
+		appendTo() {
+			return this;
+		}
+		empty() {
+			return this;
+		}
+		remove() {
+			return this;
+		}
+		attr() {
+			return this;
+		}
+		prop(key, value) {
+			this[key] = value;
+			return this;
+		}
+		hide() {
+			return this;
+		}
+		show() {
+			return this;
+		}
+		toggleClass() {
+			return this;
+		}
+		text() {
+			return this;
+		}
+	}
+	const d = drawer();
+	d.panel = new Surface();
+	d.controls = [];
+	d.error = (error) => errors.push(error.message);
+	const settings = {
+		enabled: 0,
+		token_configured: true,
+		company_mappings: { LegalA: "CompanyA", LegalB: "CompanyB" },
+	};
+	const a = create({
+		$: (value) => new Surface(value),
+		DeepLinkERPOperatingExpenses:
+			require("../deeplinkerp_branding/public/js/operating_expenses.js")({}),
+		DeepLinkERPPurchasePayments: {
+			createDrawer: () => d,
+			disposeControls: (items) => items.splice(0),
+		},
+		frappe: {
+			...host().frappe,
+			session: { user: "Administrator" },
+			call: async (req) => {
+				if (req.method.endsWith("save_sync_settings")) {
+					const mappings = JSON.parse(req.args.company_mappings);
+					saved.push(mappings);
+					return { message: { ...settings, company_mappings: mappings } };
+				}
+				return { message: settings };
+			},
+			ui: {
+				form: {
+					make_control: ({ df }) => {
+						const control = {
+							df,
+							$input: new Surface(),
+							value: "",
+							async set_value(value) {
+								this.value = value;
+							},
+							get_value() {
+								return this.value;
+							},
+						};
+						controls.push(control);
+						return control;
+					},
+				},
+			},
+		},
+	});
+	const lastControl = (name) =>
+		controls.filter((control) => control.df.fieldname === name).at(-1);
+	const click = async (label) => buttons.get(label).at(-1).handlers["click.dlpDrawer"]();
+	await a.openSettings();
+	const deletedLink = lastControl("company_map_0_company");
+	await buttons.get("移除")[0].handlers["click.dlpDrawer"]();
+	assert.equal(d.busy, false);
+	assert.equal(lastControl("company_map_0_company").get_value(), "CompanyB");
+	deletedLink.df.change();
+	await click("保存设置并停用同步");
+	assert.equal(d.busy, false);
+	assert.deepEqual(
+		saved.at(-1),
+		{ LegalB: "CompanyB" },
+		"The deleted row callback cannot shift CompanyA onto LegalB"
+	);
+	const beforeAdd = lastControl("company_map_0_company");
+	await click("新增公司映射");
+	assert.equal(d.busy, false);
+	const currentLink = lastControl("company_map_0_company");
+	await currentLink.set_value("CompanyB2");
+	currentLink.df.change();
+	await beforeAdd.set_value("CompanyA");
+	beforeAdd.df.change();
+	const addedSource = lastControl("company_map_1_source_company"),
+		addedLink = lastControl("company_map_1_company");
+	await addedSource.set_value("LegalC");
+	addedSource.df.change();
+	await addedLink.set_value("CompanyC");
+	addedLink.df.change();
+	await click("保存设置并停用同步");
+	assert.equal(d.busy, false);
+	assert.deepEqual(saved.at(-1), { LegalB: "CompanyB2", LegalC: "CompanyC" });
+	await addedLink.set_value("CompanyA");
+	addedLink.df.change();
+	await click("保存设置并停用同步");
+	assert.equal(d.busy, false);
+	assert.deepEqual(
+		saved.at(-1),
+		{ LegalB: "CompanyB2", LegalC: "CompanyC" },
+		"A save rebuild also rejects old Link callbacks"
+	);
+	assert.deepEqual(errors, []);
+});
 test("settlement terms stay unavailable until the mapping has a saved explicit payable rate", () => {
 	assert.equal(typeof api.canEditPayment, "function");
 	const d = detail();
