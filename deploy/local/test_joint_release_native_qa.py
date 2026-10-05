@@ -5,6 +5,7 @@ The helper never submits a voucher, invokes source sync, or contacts production.
 """
 
 import copy
+import hashlib
 import importlib
 import json
 import os
@@ -116,6 +117,66 @@ class JointNativeRehearsal(unittest.TestCase):
 		original_page = [row for row in self.original["metadata"]["scope"]["Page"] if row["name"] == "operating-expenses"]
 		self.assertEqual([row for row in after["metadata"]["scope"]["Page"] if row["name"] == "operating-expenses"], original_page)
 		self.restore()
+
+	def test_legacy_nullable_sidebar_column_preserves_bytes_through_nine_ddl_noop_and_restore(self):
+		from audit_unified_purchase import table_schema
+		from joint_release_guards import serialized
+
+		doctype = "Workspace Sidebar Item"
+		physical_before = table_schema(doctype)
+		self.assertNotIn("display_depends_on", physical_before["columns"], "Preserve an existing legacy column; do not replace it")
+		self.assertIsNone(frappe.get_meta(doctype, cached=False).get_field("display_depends_on"))
+		baseline = self.original
+		identity = "DLP-NATIVE-CUSTOM-Workspace-Sidebar-China-Finance"
+		self.assertTrue(frappe.db.exists(doctype, identity), "Only the existing synthetic fixture can hold test bytes")
+		frappe.db.sql_ddl("ALTER TABLE `tabWorkspace Sidebar Item` ADD COLUMN `display_depends_on` LONGTEXT NULL")
+		frappe.db.sql("update `tabWorkspace Sidebar Item` set display_depends_on=%s where name=%s", ("eval:doc.synthetic_legacy\n原始旧列字节", identity))
+		frappe.db.commit()
+		frappe.clear_cache(doctype=doctype)
+		self.original = self.capture()
+		legacy_schema = table_schema(doctype)
+		self.assertEqual(legacy_schema["columns"]["display_depends_on"]["type"], "longtext")
+		self.assertEqual(legacy_schema["columns"]["display_depends_on"]["nullable"], "YES")
+		try:
+			self.assertIn(legacy_schema["columns"]["display_depends_on"]["default_value"], {None, "NULL"})
+			self.assertEqual(legacy_schema["columns"]["display_depends_on"]["collation"], "utf8mb4_unicode_ci")
+			result = release.apply_joint_metadata(CANDIDATE_SHA, self.receipt)
+			self.assertEqual(result["ddl_boundaries"], 9)
+			after = self.capture()
+			self.assertEqual(after["je"]["rows"], self.original["je"]["rows"])
+			self.assertEqual(after["audit"]["tables"]["Journal Entry Account"], self.original["audit"]["tables"]["Journal Entry Account"])
+			self.assertEqual(after["metadata"]["outside_rows"], self.original["metadata"]["outside_rows"])
+			old_rows = {row["name"]: row for row in self.original["metadata"]["scope"][doctype]}
+			new_rows = [row for row in after["metadata"]["scope"][doctype] if row["name"] not in old_rows]
+			self.assertTrue(new_rows)
+			for row in new_rows:
+				self.assertEqual(set(row), set(legacy_schema["columns"]))
+				self.assertIsNone(row["display_depends_on"])
+			self.assertEqual(next(row for row in after["metadata"]["scope"][doctype] if row["name"] == identity), old_rows[identity])
+			first = self.receipt.read_bytes()
+			with patch.object(frappe.db, "sql_ddl", side_effect=AssertionError("No-op attempted DDL")), patch.object(frappe.db, "commit", side_effect=AssertionError("No-op attempted commit")), patch.object(release, "_write_scope", side_effect=AssertionError("No-op attempted metadata write")):
+				self.assertTrue(release.apply_joint_metadata(CANDIDATE_SHA, self.receipt)["unchanged"])
+			self.assertEqual(self.receipt.read_bytes(), first)
+			self.assert_state_equal(self.capture(), after)
+			self.assertEqual(table_schema(doctype), legacy_schema)
+			self.restore()
+		finally:
+			# Recover the original implementation's pre-commit failure too. Never
+			# remove the fixture while any actual release delta or drift remains.
+			if self.receipt.exists() and json.loads(self.receipt.read_bytes())["status"] != "restored":
+				self.restore()
+			self.assert_state_equal(self.capture(), self.original)
+			self.assertEqual(table_schema(doctype), legacy_schema)
+			self.assertEqual([tuple(row) for row in frappe.db.sql("select name, display_depends_on from `tabWorkspace Sidebar Item` where display_depends_on is not null")], [(identity, "eval:doc.synthetic_legacy\n原始旧列字节")])
+			frappe.db.sql("update `tabWorkspace Sidebar Item` set display_depends_on=null where name=%s", (identity,))
+			frappe.db.commit()
+			self.assertEqual(frappe.db.sql("select count(*) from `tabWorkspace Sidebar Item` where display_depends_on is not null")[0][0], 0)
+			frappe.db.sql_ddl("ALTER TABLE `tabWorkspace Sidebar Item` DROP COLUMN `display_depends_on`")
+			frappe.clear_cache(doctype=doctype)
+			self.original = baseline
+			self.assert_state_equal(self.capture(), baseline)
+			self.assertEqual(table_schema(doctype), physical_before)
+			print("legacy-column fixture restored:", json.dumps({"candidate_sha": CANDIDATE_SHA, "receipt": self.receipt.name, "legacy_column_schema": legacy_schema["columns"]["display_depends_on"], "original_and_final_full_state_sha256": hashlib.sha256(serialized(baseline)).hexdigest(), "physical_schema_sha256": hashlib.sha256(serialized(physical_before)).hexdigest(), "maintenance": frappe.conf.maintenance_mode, "GL": frappe.db.count("GL Entry"), "PE": frappe.db.count("Payment Entry")}), flush=True)
 
 	def test_pending_native_column_index_and_model_ddl_failures_restore_exact_baseline(self):
 		boundaries = [("column-" + key, "ADD COLUMN `" + key + "`") for key in release.CUSTOM_FIELD_ORDER]

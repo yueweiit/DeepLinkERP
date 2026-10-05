@@ -105,6 +105,64 @@ class JointReleaseGuardTests(unittest.TestCase):
 		self.assertTrue(module._definition_matches(scope, module.OPERATING_METHOD, definition))
 		self.assertEqual(scope["Scheduled Job Type"][0]["name"], "native-hash-id")
 
+	def navigation_fixture(self):
+		from tests.test_procurement_navigation import Doc, Row, navigation
+		class NativeRow(Row):
+			def _fix_numeric_types(self):
+				for key in ("docstatus", "idx", "child"):
+					self[key] = int(self.get(key) or 0)
+			def get_valid_dict(self, **kwargs):
+				return {key: value for key, value in self.items() if key not in {"doctype", "display_depends_on"}}
+		class NativeSidebar(Doc):
+			@property
+			def meta(self):
+				return types.SimpleNamespace(get_table_fields=lambda: [types.SimpleNamespace(fieldname="items", options="Workspace Sidebar Item")])
+			def as_dict(self):
+				return copy.deepcopy(dict(self))
+			def get_all_children(self):
+				return self["items"]
+			def get_valid_dict(self, **kwargs):
+				return {key: value for key, value in self.items() if key not in {"doctype", "items"}}
+			def append(self, table, values):
+				row = NativeRow(values, doctype="Workspace Sidebar Item", name=None, docstatus="0", idx="0", child="0", parent="Accounting", parenttype="Workspace Sidebar", parentfield=table)
+				self[table].append(row)
+				return row
+		original = NativeRow(doctype="Workspace Sidebar Item", name="custom-original", docstatus=0, idx=1, child=0, parent="Accounting", parenttype="Workspace Sidebar", parentfield="items", label="原有入口", link_to="Journal Entry", link_type="DocType", filters='{"keep":"原始字节"}', display_depends_on="eval:doc.keep_custom", creation="original", modified="original")
+		doc = NativeSidebar(doctype="Workspace Sidebar", name="Accounting", creation="original", modified="original", items=[original])
+		scope = {"Workspace": [], "Workspace Sidebar": [doc.get_valid_dict()], "Workspace Sidebar Item": [{key: value for key, value in original.items() if key != "doctype"}]}
+		fake = types.SimpleNamespace(get_doc=lambda *args: doc)
+		operating = types.SimpleNamespace(ENTRIES=(("运营费用", "Page", "operating-expenses", "receipt-text"),), TARGETS={"operating-expenses"}, _anchor=lambda doc, table: len(doc.get(table) or []))
+		columns = {key: {"nullable": "YES", "type": "varchar(140)", "default_value": "NULL"} for key in scope["Workspace Sidebar Item"][0]}
+		for key in ("docstatus", "idx", "child"):
+			columns[key].update(nullable="NO", type="int(11)", default_value="0")
+		return scope, fake, operating, navigation, columns
+
+	def test_new_navigation_rows_pad_legacy_sql_columns_coerce_native_types_and_preserve_existing_bytes(self):
+		module = self.metadata_module()
+		scope, fake, operating, navigation, columns = self.navigation_fixture()
+		before = copy.deepcopy(scope)
+		audit = types.SimpleNamespace(table_schema=lambda doctype: {"columns": columns})
+		with patch.dict(sys.modules, {"frappe": fake, "frappe.utils": types.SimpleNamespace(cint=lambda value: int(value or 0)), "audit_unified_purchase": audit, "deeplinkerp_branding.procurement_navigation": navigation, "deeplinkerp_branding.operating_navigation": operating}):
+			planned = module._desired_navigation(scope, when="2026-10-06 00:00:00.000000", seed="frozen")
+		old, new = sorted(planned["Workspace Sidebar Item"], key=lambda row: row["idx"])
+		self.assertEqual(old, before["Workspace Sidebar Item"][0])
+		self.assertIn("display_depends_on", new)
+		self.assertIsNone(new["display_depends_on"])
+		for key in ("docstatus", "idx", "child"):
+			self.assertIs(type(new[key]), int)
+		self.assertEqual(scope, before)
+
+	def test_new_navigation_rows_reject_unknown_nonnull_physical_defaults_before_writes(self):
+		module = self.metadata_module()
+		scope, fake, operating, navigation, columns = self.navigation_fixture()
+		columns["display_depends_on"].update(nullable="NO", default_value=None)
+		before = copy.deepcopy(scope)
+		audit = types.SimpleNamespace(table_schema=lambda doctype: {"columns": columns})
+		with patch.dict(sys.modules, {"frappe": fake, "frappe.utils": types.SimpleNamespace(cint=lambda value: int(value or 0)), "audit_unified_purchase": audit, "deeplinkerp_branding.procurement_navigation": navigation, "deeplinkerp_branding.operating_navigation": operating}):
+			with self.assertRaisesRegex(AssertionError, "Unknown non-NULL native metadata default: display_depends_on"):
+				module._desired_navigation(scope, when="2026-10-06 00:00:00.000000", seed="frozen")
+		self.assertEqual(scope, before)
+
 	def test_receipt_is_private_and_preserves_first_baseline_after_identical_apply(self):
 		module = self.module()
 		identity = {"candidate_sha": "a" * 40, "contract_sha256": "b" * 64}

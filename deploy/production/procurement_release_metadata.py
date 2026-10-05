@@ -102,11 +102,31 @@ def _custom_fields():
 	return result
 
 
+def _native_sql_row(item):
+	"""Coerce a new native row and include every physical metadata column.
+
+	Legacy nullable SQL columns can outlive their native Meta fields. Existing
+	rows do not use this path: their complete raw SQL bytes remain authoritative.
+	"""
+	from frappe.utils import cint
+	from audit_unified_purchase import table_schema
+
+	item._fix_numeric_types()
+	values = item.get_valid_dict(ignore_virtual=True)
+	values["docstatus"] = cint(values.get("docstatus"))
+	for key, schema in table_schema(item.doctype)["columns"].items():
+		values.setdefault(key, None)
+		if values[key] is None and schema["nullable"] == "NO":
+			default = schema["default_value"]
+			assert default not in {None, "NULL"}, "Unknown non-NULL native metadata default: " + key
+			values[key] = int(default.strip("'")) if schema["type"].startswith(("int", "tinyint", "bigint")) else default.strip("'")
+	return _json(values)
+
+
 def _native_rows(source, *, when, seed, defaults=False):
 	"""Use native import ordering and native valid-dict coercion, without hooks."""
 	import frappe
 	from frappe.model.base_document import get_controller
-	from frappe.utils import cint
 
 	source = copy.deepcopy(source)
 	controller = get_controller(source["doctype"])
@@ -126,17 +146,7 @@ def _native_rows(source, *, when, seed, defaults=False):
 		item.creation = item.modified = when
 		item.owner = item.modified_by = "Administrator"
 		item.docstatus = 0
-		item._fix_numeric_types()
-		values = item.get_valid_dict(ignore_virtual=True)
-		values["docstatus"] = cint(values.get("docstatus"))
-		from audit_unified_purchase import table_schema
-		for key, schema in table_schema(item.doctype)["columns"].items():
-			values.setdefault(key, None)
-			if values[key] is None and schema["nullable"] == "NO":
-				default = schema["default_value"]
-				assert default not in {None, "NULL"}, "Unknown non-NULL native metadata default: " + key
-				values[key] = int(default.strip("'")) if schema["type"].startswith(("int", "tinyint", "bigint")) else default.strip("'")
-		result.setdefault(item.doctype, []).append(_json(values))
+		result.setdefault(item.doctype, []).append(_native_sql_row(item))
 	return result
 
 
@@ -385,7 +395,7 @@ def _desired_navigation(scope, *, when, seed):
 				item.name = "dlp-ope-" + hashlib.sha256((seed + ":" + dt + ":" + name + ":" + item_dt + ":" + str(item.parentfield) + ":" + str(item.idx)).encode()).hexdigest()[:24]
 				item.creation = item.modified = when
 				item.owner = item.modified_by = "Administrator"
-				row = _json(item.get_valid_dict(ignore_virtual=True))
+				row = _native_sql_row(item)
 			expected[item_dt] = [other for other in expected[item_dt] if other["name"] != row["name"]]
 			expected[item_dt].append(row)
 		for field in doc.meta.get_table_fields():
