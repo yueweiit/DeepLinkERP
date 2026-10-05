@@ -233,6 +233,7 @@ recover() {
         if [[ -s "$release_dir/metadata.json" ]]; then
           docker cp "$build_dir/deploy/production/procurement_release_metadata.py" frappe_docker-backend-1:/tmp/procurement_release_metadata.py || recovery_ok=0
           docker cp "$release_dir/metadata.json" frappe_docker-backend-1:/tmp/procurement-metadata-receipt.json || recovery_ok=0
+          docker exec --user root frappe_docker-backend-1 chown frappe:frappe /tmp/procurement-metadata-receipt.json || recovery_ok=0
           if (( recovery_ok )); then
             "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend /home/frappe/frappe-bench/env/bin/python /tmp/procurement_release_metadata.py --rollback /tmp/procurement-metadata-receipt.json > "$release_dir/metadata-rollback.json" || recovery_ok=0
           fi
@@ -294,6 +295,7 @@ verify_running_release "$new_image_id" "$branding_sha" "$crm_sha" "$finance_sha"
 docker cp "$build_dir/deploy/production/procurement_release_metadata.py" frappe_docker-backend-1:/tmp/procurement_release_metadata.py
 docker cp "$build_dir/deeplinkerp_branding/deeplinkerp_branding/page/purchase_payables/purchase_payables.json" frappe_docker-backend-1:/tmp/purchase-payables.json
 docker cp "$release_dir/before.json" frappe_docker-backend-1:/tmp/procurement-before-audit.json
+docker exec --user root frappe_docker-backend-1 chown frappe:frappe /tmp/procurement-before-audit.json
 # Create only the missing Page and reconcile Buying; never reload existing Page roles.
 "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend /home/frappe/frappe-bench/env/bin/python /tmp/procurement_release_metadata.py --apply /tmp/purchase-payables.json --before-audit /tmp/procurement-before-audit.json > "$release_dir/metadata.json"
 if [[ -n "$crm_archive" ]]; then

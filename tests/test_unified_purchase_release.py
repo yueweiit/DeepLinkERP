@@ -186,6 +186,16 @@ capture_release_audit after "$build_dir/after.json"
 				self.assertIn("--release-manifest /tmp/release-source-manifest.json", output)
 				self.assertIn("--phase " + phase, output)
 
+	def test_private_metadata_inputs_are_owned_by_frappe_before_apply_or_rollback(self):
+		source = self.release_source()
+		for filename, action in (("procurement-before-audit.json", "--apply /tmp/purchase-payables.json"),
+		                         ("procurement-metadata-receipt.json", "--rollback /tmp/procurement-metadata-receipt.json")):
+			with self.subTest(filename=filename):
+				owner = "docker exec --user root frappe_docker-backend-1 chown frappe:frappe /tmp/" + filename
+				self.assertIn(owner, source)
+				self.assertLess(source.index(owner), source.index(action))
+				self.assertNotIn("chmod 644 /tmp/" + filename, source)
+
 	def test_release_source_manifest_accepts_expected_new_file_and_version(self):
 		with tempfile.TemporaryDirectory() as tmp:
 			root = Path(tmp)
