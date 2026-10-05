@@ -67,7 +67,7 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		self.assertIsNotNone(rule, "Only the classic PO menu should override the global right anchor")
 		self.assertRegex(rule.group(1), r"left:\s*0\s*;")
 		self.assertRegex(rule.group(1), r"right:\s*auto\s*;")
-		self.assertIn("/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.14", hooks.app_include_css)
+		self.assertIn("/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.15", hooks.app_include_css)
 
 	def test_header_and_rows_do_not_distribute_extra_width_between_columns(self):
 		css = (

@@ -112,17 +112,14 @@ def execute():
         receipt_item = receipt_preview["document"]["items"][0]
         assert receipt_item["max_qty"] == 6
         receipt_draft = actions.save_document_draft("Purchase Order", po.name, "Purchase Receipt",
-            {"items": [{"key": receipt_item["key"], "qty": 2}]}, str(uuid.uuid4()))["document"]
+            {"items": [{"key": receipt_item["key"], "qty": 2}]}, str(uuid.uuid4()), allow_another_draft=1)["document"]
         assert receipt_draft["docstatus"] == 0 and receipt_draft["grand_total"] == 2000
         assert frappe.db.get_value("Purchase Order", po.name, "per_received") == 40
-        assert receipt_draft["allowed_actions"] == []
-        try:
-            actions.submit_document("Purchase Receipt", receipt_draft["name"], receipt_draft["modified"])
-        except frappe.ValidationError:
-            pass
-        else:
-            raise AssertionError("Drawer must not submit a stock receipt")
-        results.append("native remaining receipt draft preserves stock submission boundary")
+        assert receipt_draft["allowed_actions"] == ["Submit"]
+        received = actions.submit_document("Purchase Receipt", receipt_draft["name"], receipt_draft["modified"], request_id=str(uuid.uuid4()))
+        assert received["document"]["docstatus"] == 1
+        assert frappe.db.get_value("Purchase Order", po.name, "per_received") == 60
+        results.append("explicit native receipt submission consumes remaining quantity once")
         changed = actions.save_document_draft("Purchase Receipt", pr.name, "Purchase Invoice",
             {"items": [{"key": item["key"], "qty": 2}]}, str(uuid.uuid4()),
             target_name=draft["name"], expected_modified=draft["modified"])["document"]

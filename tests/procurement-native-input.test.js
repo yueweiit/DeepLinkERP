@@ -51,7 +51,7 @@ test('one native parent with multiple PO item joins resumes its unique receipt d
  const previews=h.requests.filter(r=>r.method.endsWith('.preview_document'));
  assert.equal(previews.length,1);assert.equal(previews[0].args.target_name,'PR-ONE');
  assert.equal(h.requests[0].args.distinct,undefined,'do not invent unsupported native get_list options');
- assert.doesNotMatch(h.html(),/已有 2 张/);
+ assert.doesNotMatch(h.html(),/2 张可见入库草稿/);
 });
 test('payable entry selects its clicked native invoice and ignores other invoice drafts on the source',async()=>{
  const h=harness({chain:{can_create:true,company:'C',supplier:'S',balances:[],payments:[{name:'OTHER-DRAFT',docstatus:0,payment_type:'Pay',references:[{doctype:'Purchase Invoice',name:'PI-FIRST'}]}],invoices:[{name:'PI-FIRST',can_pay:true,outstanding:100,currency:'USD'},{name:'PI-CLICKED',can_pay:true,outstanding:250,currency:'CNY'}]}});
@@ -68,7 +68,7 @@ test('multiple unique native receipt drafts keep sorted unique choices without g
  const h=harness({drafts:[{name:'PR-NEW',modified:'v2'},{name:'PR-NEW',modified:'v2'},{name:'PR-OLD',modified:'v1'}]});
  await h.api.documentDrawer('Purchase Order','PO','Purchase Receipt');
  assert.equal(h.requests.length,1);
- const html=h.html();assert.match(html,/已有 2 张/);assert.equal((html.match(/data-target="PR-NEW"/g)||[]).length,1);assert.ok(html.indexOf('data-target="PR-NEW"')<html.indexOf('data-target="PR-OLD"'));
+ const html=h.html();assert.match(html,/2 张可见入库草稿/);assert.equal((html.match(/data-target="PR-NEW"/g)||[]).length,1);assert.ok(html.indexOf('data-target="PR-NEW"')<html.indexOf('data-target="PR-OLD"'));
 });
 test('native default Float precision3 accepts qty0.004 while drawer display is only2',async()=>{
  const h=harness();await h.api.documentDrawer('Purchase Receipt','PR','Purchase Invoice');

@@ -39,7 +39,7 @@ test("design-specific header labels and widths keep the desktop table within 170
 	production("mount")(list, env);
 	const header = list.get_header_html();
 	for (const label of ["采购订单号", "供应商名称", "订单状态", "订单金额", "已付 / 核销", "订单未付"]) assert.ok(header.includes(label));
-	assert.ok(header.includes("166px 190px 140px 140px 140px 70px 120px 112px"), "approved primary columns fit without all optional fields");
+	assert.ok(header.includes("166px 190px 140px 140px 140px 70px 120px 176px"), "approved primary columns fit without all optional fields");
 });
 
 test("export includes visible columns in order and account currency, without any page limit", () => {
