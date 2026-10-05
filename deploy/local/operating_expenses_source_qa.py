@@ -5,6 +5,7 @@ worktree on PYTHONPATH. This fixture never reads a real cashier database.
 """
 
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -35,7 +36,9 @@ def main():
 	import uvicorn
 
 	db.init_db()
-	stamp = "2026-10-01T00:00:00Z"
+	# A newly built source must be newer than the ERP's prior incremental
+	# watermark. Business dates below remain fixed for repeatable assertions.
+	stamp = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 	storage = data / "storage"
 	storage.mkdir(exist_ok=True)
 	proofs = {

@@ -1,5 +1,6 @@
 """Bootstrap only the isolated operating-expenses QA site; never create postings."""
 
+import argparse
 import json
 import runpy
 
@@ -78,11 +79,39 @@ def seed_browser_data():
 		"payment_entries": frappe.db.count("Payment Entry")}
 
 
+def seed_restricted_browser_user():
+	"""Create a synthetic company-limited user for actual browser acceptance."""
+	if frappe.local.site != QA_SITE or frappe.conf.db_host != "db":
+		raise RuntimeError("Restricted browser fixtures require the dedicated local QA site")
+	frappe.set_user("Administrator")
+	frappe.flags.mute_emails = True
+	if frappe.db.count("GL Entry") or frappe.db.count("Payment Entry"):
+		raise RuntimeError("Expected an unposted, dedicated QA site")
+	email = "operating-browser-china@example.invalid"
+	created = not frappe.db.exists("User", email)
+	if created:
+		frappe.get_doc({"doctype": "User", "email": email, "first_name": "QA China Finance",
+			"send_welcome_email": 0, "enabled": 1, "language": "zh",
+			"new_password": "operating-company-qa-only", "roles": [{"role": "Accounts User"}]}).insert()
+	filters = {"user": email, "allow": "Company", "for_value": "QA Operating China"}
+	if not frappe.db.exists("User Permission", filters):
+		frappe.get_doc({"doctype": "User Permission", **filters,
+			"apply_to_all_doctypes": 1}).insert()
+	frappe.db.commit()
+	frappe.clear_cache(user=email)
+	return {"site": QA_SITE, "user": email, "company": "QA Operating China", "created": created,
+		"journal_entries": frappe.db.count("Journal Entry"), "gl_entries": frappe.db.count("GL Entry"),
+		"payment_entries": frappe.db.count("Payment Entry")}
+
+
 if __name__ == "__main__":
+	parser = argparse.ArgumentParser()
+	parser.add_argument("--restricted-browser-user", action="store_true")
+	args = parser.parse_args()
 	frappe.init(site=QA_SITE, sites_path=".")
 	frappe.connect()
 	try:
-		print(json.dumps(bootstrap()))
+		print(json.dumps(seed_restricted_browser_user() if args.restricted_browser_user else bootstrap()))
 	finally:
 		frappe.db.rollback()
 		frappe.destroy()
