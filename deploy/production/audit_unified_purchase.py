@@ -101,6 +101,7 @@ def capture_audit():
 		"Has Role",
 		"User Permission",
 		"Custom DocPerm",
+		"File",
 		"China Cash Flow Assignment",
 		"China Voucher Sync Issue",
 		"Company",
@@ -192,6 +193,7 @@ def main():
 	parser.add_argument("--release-manifest")
 	parser.add_argument("--phase", choices=["before", "after"])
 	parser.add_argument("--purchase-payment-page-source")
+	parser.add_argument("--procurement-metadata", action="store_true")
 	args = parser.parse_args()
 	frappe.init(site=SITE, sites_path=str(BENCH / "sites"))
 	frappe.connect()
@@ -199,6 +201,10 @@ def main():
 		if args.purchase_payment_page_source:
 			verify_purchase_payment_page(json.loads(Path(args.purchase_payment_page_source).read_text()))
 		result = capture_audit()
+		if args.procurement_metadata:
+			from procurement_release_metadata import capture
+
+			result["procurement_metadata"] = capture()
 		if args.phase:
 			assert result["maintenance_mode"] == 1, "Release audit requires maintenance mode on"
 		if args.release_manifest:

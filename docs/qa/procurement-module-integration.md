@@ -26,7 +26,7 @@ The new payables Page allows System Manager, Accounts User and Accounts Manager.
 
 Attachment upload, binding and listing preserve the finance boundary. Procurement cannot begin a financial upload session or list PE attachments. Real HTTP downloads return 200 for finance and 403 for procurement, including after native submission. No bank-account read scope or role/user assignment is added.
 
-Production custom DocPerm, user-role and User Permission assignments, including Nelly, could not be inspected because production SSH authentication was unavailable. No shared production permission or user assignment has been changed. Any necessary permission change must first identify affected roles, users and companies for the release owner to approve.
+Production custom DocPerm, user roles and company scope were subsequently inspected read-only after normal SSH authentication recovered. Four pure procurement users have no PI/PE mutation capability; Nelly retains finance capabilities and 14 companies. No shared production permission or user assignment has been changed.
 
 ## Reuse and changes
 
@@ -34,7 +34,7 @@ Recovered task-3 work was read and copied serially into this independently regis
 
 Reused: compact list paging/filter/sort/selection/viewport support; Sales' detail table; `_RecordReader`, `_read`, `_source_links`, `_invoice_row` and native `invoice_balance`; existing payment drawer, draft continuation, company/workflow checks, request idempotency and return context; native FileUploader, private File lifecycle and attachment-copy API. There is no second compact engine, balance formula, ledger, permission allocator, payment drawer or file storage.
 
-Final cumulative source/test diff against c4, excluding this report: **26 files, +1493 / -188 lines**; product/configuration/translations **+881 / -166**, tests/guarded QA **+612 / -22**. Nine source/test files are added and seventeen modified; none are deleted.
+Final cumulative source/test/release-tool diff against c4, excluding this report: **32 files, +2469 / -199 lines**; product/configuration/translations **+1122 / -166**, tests/guarded QA **+1095 / -31**, release tooling/CI **+252 / -2**. Eleven files are added and twenty-one modified; none are deleted. New-file formatting accounts for part of the extra lines; legacy whole-file reformatting was removed. The new metadata helper and five unit methods (ten parameterized subcases) verify allowed differences, preserved identities, strict business equality and precise recovery instead of weakening the audit.
 
 The recovered procurement portion before attachments changed **21 source/test files, +893 / -147 lines**: product/configuration/translations **+576 / -136**, tests/guarded native QA **+317 / -11**. It added six files and changed fifteen. The former Sales-specific table-render loop was removed for the shared renderer.
 
@@ -98,9 +98,13 @@ They also remain at `../evidence/deliverables/`. The finance image is updated to
 
 ## Release conditions and debt
 
-The release owner must obtain explicit deployment authorization, restore the authorized production SSH identity and run the existing strict source/business/permission audit, backup and frozen-image rollback process against the final candidate. No deployment is claimed here.
+The user has explicitly authorized procurement and attachments to deploy together. Existing documented SSH authentication now succeeds, with no secret read or new credential. The production release has not yet cut over at this report revision.
 
-The cached synthetic QA image lacks Git metadata for China Finance and CRM; their exact requested revisions `4f019f91` / `b0a9c211` are therefore not claimed as verified. This candidate changes branding only and leaves those application sources untouched. Their production revisions still need the release owner's legitimate read-only audit.
+Production read-only preflight confirms all six services at branding `c4ea01e`, Finance `4f019f91f36aa549df1854d2df0b60e20c01751c` and CRM `b0a9c211f234e3751cdd2e0bb0bac36fe726b45f`. Runtime source hashes match the protected commits; two existing Finance test-file differences and three CRM test-file differences are preserved, not overlaid. All tracked branding files match c4; existing AppleDouble/build outputs are retained. Four pure procurement users cannot create/write/submit/cancel/delete PI or PE. Nelly retains finance capabilities and all 14 companies. No shared role change is needed.
+
+Release preparation reuses the existing exclusive lock, full database/files backup, frozen image, six-service cutover and strict source/business/configuration audit. It adds only the missing standard Page through Frappe's native importer; existing Pages are verified without reload. The exact Buying metadata receipt retains existing child IDs/custom entries, freezes all other navigation and Has Role rows, verifies a second reconcile writes nothing and supports exact restoration. A stale pre-existing Buying report link is preserved; new canonical targets are checked before saving. Seven native synthetic metadata scenarios and 28 release unit tests pass, with the original synthetic database restored.
+
+Final local checks after release preparation: 229 Node, 333 Python plus 59 subtests, and 68 configuration/release tests pass. All new files pass the repository pre-commit configuration. The c4 baseline and candidate each have the same eight Ruff diagnostics; baseline whole-file formatting and ESLint failures also reproduce. Broad legacy reformatting is removed. Final CI statuses must be reported individually rather than called all green; the default branch API reports no protection, and no required check is bypassed.
 
 Remaining debt: permission/source filtering currently evaluates candidate invoices before pagination to keep counts exact; it follows the existing reader and bulk preload pattern but scales with candidate count. Shared/cross-currency/return/mismatched/orphan invoice settlement deliberately shows an uncertainty notice instead of invented PO allocation. Complex accounting remains in native forms. Some older untouched native ERP labels retain their previous localization. No unrelated finance redesign or permission migration is introduced.
 

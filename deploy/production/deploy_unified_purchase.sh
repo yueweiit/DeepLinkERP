@@ -58,6 +58,7 @@ root = Path(sys.argv[1])
 finance_files = {'services/cash_flow_assignment.py', 'services/voucher.py', 'tests/test_cancellation_sync.py',
                  'tests/test_cancellation_sync_concurrency.py', 'translations/zh.csv'}
 deploy_files = {'deploy/production/deploy_unified_purchase.sh', 'deploy/production/audit_unified_purchase.py',
+		        'deploy/production/procurement_release_metadata.py',
                 'deploy/local/Dockerfile.unified-purchase'}
 archives = []
 manifest = None
@@ -160,13 +161,15 @@ release_dir="private/release-evidence/unified-purchase-$release_key"
 mkdir -p private/release-evidence
 mkdir "$release_dir" # Refuse an ambiguous repeated cutover; retain previous evidence.
 cp compose.custom.yaml "$release_dir/compose.before.yaml"
-audit_args=(--purchase-payment-page-source /tmp/purchase-payment-records.json)
+audit_args=(--purchase-payment-page-source /tmp/purchase-payment-records.json --procurement-metadata)
 if [[ -f "$build_dir/release-source-manifest.json" ]]; then
   chmod 644 "$build_dir/release-source-manifest.json"
   audit_args+=(--release-manifest /tmp/release-source-manifest.json)
 fi
 # The private release umask is right for backups, not for a script copied as root to a non-root container.
 chmod 644 "$build_dir/deploy/production/audit_unified_purchase.py"
+chmod 644 "$build_dir/deploy/production/procurement_release_metadata.py"
+chmod 644 "$build_dir/deeplinkerp_branding/deeplinkerp_branding/page/purchase_payables/purchase_payables.json"
 chmod 644 "$build_dir/deeplinkerp_branding/deeplinkerp_branding/page/purchase_payment_records/purchase_payment_records.json"
 new_image="deeplinkerp-custom:unified-purchase-$release_key"
 frozen_base="deeplinkerp-custom:unified-base-$release_key"
@@ -188,6 +191,7 @@ Path(sys.argv[3], 'compose.rollback.yaml').write_text(source.replace(sys.argv[1]
 PY
 capture_release_audit() {
   docker cp "$build_dir/deploy/production/audit_unified_purchase.py" frappe_docker-backend-1:/tmp/audit-unified-purchase.py || return 1
+  docker cp "$build_dir/deploy/production/procurement_release_metadata.py" frappe_docker-backend-1:/tmp/procurement_release_metadata.py || return 1
   docker cp "$build_dir/deeplinkerp_branding/deeplinkerp_branding/page/purchase_payment_records/purchase_payment_records.json" frappe_docker-backend-1:/tmp/purchase-payment-records.json || return 1
   if [[ -f "$build_dir/release-source-manifest.json" ]]; then
     docker cp "$build_dir/release-source-manifest.json" frappe_docker-backend-1:/tmp/release-source-manifest.json || return 1
@@ -226,6 +230,13 @@ recover() {
           test "$(docker inspect "frappe_docker-$service-1" --format '{{.Image}}')" = "$old_image_id" || recovery_ok=0
           test "$(docker inspect "frappe_docker-$service-1" --format '{{.State.Running}}')" = true || recovery_ok=0
         done
+        if [[ -s "$release_dir/metadata.json" ]]; then
+          docker cp "$build_dir/deploy/production/procurement_release_metadata.py" frappe_docker-backend-1:/tmp/procurement_release_metadata.py || recovery_ok=0
+          docker cp "$release_dir/metadata.json" frappe_docker-backend-1:/tmp/procurement-metadata-receipt.json || recovery_ok=0
+          if (( recovery_ok )); then
+            "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend /home/frappe/frappe-bench/env/bin/python /tmp/procurement_release_metadata.py --rollback /tmp/procurement-metadata-receipt.json > "$release_dir/metadata-rollback.json" || recovery_ok=0
+          fi
+        fi
         "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend bench --site deeplinkerp.com clear-cache || recovery_ok=0
       fi
     fi
@@ -280,6 +291,11 @@ switched=1
 "${dc[@]}" config --quiet
 "${dc[@]}" up -d --no-deps "${services[@]}"
 verify_running_release "$new_image_id" "$branding_sha" "$crm_sha" "$finance_sha"
+docker cp "$build_dir/deploy/production/procurement_release_metadata.py" frappe_docker-backend-1:/tmp/procurement_release_metadata.py
+docker cp "$build_dir/deeplinkerp_branding/deeplinkerp_branding/page/purchase_payables/purchase_payables.json" frappe_docker-backend-1:/tmp/purchase-payables.json
+docker cp "$release_dir/before.json" frappe_docker-backend-1:/tmp/procurement-before-audit.json
+# Create only the missing Page and reconcile Buying; never reload existing Page roles.
+"${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend /home/frappe/frappe-bench/env/bin/python /tmp/procurement_release_metadata.py --apply /tmp/purchase-payables.json --before-audit /tmp/procurement-before-audit.json > "$release_dir/metadata.json"
 if [[ -n "$crm_archive" ]]; then
   # Register only the new empty capability metadata; do not run unrelated app migrations.
   "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend bench --site deeplinkerp.com reload-doc crm_integration doctype sales_production_release_permission
@@ -290,11 +306,14 @@ fi
 capture_release_audit after "$release_dir/after.json"
 python3 - "$release_dir" "$build_dir" <<'PY'
 import json
+import runpy
 import sys
 from pathlib import Path
 root = Path(sys.argv[1])
 before = json.loads((root / 'before.json').read_text())
 after = json.loads((root / 'after.json').read_text())
+metadata = runpy.run_path(str(Path(sys.argv[2], 'deploy/production/procurement_release_metadata.py')))
+metadata['verify_audit_delta'](before, after, json.loads((root / 'metadata.json').read_text()))
 manifest_path = Path(sys.argv[2], 'release-source-manifest.json')
 if manifest_path.exists():
     manifest = json.loads(manifest_path.read_text())

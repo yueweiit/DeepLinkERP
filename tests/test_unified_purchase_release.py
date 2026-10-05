@@ -69,7 +69,9 @@ class ReleaseRecoveryTests(unittest.TestCase):
 			return page["roles"] if raw_roles is None else raw_roles
 
 		module = self.audit_module(
-			types.SimpleNamespace(get_doc=get_doc, DoesNotExistError=LookupError, db=types.SimpleNamespace(sql=sql))
+			types.SimpleNamespace(
+				get_doc=get_doc, DoesNotExistError=LookupError, db=types.SimpleNamespace(sql=sql)
+			)
 		)
 		self.assertTrue("verify_purchase_payment_page" in module, "Read-only Page verification is required")
 		return module["verify_purchase_payment_page"]
@@ -81,7 +83,9 @@ class ReleaseRecoveryTests(unittest.TestCase):
 		verify(source)
 		verify(source)
 		self.assertEqual(json.dumps(page, sort_keys=True), before)
-		self.assertEqual([role["name"] for role in page["roles"]], [f"existing-child-{i}" for i in range(1, 6)])
+		self.assertEqual(
+			[role["name"] for role in page["roles"]], [f"existing-child-{i}" for i in range(1, 6)]
+		)
 
 	def test_purchase_payment_page_verification_rejects_missing_page(self):
 		source, _ = self.purchase_payment_page_fixture()
@@ -104,9 +108,19 @@ class ReleaseRecoveryTests(unittest.TestCase):
 	def test_purchase_payment_page_verification_rejects_metadata_and_permission_drift(self):
 		source, original = self.purchase_payment_page_fixture()
 		for scenario in (
-			"doctype", "name", "module", "title", "standard",
-			"missing-role", "extra-role", "role", "role-order",
-			"parent", "parenttype", "parentfield", "idx",
+			"doctype",
+			"name",
+			"module",
+			"title",
+			"standard",
+			"missing-role",
+			"extra-role",
+			"role",
+			"role-order",
+			"parent",
+			"parenttype",
+			"parentfield",
+			"idx",
 		):
 			with self.subTest(scenario=scenario):
 				page = json.loads(json.dumps(original))
@@ -132,7 +146,8 @@ class ReleaseRecoveryTests(unittest.TestCase):
 		)
 		self.assertIn("reload-doc crm_integration doctype sales_production_release_permission", source)
 		self.assertLess(
-			source.index('capture_release_audit before "$release_dir/before.json"'), source.index("switched=1")
+			source.index('capture_release_audit before "$release_dir/before.json"'),
+			source.index("switched=1"),
 		)
 		self.assertLess(
 			source.index('capture_release_audit after "$release_dir/after.json"'),
@@ -141,7 +156,9 @@ class ReleaseRecoveryTests(unittest.TestCase):
 		page_path = "deeplinkerp_branding/deeplinkerp_branding/page/purchase_payment_records/purchase_payment_records.json"
 		self.assertIn(f'chmod 644 "$build_dir/{page_path}"', source)
 		args = source.split("audit_args=", 1)[1].split("\n# The private release umask", 1)[0]
-		mock = self.shell_function("capture_release_audit") + f"""
+		mock = (
+			self.shell_function("capture_release_audit")
+			+ f"""
 build_dir="$1"
 dc=(docker compose)
 audit_args={args}
@@ -149,13 +166,18 @@ docker() {{ printf '%s\\n' "$*"; }}
 capture_release_audit before "$build_dir/before.json"
 capture_release_audit after "$build_dir/after.json"
 """
+		)
 		with tempfile.TemporaryDirectory() as tmp:
 			root = Path(tmp)
 			(root / "release-source-manifest.json").write_text('{"apps": {}}')
-			result = subprocess.run(["bash", "-c", mock, "page-release-test", tmp], capture_output=True, text=True)
+			result = subprocess.run(
+				["bash", "-c", mock, "page-release-test", tmp], capture_output=True, text=True
+			)
 			self.assertEqual(result.returncode, 0, result.stderr)
 			self.assertEqual(
-				result.stdout.count(f"cp {tmp}/{page_path} frappe_docker-backend-1:/tmp/purchase-payment-records.json"),
+				result.stdout.count(
+					f"cp {tmp}/{page_path} frappe_docker-backend-1:/tmp/purchase-payment-records.json"
+				),
 				2,
 			)
 			for phase in ("before", "after"):
@@ -340,6 +362,25 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 		code = source.split('python3 - "$release_dir" "$build_dir" <<\'PY\'\n', 1)[1].split("\nPY", 1)[0]
 		with tempfile.TemporaryDirectory() as tmp:
 			root = Path(tmp)
+			metadata = {
+				"scope": {"Page": [{"name": "purchase-payables"}], "Has Role": []},
+				"outside": {"Has Role": before["tables"]["Has Role"]},
+			}
+			before = dict(before, procurement_metadata=metadata)
+			after = dict(after, procurement_metadata=metadata)
+			receipt = {
+				"semantic_validated": True,
+				"second_reconcile_unchanged": True,
+				"new_page": False,
+				"before": metadata,
+				"after": metadata,
+			}
+			(root / "metadata.json").write_text(json.dumps(receipt))
+			deployment = root / "deploy/production"
+			deployment.mkdir(parents=True)
+			(deployment / "procurement_release_metadata.py").write_text(
+				(Path(__file__).parents[1] / "deploy/production/procurement_release_metadata.py").read_text()
+			)
 			(root / "before.json").write_text(json.dumps(before))
 			(root / "after.json").write_text(json.dumps(after))
 			(root / "release-source-manifest.json").write_text(json.dumps(manifest))
