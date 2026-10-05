@@ -1,6 +1,7 @@
 """Bootstrap only the isolated operating-expenses QA site; never create postings."""
 
 import argparse
+import hashlib
 import json
 import runpy
 
@@ -104,14 +105,61 @@ def seed_restricted_browser_user():
 		"payment_entries": frappe.db.count("Payment Entry")}
 
 
+def seed_joint_purchase_draft():
+	"""One identifiable order to verify merged shared drawers, without posting."""
+	if frappe.local.site != QA_SITE or frappe.conf.db_host != "db":
+		raise RuntimeError("Joint purchase fixtures require the dedicated local QA site")
+	if frappe.db.count("GL Entry") or frappe.db.count("Payment Entry"):
+		raise RuntimeError("Expected an unposted, dedicated QA site")
+	frappe.set_user("Administrator")
+	frappe.flags.mute_emails = True
+
+	def preserved():
+		return {
+			dt: hashlib.sha256(
+				json.dumps(
+					frappe.db.sql(f"select * from `tab{dt}` order by name", as_dict=True),
+					sort_keys=True,
+					default=str,
+				).encode()
+			).hexdigest()
+			for dt in (
+				"Journal Entry", "Journal Entry Account", "Operating Expense Source",
+				"Operating Expense Event", "GL Entry", "Payment Entry",
+			)
+		}
+
+	before = preserved()
+	item, name = "QA-JOINT-PO-ITEM", "QA-JOINT-PO-01"
+	created = not frappe.db.exists("Purchase Order", name)
+	if not frappe.db.exists("Item", item):
+		frappe.get_doc({"doctype": "Item", "item_code": item, "item_name": "QA 联合采购验收",
+			"item_group": "All Item Groups", "stock_uom": "Nos", "is_stock_item": 0}).insert()
+	if created:
+		from frappe.utils import add_days, nowdate
+		frappe.get_doc({"doctype": "Purchase Order", "company": "QA Operating China",
+			"supplier": "QA Operating Supplier", "currency": "CNY", "conversion_rate": 1,
+			"transaction_date": nowdate(), "schedule_date": add_days(nowdate(), 7),
+			"items": [{"item_code": item, "qty": 2, "rate": 50,
+				"schedule_date": add_days(nowdate(), 7)}]}).insert(set_name=name)
+	assert frappe.db.get_value("Purchase Order", name, "docstatus") == 0
+	assert before == preserved(), "Joint UI fixture changed protected QA finance/source rows"
+	frappe.db.commit()
+	return {"site": QA_SITE, "order": name, "created": created, "docstatus": 0,
+		"protected_unchanged": True, "gl_entries": 0, "payment_entries": 0}
+
+
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser()
 	parser.add_argument("--restricted-browser-user", action="store_true")
+	parser.add_argument("--joint-purchase-draft", action="store_true")
 	args = parser.parse_args()
 	frappe.init(site=QA_SITE, sites_path=".")
 	frappe.connect()
 	try:
-		print(json.dumps(seed_restricted_browser_user() if args.restricted_browser_user else bootstrap()))
+		operation = (seed_joint_purchase_draft if args.joint_purchase_draft else
+			seed_restricted_browser_user if args.restricted_browser_user else bootstrap)
+		print(json.dumps(operation()))
 	finally:
 		frappe.db.rollback()
 		frappe.destroy()
