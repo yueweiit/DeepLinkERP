@@ -160,6 +160,8 @@ cd /home/yuewei/ERPNext-Docker/frappe_docker
 exec 9>/tmp/deeplinkerp-erp-release.lock
 flock -n 9 || { echo 'Another ERP release owns the lock'; exit 1; }
 dc=(docker compose -p frappe_docker -f compose.custom.yaml)
+# Parse supported staging flags before building or enabling maintenance.
+"${dc[@]}" up --no-start --force-recreate --no-deps --help > /dev/null
 services=(backend frontend queue-long queue-short scheduler websocket)
 build_dir=$(mktemp -d /tmp/unified-purchase-build.XXXXXX)
 prepare_sources
@@ -256,7 +258,7 @@ recover() {
         fi
         if (( recovery_ok )); then
           "${dc[@]}" up -d --no-deps backend frontend websocket || recovery_ok=0
-          "${dc[@]}" create --force-recreate --no-deps queue-long queue-short scheduler || recovery_ok=0
+          "${dc[@]}" up --no-start --force-recreate --no-deps queue-long queue-short scheduler || recovery_ok=0
         fi
         for service in "${services[@]}"; do
           test "$(docker inspect "frappe_docker-$service-1" --format '{{.Image}}')" = "$old_image_id" || recovery_ok=0
@@ -357,7 +359,7 @@ cp "$release_dir/compose.after.yaml" compose.custom.yaml
 switched=1
 "${dc[@]}" config --quiet
 "${dc[@]}" up -d --no-deps backend frontend websocket
-"${dc[@]}" create --force-recreate --no-deps queue-long queue-short scheduler
+"${dc[@]}" up --no-start --force-recreate --no-deps queue-long queue-short scheduler
 verify_staged_release "$new_image_id" "$branding_sha" "$crm_sha" "$finance_sha"
 docker cp "$build_dir/deploy/production/procurement_release_metadata.py" frappe_docker-backend-1:/tmp/procurement_release_metadata.py
 docker cp "$build_dir/deeplinkerp_branding/deeplinkerp_branding/page/purchase_payables/purchase_payables.json" frappe_docker-backend-1:/tmp/purchase-payables.json

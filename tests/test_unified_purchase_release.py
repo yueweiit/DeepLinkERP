@@ -1,9 +1,11 @@
-"""Exercise only the shell recovery function with mocks; never invoke a release."""
+"""Test isolated recovery and native CLI parsing; never invoke a release."""
 
 import hashlib
 import io
 import json
 import runpy
+import shlex
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -17,6 +19,36 @@ from unittest.mock import patch
 class ReleaseRecoveryTests(unittest.TestCase):
 	def release_source(self):
 		return (Path(__file__).parents[1] / "deploy/production/deploy_unified_purchase.sh").read_text()
+
+	def worker_staging_commands(self):
+		return [
+			shlex.split(line.strip())[1:]
+			for line in self.release_source().splitlines()
+			if line.strip().startswith('"${dc[@]}"')
+			and "queue-long queue-short scheduler" in line
+			and shlex.split(line.strip())[1] in {"create", "up"}
+		]
+
+	def test_worker_staging_never_starts_jobs_and_checks_cli_before_maintenance(self):
+		commands = self.worker_staging_commands()
+		self.assertEqual(len(commands), 2, "Both forward cutover and recovery must stage stopped workers")
+		for command in commands:
+			self.assertEqual(command[0], "up", "Compose create does not support --no-deps")
+			for flag in ("--no-start", "--force-recreate", "--no-deps"):
+				self.assertIn(flag, command)
+		source = self.release_source()
+		preflight = '"${dc[@]}" up --no-start --force-recreate --no-deps --help > /dev/null'
+		self.assertIn(preflight, source)
+		self.assertLess(source.index(preflight), source.index("set-maintenance-mode on"))
+
+	@unittest.skipUnless(shutil.which("docker"), "Docker CLI is unavailable; semantic guard still runs")
+	def test_worker_staging_flags_are_accepted_by_actual_compose_parser(self):
+		for command in self.worker_staging_commands():
+			with self.subTest(command=command):
+				# --help validates native flags but does not load a site or contact Docker's daemon.
+				args = command[:command.index("queue-long")]
+				result = subprocess.run(["docker", "compose", *args, "--help"], capture_output=True, text=True)
+				self.assertEqual(result.returncode, 0, result.stderr)
 
 	def shell_function(self, name):
 		source = self.release_source()
@@ -727,8 +759,7 @@ docker() {{
     inspect*crm.revision*) printf '%s' "$current_crm" ;;
     inspect*finance.revision*) printf '%s' "$current_finance" ;;
     'compose stop '*) workers_running=0; printf 'QUIESCENT\\n' ;;
-    'compose create '*) workers_running=0; printf 'CREATE STOPPED\\n' ;;
-    'compose up '*) case "$*" in *queue-long*) workers_running=1;; esac; printf 'UP\\n'; return {up_status} ;;
+    'compose up '*) case "$*" in *--no-start*) workers_running=0; printf 'STAGE STOPPED\\n';; *) case "$*" in *queue-long*) workers_running=1;; esac; printf 'UP\\n';; esac; return {up_status} ;;
     *'backend test -s '*) return 1 ;;
     cp*) printf 'DOCKER %s\\n' "$*"; return {copy_status} ;;
     *'/env/bin/python /tmp/audit-unified-purchase.py'*)
