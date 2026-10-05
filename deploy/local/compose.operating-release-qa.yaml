@@ -1,0 +1,43 @@
+# Isolated metadata/DDL rehearsal. Base package must be a frozen pre-operating
+# checkout; replace it with the reviewed candidate only after site bootstrap.
+services:
+  db:
+    image: mariadb:11.8
+    environment:
+      MARIADB_ROOT_PASSWORD: operating-release-local-only
+    command: [--character-set-server=utf8mb4, --collation-server=utf8mb4_unicode_ci]
+    volumes:
+      - operating-release-db:/var/lib/mysql
+    healthcheck:
+      test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
+      interval: 3s
+      retries: 40
+  redis:
+    image: redis:8-alpine
+  backend:
+    image: deeplinkerp-local:procurement-nav-20261005
+    command: [sleep, infinity]
+    working_dir: /home/frappe/frappe-bench
+    volumes:
+      - operating-release-sites:/home/frappe/frappe-bench/sites
+      - ${OPERATING_RELEASE_QA_PACKAGE:?Frozen QA package path required}:/home/frappe/frappe-bench/apps/deeplinkerp_branding/deeplinkerp_branding
+      - ../..:/workspace:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+  worker:
+    profiles: [qa-worker]
+    image: deeplinkerp-local:procurement-nav-20261005
+    command: [bench, worker, --queue, "default,short,long"]
+    working_dir: /home/frappe/frappe-bench
+    volumes:
+      - operating-release-sites:/home/frappe/frappe-bench/sites
+      - ${OPERATING_RELEASE_QA_PACKAGE:?Frozen QA package path required}:/home/frappe/frappe-bench/apps/deeplinkerp_branding/deeplinkerp_branding
+    depends_on:
+      - backend
+      - redis
+volumes:
+  operating-release-sites:
+  operating-release-db:
