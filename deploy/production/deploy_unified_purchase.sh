@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Serialized app release. Optional CRM and Finance overlays use a source-drift manifest.
+# Serialized bounded joint release; the frozen base retains CRM and Finance.
 set -euo pipefail
 umask 077
 archive=${1:?Committed source archive required}
@@ -10,6 +10,8 @@ crm_archive=${5:-}
 crm_sha=${6:-}
 finance_archive=${7:-}
 finance_sha=${8:-}
+# This frozen joint release retains the already-deployed CRM/Finance packages.
+[[ -z "$crm_archive" && -z "$finance_archive" ]] || { echo 'Joint release forbids additional app overlays' >&2; exit 1; }
 if [[ -n "$crm_archive" ]]; then
   [[ "$crm_sha" =~ ^[0-9a-f]{40}$ ]]
   [[ "$crm_archive" == /tmp/deeplinkerp-sales-crm-*.tar.gz ]]
@@ -46,6 +48,28 @@ release_is_current() {
   image_id=$(docker inspect frappe_docker-backend-1 --format '{{.Image}}') || return 1
   verify_running_release "$image_id" "$branding_sha" "$crm_sha" "$finance_sha"
 }
+quiesce_release_workers() {
+  "${dc[@]}" stop queue-long queue-short scheduler || return 1
+  local service
+  for service in queue-long queue-short scheduler; do
+    test "$(docker inspect "frappe_docker-$service-1" --format '{{.State.Running}}')" = false || return 1
+  done
+}
+verify_staged_release() {
+  local image_id=$1 branding=$2 crm=$3 finance=$4 service running label
+  for service in "${services[@]}"; do
+    test "$(docker inspect "frappe_docker-$service-1" --format '{{.Image}}')" = "$image_id" || return 1
+    label=$(revision_label "frappe_docker-$service-1" branding) || return 1
+    test "$label" = "$branding" || return 1
+    label=$(revision_label "frappe_docker-$service-1" crm) || return 1
+    test "$label" = "$crm" || return 1
+    label=$(revision_label "frappe_docker-$service-1" finance) || return 1
+    test "$label" = "$finance" || return 1
+    running=$(docker inspect "frappe_docker-$service-1" --format '{{.State.Running}}') || return 1
+    case "$service" in queue-long|queue-short|scheduler) test "$running" = false || return 1;;
+      *) test "$running" = true || return 1;; esac
+  done
+}
 prepare_sources() {
   python3 - "$build_dir" "$archive" "$crm_archive" "$finance_archive" <<'PY'
 import hashlib
@@ -59,6 +83,7 @@ finance_files = {'services/cash_flow_assignment.py', 'services/voucher.py', 'tes
                  'tests/test_cancellation_sync_concurrency.py', 'translations/zh.csv'}
 deploy_files = {'deploy/production/deploy_unified_purchase.sh', 'deploy/production/audit_unified_purchase.py',
 		        'deploy/production/procurement_release_metadata.py',
+                'deploy/production/joint_release_guards.py',
                 'deploy/local/Dockerfile.unified-purchase'}
 archives = []
 manifest = None
@@ -158,10 +183,11 @@ release_key=${branding_sha:0:12}
 if [[ -n "$crm_archive" ]]; then release_key+="-crm-${crm_sha:0:12}"; fi
 if [[ -n "$finance_archive" ]]; then release_key+="-finance-${finance_sha:0:12}"; fi
 release_dir="private/release-evidence/unified-purchase-$release_key"
+native_receipt="/home/frappe/frappe-bench/sites/deeplinkerp.com/private/release-evidence/joint-$release_key.json"
 mkdir -p private/release-evidence
 mkdir "$release_dir" # Refuse an ambiguous repeated cutover; retain previous evidence.
 cp compose.custom.yaml "$release_dir/compose.before.yaml"
-audit_args=(--purchase-payment-page-source /tmp/purchase-payment-records.json --procurement-metadata)
+audit_args=(--purchase-payment-page-source /tmp/purchase-payment-records.json --joint-metadata)
 if [[ -f "$build_dir/release-source-manifest.json" ]]; then
   chmod 644 "$build_dir/release-source-manifest.json"
   audit_args+=(--release-manifest /tmp/release-source-manifest.json)
@@ -169,6 +195,7 @@ fi
 # The private release umask is right for backups, not for a script copied as root to a non-root container.
 chmod 644 "$build_dir/deploy/production/audit_unified_purchase.py"
 chmod 644 "$build_dir/deploy/production/procurement_release_metadata.py"
+chmod 644 "$build_dir/deploy/production/joint_release_guards.py"
 chmod 644 "$build_dir/deeplinkerp_branding/deeplinkerp_branding/page/purchase_payables/purchase_payables.json"
 chmod 644 "$build_dir/deeplinkerp_branding/deeplinkerp_branding/page/purchase_payment_records/purchase_payment_records.json"
 new_image="deeplinkerp-custom:unified-purchase-$release_key"
@@ -192,11 +219,14 @@ PY
 capture_release_audit() {
   docker cp "$build_dir/deploy/production/audit_unified_purchase.py" frappe_docker-backend-1:/tmp/audit-unified-purchase.py || return 1
   docker cp "$build_dir/deploy/production/procurement_release_metadata.py" frappe_docker-backend-1:/tmp/procurement_release_metadata.py || return 1
+  docker cp "$build_dir/deploy/production/joint_release_guards.py" frappe_docker-backend-1:/tmp/joint_release_guards.py || return 1
   docker cp "$build_dir/deeplinkerp_branding/deeplinkerp_branding/page/purchase_payment_records/purchase_payment_records.json" frappe_docker-backend-1:/tmp/purchase-payment-records.json || return 1
   if [[ -f "$build_dir/release-source-manifest.json" ]]; then
     docker cp "$build_dir/release-source-manifest.json" frappe_docker-backend-1:/tmp/release-source-manifest.json || return 1
   fi
-  "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend /home/frappe/frappe-bench/env/bin/python /tmp/audit-unified-purchase.py "${audit_args[@]}" --phase "$1" > "$2"
+  local receipt_args=()
+  if [[ "$1" == after ]]; then receipt_args=(--joint-receipt "$native_receipt"); fi
+  "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend /home/frappe/frappe-bench/env/bin/python /tmp/audit-unified-purchase.py "${audit_args[@]}" "${receipt_args[@]}" --phase "$1" > "$2"
 }
 maintenance=0
 switched=0
@@ -205,6 +235,7 @@ recover() {
   code=$?
   if (( code != 0 )); then
     recovery_ok=1
+    quiesce_release_workers || recovery_ok=0
     # Keep the shared maintenance flag on until every service has a verified frozen revision.
     maintenance_set=0
     if "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend bench --site deeplinkerp.com set-maintenance-mode on; then
@@ -224,18 +255,20 @@ recover() {
           recovery_ok=0
         fi
         if (( recovery_ok )); then
-          "${dc[@]}" up -d --no-deps "${services[@]}" || recovery_ok=0
+          "${dc[@]}" up -d --no-deps backend frontend websocket || recovery_ok=0
+          "${dc[@]}" create --force-recreate --no-deps queue-long queue-short scheduler || recovery_ok=0
         fi
         for service in "${services[@]}"; do
           test "$(docker inspect "frappe_docker-$service-1" --format '{{.Image}}')" = "$old_image_id" || recovery_ok=0
-          test "$(docker inspect "frappe_docker-$service-1" --format '{{.State.Running}}')" = true || recovery_ok=0
         done
-        if [[ -s "$release_dir/metadata.json" ]]; then
+        verify_staged_release "$old_image_id" "$current_revision" "$current_crm" "$current_finance" || recovery_ok=0
+        if "${dc[@]}" exec -T backend test -s "$native_receipt"; then
           docker cp "$build_dir/deploy/production/procurement_release_metadata.py" frappe_docker-backend-1:/tmp/procurement_release_metadata.py || recovery_ok=0
-          docker cp "$release_dir/metadata.json" frappe_docker-backend-1:/tmp/procurement-metadata-receipt.json || recovery_ok=0
-          docker exec --user root frappe_docker-backend-1 chown frappe:frappe /tmp/procurement-metadata-receipt.json || recovery_ok=0
+          docker cp "$build_dir/deploy/production/joint_release_guards.py" frappe_docker-backend-1:/tmp/joint_release_guards.py || recovery_ok=0
+          docker cp "$build_dir/deploy/production/audit_unified_purchase.py" frappe_docker-backend-1:/tmp/audit_unified_purchase.py || recovery_ok=0
           if (( recovery_ok )); then
-            "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend /home/frappe/frappe-bench/env/bin/python /tmp/procurement_release_metadata.py --rollback /tmp/procurement-metadata-receipt.json > "$release_dir/metadata-rollback.json" || recovery_ok=0
+            "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 -e DEEPLINKERP_RELEASE_QUIESCENT=1 backend /home/frappe/frappe-bench/env/bin/python /tmp/procurement_release_metadata.py --joint-rollback --receipt "$native_receipt" --candidate-sha "$branding_sha" --source-phase before > "$release_dir/metadata-rollback.json" || recovery_ok=0
+            docker cp "frappe_docker-backend-1:$native_receipt" "$release_dir/joint-receipt.json" || recovery_ok=0
           fi
         fi
         "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend bench --site deeplinkerp.com clear-cache || recovery_ok=0
@@ -253,11 +286,16 @@ import sys
 from pathlib import Path
 root = Path(sys.argv[1])
 before = json.loads((root / 'before.json').read_text())
+before.pop('approved_sources_after', None)
 rollback = json.loads((root / 'rollback.json').read_text())
 assert before == rollback, 'Restored audit differs from original baseline; maintenance retained'
 print('Restored full audit matches original baseline')
 PY
       then recovery_ok=0; fi
+    fi
+    if (( recovery_ok )); then
+      "${dc[@]}" up -d --no-deps "${services[@]}" || recovery_ok=0
+      verify_running_release "$old_image_id" "$current_revision" "$current_crm" "$current_finance" || recovery_ok=0
     fi
     if (( recovery_ok )); then
       "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend bench --site deeplinkerp.com set-maintenance-mode off || recovery_ok=0
@@ -284,24 +322,53 @@ trap recover EXIT
 "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend bench --site deeplinkerp.com set-maintenance-mode on
 maintenance=1
 "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend bench --site deeplinkerp.com ready-for-migration
+quiesce_release_workers
 "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend bench --site deeplinkerp.com backup --with-files --compress > "$release_dir/backup.log"
 capture_release_audit before "$release_dir/before.json"
 baseline_captured=1
+# Compare complete running source sets against the pinned immutable image, then
+# freeze the complete candidate Branding package and unchanged CRM/Finance sets.
+docker run --rm --read-only --network none --entrypoint /home/frappe/frappe-bench/env/bin/python "$old_image_id" -c '
+import hashlib,json
+from pathlib import Path
+result={}
+for app in ("deeplinkerp_branding","china_finance","crm_integration"):
+ root=Path("/home/frappe/frappe-bench/apps")/app/app
+ assert root.is_dir(), "Missing pinned app source: "+app
+ result[app]={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob("*")) if p.is_file() and "__pycache__" not in p.parts and p.suffix not in {".pyc",".pyo"}}
+print(json.dumps(result,sort_keys=True))
+' > "$release_dir/pinned-base-sources.json"
+python3 - "$release_dir" "$build_dir" <<'PY'
+import hashlib,json,sys
+from pathlib import Path
+evidence,build=map(Path,sys.argv[1:])
+sys.path.insert(0,str(build/'deploy/production'))
+from joint_release_guards import merge_frozen_branding_sources
+before=json.loads((evidence/'before.json').read_text())
+assert before['release_sources_all']==json.loads((evidence/'pinned-base-sources.json').read_text()), 'Running app source differs from pinned base image'
+candidate=build/'deeplinkerp_branding'
+after=dict(before['release_sources_all'])
+candidate_files={str(p.relative_to(candidate)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(candidate.rglob('*')) if p.is_file() and '__pycache__' not in p.parts and p.suffix not in {'.pyc','.pyo'}}
+after['deeplinkerp_branding']=merge_frozen_branding_sources(before['release_sources_all']['deeplinkerp_branding'],candidate_files)
+before['approved_sources_after']=after
+(evidence/'before.json').write_text(json.dumps(before,sort_keys=True,ensure_ascii=False))
+PY
 cp "$release_dir/compose.after.yaml" compose.custom.yaml
 switched=1
 "${dc[@]}" config --quiet
-"${dc[@]}" up -d --no-deps "${services[@]}"
-verify_running_release "$new_image_id" "$branding_sha" "$crm_sha" "$finance_sha"
+"${dc[@]}" up -d --no-deps backend frontend websocket
+"${dc[@]}" create --force-recreate --no-deps queue-long queue-short scheduler
+verify_staged_release "$new_image_id" "$branding_sha" "$crm_sha" "$finance_sha"
 docker cp "$build_dir/deploy/production/procurement_release_metadata.py" frappe_docker-backend-1:/tmp/procurement_release_metadata.py
 docker cp "$build_dir/deeplinkerp_branding/deeplinkerp_branding/page/purchase_payables/purchase_payables.json" frappe_docker-backend-1:/tmp/purchase-payables.json
 docker cp "$release_dir/before.json" frappe_docker-backend-1:/tmp/procurement-before-audit.json
 docker exec --user root frappe_docker-backend-1 chown frappe:frappe /tmp/procurement-before-audit.json
-# Create only the missing Page and reconcile Buying; never reload existing Page roles.
-"${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend /home/frappe/frappe-bench/env/bin/python /tmp/procurement_release_metadata.py --apply /tmp/purchase-payables.json --before-audit /tmp/procurement-before-audit.json > "$release_dir/metadata.json"
-if [[ -n "$crm_archive" ]]; then
-  # Register only the new empty capability metadata; do not run unrelated app migrations.
-  "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend bench --site deeplinkerp.com reload-doc crm_integration doctype sales_production_release_permission
-fi
+# One bounded installer, with its first fsynced receipt in the shared sites volume.
+docker cp "$build_dir/deploy/production/joint_release_guards.py" frappe_docker-backend-1:/tmp/joint_release_guards.py
+docker cp "$build_dir/deploy/production/audit_unified_purchase.py" frappe_docker-backend-1:/tmp/audit_unified_purchase.py
+"${dc[@]}" exec -T backend mkdir -p /home/frappe/frappe-bench/sites/deeplinkerp.com/private/release-evidence
+"${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 -e DEEPLINKERP_RELEASE_QUIESCENT=1 backend /home/frappe/frappe-bench/env/bin/python /tmp/procurement_release_metadata.py --joint-apply --receipt "$native_receipt" --candidate-sha "$branding_sha" --before-audit /tmp/procurement-before-audit.json > "$release_dir/metadata.json"
+docker cp "frappe_docker-backend-1:$native_receipt" "$release_dir/joint-receipt.json"
 # Frappe's lazy require cache version is the manifest mtime. Preserve its contents/bundles.
 "${dc[@]}" exec -T backend touch /home/frappe/frappe-bench/sites/assets/assets.json
 "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend bench --site deeplinkerp.com clear-cache
@@ -312,30 +379,15 @@ import runpy
 import sys
 from pathlib import Path
 root = Path(sys.argv[1])
+sys.path.insert(0,str(Path(sys.argv[2], 'deploy/production')))
 before = json.loads((root / 'before.json').read_text())
 after = json.loads((root / 'after.json').read_text())
 metadata = runpy.run_path(str(Path(sys.argv[2], 'deploy/production/procurement_release_metadata.py')))
-metadata['verify_audit_delta'](before, after, json.loads((root / 'metadata.json').read_text()))
-manifest_path = Path(sys.argv[2], 'release-source-manifest.json')
-if manifest_path.exists():
-    manifest = json.loads(manifest_path.read_text())
-    old_sources = before.pop('release_sources')
-    new_sources = after.pop('release_sources')
-    assert set(old_sources) == set(new_sources) == set(manifest['apps']), 'Unexpected audited source apps'
-    for app, files in manifest['apps'].items():
-        for path, versions in files.items():
-            assert old_sources[app].get(path) == versions['before'], f'Unexpected before source: {app}/{path}'
-            assert new_sources[app].get(path) == versions['after'], f'Unexpected after source: {app}/{path}'
-        changed = {p for p in set(old_sources[app]) | set(new_sources[app]) if old_sources[app].get(p) != new_sources[app].get(p)}
-        expected = {p for p, versions in files.items() if versions['before'] != versions['after']}
-        assert changed == expected, f'Unexpected app source changes: {app}'
-        # Remove only explicitly overlaid app digests; every other app remains in the equality audit.
-        if app in before['preserved_apps']:
-            before['preserved_apps'].pop(app)
-            after['preserved_apps'].pop(app)
-assert before == after, 'Business data, preserved apps, or asset manifest changed; release rejected'
+metadata['verify_joint_audit_delta'](before, after, json.loads((root / 'joint-receipt.json').read_text()))
 print('Business data and preserved application hashes unchanged')
 PY
+"${dc[@]}" up -d --no-deps "${services[@]}"
+verify_running_release "$new_image_id" "$branding_sha" "$crm_sha" "$finance_sha"
 "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend bench --site deeplinkerp.com set-maintenance-mode off
 maintenance=0
 for attempt in $(seq 1 90); do

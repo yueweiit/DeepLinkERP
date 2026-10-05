@@ -144,7 +144,8 @@ class ReleaseRecoveryTests(unittest.TestCase):
 			"reload-doc deeplinkerp_branding page purchase_payment_records" in source,
 			"Page reload recreates permission children",
 		)
-		self.assertIn("reload-doc crm_integration doctype sales_production_release_permission", source)
+		self.assertNotIn("reload-doc crm_integration doctype sales_production_release_permission", source)
+		self.assertIn("Joint release forbids additional app overlays", source)
 		self.assertLess(
 			source.index('capture_release_audit before "$release_dir/before.json"'),
 			source.index("switched=1"),
@@ -160,6 +161,7 @@ class ReleaseRecoveryTests(unittest.TestCase):
 			self.shell_function("capture_release_audit")
 			+ f"""
 build_dir="$1"
+native_receipt=/private/joint-receipt.json
 dc=(docker compose)
 audit_args={args}
 docker() {{ printf '%s\\n' "$*"; }}
@@ -188,13 +190,13 @@ capture_release_audit after "$build_dir/after.json"
 
 	def test_private_metadata_inputs_are_owned_by_frappe_before_apply_or_rollback(self):
 		source = self.release_source()
-		for filename, action in (("procurement-before-audit.json", "--apply /tmp/purchase-payables.json"),
-		                         ("procurement-metadata-receipt.json", "--rollback /tmp/procurement-metadata-receipt.json")):
-			with self.subTest(filename=filename):
-				owner = "docker exec --user root frappe_docker-backend-1 chown frappe:frappe /tmp/" + filename
-				self.assertIn(owner, source)
-				self.assertLess(source.index(owner), source.index(action))
-				self.assertNotIn("chmod 644 /tmp/" + filename, source)
+		owner = "docker exec --user root frappe_docker-backend-1 chown frappe:frappe /tmp/procurement-before-audit.json"
+		self.assertIn(owner, source)
+		self.assertLess(source.index(owner), source.index("--joint-apply"))
+		self.assertNotIn("chmod 644 /tmp/procurement-before-audit.json", source)
+		self.assertIn('--joint-rollback --receipt "$native_receipt"', source)
+		self.assertIn('exec -T backend mkdir -p /home/frappe/frappe-bench/sites/deeplinkerp.com/private/release-evidence', source)
+		self.assertNotIn("chmod 644 /tmp/procurement-metadata-receipt.json", source)
 
 	def test_release_source_manifest_accepts_expected_new_file_and_version(self):
 		with tempfile.TemporaryDirectory() as tmp:
@@ -345,6 +347,13 @@ verify_running_release image branding crm ''
 		)
 		result = subprocess.run(["bash", "-c", mock], capture_output=True, text=True)
 		self.assertEqual(result.returncode, 1)
+		staged = self.shell_function("revision_label") + self.shell_function("verify_staged_release") + """
+services=(backend frontend queue-long queue-short scheduler websocket)
+docker() { case "$*" in *'.Image'*) printf 'image';; *'.State.Running'*) case "$*" in *queue-long*|*queue-short*|*scheduler*) printf 'false';; *) printf 'true';; esac;; *branding.revision*) printf 'branding';; *crm.revision*) printf 'crm';; *finance.revision*) return 1;; esac; }
+verify_staged_release image branding crm ''
+"""
+		result = subprocess.run(["bash", "-c", staged], capture_output=True, text=True)
+		self.assertEqual(result.returncode, 1)
 
 	def test_empty_overlays_preserve_current_labels_including_legacy_finance(self):
 		source = self.release_source()
@@ -369,28 +378,42 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 
 	def compare_audits(self, before, after, manifest):
 		source = self.release_source()
-		code = source.split('python3 - "$release_dir" "$build_dir" <<\'PY\'\n', 1)[1].split("\nPY", 1)[0]
+		code = source.rsplit('python3 - "$release_dir" "$build_dir" <<\'PY\'\n', 1)[1].split("\nPY", 1)[0]
 		with tempfile.TemporaryDirectory() as tmp:
 			root = Path(tmp)
+			roles = [{"name": "original-child-" + str(index)} for index in range(5)]
+			digest = runpy.run_path(str(Path(__file__).parents[1] / "deploy/production/procurement_release_metadata.py"))["digest"]
 			metadata = {
 				"scope": {"Page": [{"name": "purchase-payables"}], "Has Role": []},
-				"outside": {"Has Role": before["tables"]["Has Role"]},
+				"outside": {"Has Role": digest(roles)},
+				"outside_rows": {"Has Role": roles},
 			}
-			before = dict(before, procurement_metadata=metadata)
-			after = dict(after, procurement_metadata=metadata)
+			before = dict(before, joint_metadata=metadata)
+			after = dict(after, joint_metadata=metadata)
+			before["release_sources_all"] = dict(before["release_sources"], crm_integration={"original.py": "crm"})
+			before["approved_sources_after"] = json.loads(json.dumps(before["release_sources_all"]))
+			for app, files in manifest["apps"].items():
+				for name, version in files.items():
+					before["approved_sources_after"][app][name] = version["after"]
+			after["release_sources_all"] = dict(after["release_sources"], crm_integration={"original.py": "crm"})
+			old_schema = {"columns": {"name": {"type": "varchar(140)"}}, "indexes": {"PRIMARY": [{"column": "name", "unique": 1}]}, "table": {"engine": "InnoDB"}}
+			new_schema = json.loads(json.dumps(old_schema))
+			new_schema["columns"]["custom_operating_event_key"] = {"type": "varchar(140)"}
+			new_schema["indexes"]["custom_operating_event_key"] = [{"column": "custom_operating_event_key", "unique": 1, "prefix": None, "type": "BTREE"}]
+			before["schemas"], after["schemas"] = {"Journal Entry": old_schema}, {"Journal Entry": new_schema}
 			receipt = {
-				"semantic_validated": True,
-				"second_reconcile_unchanged": True,
-				"new_page": False,
-				"before": metadata,
-				"after": metadata,
+				"status": "applied", "steps": [{"status": "complete"}],
+				"before": {"metadata": metadata, "je": {"schema": old_schema}},
+				"after": {"metadata": metadata, "je": {"schema": new_schema}},
+				"contract": {"sources_before": before["release_sources_all"], "sources_after": before["approved_sources_after"]},
 			}
-			(root / "metadata.json").write_text(json.dumps(receipt))
+			(root / "joint-receipt.json").write_text(json.dumps(receipt))
 			deployment = root / "deploy/production"
 			deployment.mkdir(parents=True)
 			(deployment / "procurement_release_metadata.py").write_text(
 				(Path(__file__).parents[1] / "deploy/production/procurement_release_metadata.py").read_text()
 			)
+			(deployment / "joint_release_guards.py").write_text((Path(__file__).parents[1] / "deploy/production/joint_release_guards.py").read_text())
 			(root / "before.json").write_text(json.dumps(before))
 			(root / "after.json").write_text(json.dumps(after))
 			(root / "release-source-manifest.json").write_text(json.dumps(manifest))
@@ -400,11 +423,10 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 		manifest = {
 			"apps": {
 				"deeplinkerp_branding": {"page.js": {"before": "old", "after": "new"}},
-				"china_finance": {"services/voucher.py": {"before": "old", "after": "new"}},
 			}
 		}
 		before = {
-			"tables": {"Has Role": {"count": 5, "sha256": "original-child-identities"}},
+			"tables": {"Has Role": runpy.run_path(str(Path(__file__).parents[1] / "deploy/production/procurement_release_metadata.py"))["digest"]([{"name": "original-child-" + str(index)} for index in range(5)])},
 			"preserved_apps": {"crm_integration": "crm", "china_finance": "old"},
 			"release_sources": {
 				"deeplinkerp_branding": {"page.js": "old"},
@@ -412,7 +434,6 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 			},
 		}
 		after = json.loads(json.dumps(before))
-		after["preserved_apps"]["china_finance"] = "new"
 		for app in manifest["apps"]:
 			after["release_sources"][app][next(iter(manifest["apps"][app]))] = "new"
 		self.assertEqual(self.compare_audits(before, after, manifest).returncode, 0)
@@ -434,6 +455,8 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 			root = Path(tmp)
 			(root / "sites/assets").mkdir(parents=True)
 			(root / "sites/deeplinkerp.com").mkdir()
+			for app in ("deeplinkerp_branding", "china_finance", "crm_integration"):
+				(root / "apps" / app / app).mkdir(parents=True)
 			(root / "sites/assets/assets.json").write_text('{"bundle": "same"}')
 			(root / "sites/common_site_config.json").write_text('{"maintenance_mode": 1, "secret": "hidden"}')
 			config = root / "sites/deeplinkerp.com/site_config.json"
@@ -449,8 +472,14 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 					fields=[types.SimpleNamespace(fieldtype="Table", options=name + " Child")],
 				)
 
-			def sql(query, **kwargs):
+			def sql(query, values=None, **kwargs):
 				queried.append(query)
+				if "information_schema.COLUMNS" in query:
+					return [{"name": "name", "position": 1, "type": "varchar(140)", "nullable": "NO", "default_value": None, "charset": "utf8mb4", "collation": "utf8mb4_unicode_ci", "extra": "", "expression": None}]
+				if "information_schema.STATISTICS" in query:
+					return [{"name": "PRIMARY", "sequence": 1, "column": "name", "unique": 1, "prefix": None, "collation": "A", "type": "BTREE", "nullable": ""}]
+				if "information_schema.TABLES" in query:
+					return [{"engine": "InnoDB", "row_format": "Dynamic", "collation": "utf8mb4_unicode_ci", "options": ""}]
 				if "tabHas Role`" in query:
 					self.assertEqual(query, "select * from `tabHas Role` order by name")
 					return roles
@@ -464,6 +493,7 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 				local=types.SimpleNamespace(site="deeplinkerp.com"),
 				db=types.SimpleNamespace(exists=lambda *args: True, sql=sql),
 				get_meta=meta,
+				get_installed_apps=lambda: [],
 			)
 			module = self.audit_module(fake)
 			capture = module["capture_audit"]
@@ -484,8 +514,11 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 			recreated = capture()["tables"]["Has Role"]
 			self.assertEqual(recreated["count"], before["tables"]["Has Role"]["count"])
 			self.assertNotEqual(recreated["sha256"], before["tables"]["Has Role"]["sha256"])
-			for parent in ("China Cash Flow Assignment", "China Voucher Sync Issue", "Company", *settings):
+			for parent in ("Journal Entry", "China Cash Flow Assignment", "China Voucher Sync Issue", "Company", *settings):
 				self.assertIn(parent + " Child", before["tables"])
+			self.assertEqual(before["schemas"]["Journal Entry"]["columns"]["name"]["nullable"], "NO")
+			self.assertIsNone(before["schemas"]["Journal Entry"]["columns"]["name"]["default_value"])
+			self.assertEqual(before["schemas"]["Journal Entry"]["indexes"]["PRIMARY"][0]["unique"], 1)
 			self.assertTrue(any("tabSingles" in query for query in queried))
 			self.assertFalse(any("tabCRM Integration Settings`" in query for query in queried))
 			self.assertNotIn("hidden", json.dumps(before))
@@ -624,6 +657,7 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 		source = (Path(__file__).parents[1] / "deploy/production/deploy_unified_purchase.sh").read_text()
 		function = source.split("recover() {", 1)[1].split("\ntrap recover EXIT", 1)[0]
 		capture = self.shell_function("capture_release_audit")
+		release_functions = "".join(self.shell_function(name) for name in ("revision_label", "quiesce_release_workers", "verify_staged_release", "verify_running_release"))
 		baseline = {
 			"site": "deeplinkerp.com",
 			"maintenance_mode": 1,
@@ -676,15 +710,26 @@ build_dir="$1"
 audit_args=(--release-manifest /tmp/release-source-manifest.json)
 frozen_base=mock-base
 old_image_id=sha256:expected
+current_revision=branding-old
+current_crm=crm-old
+current_finance=finance-old
+native_receipt=/private/absent-joint-receipt.json
 maintenance_calls=0
+workers_running=0
 cp() {{ printf 'COPY %s\\n' "$*"; }}
 sleep() {{ :; }}
 docker() {{
   case "$*" in
     'image inspect '*) printf '%s\\n' "$old_image_id" ;;
     inspect*'.Image'* ) printf '%s\\n' "$old_image_id" ;;
-    inspect*'.State.Running'* ) printf 'true\\n' ;;
-    'compose up '*) printf 'UP\\n'; return {up_status} ;;
+    inspect*'.State.Running'* ) case "$*" in *queue-long*|*queue-short*|*scheduler*) if (( workers_running )); then printf 'true\\n'; else printf 'false\\n'; fi;; *) printf 'true\\n';; esac ;;
+    inspect*branding.revision*) printf '%s' "$current_revision" ;;
+    inspect*crm.revision*) printf '%s' "$current_crm" ;;
+    inspect*finance.revision*) printf '%s' "$current_finance" ;;
+    'compose stop '*) workers_running=0; printf 'QUIESCENT\\n' ;;
+    'compose create '*) workers_running=0; printf 'CREATE STOPPED\\n' ;;
+    'compose up '*) case "$*" in *queue-long*) workers_running=1;; esac; printf 'UP\\n'; return {up_status} ;;
+    *'backend test -s '*) return 1 ;;
     cp*) printf 'DOCKER %s\\n' "$*"; return {copy_status} ;;
     *'/env/bin/python /tmp/audit-unified-purchase.py'*)
       printf 'AUDIT %s\\n' "$*" >&2
@@ -699,6 +744,7 @@ docker() {{
 }}
 curl() {{ printf 'HEALTH\\n'; return {health_status}; }}
 {capture}
+{release_functions}
 recover() {{{function}
 false
 recover
@@ -779,7 +825,7 @@ recover
 		result = self.run_recovery(initial_maintenance_status=1)
 		self.assertEqual(result.returncode, 1)
 		self.assertIn("stop frappe_docker-frontend-1", result.stdout)
-		self.assertEqual(result.stdout.count("UP"), 2)
+		self.assertEqual(result.stdout.count("UP"), 3)
 		self.assertIn("set-maintenance-mode off", result.stdout)
 		self.assertNotIn("Manual recovery required", result.stderr)
 

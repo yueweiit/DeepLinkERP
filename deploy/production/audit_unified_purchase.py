@@ -9,6 +9,7 @@ import frappe
 
 SITE = "deeplinkerp.com"
 BENCH = Path("/home/frappe/frappe-bench")
+REQUIRED_SOURCE_APPS = ("deeplinkerp_branding", "china_finance", "crm_integration")
 
 
 def source_files(app):
@@ -64,7 +65,9 @@ def verify_purchase_payment_page(source):
 
 def source_digest(app):
 	root = BENCH / "apps" / app / app
-	assert root.is_dir(), f"Missing preserved app: {app}"
+	if not root.is_dir():
+		assert app not in REQUIRED_SOURCE_APPS and app not in frappe.get_installed_apps(), f"Missing required/installed preserved app: {app}"
+		return None  # Preserve explicit absence; a later unexpected app/source cannot disappear from the audit.
 	digest = hashlib.sha256()
 	for path in sorted(root.rglob("*")):
 		if not path.is_file() or "__pycache__" in path.parts or path.suffix in {".pyc", ".pyo"}:
@@ -74,8 +77,40 @@ def source_digest(app):
 	return digest.hexdigest()
 
 
-def capture_audit():
+def table_schema(doctype):
+	"""Raw native column/default/null/index definitions, without volatile cardinality."""
+	name = "tab" + doctype
+	columns = frappe.db.sql(
+		"select COLUMN_NAME as name, ORDINAL_POSITION as position, COLUMN_TYPE as type, "
+		"IS_NULLABLE as nullable, COLUMN_DEFAULT as default_value, CHARACTER_SET_NAME as charset, "
+		"COLLATION_NAME as collation, EXTRA as extra, GENERATION_EXPRESSION as expression "
+		"from information_schema.COLUMNS where TABLE_SCHEMA=database() and TABLE_NAME=%s order by ORDINAL_POSITION",
+		(name,), as_dict=True,
+	)
+	if not columns:
+		return None
+	indexes = frappe.db.sql(
+		"select INDEX_NAME as name, SEQ_IN_INDEX as sequence, COLUMN_NAME as `column`, "
+		"(1-NON_UNIQUE) as `unique`, SUB_PART as prefix, COLLATION as collation, INDEX_TYPE as type, NULLABLE as nullable "
+		"from information_schema.STATISTICS where TABLE_SCHEMA=database() and TABLE_NAME=%s order by INDEX_NAME, SEQ_IN_INDEX",
+		(name,), as_dict=True,
+	)
+	options = frappe.db.sql(
+		"select ENGINE as engine, ROW_FORMAT as row_format, TABLE_COLLATION as collation, CREATE_OPTIONS as options "
+		"from information_schema.TABLES where TABLE_SCHEMA=database() and TABLE_NAME=%s", (name,), as_dict=True,
+	)[0]
+	result = {"columns": {}, "indexes": {}, "table": options}
+	for row in columns:
+		result["columns"][row.pop("name")] = row
+	for row in indexes:
+		result["indexes"].setdefault(row.pop("name"), []).append(row)
+	return json.loads(json.dumps(result, default=str))
+
+
+def capture_audit(*, je_columns=None):
 	"""Capture inside the caller's transaction; the CLI remains read-only."""
+	for app in set(REQUIRED_SOURCE_APPS) | set(frappe.get_installed_apps()):
+		assert (BENCH / "apps" / app / app).is_dir(), "Missing required/installed app source: " + app
 	tables = [
 		"Purchase Order",
 		"Purchase Order Item",
@@ -86,6 +121,7 @@ def capture_audit():
 		"Stock Entry Detail",
 		"Stock Ledger Entry",
 		"GL Entry",
+		"Journal Entry",
 		"Bin",
 		"Inventory Original Location Snapshot",
 		"Purchase Receipt",
@@ -118,6 +154,7 @@ def capture_audit():
 		"Purchase Receipt",
 		"Purchase Invoice",
 		"Payment Entry",
+		"Journal Entry",
 		"China Accounting Voucher",
 		"Sales Order",
 		"China Cash Flow Assignment",
@@ -136,6 +173,8 @@ def capture_audit():
 	result = {
 		"site": frappe.local.site,
 		"tables": {},
+		"schemas": {},
+		"release_sources_all": {app: source_files(app) for app in ("deeplinkerp_branding", "china_finance", "crm_integration")},
 		"preserved_apps": {
 			app: source_digest(app)
 			for app in [
@@ -157,13 +196,19 @@ def capture_audit():
 			continue
 		# Doctype names come only from this fixed allowlist and installed metadata; quote defensively.
 		table = ("tab" + doctype).replace("`", "``")
-		rows = frappe.db.sql(f"select * from `{table}` order by name", as_dict=True)
+		projection = "*"
+		if doctype == "Journal Entry" and je_columns is not None:
+			assert je_columns and "name" in je_columns and len(je_columns) == len(set(je_columns))
+			assert all(isinstance(field, str) and field.isidentifier() for field in je_columns)
+			projection = ",".join("`" + field + "`" for field in je_columns)
+		rows = frappe.db.sql(f"select {projection} from `{table}` order by name", as_dict=True)
 		result["tables"][doctype] = {
 			"count": len(rows),
 			"sha256": hashlib.sha256(
 				json.dumps(rows, sort_keys=True, default=str, ensure_ascii=False).encode()
 			).hexdigest(),
 		}
+		result["schemas"][doctype] = table_schema(doctype)
 	# Single settings have no per-DocType SQL table. Preserve every installed Single, including integration URLs.
 	singles = frappe.db.sql(
 		"select doctype, field, value from `tabSingles` order by doctype, field, value", as_dict=True
@@ -176,7 +221,7 @@ def capture_audit():
 	}
 	result["configuration_sha256"] = {}
 	maintenance_mode = 0
-	for relative in ("common_site_config.json", SITE + "/site_config.json"):
+	for relative in ("common_site_config.json", frappe.local.site + "/site_config.json"):
 		config = json.loads((BENCH / "sites" / relative).read_text())
 		maintenance_mode = config.pop("maintenance_mode", maintenance_mode)
 		result["configuration_sha256"][relative] = hashlib.sha256(
@@ -188,23 +233,51 @@ def capture_audit():
 	return result
 
 
+def capture_joint_state(*, original_columns=None):
+	"""Private receipt snapshot. Raw JE projection and all scoped metadata stay private."""
+	from procurement_release_metadata import JOINT_MODELS, capture_joint_metadata
+
+	schema = table_schema("Journal Entry")
+	assert schema, "Native Journal Entry table is required"
+	columns = original_columns or list(schema["columns"])
+	assert all(isinstance(field, str) and field.isidentifier() for field in columns)
+	rows = frappe.db.sql("select " + ",".join("`" + field + "`" for field in columns) + " from `tabJournal Entry` order by name", as_dict=True)
+	models = {}
+	for doctype in JOINT_MODELS:
+		model_schema = table_schema(doctype)
+		models[doctype] = {"schema": model_schema, "rows": frappe.db.sql("select * from `" + ("tab" + doctype).replace("`", "``") + "` order by name", as_dict=True) if model_schema else []}
+	result = {"audit": capture_audit(je_columns=columns), "metadata": capture_joint_metadata(),
+		"je": {"schema": schema, "original_columns": columns, "rows": rows}, "models": models,
+		"operating_singles": frappe.db.sql("select * from `tabSingles` where doctype='Operating Expense Sync Settings' order by field", as_dict=True)}
+	return json.loads(json.dumps(result, default=str, ensure_ascii=False))
+
+
 def main():
 	parser = argparse.ArgumentParser()
 	parser.add_argument("--release-manifest")
 	parser.add_argument("--phase", choices=["before", "after"])
 	parser.add_argument("--purchase-payment-page-source")
 	parser.add_argument("--procurement-metadata", action="store_true")
+	parser.add_argument("--joint-metadata", action="store_true")
+	parser.add_argument("--joint-receipt")
 	args = parser.parse_args()
 	frappe.init(site=SITE, sites_path=str(BENCH / "sites"))
 	frappe.connect()
 	try:
 		if args.purchase_payment_page_source:
 			verify_purchase_payment_page(json.loads(Path(args.purchase_payment_page_source).read_text()))
-		result = capture_audit()
+		original_columns = None
+		if args.joint_receipt:
+			from joint_release_guards import DDLReceipt
+			original_columns = DDLReceipt.load(args.joint_receipt).state["before"]["je"]["original_columns"]
+		result = capture_audit(je_columns=original_columns)
 		if args.procurement_metadata:
 			from procurement_release_metadata import capture
 
 			result["procurement_metadata"] = capture()
+		if args.joint_metadata:
+			from procurement_release_metadata import capture_joint_metadata
+			result["joint_metadata"] = capture_joint_metadata()
 		if args.phase:
 			assert result["maintenance_mode"] == 1, "Release audit requires maintenance mode on"
 		if args.release_manifest:
