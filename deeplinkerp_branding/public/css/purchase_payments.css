@@ -60,3 +60,5 @@ body.dlp-purchase-payment-grid-active .dlp-payment-native-filters { width: 100%;
 @media (max-width:767px) { .dlp-document-fields { grid-template-columns: 1fr; } .dlp-document-drawer { width: 100vw; } .dlp-payment-drawer header, .dlp-payment-drawer footer { padding: 10px; } }
 
 body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active) .dlp-po-grid-cell .dlp-native-document { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.dlp-order-actions { display: inline-flex; gap: 6px; white-space: nowrap; }

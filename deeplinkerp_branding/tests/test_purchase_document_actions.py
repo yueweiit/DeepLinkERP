@@ -31,11 +31,11 @@ class QuantityCapTests(unittest.TestCase):
 
 
 class WorkflowActionTests(unittest.TestCase):
-    def test_purchase_receipt_never_offers_submission_even_with_active_workflow(self):
+    def test_purchase_receipt_uses_only_native_permitted_workflow_transitions(self):
         doc = SimpleNamespace(doctype="Purchase Receipt", docstatus=0, is_new=lambda: False)
-        with patch("frappe.model.workflow.get_workflow_name", return_value="Active"), patch("frappe.model.workflow.get_workflow", return_value=SimpleNamespace(workflow_state_field="workflow_state")), patch.object(actions, "_fields"), patch("frappe.model.workflow.get_transitions") as transitions:
+        with patch("frappe.model.workflow.get_workflow_name", return_value="Active"), patch("frappe.model.workflow.get_workflow", return_value=SimpleNamespace(workflow_state_field="workflow_state")), patch.object(actions, "_fields"), patch("frappe.model.workflow.get_transitions", return_value=[]) as transitions:
             self.assertEqual(actions._workflow_actions(doc), [])
-        transitions.assert_not_called()
+        transitions.assert_called_once_with(doc)
 
     def test_inactive_workflow_uses_native_submit_permission_without_transitions(self):
         doc = SimpleNamespace(doctype="Payment Entry", docstatus=0, is_new=lambda: False, has_permission=lambda permission: True)

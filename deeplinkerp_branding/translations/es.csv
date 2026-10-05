@@ -454,3 +454,30 @@ Excel 共享文本索引不符合预期。,El índice de texto compartido de Exc
 费用确认凭证已记账，只能查看；后续实际付款仍可办理结算。,El asiento de reconocimiento del gasto ya está contabilizado y es de solo lectura. Los pagos posteriores pueden liquidarse.
 来源版本已变化，请刷新抽屉后重新预览。,La versión de origen ha cambiado. Actualiza el panel y vuelve a generar la vista previa.
 本笔结算已记账、已取消或存在问题，只能查看。,Esta liquidación está contabilizada o cancelada o presenta un problema y es de solo lectura.
+确认订单,Confirmar pedido
+付款,Pagar
+入库,Recibir
+确认入库,Confirmar recepción
+采购订单 → 入库,Pedido de compra → Recepción
+核对本次收货数量和仓库后确认入库；保存草稿不会改变库存。,Revisa la cantidad y el almacén y confirma la recepción; guardar el borrador no cambia las existencias.
+采购订单预付款,Anticipo del pedido de compra
+当前可预付余额,Saldo disponible para anticipar
+本次付款记入供应商预付款资产；实际应付确认后按原生规则核销。,El pago se contabiliza como activo de anticipos al proveedor; se concilia cuando se confirma la factura real.
+关联采购订单（预付）,Pedido vinculado (anticipo)
+入库已确认,Recepción confirmada
+已保存草稿,Borrador guardado
+物料,Artículo
+数量 / 当前剩余,Cantidad / Pendiente
+单位,Unidad
+无税费,Sin impuestos
+不含税,Sin impuestos
+总金额,Total
+（保存后由原生规则重算）,(Recalculado al guardar según las reglas nativas)
+税费（原生计算，只读）,"Impuestos (cálculo nativo, solo lectura)"
+最多,Máximo
+明确新建另一张剩余入库草稿,Crear otro borrador para la cantidad pendiente
+已有草稿。仍要明确新建另一张入库草稿？请确认不是重复收货。,Ya existe un borrador. ¿Crear otro? Comprueba que no duplique la recepción.
+已有草稿未提交。仍要明确新建另一张入库草稿？请先确认不是重复收货。,Hay un borrador sin enviar. ¿Crear otro? Comprueba que no duplique la recepción.
+张可见入库草稿。请明确选择继续编辑，避免重复建单。,borradores de recepción visibles. Elige uno para continuar y evitar duplicados.
+继续,Continuar
+单据日期,Fecha del documento

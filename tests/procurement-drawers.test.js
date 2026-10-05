@@ -99,9 +99,9 @@ test('late async drawer loads are invalidated on cancellation and superseded ope
 test('PO stock receipt action only appears for real eligible native orders, never OA rows', () => {
   const action=functionFrom('orderReceiptAction');
   assert.equal(action({row_type:'oa_request',name:'OA',docstatus:1}), '');
-  assert.match(action({name:'PO',docstatus:0}), /处理订单草稿/);
+  assert.match(action({name:'PO',docstatus:0}), /确认订单/);
   assert.equal(action({name:'PO',docstatus:1,per_received:100,status:'Completed'}), '');
-  assert.match(action({name:'PO<&',docstatus:1,per_received:50,status:'To Receive'}), /剩余入库草稿/);
+  assert.match(action({name:'PO<&',docstatus:1,per_received:50,status:'To Receive'}), /dlp-order-receipt/);
   assert.doesNotMatch(action({name:'PO<&',docstatus:1,per_received:50,status:'To Receive'}),/data-name="PO<&"/);
 });
 test('voucher rendering includes number AND status AND event and escapes supplied text', () => {
