@@ -181,6 +181,235 @@ class JointReleaseGuardTests(unittest.TestCase):
 		for name, digest in files.items():
 			self.assertEqual(digest, hashlib.sha256((ROOT / "deploy/production" / name).read_bytes()).hexdigest())
 
+	def rollback_fixture(self, module, path):
+		before = {"je": {"original_columns": ["name"], "rows": [{"name": "original-je"}], "schema": self.schema()}, "models": {"Operating Expense Source": {"schema": None, "rows": []}}, "metadata": {"scope": {"Scheduled Job Type": []}}, "audit": {"release_sources_all": {"branding": "old"}, "preserved_apps": {"china_finance": "finance", "crm_integration": "crm"}}}
+		after = copy.deepcopy(before)
+		after["audit"]["release_sources_all"] = {"branding": "candidate"}
+		after["je"]["schema"]["columns"]["custom_operating_event_key"] = {"type": "varchar(140)", "default": "NULL"}
+		after["je"]["schema"]["indexes"]["custom_operating_event_key"] = [{"column": "custom_operating_event_key", "unique": 1, "prefix": None}]
+		after["models"]["Operating Expense Source"]["schema"] = self.schema()
+		after["metadata"]["scope"]["Scheduled Job Type"] = [{"name": "exact-new-job", "method": module.OPERATING_METHOD, "creation": "frozen"}]
+		contract = {"metadata_plan": {"scope": after["metadata"]["scope"], "new_definitions": ["Operating Expense Source"]}, "sources_before": before["audit"]["release_sources_all"], "sources_after": after["audit"]["release_sources_all"], "preserved_before": before["audit"]["preserved_apps"]}
+		receipt = self.module().DDLReceipt.create(path, {"candidate_sha": "a" * 40, "contract_sha256": "b" * 64}, before, contract)
+		receipt.finish(after)
+		return receipt, before, after
+
+	def mocked_rollback(self, module, path, current, events, **kwargs):
+		def ddl(query):
+			events.append(query)
+			if query.startswith("DROP TABLE"):
+				current["models"]["Operating Expense Source"]["schema"] = None
+			else:
+				current["je"]["schema"]["columns"].pop("custom_operating_event_key", None)
+				current["je"]["schema"]["indexes"].pop("custom_operating_event_key", None)
+		def write_scope(old, new):
+			events.append("metadata-write")
+			current["metadata"]["scope"] = copy.deepcopy(new)
+		fake = types.SimpleNamespace(conf=types.SimpleNamespace(maintenance_mode=1), db=types.SimpleNamespace(rollback=lambda: None, commit=lambda: events.append("commit"), sql_ddl=ddl), scrub=lambda name: name.lower().replace(" ", "_"), clear_cache=lambda **kw: None)
+		audit = types.SimpleNamespace(capture_joint_state=lambda **kw: copy.deepcopy(current), table_schema=lambda name: copy.deepcopy(current["je"]["schema"] if name == "Journal Entry" else current["models"][name]["schema"]))
+		with patch.dict(sys.modules, {"frappe": fake, "audit_unified_purchase": audit}), patch.object(module, "_assert_joint_invariants", lambda *a, **kw: None), patch.object(module, "capture_joint_metadata", lambda: copy.deepcopy(current["metadata"])), patch.object(module, "_write_scope", write_scope):
+			return module.restore_joint_metadata(path, **kwargs)
+
+	def test_fully_applied_rollback_refuses_missing_new_metadata_column_index_or_model_before_writes(self):
+		module = self.metadata_module()
+		for missing in ("job", "column", "index", "model"):
+			with self.subTest(missing=missing), tempfile.TemporaryDirectory() as directory:
+				path = Path(directory) / "receipt.json"
+				_, _, after = self.rollback_fixture(module, path)
+				current = copy.deepcopy(after)
+				if missing == "job":
+					current["metadata"]["scope"]["Scheduled Job Type"] = []
+				elif missing == "model":
+					current["models"]["Operating Expense Source"]["schema"] = None
+				else:
+					current["je"]["schema"]["indexes"].pop("custom_operating_event_key")
+					if missing == "column":
+						current["je"]["schema"]["columns"].pop("custom_operating_event_key")
+				original, first, events = copy.deepcopy(current), path.read_bytes(), []
+				with self.assertRaisesRegex(AssertionError, "recorded|applied|drift"):
+					self.mocked_rollback(module, path, current, events)
+				self.assertEqual(current, original)
+				self.assertEqual(path.read_bytes(), first)
+				self.assertEqual(events, [])
+
+	def test_recorded_pending_rollback_before_and_after_native_drop_are_recoverable(self):
+		module = self.metadata_module()
+		for applied in (False, True):
+			with self.subTest(applied=applied), tempfile.TemporaryDirectory() as directory:
+				path = Path(directory) / "receipt.json"
+				receipt, before, after = self.rollback_fixture(module, path)
+				model_schema = after["models"]["Operating Expense Source"]["schema"]
+				receipt.plan("rollback-table-operating_expense_source", model_schema, None, kind="rollback-ddl", doctype="Operating Expense Source", sql="DROP TABLE `tabOperating Expense Source`")
+				current = copy.deepcopy(after)
+				if applied:
+					current["models"]["Operating Expense Source"]["schema"] = None
+				self.assertTrue(self.mocked_rollback(module, path, current, [])["restored"])
+				self.assertEqual(current["je"], before["je"])
+				self.assertEqual(current["models"], before["models"])
+				self.assertEqual(current["metadata"], before["metadata"])
+
+	def test_interrupted_apply_refuses_unexplained_missing_completed_ddl_and_metadata(self):
+		module = self.metadata_module()
+		for missing in ("job", "column", "index", "model"):
+			with self.subTest(missing=missing), tempfile.TemporaryDirectory() as directory:
+				path = Path(directory) / "receipt.json"
+				receipt, before, after = self.rollback_fixture(module, path)
+				receipt.plan("metadata", before["metadata"]["scope"], after["metadata"]["scope"], kind="metadata")
+				receipt.complete("metadata", after["metadata"]["scope"])
+				receipt.plan("journal", before["je"]["schema"], after["je"]["schema"], kind="ddl", doctype="Journal Entry")
+				receipt.complete("journal", after["je"]["schema"])
+				receipt.plan("model", None, after["models"]["Operating Expense Source"]["schema"], kind="ddl", doctype="Operating Expense Source")
+				receipt.complete("model", after["models"]["Operating Expense Source"]["schema"])
+				state = copy.deepcopy(receipt.state)
+				state["status"] = "applying"
+				state.pop("after")
+				receipt._save(state)
+				current = copy.deepcopy(after)
+				if missing == "job":
+					current["metadata"]["scope"]["Scheduled Job Type"] = []
+				elif missing == "model":
+					current["models"]["Operating Expense Source"]["schema"] = None
+				else:
+					current["je"]["schema"]["indexes"].pop("custom_operating_event_key")
+					if missing == "column":
+						current["je"]["schema"]["columns"].pop("custom_operating_event_key")
+				first, events = path.read_bytes(), []
+				with self.assertRaisesRegex(AssertionError, "recorded|drift"):
+					self.mocked_rollback(module, path, current, events)
+				self.assertEqual(events, [])
+				self.assertEqual(path.read_bytes(), first)
+
+	def test_pending_metadata_subset_is_recoverable_but_completed_scope_requires_exact_rows(self):
+		module = self.metadata_module()
+		for completed in (False, True):
+			with self.subTest(completed=completed), tempfile.TemporaryDirectory() as directory:
+				path = Path(directory) / "receipt.json"
+				fixture, before, after = self.rollback_fixture(module, Path(directory) / "fixture.json")
+				contract = copy.deepcopy(fixture.state["contract"])
+				contract["metadata_plan"]["scope"]["Scheduled Job Type"].append({"name": "second-planned-job", "method": "synthetic", "creation": "frozen"})
+				receipt = self.module().DDLReceipt.create(path, fixture.state["identity"], before, contract)
+				receipt.plan("metadata", before["metadata"]["scope"], contract["metadata_plan"]["scope"], kind="metadata")
+				current = copy.deepcopy(before)
+				current["audit"]["release_sources_all"] = after["audit"]["release_sources_all"]
+				current["metadata"]["scope"] = copy.deepcopy(after["metadata"]["scope"])
+				if completed:
+					receipt.complete("metadata", contract["metadata_plan"]["scope"])
+					first, events = path.read_bytes(), []
+					with self.assertRaisesRegex(AssertionError, "recorded|drift"):
+						self.mocked_rollback(module, path, current, events)
+					self.assertEqual(events, [])
+					self.assertEqual(path.read_bytes(), first)
+				else:
+					self.assertTrue(self.mocked_rollback(module, path, current, [])["restored"])
+					self.assertEqual(current["metadata"], before["metadata"])
+
+	def test_pending_rollback_metadata_resumes_from_exact_recorded_partial_rows(self):
+		module = self.metadata_module()
+		with tempfile.TemporaryDirectory() as directory:
+			fixture, before, after = self.rollback_fixture(module, Path(directory) / "fixture.json")
+			after["metadata"]["scope"]["Scheduled Job Type"].append({"name": "second-planned-job", "method": "synthetic", "creation": "frozen"})
+			contract = copy.deepcopy(fixture.state["contract"])
+			contract["metadata_plan"]["scope"] = after["metadata"]["scope"]
+			path = Path(directory) / "receipt.json"
+			receipt = self.module().DDLReceipt.create(path, fixture.state["identity"], before, contract)
+			receipt.finish(after)
+			receipt.plan("rollback-metadata", after["metadata"]["scope"], before["metadata"]["scope"], kind="rollback-metadata")
+			current = copy.deepcopy(after)
+			current["metadata"]["scope"]["Scheduled Job Type"].pop()
+			self.assertTrue(self.mocked_rollback(module, path, current, [])["restored"])
+			self.assertEqual(current["metadata"], before["metadata"])
+
+	def test_resumed_rollback_refuses_unrecorded_other_schema_or_metadata_loss(self):
+		module = self.metadata_module()
+		for missing in ("job", "index"):
+			with self.subTest(missing=missing), tempfile.TemporaryDirectory() as directory:
+				path = Path(directory) / "receipt.json"
+				receipt, _, after = self.rollback_fixture(module, path)
+				receipt.plan("rollback-table-operating_expense_source", after["models"]["Operating Expense Source"]["schema"], None, kind="rollback-ddl", doctype="Operating Expense Source")
+				current = copy.deepcopy(after)
+				current["models"]["Operating Expense Source"]["schema"] = None
+				if missing == "job":
+					current["metadata"]["scope"]["Scheduled Job Type"] = []
+				else:
+					current["je"]["schema"]["indexes"].pop("custom_operating_event_key")
+				first, events = path.read_bytes(), []
+				with self.assertRaisesRegex(AssertionError, "recorded|drift"):
+					self.mocked_rollback(module, path, current, events)
+				self.assertEqual(events, [])
+				self.assertEqual(path.read_bytes(), first)
+
+	def test_restored_receipt_is_noop_only_at_exact_original_baseline(self):
+		module = self.metadata_module()
+		for drift in (False, True):
+			with self.subTest(drift=drift), tempfile.TemporaryDirectory() as directory:
+				path = Path(directory) / "receipt.json"
+				receipt, before, after = self.rollback_fixture(module, path)
+				receipt.restored()
+				current = copy.deepcopy(before)
+				if drift:
+					current["metadata"]["scope"] = copy.deepcopy(after["metadata"]["scope"])
+				first, events = path.read_bytes(), []
+				if drift:
+					with self.assertRaisesRegex(AssertionError, "recorded|baseline|drift"):
+						self.mocked_rollback(module, path, current, events, source_phase="before")
+				else:
+					self.assertTrue(self.mocked_rollback(module, path, current, events, source_phase="before")["restored"])
+				self.assertEqual(events, [])
+				self.assertEqual(path.read_bytes(), first)
+
+	def test_applied_rollback_on_old_image_normalizes_only_pinned_source_maps(self):
+		module = self.metadata_module()
+		with tempfile.TemporaryDirectory() as directory:
+			path = Path(directory) / "receipt.json"
+			_, before, after = self.rollback_fixture(module, path)
+			current = copy.deepcopy(after)
+			current["audit"] = copy.deepcopy(before["audit"])
+			self.assertTrue(self.mocked_rollback(module, path, current, [], source_phase="before")["restored"])
+
+	def test_contract_rejects_effective_model_customizations_before_native_meta_absorption(self):
+		module = self.metadata_module()
+		self.assertTrue(hasattr(module, "_assert_no_joint_customizations"), "Read-only effective-metadata preflight is missing")
+		cases = [("Custom Field", {"dt": name, "fieldname": "unapproved"}) for name in module.JOINT_MODELS]
+		cases += [("Property Setter", {"doc_type": name, "field_name": "amount"}) for name in module.JOINT_MODELS]
+		cases += [("Custom DocPerm", {"parent": name, "parenttype": None, "role": "All"}) for name in module.JOINT_MODELS]
+		cases += [("Property Setter", {"doc_type": "Journal Entry", "field_name": key, "property": "read_only", "value": "0"}) for key in module.CUSTOM_FIELD_ORDER]
+		for doctype, row in cases:
+			with self.subTest(doctype=doctype, row=row):
+				events = []
+				def sql(query, values=(), **kwargs):
+					self.assertTrue(str(query).lstrip().lower().startswith("select"))
+					return [dict(row, name="unapproved-metadata")] if "`tab" + doctype + "`" in str(query) else []
+				fake = types.SimpleNamespace(db=types.SimpleNamespace(sql=sql, commit=lambda: events.append("commit"), sql_ddl=lambda *a: events.append("DDL")))
+				with patch.dict(sys.modules, {"frappe": fake}), self.assertRaisesRegex(AssertionError, "customization"):
+					module._assert_no_joint_customizations()
+				self.assertEqual(events, [])
+
+	def test_existing_effective_journal_fields_preserve_all_frozen_native_behavior(self):
+		module = self.metadata_module()
+		self.assertTrue(hasattr(module, "_assert_frozen_je_fields"), "Effective frozen JE field comparison is missing")
+		field = {"fieldname": "custom_operating_source", "fieldtype": "Link", "options": "Operating Expense Source", "reqd": 0, "default": None, "hidden": 0, "read_only": 1, "no_copy": 1, "unique": 0, "permlevel": 0, "search_index": 0, "fetch_from": None, "description": None, "idx": 0, "dt": "Journal Entry", "docstatus": 0}
+		contract = {"definitions": {"Journal Entry-custom_operating_source": {"native": {"Custom Field": [field]}}}, "native_metadata_schemas": {"DocField": {"columns": {flag: {} for flag in field if flag != "dt"}}}}
+		class Field(dict):
+			__getattr__ = dict.__getitem__
+		original = dict(field, idx=151, is_custom_field=1)
+		module._assert_frozen_je_fields(types.SimpleNamespace(fields=[Field(original)]), contract, (field["fieldname"],))
+		for flag in ("reqd", "default", "hidden", "read_only", "no_copy", "unique", "permlevel", "options", "search_index", "fetch_from", "description"):
+			with self.subTest(flag=flag), self.assertRaisesRegex(AssertionError, "effective|behavior"):
+				module._assert_frozen_je_fields(types.SimpleNamespace(fields=[Field(dict(original, **{flag: "changed"}))]), contract, (field["fieldname"],))
+
+	def test_unrelated_customizations_remain_read_only_and_outside_frozen_scope(self):
+		module = self.metadata_module()
+		self.assertTrue(hasattr(module, "_assert_no_joint_customizations"))
+		events = []
+		def sql(query, values=(), **kwargs):
+			self.assertTrue(str(query).lstrip().lower().startswith("select"))
+			events.append((str(query), tuple(values)))
+			return []
+		with patch.dict(sys.modules, {"frappe": types.SimpleNamespace(db=types.SimpleNamespace(sql=sql))}):
+			module._assert_no_joint_customizations()
+		self.assertEqual(len(events), 3)
+		self.assertTrue(all("Journal Entry" not in values or set(module.CUSTOM_FIELD_ORDER) <= set(values) for _, values in events))
+
 	def test_native_planning_virtualizes_cache_fills_but_forbids_real_cache_sql_and_commit_mutations(self):
 		module = self.metadata_module()
 		events = []

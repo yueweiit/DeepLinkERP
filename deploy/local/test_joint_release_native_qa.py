@@ -208,6 +208,104 @@ class JointNativeRehearsal(unittest.TestCase):
 			release.apply_joint_metadata(CANDIDATE_SHA, self.receipt)
 		self.restore()
 
+	def test_applied_drift_is_refused_and_pending_native_rollback_resumes(self):
+		release.apply_joint_metadata(CANDIDATE_SHA, self.receipt)
+		after = self.capture()
+		state = json.loads(self.receipt.read_bytes())
+		first = self.receipt.read_bytes()
+		self.assertTrue(release.apply_joint_metadata(CANDIDATE_SHA, self.receipt)["unchanged"])
+		second_receipt = self.evidence / (self.run_prefix + "-applied-gate-existing-noop.json")
+		self.assertTrue(release.apply_joint_metadata(CANDIDATE_SHA, second_receipt)["unchanged"])
+		self.assertTrue(release.restore_joint_metadata(second_receipt)["restored"])
+		self.assert_state_equal(self.capture(), after)
+		self.assertEqual(self.receipt.read_bytes(), first)
+		job = next(row for row in after["metadata"]["scope"]["Scheduled Job Type"] if row["method"] == release.OPERATING_METHOD)
+		for missing in ("job", "index", "model", "column"):
+			with self.subTest(missing=missing):
+				if missing == "job":
+					frappe.db.sql("delete from `tabScheduled Job Type` where name=%s and method=%s", (job["name"], release.OPERATING_METHOD))
+					frappe.db.commit()
+				elif missing == "index":
+					frappe.db.sql_ddl("ALTER TABLE `tabJournal Entry` DROP INDEX custom_operating_event_key")
+				elif missing == "model":
+					self.assertEqual(frappe.db.count("Operating Expense Source"), 0)
+					frappe.db.sql_ddl("DROP TABLE `tabOperating Expense Source`")
+				else:
+					self.assertEqual(frappe.db.sql("select count(*) from `tabJournal Entry` where custom_operating_fingerprint is not null")[0][0], 0)
+					frappe.db.sql_ddl("ALTER TABLE `tabJournal Entry` DROP COLUMN custom_operating_fingerprint")
+				changed = self.capture()
+				def forbidden(*args, **kwargs):
+					self.fail("Drifted rollback must refuse before any DDL/metadata commit")
+				with patch.object(frappe.db, "sql_ddl", forbidden), patch.object(frappe.db, "commit", forbidden), patch.object(release, "_write_scope", forbidden), self.assertRaisesRegex(AssertionError, "recorded|drift"):
+					release.restore_joint_metadata(self.receipt)
+				self.assert_state_equal(self.capture(), changed)
+				self.assertEqual(self.receipt.read_bytes(), first)
+				self.assertEqual(frappe.conf.maintenance_mode, 1)
+				# Repair only the exact introduced synthetic fault, not business data.
+				if missing == "job":
+					keys = sorted(job)
+					frappe.db.sql("insert into `tabScheduled Job Type` (" + ",".join(map(release._quote, keys)) + ") values (" + ",".join(["%s"] * len(keys)) + ")", tuple(job[key] for key in keys))
+					frappe.db.commit()
+				else:
+					marker = "ADD UNIQUE INDEX" if missing == "index" else ("create table `tabOperating Expense Source`" if missing == "model" else "ADD COLUMN `custom_operating_fingerprint`")
+					query = next(step["sql"] for step in state["steps"] if step.get("kind") == "ddl" and marker in step["sql"])
+					frappe.db.sql_ddl(query)
+				self.assert_state_equal(self.capture(), after)
+		# Crash after a recorded native DROP but before complete(); resume must
+		# inspect its actual result, complete the intent, and restore exactly.
+		original_ddl = frappe.db.sql_ddl
+		def failure(query, **kwargs):
+			original_ddl(query, **kwargs)
+			if str(query) == "DROP TABLE `tabOperating Expense Company Map`":
+				raise RuntimeError("Synthetic failure AFTER pending native rollback")
+		with patch.object(frappe.db, "sql_ddl", failure), self.assertRaisesRegex(RuntimeError, "pending native rollback"):
+			release.restore_joint_metadata(self.receipt)
+		self.assertTrue(any(step["kind"] == "rollback-ddl" and step["status"] == "pending" for step in json.loads(self.receipt.read_bytes())["steps"]))
+		self.restore()
+		self.assertTrue(all(step["status"] == "complete" for step in json.loads(self.receipt.read_bytes())["steps"] if step["kind"].startswith("rollback-")))
+		# Exercise a genuinely committed partial rollback-metadata write too.
+		self.receipt = self.evidence / (self.run_prefix + "-pending-rollback-metadata.json")
+		release.apply_joint_metadata(CANDIDATE_SHA, self.receipt)
+		original_sql, original_commit = frappe.db.sql, frappe.db.commit
+		def metadata_failure(query, *args, **kwargs):
+			result = original_sql(query, *args, **kwargs)
+			if str(query).startswith("delete from `tabCustom Field`"):
+				original_commit()
+				raise RuntimeError("Synthetic failure AFTER pending rollback metadata autocommit")
+			return result
+		with patch.object(frappe.db, "sql", metadata_failure), self.assertRaisesRegex(RuntimeError, "rollback metadata autocommit"):
+			release.restore_joint_metadata(self.receipt)
+		self.assertTrue(any(step["kind"] == "rollback-metadata" and step["status"] == "pending" for step in json.loads(self.receipt.read_bytes())["steps"]))
+		self.restore()
+
+	def test_native_customization_overrides_abort_before_contract_receipt_or_writes(self):
+		cases = [("Custom Field", {"dt": name, "fieldname": "custom_dlp_native_unapproved", "fieldtype": "Data", "reqd": 1}) for name in release.JOINT_MODELS]
+		cases += [("Property Setter", {"doc_type": name, "doctype_or_field": "DocField", "field_name": self.contract["definitions"][name]["source"]["fields"][0]["fieldname"], "property": "reqd", "property_type": "Check", "value": "1"}) for name in release.JOINT_MODELS]
+		cases += [("Custom DocPerm", {"parent": name, "parenttype": None, "role": "All", "read": 1, "write": 1}) for name in release.JOINT_MODELS]
+		cases += [("Property Setter", {"doc_type": "Journal Entry", "doctype_or_field": "DocField", "field_name": key, "property": "reqd", "property_type": "Check", "value": "1"}) for key in release.CUSTOM_FIELD_ORDER]
+		cases += [("Property Setter", {"doc_type": "Journal Entry", "doctype_or_field": "DocField", "field_name": "custom_operating_source", "property": flag, "property_type": "Check", "value": "0"}) for flag in ("read_only", "no_copy")]
+		for index, (doctype, values) in enumerate(cases):
+			with self.subTest(doctype=doctype, target=values):
+				identity = "DLP-NATIVE-OVERRIDE-FIXTURE-" + str(index)
+				row = release._native_rows(dict(values, doctype=doctype, name=identity), when="2000-01-01 00:00:00.000000", seed="qa-override", defaults=True)[doctype][0]
+				keys = sorted(row)
+				frappe.db.sql("insert into " + release._quote("tab" + doctype) + " (" + ",".join(map(release._quote, keys)) + ") values (" + ",".join(["%s"] * len(keys)) + ")", tuple(row[key] for key in keys))
+				frappe.db.commit()
+				changed = self.capture()
+				original_sql = frappe.db.sql
+				def readonly(query, *args, **kwargs):
+					self.assertTrue(str(query).lstrip().lower().startswith(("select", "show", "describe", "explain")), "Override preflight must not issue SQL writes")
+					return original_sql(query, *args, **kwargs)
+				def forbidden(*args, **kwargs):
+					self.fail("Override preflight must not commit or run native DDL")
+				with patch.object(frappe.db, "sql", readonly), patch.object(frappe.db, "commit", forbidden), patch.object(frappe.db, "sql_ddl", forbidden), self.assertRaisesRegex(AssertionError, "customization"):
+					release.apply_joint_metadata(CANDIDATE_SHA, self.receipt)
+				self.assertFalse(self.receipt.exists())
+				self.assert_state_equal(self.capture(), changed)
+				frappe.db.sql("delete from " + release._quote("tab" + doctype) + " where name=%s", (identity,))
+				frappe.db.commit()
+				self.assert_state_equal(self.capture(), self.original)
+
 	def test_rollback_refuses_new_model_single_nonnull_column_or_outside_activity(self):
 		for activity in ("model", "single", "nonnull", "outside"):
 			with self.subTest(activity=activity):

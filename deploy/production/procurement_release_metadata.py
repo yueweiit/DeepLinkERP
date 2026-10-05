@@ -249,6 +249,26 @@ def _installer_source_files():
 	return {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in ("procurement_release_metadata.py", "audit_unified_purchase.py", "joint_release_guards.py")}
 
 
+def _assert_no_joint_customizations():
+	"""Reject effective Meta overrides before constructing the frozen contract.
+
+	Native Meta absorbs these rows independently of the standard DocType JSON.
+	Custom DocPerm is keyed by parent only, including legacy NULL parenttype.
+	Unrelated Journal Entry customizations remain outside this bounded check.
+	"""
+	import frappe
+
+	models = tuple(JOINT_MODELS)
+	placeholders = ",".join(["%s"] * len(models))
+	queries = (
+		("Custom Field", "select name from `tabCustom Field` where dt in (" + placeholders + ")", models),
+		("Property Setter", "select name from `tabProperty Setter` where doc_type in (" + placeholders + ") or (doc_type=%s and field_name in (" + ",".join(["%s"] * len(CUSTOM_FIELD_ORDER)) + "))", (*models, "Journal Entry", *CUSTOM_FIELD_ORDER)),
+		("Custom DocPerm", "select name from `tabCustom DocPerm` where parent in (" + placeholders + ")", models),
+	)
+	for doctype, query, values in queries:
+		assert not frappe.db.sql(query, values), "Unapproved effective customization targets frozen operating metadata: " + doctype
+
+
 def load_joint_contract():
 	import frappe
 	from frappe.model.meta import Meta
@@ -256,6 +276,7 @@ def load_joint_contract():
 	from joint_release_guards import serialized
 
 	assert frappe.__version__ == "16.23.0" and frappe.db.db_type == "mariadb", "Frozen native Frappe 16.23/MariaDB contract required"
+	_assert_no_joint_customizations()
 	root = Path(frappe.get_app_path("deeplinkerp_branding"))
 	files, definitions, schemas, ddl = {}, {}, {}, {}
 	for name in JOINT_MODELS:
@@ -373,12 +394,28 @@ def _desired_navigation(scope, *, when, seed):
 	return {dt: sorted(rows, key=lambda row: row["name"]) for dt, rows in expected.items()}
 
 
+def _assert_frozen_je_fields(meta, contract, present):
+	"""Check effective fields as well as raw CF rows and their SQL definitions.
+
+	Native field sorting changes idx. All other shared native behavior/default
+	columns must still match the frozen CF, not an effective Property Setter.
+	"""
+	registration = {"name", "creation", "modified", "owner", "modified_by", "docstatus", "idx", "_comments", "_assign", "_user_tags", "_liked_by"}
+	shared = set(contract["native_metadata_schemas"]["DocField"]["columns"]) - registration
+	for key in present:
+		fields = [field for field in meta.fields if field.fieldname == key]
+		assert len(fields) == 1, "Missing/duplicate effective operating Journal Entry field"
+		expected = contract["definitions"]["Journal Entry-" + key]["native"]["Custom Field"][0]
+		assert all(fields[0].get(flag) == value for flag, value in expected.items() if flag in shared), "Conflicting effective native Journal Entry field behavior: " + key
+
+
 def _joint_plan(before, contract, *, when, seed):
 	import frappe
 	from frappe.model.meta import Meta
 	from audit_unified_purchase import table_schema
 	from joint_release_guards import validate_event_index
 
+	_assert_no_joint_customizations()
 	scope = before["metadata"]["scope"]
 	for row in scope["Custom Field"]:
 		assert row.get("dt") == "Journal Entry" and row.get("fieldname") in CUSTOM_FIELD_ORDER and row["name"] == "Journal Entry-" + row["fieldname"], "Orphan/conflicting Custom Field identity"
@@ -417,6 +454,7 @@ def _joint_plan(before, contract, *, when, seed):
 	expected = _desired_navigation(expected, when=when, seed=seed)
 	# Inspect the native desired JE delta BEFORE registering any metadata.
 	meta = copy.deepcopy(frappe.get_meta("Journal Entry", cached=False))
+	_assert_frozen_je_fields(meta, contract, [key for key in contract["custom_fields"] if key in columns])
 	for key, field in contract["custom_fields"].items():
 		if key not in columns:
 			meta.fields.append(frappe._dict(field))
@@ -597,6 +635,52 @@ def apply_joint_metadata(candidate_sha, receipt_path, *, before_audit=None):
 	return {"applied": True, "unchanged": not receipt.state["steps"], "identity": identity, "ddl_boundaries": len([step for step in receipt.state["steps"] if step["kind"] == "ddl"]), "protected_tables": len(after["audit"]["tables"]), "original_je_projection": digest(before["je"]["rows"]), "new_fields_all_null": True, "source_sync_enabled": False}
 
 
+def _assert_recorded_rollback_state(receipt, current):
+	"""Accept only states explained by the durable latest intent per component.
+
+	The common business/source invariants run separately, including old-image
+	source normalization. Here every scope row and native schema is exact; only
+	a pending single DDL or per-row metadata autocommit may be on either side.
+	"""
+	state = receipt.state
+	assert state["status"] in {"applying", "applied", "restored"}
+	basis = state["after"] if state["status"] == "applied" else state["before"]
+	if state["status"] == "restored":
+		basis = state["before"]
+	latest = {}
+	if state["status"] != "restored":
+		for step in state["steps"]:
+			if state["status"] == "applied" and not step["kind"].startswith("rollback-"):
+				continue
+			if step["kind"] in {"ddl", "rollback-ddl"}:
+				latest[step["doctype"]] = step
+			elif step["kind"] in {"metadata", "rollback-metadata"}:
+				latest["metadata"] = step
+	for name, actual in (("Journal Entry", current["je"]["schema"]), *((name, model["schema"]) for name, model in current["models"].items())):
+		original = basis["je"]["schema"] if name == "Journal Entry" else basis["models"][name]["schema"]
+		step = latest.get(name)
+		allowed = [original] if step is None else [step["expected_after"]]
+		if step is not None and step["status"] == "pending":
+			allowed.append(step["before"])
+		assert actual in allowed, "Native schema drift from recorded release/rollback intent: " + name
+	step = latest.get("metadata")
+	actual_scope = current["metadata"]["scope"]
+	if step is None or step["status"] == "complete":
+		expected = basis["metadata"]["scope"] if step is None else step["expected_after"]
+		assert actual_scope == expected, "Metadata drift from exact recorded release/baseline"
+	else:
+		# _write_scope mutates one whole row per SQL statement. A pending
+		# autocommit can contain only exact before/after rows, with shared rows
+		# mandatory and newly inserted/deleted rows optional until completion.
+		assert set(actual_scope) == set(step["before"]) == set(step["expected_after"])
+		for doctype, rows in actual_scope.items():
+			old = {row["name"]: row for row in step["before"][doctype]}
+			wanted = {row["name"]: row for row in step["expected_after"][doctype]}
+			assert set(old) & set(wanted) <= {row["name"] for row in rows}, "Preexisting recorded metadata disappeared"
+			for row in rows:
+				assert row == old.get(row["name"]) or row == wanted.get(row["name"]), "Unrecorded partial metadata drift"
+
+
 def restore_joint_metadata(receipt_path, *, candidate_sha=None, source_phase="after"):
 	"""Inspect actual pending state; remove only exact newly absent-before empties."""
 	import frappe
@@ -611,6 +695,17 @@ def restore_joint_metadata(receipt_path, *, candidate_sha=None, source_phase="af
 	frappe.db.rollback()
 	current = capture_joint_state(original_columns=before["je"]["original_columns"])
 	_assert_joint_invariants(receipt, current, source_phase=source_phase)
+	_assert_recorded_rollback_state(receipt, current)
+	# A crash may follow the native autocommit but precede complete(). Persist
+	# only the latest pending rollback intent actually observed at its result.
+	latest = {}
+	for step in receipt.state["steps"]:
+		if step["kind"] in {"rollback-ddl", "rollback-metadata"}:
+			latest[step.get("doctype", "metadata")] = step
+	for name, step in latest.items():
+		actual = current["metadata"]["scope"] if name == "metadata" else (current["je"]["schema"] if name == "Journal Entry" else current["models"][name]["schema"])
+		if step["status"] == "pending" and actual == step["expected_after"]:
+			receipt.complete(step["id"], actual)
 	for dt, rows in current["metadata"]["scope"].items():
 		original = {row["name"]: row for row in before["metadata"]["scope"][dt]}
 		planned = {row["name"]: row for row in contract["metadata_plan"]["scope"][dt]}
@@ -626,6 +721,7 @@ def restore_joint_metadata(receipt_path, *, candidate_sha=None, source_phase="af
 			frappe.db.sql_ddl(query)
 			after = capture_joint_state(original_columns=before["je"]["original_columns"])
 			_assert_joint_invariants(receipt, after, source_phase=source_phase)
+			_assert_recorded_rollback_state(receipt, after)
 			receipt.complete(step_id, table_schema(name))
 	# One newly NULL column per native autocommit; dropping its new index is bounded too.
 	for key in reversed(CUSTOM_FIELD_ORDER):
@@ -641,10 +737,14 @@ def restore_joint_metadata(receipt_path, *, candidate_sha=None, source_phase="af
 			frappe.db.sql_ddl(query)
 			after = capture_joint_state(original_columns=before["je"]["original_columns"])
 			_assert_joint_invariants(receipt, after, source_phase=source_phase)
+			_assert_recorded_rollback_state(receipt, after)
 			receipt.complete(step_id, table_schema("Journal Entry"))
 	actual_scope = capture_joint_metadata()["scope"]
 	if actual_scope != before["metadata"]["scope"]:
-		receipt.plan("rollback-metadata", actual_scope, before["metadata"]["scope"], kind="rollback-metadata")
+		pending = next((step for step in receipt.state["steps"] if step["id"] == "rollback-metadata"), None)
+		# Do not replace the original durable intent with a partially recovered
+		# snapshot. Its exact per-row partial state was validated on entry.
+		receipt.plan("rollback-metadata", pending["before"] if pending else actual_scope, before["metadata"]["scope"], kind="rollback-metadata")
 		_write_scope(actual_scope, before["metadata"]["scope"])
 		_assert_joint_invariants(receipt, capture_joint_state(original_columns=before["je"]["original_columns"]), scope=before["metadata"]["scope"], source_phase=source_phase)
 		frappe.db.commit()
@@ -653,6 +753,7 @@ def restore_joint_metadata(receipt_path, *, candidate_sha=None, source_phase="af
 		frappe.clear_cache(doctype=name)
 	final = capture_joint_state(original_columns=before["je"]["original_columns"])
 	_assert_joint_invariants(receipt, final, scope=before["metadata"]["scope"], source_phase=source_phase)
+	_assert_recorded_rollback_state(receipt, final)
 	assert final["je"] == before["je"] and final["models"] == before["models"] and final["metadata"] == before["metadata"], "Rollback did not restore exact native original state"
 	receipt.restored()
 	return {"restored": True, "original_bytes_and_child_ids": True, "pending_inspected_from_database": True, "maintenance_retained": True}
