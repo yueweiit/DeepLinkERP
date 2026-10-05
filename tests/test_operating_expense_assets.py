@@ -30,6 +30,7 @@ class OperatingExpenseAssetsTest(unittest.TestCase):
 		self.assertIn(provider, files)
 		self.assertLess(files.index(shell), files.index(drawer))
 		self.assertLess(files.index(drawer), files.index(provider))
+		self.assertIn(drawer + "?v=0.0.7", hooks.app_include_js)
 		self.assertNotIn("Operating Expense Source", hooks.doctype_list_js)
 		self.assertEqual(len([p for p in hooks.app_include_css if "operating_expenses.css" in p]), 1)
 
@@ -58,5 +59,11 @@ class OperatingExpenseAssetsTest(unittest.TestCase):
 			"生成费用凭证草稿",
 			"生成结算凭证草稿",
 			"尚未核销",
+			"原始审批编号",
+			"原始钉钉实例编号",
+			"原始来源请求编号",
+			"请先保存费用映射并生成或关联费用确认凭证，再维护本笔结算。",
+			"费用确认凭证已记账，只能查看；后续实际付款仍可办理结算。",
+			"来源版本已变化，请刷新抽屉后重新预览。",
 		):
 			self.assertIn(label + ",", translations)

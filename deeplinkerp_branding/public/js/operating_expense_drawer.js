@@ -22,6 +22,16 @@
 				: value
 		);
 	const boolean = (value) => value === true || value === 1 || value === "1";
+	const recognitionEvents = (detail) =>
+		(detail?.events || []).filter(
+			(event) =>
+				event.operation === "expense" &&
+				event.journal_entry &&
+				!event.issue &&
+				[0, 1].includes(event.docstatus)
+		);
+	const hasPostedRecognition = (detail) =>
+		recognitionEvents(detail).some((event) => event.docstatus === 1);
 	const mappingFields = [
 		"company",
 		"party_type",
@@ -180,8 +190,10 @@
 				this.changed();
 			},
 			touchPayment(id, field, value) {
-				if (!detail.mapping?.payable_exchange_rate)
-					throw new Error(t("请先保存费用映射，再维护本笔结算。"));
+				if (!canEditPayment(detail))
+					throw new Error(
+						t("请先保存费用映射并生成或关联费用确认凭证，再维护本笔结算。")
+					);
 				if (
 					![
 						"bank_account",
@@ -364,6 +376,12 @@
 				if (!detail?.mapping || !this.session || this.session.dirty())
 					throw new Error(t("请先保存当前财务映射，再预览"));
 				this.invalidate();
+				if (payment && !canEditPayment(detail))
+					throw new Error(
+						t("请先保存费用映射并生成或关联费用确认凭证，再维护本笔结算。")
+					);
+				if (!payment && hasPostedRecognition(detail))
+					throw new Error(t("费用确认凭证已记账，只能查看；后续实际付款仍可办理结算。"));
 				const revision = this.session.revision,
 					sourceVersion = detail.source.version;
 				return run(async (current) => {
@@ -374,6 +392,8 @@
 					if (!current() || revision !== this.session.revision) return;
 					if (!result?.fingerprint || !Array.isArray(result.accounts))
 						throw new Error(t("凭证预览无效，请刷新后复核"));
+					if (result.source_version !== sourceVersion)
+						throw new Error(t("来源版本已变化，请刷新抽屉后重新预览。"));
 					previews.set(key(payment), { revision, sourceVersion, result });
 					hooks.onPreview?.(result, payment);
 					state();
@@ -385,6 +405,7 @@
 				return Boolean(
 					canFinance() &&
 						sourceReady() &&
+						(payment ? canEditPayment(detail) : !hasPostedRecognition(detail)) &&
 						currentPreview(payment) &&
 						(payment || this.session.mapping().recognition_mode === "new")
 				);
@@ -393,6 +414,7 @@
 				return Boolean(
 					canFinance() &&
 						sourceReady() &&
+						!hasPostedRecognition(detail) &&
 						currentPreview() &&
 						this.session.mapping().recognition_mode === "existing"
 				);
@@ -449,7 +471,7 @@
 		return `<section class="dlp-operating-section"><div class="dlp-operating-facts">${fact(
 			"申请编号",
 			s.source_id
-		)}${fact("原始申请类型", s.application_type_raw)}${fact("来源版本", s.version)}${fact("法律公司", detail.company)}${fact("来源公司", s.source_company)}${fact("来源归档表", s.source_sheet)}${fact("申请日期", s.request_date)}${fact("收款人", s.payee_name)}${fact("申请人", s.applicant)}${fact("当前来源金额", `${money(s.amount)} ${s.currency || t("币种未明确")}`)}${fact("原始批准金额", s.original_source_amount == null ? "—" : `${money(s.original_source_amount)} ${s.original_source_currency || t("币种未明确")}`)}${fact("出纳已付", `${money(s.paid_amount)} ${s.currency || ""}`)}${fact("出纳待付", `${money(s.pending_amount)} ${s.currency || ""}`)}</div><p>${display(s.summary)}</p><p><a href="https://payment.yueweiportal.com/" target="_blank" rel="noopener noreferrer">${esc(t("请款网站"))}</a>${original ? ` · <a href="${esc(original)}" target="_blank" rel="noopener noreferrer">${esc(t("钉钉审批来源"))}</a>` : ""}</p></section>
+		)}${fact("原始审批编号", s.approval_no)}${fact("原始钉钉实例编号", s.dingding_id)}${fact("原始来源请求编号", s.source_request_id)}${fact("原始申请类型", s.application_type_raw)}${fact("来源版本", s.version)}${fact("法律公司", detail.company)}${fact("来源公司", s.source_company)}${fact("来源归档表", s.source_sheet)}${fact("申请日期", s.request_date)}${fact("收款人", s.payee_name)}${fact("申请人", s.applicant)}${fact("当前来源金额", `${money(s.amount)} ${s.currency || t("币种未明确")}`)}${fact("原始批准金额", s.original_source_amount == null ? "—" : `${money(s.original_source_amount)} ${s.original_source_currency || t("币种未明确")}`)}${fact("出纳已付", `${money(s.paid_amount)} ${s.currency || ""}`)}${fact("出纳待付", `${money(s.pending_amount)} ${s.currency || ""}`)}</div><p>${display(s.summary)}</p><p><a href="https://payment.yueweiportal.com/" target="_blank" rel="noopener noreferrer">${esc(t("请款网站"))}</a>${original ? ` · <a href="${esc(original)}" target="_blank" rel="noopener noreferrer">${esc(t("钉钉审批来源"))}</a>` : ""}</p></section>
 		<section class="dlp-operating-section"><strong>${esc(
 			t("来源审批与待处理问题")
 		)}</strong><p class="${s.approvals?.eligibility === "eligible" ? "text-success" : "text-warning"}">${esc(root.DeepLinkERPOperatingExpenses.approvalLabel(s.approvals?.eligibility))}</p><div class="dlp-operating-facts">${Object.entries(
@@ -607,7 +629,8 @@
 		];
 		return defs;
 	}
-	const canEditPayment = (detail) => Boolean(detail.mapping?.payable_exchange_rate);
+	const canEditPayment = (detail) =>
+		Boolean(detail?.mapping?.payable_exchange_rate && recognitionEvents(detail).length);
 	function configureDrawer(drawer) {
 		const original = drawer.setBusy.bind(drawer);
 		drawer.actions = [];
@@ -650,6 +673,24 @@
 		drawer.controls.push(control);
 		control.$input?.attr("aria-label", t(df.label));
 		if (query) control.get_query = query;
+		if (
+			df.fieldtype === "Check" &&
+			df.read_only &&
+			control.disp_area &&
+			control.set_disp_area
+		) {
+			const renderDisplay = control.set_disp_area.bind(control);
+			control.set_disp_area = (displayValue) => {
+				if (!drawer.alive() || load !== drawer.loadId) return;
+				renderDisplay(displayValue);
+				// Native readonly Check formatter supplies a CSS class but no checked attribute.
+				root.$(control.disp_area)
+					.find('input[type="checkbox"]')
+					.prop("checked", boolean(control.value ?? displayValue))
+					.prop("disabled", true)
+					.attr("aria-label", t(df.label));
+			};
+		}
 		await control.set_value(df.fieldtype === "Check" ? (boolean(value) ? 1 : 0) : value ?? "");
 		if (!drawer.alive() || load !== drawer.loadId) {
 			root.DeepLinkERPPurchasePayments.disposeControls([control]);
@@ -1038,7 +1079,11 @@
 				drawer.panel.find(".dlp-operating-expense-actions"),
 				"预览费用凭证",
 				() => w.preview(),
-				() => eligible() && !w.session.dirty() && w.session.ready()
+				() =>
+					eligible() &&
+					!hasPostedRecognition(detail) &&
+					!w.session.dirty() &&
+					w.session.ready()
 			);
 			action(
 				drawer,
@@ -1056,7 +1101,7 @@
 					fieldtype: "Link",
 					options: "Journal Entry",
 					label: "选择已有原生凭证",
-					read_only: !eligible(),
+					read_only: !eligible() || hasPostedRecognition(detail),
 				},
 				"",
 				(value) => {
@@ -1137,7 +1182,9 @@
 				}
 				if (!canEditPayment(detail))
 					section.append(
-						`<p class="text-muted">${esc(t("请先保存费用映射，再维护本笔结算。"))}</p>`
+						`<p class="text-muted">${esc(
+							t("请先保存费用映射并生成或关联费用确认凭证，再维护本笔结算。")
+						)}</p>`
 					);
 				action(
 					drawer,

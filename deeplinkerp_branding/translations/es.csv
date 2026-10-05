@@ -447,3 +447,9 @@ Excel 共享文本索引不符合预期。,El índice de texto compartido de Exc
 舍入后本位币金额,Importe redondeado en moneda base
 差额（舍入后 - 精确）,Diferencia (redondeado menos exacto)
 操作失败，请核对系统提示。,La operación falló. Revisa el aviso del sistema.
+原始审批编号,Número de aprobación original
+原始钉钉实例编号,Identificador original de la instancia de DingTalk
+原始来源请求编号,Identificador original de la solicitud de origen
+请先保存费用映射并生成或关联费用确认凭证，再维护本笔结算。,Guarda las correspondencias del gasto y crea o vincula su asiento de reconocimiento antes de gestionar esta liquidación.
+费用确认凭证已记账，只能查看；后续实际付款仍可办理结算。,El asiento de reconocimiento del gasto ya está contabilizado y es de solo lectura. Los pagos posteriores pueden liquidarse.
+来源版本已变化，请刷新抽屉后重新预览。,La versión de origen ha cambiado. Actualiza el panel y vuelve a generar la vista previa.

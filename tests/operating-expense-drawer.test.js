@@ -51,6 +51,11 @@ const detail = () => ({
 		expense_fingerprint: "private",
 	},
 });
+const recognizedDetail = (docstatus = 0) => {
+	const d = detail();
+	d.events = [{ journal_entry: "JE-expense", docstatus, operation: "expense" }];
+	return d;
+};
 const api = create({});
 function host(call) {
 	return {
@@ -78,7 +83,7 @@ function drawer() {
 
 test("source mapping uses exact decimal strings and preserves hidden payment terms", () => {
 	assert.equal(typeof api.editSession, "function");
-	const s = api.editSession(detail());
+	const s = api.editSession(recognizedDetail());
 	s.touchLine(0, "amount", "99.123456789");
 	s.touchPayment("pay:1", "bank_amount", "25.000");
 	const payload = s.mapping();
@@ -194,7 +199,11 @@ test("saved mapping then preview is the only path to a fingerprint-bound Journal
 				: req.method.endsWith("save_mapping")
 				? { mapping: detail().mapping }
 				: req.method.endsWith("preview_voucher")
-				? { fingerprint: "p1", accounts: [{ account: "Rent", debit: "100", credit: "0" }] }
+				? {
+						fingerprint: "p1",
+						source_version: "v1",
+						accounts: [{ account: "Rent", debit: "100", credit: "0" }],
+				  }
 				: { journal_entry: "JE-1", docstatus: 0 },
 		};
 	});
@@ -219,7 +228,7 @@ test("changing any mapping input immediately invalidates a previous preview and 
 	const h = host(async (req) => ({
 		message: req.method.endsWith("get_operating_expense_detail")
 			? detail()
-			: { fingerprint: "old", accounts: [] },
+			: { fingerprint: "old", source_version: "v1", accounts: [] },
 	}));
 	const a = create(h);
 	assert.equal(typeof a.workflow, "function");
@@ -260,7 +269,7 @@ test("a preview resolving after mapping edits is discarded before it can enable 
 	await w.load();
 	const pending = w.preview();
 	w.session.touch("payable_exchange_rate", "2");
-	finish({ message: { fingerprint: "old" } });
+	finish({ message: { fingerprint: "old", source_version: "v1" } });
 	await pending;
 	assert.equal(w.canCreate(), false);
 });
@@ -277,7 +286,7 @@ test("existing coverage mode permits explicit link after preview and blocks expe
 				message: req.method.endsWith("get_operating_expense_detail")
 					? d
 					: req.method.endsWith("preview_voucher")
-					? { fingerprint: "existing", accounts: [] }
+					? { fingerprint: "existing", source_version: "v1", accounts: [] }
 					: { journal_entry: "JE-old", docstatus: 1 },
 			};
 		})
@@ -302,9 +311,14 @@ test("settlement uses the actual source payment identifier and keeps expense eve
 			calls.push(req);
 			return {
 				message: req.method.endsWith("get_operating_expense_detail")
-					? detail()
+					? recognizedDetail()
 					: req.method.endsWith("preview_voucher")
-					? { fingerprint: "payp", accounts: [], settlement_state: "尚未核销" }
+					? {
+							fingerprint: "payp",
+							source_version: "v1",
+							accounts: [],
+							settlement_state: "尚未核销",
+					  }
 					: { journal_entry: "JE-pay", docstatus: 0, settlement_state: "尚未核销" },
 			};
 		})
@@ -320,6 +334,95 @@ test("settlement uses the actual source payment identifier and keeps expense eve
 		expected_fingerprint: "payp",
 	});
 });
+test("preview accepts only the returned version of the loaded source for expense and settlement", async () => {
+	for (const payment of [undefined, "pay:1"]) {
+		let sourceVersion = "v1",
+			painted = 0;
+		const a = create(
+			host(async (req) => ({
+				message: req.method.endsWith("get_operating_expense_detail")
+					? recognizedDetail()
+					: { fingerprint: "p", source_version: sourceVersion, accounts: [] },
+			}))
+		);
+		const w = a.workflow(drawer(), "source:1", { onPreview: () => painted++ });
+		await w.load();
+		await w.preview(payment);
+		assert.equal(w.canCreate(payment), true);
+		sourceVersion = "v2";
+		await assert.rejects(() => w.preview(payment), /刷新/);
+		assert.equal(w.previewResult(payment), null);
+		assert.equal(w.canCreate(payment), false);
+		assert.equal(painted, 1, "A stale response cannot paint a valid-looking preview");
+		sourceVersion = "v1";
+		await w.preview(payment);
+		assert.equal(w.canCreate(payment), true);
+	}
+});
+test("saved mapping without a valid expense recognition cannot edit or preview settlement terms", async () => {
+	for (const events of [
+		[],
+		[{ operation: "expense", docstatus: 0, journal_entry: "" }],
+		[{ operation: "payment", docstatus: 0, journal_entry: "JE-payment" }],
+		[{ operation: "expense", docstatus: 0, journal_entry: "JE-expense", issue: "unreadable" }],
+		[{ operation: "expense", docstatus: 2, journal_entry: "JE-expense" }],
+	]) {
+		const d = detail();
+		d.events = events;
+		const calls = [];
+		const a = create(
+			host(async (req) => {
+				calls.push(req);
+				return {
+					message: req.method.endsWith("get_operating_expense_detail")
+						? d
+						: { fingerprint: "p", source_version: "v1", accounts: [] },
+				};
+			})
+		);
+		const w = a.workflow(drawer(), "source:1");
+		await w.load();
+		assert.equal(a.canEditPayment(d), false);
+		assert.throws(() => w.session.touchPayment("pay:1", "bank_amount", "25"), /费用确认凭证/);
+		await assert.rejects(() => w.preview("pay:1"), /费用确认凭证/);
+		assert.equal(w.canCreate("pay:1"), false);
+		assert.equal(
+			calls.length,
+			1,
+			"No settlement preview is dispatched before recognition exists"
+		);
+	}
+});
+test("posted expense recognition blocks repeat expense preview but permits recorded settlement drafts", async () => {
+	const d = recognizedDetail(1),
+		calls = [];
+	const a = create(
+		host(async (req) => {
+			calls.push(req);
+			return {
+				message: req.method.endsWith("get_operating_expense_detail")
+					? d
+					: req.method.endsWith("preview_voucher")
+					? { fingerprint: "pay", source_version: "v1", accounts: [] }
+					: { journal_entry: "JE-payment", docstatus: 0 },
+			};
+		})
+	);
+	const w = a.workflow(drawer(), "source:1");
+	await w.load();
+	assert.equal(a.canEditPayment(d), true);
+	await assert.rejects(() => w.preview(), /已记账/);
+	assert.equal(w.canCreate(), false);
+	assert.equal(w.canLink(), false);
+	assert.equal(calls.length, 1);
+	await w.preview("pay:1");
+	assert.equal(w.canCreate("pay:1"), true);
+	const result = await w.create("pay:1");
+	assert.equal(result.docstatus, 0);
+	assert.ok(calls.at(-1).method.endsWith("create_voucher_draft"));
+	assert.equal(calls.at(-1).args.payment_source_id, "pay:1");
+	assert.ok(calls.every((req) => !/submit|record_payment/.test(req.method)));
+});
 test("source evidence view separates original approved facts, cashier payment evidence, attachments and native JE history", () => {
 	const a = create({
 		DeepLinkERPOperatingExpenses:
@@ -328,6 +431,9 @@ test("source evidence view separates original approved facts, cashier payment ev
 	assert.equal(typeof a.sourceHTML, "function");
 	const d = detail();
 	d.source.application_type_raw = "原文<&";
+	d.source.approval_no = "AP<&-001";
+	d.source.dingding_id = "DING<&-002";
+	d.source.source_request_id = "REQ<&-003";
 	d.source.original_source_amount = "98.765";
 	d.source.original_source_currency = "USD";
 	d.source.source_sheet = "BU归档";
@@ -346,6 +452,12 @@ test("source evidence view separates original approved facts, cashier payment ev
 	const html = a.sourceHTML(d);
 	assert.match(html, /原始批准金额.*98\.77 USD/);
 	assert.match(html, /原文&lt;&amp;/);
+	assert.match(html, /原始审批编号.*AP&lt;&amp;-001/);
+	assert.match(html, /原始钉钉实例编号.*DING&lt;&amp;-002/);
+	assert.match(html, /原始来源请求编号.*REQ&lt;&amp;-003/);
+	assert.equal(d.source.approval_no, "AP<&-001");
+	assert.equal(d.source.dingding_id, "DING<&-002");
+	assert.equal(d.source.source_request_id, "REQ<&-003");
 	assert.match(html, /请款网站/);
 	assert.match(html, /实际付款证据/);
 	assert.match(html, /data-attachment="att:1"/);
@@ -451,7 +563,8 @@ test("source and settlement controls use native Link/Date/Data/Check with explic
 	const noMapping = detail();
 	noMapping.mapping = null;
 	assert.equal(api.canEditPayment(noMapping), false);
-	assert.equal(api.canEditPayment(detail()), true);
+	assert.equal(api.canEditPayment(detail()), false);
+	assert.equal(api.canEditPayment(recognizedDetail()), true);
 });
 test("drawer reuses the shared accessible shell factory and stops initializing controls after close", async () => {
 	let made = 0,
@@ -809,11 +922,12 @@ test("settings drawer uses a native Password input and an explicit preview confi
 	assert.match(html.join(""), /固定来源/);
 	assert.doesNotMatch(html.join(""), /name="source_url"/);
 });
-test("successful native draft creation reloads history so expense controls become immutable", async () => {
+test("native recognition history separates immutable expense controls from available settlement controls", async () => {
 	const requests = [],
 		buttons = new Map(),
 		errors = [];
-	let created = false;
+	let created = false,
+		expenseDocstatus = 0;
 	class Surface {
 		constructor(html = "") {
 			this.htmlValue = html;
@@ -878,12 +992,20 @@ test("successful native draft creation reloads history so expense controls becom
 		requests.push(req.method);
 		const item = detail();
 		if (created)
-			item.events = [{ journal_entry: "JE-new", docstatus: 0, operation: "expense" }];
+			item.events = [
+				{ journal_entry: "JE-new", docstatus: expenseDocstatus, operation: "expense" },
+			];
 		return {
 			message: req.method.endsWith("get_operating_expense_detail")
 				? item
 				: req.method.endsWith("preview_voucher")
-				? { fingerprint: "p", accounts: [], company: "C", posting_date: "2026-10-01" }
+				? {
+						fingerprint: "p",
+						source_version: "v1",
+						accounts: [],
+						company: "C",
+						posting_date: "2026-10-01",
+				  }
 				: ((created = true), { journal_entry: "JE-new", docstatus: 0 }),
 		};
 	}).frappe;
@@ -911,6 +1033,11 @@ test("successful native draft creation reloads history so expense controls becom
 		},
 	});
 	await a.open("source:1");
+	assert.equal(
+		d.controls.find((control) => control.df.fieldname === "bank_account").df.read_only,
+		true
+	);
+	assert.equal(buttons.get("预览结算凭证").disabled, true);
 	await buttons.get("预览费用凭证").handlers["click.dlpDrawer"]();
 	await buttons.get("生成费用凭证草稿").handlers["click.dlpDrawer"]();
 	assert.equal(
@@ -918,6 +1045,28 @@ test("successful native draft creation reloads history so expense controls becom
 		"deeplinkerp_branding.services.operating_expenses.get_operating_expense_detail"
 	);
 	assert.equal(buttons.get("保存财务映射").disabled, true);
+	assert.equal(
+		d.controls.find((control) => control.df.fieldname === "classification").df.read_only,
+		true
+	);
+	assert.equal(
+		d.controls.find((control) => control.df.fieldname === "bank_account").df.read_only,
+		false
+	);
+	assert.equal(buttons.get("预览结算凭证").disabled, false);
+	expenseDocstatus = 1;
+	await buttons.get("刷新抽屉").handlers["click.dlpDrawer"]();
+	assert.equal(buttons.get("预览费用凭证").disabled, true);
+	assert.equal(buttons.get("生成费用凭证草稿").disabled, true);
+	assert.equal(
+		d.controls.find((control) => control.df.fieldname === "existing_journal").df.read_only,
+		true
+	);
+	assert.equal(
+		d.controls.find((control) => control.df.fieldname === "bank_account").df.read_only,
+		false
+	);
+	assert.equal(buttons.get("预览结算凭证").disabled, false);
 	assert.deepEqual(
 		errors,
 		[],
@@ -929,7 +1078,8 @@ test("a failed re-preview cannot leave the previous fingerprint eligible for cre
 	const a = create(
 		host(async (req) => {
 			if (req.method.endsWith("get_operating_expense_detail")) return { message: detail() };
-			if (++previews === 1) return { message: { fingerprint: "old", accounts: [] } };
+			if (++previews === 1)
+				return { message: { fingerprint: "old", source_version: "v1", accounts: [] } };
 			throw new Error("changed source");
 		})
 	);
@@ -947,7 +1097,7 @@ test("cancelled or unreadable native associations block further voucher creation
 		host(async (req) => ({
 			message: req.method.endsWith("get_operating_expense_detail")
 				? d
-				: { fingerprint: "p", accounts: [] },
+				: { fingerprint: "p", source_version: "v1", accounts: [] },
 		}))
 	);
 	const w = a.workflow(drawer(), "source:1");
@@ -956,7 +1106,7 @@ test("cancelled or unreadable native associations block further voucher creation
 	assert.equal(w.canCreate(), false);
 });
 test("same-value native Link Date Data Check validation and empty payment controls never dirty a saved mapping", () => {
-	const s = api.editSession(detail());
+	const s = api.editSession(recognizedDetail());
 	const revision = s.revision;
 	s.touch("party", "S");
 	s.touch("posting_date", "2026-10-01");
@@ -1025,6 +1175,9 @@ test("real drawer stays previewable after late native validation callbacks inclu
 		text() {
 			return this;
 		}
+		val() {
+			return this;
+		}
 	}
 	const d = drawer();
 	d.panel = new Surface();
@@ -1064,20 +1217,29 @@ test("real drawer stays previewable after late native validation callbacks inclu
 	assert.equal(buttons.get("预览费用凭证").disabled, false);
 	assert.deepEqual(errors, []);
 });
-test("readonly native Check renders persisted boolean confirmations through its integer-only contract without dirtying mapping", async () => {
+test("readonly native Check keeps persisted confirmation state in its display checkbox after native Read refreshes", async () => {
 	const checks = new Map(),
 		decimalDisplays = [];
 	class Surface {
-		constructor() {
+		constructor(role = "") {
 			this.length = 1;
+			this.role = role;
+			this.attrs = {};
 		}
 		addClass() {
 			return this;
 		}
-		find() {
+		find(selector) {
+			if (this.role === "display" && selector === 'input[type="checkbox"]')
+				return this.checkbox;
 			return new Surface();
 		}
-		html() {
+		html(value) {
+			if (this.role === "display") {
+				this.checkbox = new Surface("checkbox");
+				this.checkbox.checked = /\bchecked\b/.test(value);
+				this.checkbox.disabled = /\bdisabled\b/.test(value);
+			}
 			return this;
 		}
 		on() {
@@ -1098,10 +1260,12 @@ test("readonly native Check renders persisted boolean confirmations through its 
 		remove() {
 			return this;
 		}
-		attr() {
+		attr(key, value) {
+			this.attrs[key] = value;
 			return this;
 		}
-		prop() {
+		prop(key, value) {
+			this[key] = value;
 			return this;
 		}
 		toggle() {
@@ -1126,7 +1290,7 @@ test("readonly native Check renders persisted boolean confirmations through its 
 	item.mapping.expense_lines[0].source_amount = "100";
 	item.mapping.expense_lines[0].amount = "100";
 	const a = create({
-		$: () => new Surface(),
+		$: (value) => (value instanceof Surface ? value : new Surface()),
 		DeepLinkERPOperatingExpenses:
 			require("../deeplinkerp_branding/public/js/operating_expenses.js")({}),
 		DeepLinkERPPurchasePayments: {
@@ -1139,26 +1303,69 @@ test("readonly native Check renders persisted boolean confirmations through its 
 			ui: {
 				form: {
 					make_control: ({ df }) => {
-						let value;
-						const input = new Surface();
-						return {
+						const control = {
 							df,
-							$input: input,
-							set_value: async (next) => {
-								value = df.fieldtype === "Check" ? parseInt(next, 10) || 0 : next;
-								if (df.fieldtype === "Check") checks.set(df.fieldname, value);
+							disp_status: df.read_only ? "Read" : "Write",
+							$input:
+								df.fieldtype === "Check" && df.read_only
+									? undefined
+									: new Surface(),
+							disp_area:
+								df.fieldtype === "Check" ? new Surface("display") : undefined,
+							set_value: async function (next) {
+								this.value =
+									df.fieldtype === "Check"
+										? next === true
+											? 1
+											: parseInt(next, 10) || 0
+										: next;
+								this.set_disp_area(this.value);
+								df.change();
 							},
-							get_value: () => value,
+							set_disp_area: function (value) {
+								// Frappe's Check formatter conveys state only by CSS class, not checked.
+								this.disp_area?.html(
+									`<input type="checkbox" disabled class="disabled-${
+										this.value || value ? "selected" : "deselected"
+									}">`
+								);
+							},
+							refresh: function () {
+								// Native refresh_input Read path renders disp_area without set_input.
+								this.set_disp_area(this.value);
+							},
+							get_value: function () {
+								return this.value;
+							},
 						};
+						if (df.fieldtype === "Check") checks.set(df.fieldname, control);
+						return control;
 					},
 				},
 			},
 		},
 	});
 	await a.open("source:1");
-	assert.equal(checks.get("actual_incurred"), 1);
-	assert.equal(checks.get("no_existing_erp_coverage"), 1);
-	assert.equal(checks.get("existing_erp_coverage_confirmed"), 0);
+	for (const [field, expected] of [
+		["actual_incurred", true],
+		["no_existing_erp_coverage", true],
+		["existing_erp_coverage_confirmed", false],
+	]) {
+		const control = checks.get(field);
+		assert.equal(control.disp_status, "Read");
+		assert.equal(control.$input, undefined);
+		assert.equal(control.value, expected ? 1 : 0);
+		for (let refresh = 0; refresh < 3; refresh++) {
+			control.refresh();
+			assert.equal(
+				control.disp_area.checkbox.checked,
+				expected,
+				`${field} readonly display state`
+			);
+			assert.equal(control.disp_area.checkbox.disabled, true);
+			assert.equal(control.disp_area.checkbox.attrs["aria-label"], control.df.label);
+		}
+	}
 	assert.ok(decimalDisplays.includes("100.00"));
 	assert.equal(item.mapping.actual_incurred, true);
 	assert.equal(item.mapping.expense_lines[0].amount, "100");
@@ -1266,7 +1473,8 @@ test("server validation messages remain readable through silent RPC rejection an
 	let saved = 0;
 	const a = create(
 		host(async (req) => {
-			if (req.method.endsWith("get_operating_expense_detail")) return { message: detail() };
+			if (req.method.endsWith("get_operating_expense_detail"))
+				return { message: recognizedDetail() };
 			throw {
 				responseJSON: {
 					exc_type: "ValidationError",

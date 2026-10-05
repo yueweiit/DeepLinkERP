@@ -70,7 +70,8 @@ def reconcile_workspace(doc, prefix="dlp-procurement-", entries=None, targets=No
 		{
 			row.label
 			for row in doc.get("shortcuts") or []
-			if any(row.get(key) for key in ("filters", "route_options", "url"))
+			if row.get("link_to") not in targets
+			or any(row.get(key) for key in ("filters", "route_options", "url"))
 		}
 		if entries is not ENTRIES
 		else set()

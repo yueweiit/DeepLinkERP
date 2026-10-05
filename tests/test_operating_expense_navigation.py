@@ -77,6 +77,25 @@ class OperatingNavigationTest(unittest.TestCase):
 		self.assertIn(block, json.loads(doc.content))
 		self.assertEqual(doc["shortcuts"][-1].name, "custom-row")
 
+	def test_same_label_shortcut_to_another_native_route_keeps_child_and_original_content(self):
+		block = {"id": "custom-je", "type": "shortcut", "data": {"shortcut_name": "运营费用"}}
+		chart = {"id": "custom-chart", "type": "chart"}
+		custom = Row(name="custom-je-row", link_to="Journal Entry", label="运营费用", type="DocType")
+		doc = Doc(links=[], shortcuts=[custom], content=json.dumps([block, chart]))
+		args = dict(
+			entries=(("运营费用", "Page", "operating-expenses", "receipt-text"),),
+			targets={"operating-expenses"},
+			prefix="dlp-operating-",
+			anchor=0,
+		)
+		self.assertTrue(navigation.reconcile_workspace(doc, **args))
+		self.assertEqual(doc["shortcuts"][-1], custom)
+		self.assertEqual(custom.link_to, "Journal Entry")
+		self.assertEqual(json.loads(doc.content)[1:], [block, chart])
+		snapshot = copy.deepcopy(doc)
+		self.assertFalse(navigation.reconcile_workspace(doc, **args))
+		self.assertEqual(doc, snapshot)
+
 	def load_module(self, fake):
 		self.assertTrue(MODULE.exists(), "Narrow operating navigation hook missing")
 		spec = importlib.util.spec_from_file_location("operating_navigation_contract", MODULE)
