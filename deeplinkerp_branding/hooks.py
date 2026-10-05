@@ -142,7 +142,19 @@ after_migrate = [
 	"deeplinkerp_branding.deeplinkerp_branding.branding.apply_deeplinkerp_settings_branding",
 	"deeplinkerp_branding.inventory_install.after_migrate",
 	"deeplinkerp_branding.procurement_navigation.ensure_procurement_navigation",
+	"deeplinkerp_branding.operating_expense_install.after_migrate",
 ]
+
+permission_query_conditions = {
+    dt: "deeplinkerp_branding.services.operating_expenses.permission_query_conditions"
+    for dt in ("Operating Expense Source", "Operating Expense Mapping", "Operating Expense Event")
+}
+has_permission = {
+    dt: "deeplinkerp_branding.services.operating_expenses.has_permission"
+    for dt in ("Operating Expense Source", "Operating Expense Mapping", "Operating Expense Event")
+}
+doc_events = {"Journal Entry": {"validate": "deeplinkerp_branding.services.operating_expenses.validate_operating_journal"}}
+scheduler_events = {"cron": {"*/15 * * * *": ["deeplinkerp_branding.services.operating_expenses.scheduled_sync"]}}
 website_context = {
 	"favicon": "/assets/deeplinkerp_branding/logo/tab_logo.svg?v=0.0.6",
 	"splash_image": "/assets/deeplinkerp_branding/logo/deeplinkerp_logo_radius.png?v=0.0.6",

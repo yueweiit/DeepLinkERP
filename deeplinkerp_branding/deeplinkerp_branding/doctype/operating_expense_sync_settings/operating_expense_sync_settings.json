@@ -1,0 +1,90 @@
+{
+ "doctype": "DocType",
+ "name": "Operating Expense Sync Settings",
+ "module": "Deeplinkerp Branding",
+ "custom": 0,
+ "engine": "InnoDB",
+ "issingle": 1,
+ "istable": 0,
+ "allow_rename": 0,
+ "track_changes": 1,
+ "autoname": "",
+ "field_order": [
+  "enabled",
+  "api_token",
+  "company_mappings",
+  "changed_since",
+  "until",
+  "cursor",
+  "last_sync_at",
+  "last_error",
+  "preview_fingerprint"
+ ],
+ "fields": [
+  {
+   "fieldname": "enabled",
+   "label": "enabled",
+   "fieldtype": "Check",
+   "read_only": 1
+  },
+  {
+   "fieldname": "api_token",
+   "label": "api token",
+   "fieldtype": "Password",
+   "read_only": 0
+  },
+  {
+   "fieldname": "company_mappings",
+   "label": "company mappings",
+   "fieldtype": "Table",
+   "options": "Operating Expense Company Map",
+   "read_only": 0
+  },
+  {
+   "fieldname": "changed_since",
+   "label": "changed since",
+   "fieldtype": "Data",
+   "read_only": 1
+  },
+  {
+   "fieldname": "until",
+   "label": "until",
+   "fieldtype": "Data",
+   "read_only": 1
+  },
+  {
+   "fieldname": "cursor",
+   "label": "cursor",
+   "fieldtype": "Long Text",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_sync_at",
+   "label": "last sync at",
+   "fieldtype": "Datetime",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_error",
+   "label": "last error",
+   "fieldtype": "Small Text",
+   "read_only": 1
+  },
+  {
+   "fieldname": "preview_fingerprint",
+   "label": "preview fingerprint",
+   "fieldtype": "Data",
+   "read_only": 1
+  }
+ ],
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC"
+}

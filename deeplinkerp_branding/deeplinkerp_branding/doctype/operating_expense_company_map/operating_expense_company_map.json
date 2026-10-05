@@ -1,0 +1,32 @@
+{
+ "doctype": "DocType",
+ "name": "Operating Expense Company Map",
+ "module": "Deeplinkerp Branding",
+ "custom": 0,
+ "engine": "InnoDB",
+ "issingle": 0,
+ "istable": 1,
+ "allow_rename": 0,
+ "track_changes": 1,
+ "autoname": "",
+ "field_order": [
+  "source_company",
+  "company"
+ ],
+ "fields": [
+  {
+   "fieldname": "source_company",
+   "label": "source company",
+   "fieldtype": "Small Text"
+  },
+  {
+   "fieldname": "company",
+   "label": "company",
+   "fieldtype": "Link",
+   "options": "Company"
+  }
+ ],
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC"
+}
