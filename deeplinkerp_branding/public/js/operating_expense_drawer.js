@@ -32,6 +32,12 @@
 		);
 	const hasPostedRecognition = (detail) =>
 		recognitionEvents(detail).some((event) => event.docstatus === 1);
+	const settlementBlocked = (detail, payment) =>
+		(detail?.events || []).some(
+			(event) =>
+				event.payment_source_id === payment &&
+				(event.docstatus === 1 || event.docstatus === 2 || event.issue)
+		);
 	const mappingFields = [
 		"company",
 		"party_type",
@@ -376,6 +382,8 @@
 				if (!detail?.mapping || !this.session || this.session.dirty())
 					throw new Error(t("请先保存当前财务映射，再预览"));
 				this.invalidate();
+				if (payment && settlementBlocked(detail, payment))
+					throw new Error(t("本笔结算已记账、已取消或存在问题，只能查看。"));
 				if (payment && !canEditPayment(detail))
 					throw new Error(
 						t("请先保存费用映射并生成或关联费用确认凭证，再维护本笔结算。")
@@ -405,7 +413,9 @@
 				return Boolean(
 					canFinance() &&
 						sourceReady() &&
-						(payment ? canEditPayment(detail) : !hasPostedRecognition(detail)) &&
+						(payment
+							? canEditPayment(detail) && !settlementBlocked(detail, payment)
+							: !hasPostedRecognition(detail)) &&
 						currentPreview(payment) &&
 						(payment || this.session.mapping().recognition_mode === "new")
 				);
@@ -1204,7 +1214,12 @@
 					section.find(".dlp-operating-actions"),
 					"预览结算凭证",
 					() => w.preview(id),
-					() => eligible() && recorded && !w.session.dirty() && canEditPayment(detail)
+					() =>
+						eligible() &&
+						recorded &&
+						!w.session.dirty() &&
+						canEditPayment(detail) &&
+						!settlementBlocked(detail, id)
 				);
 				action(
 					drawer,

@@ -396,6 +396,18 @@ test("saved mapping without a valid expense recognition cannot edit or preview s
 test("posted expense recognition blocks repeat expense preview but permits recorded settlement drafts", async () => {
 	const d = recognizedDetail(1),
 		calls = [];
+	d.events.push({
+		journal_entry: "JE-prior-payment",
+		docstatus: 1,
+		operation: "payment",
+		payment_source_id: "pay:1",
+	});
+	d.source.payments.push({
+		source_id: "pay:2",
+		amount: "10.00",
+		currency: "CNY",
+		evidence_status: "recorded",
+	});
 	const a = create(
 		host(async (req) => {
 			calls.push(req);
@@ -415,13 +427,75 @@ test("posted expense recognition blocks repeat expense preview but permits recor
 	assert.equal(w.canCreate(), false);
 	assert.equal(w.canLink(), false);
 	assert.equal(calls.length, 1);
-	await w.preview("pay:1");
-	assert.equal(w.canCreate("pay:1"), true);
-	const result = await w.create("pay:1");
+	await w.preview("pay:2");
+	assert.equal(w.canCreate("pay:2"), true);
+	const result = await w.create("pay:2");
 	assert.equal(result.docstatus, 0);
 	assert.ok(calls.at(-1).method.endsWith("create_voucher_draft"));
-	assert.equal(calls.at(-1).args.payment_source_id, "pay:1");
+	assert.equal(calls.at(-1).args.payment_source_id, "pay:2");
 	assert.ok(calls.every((req) => !/submit|record_payment/.test(req.method)));
+});
+test("known posted cancelled or problematic payment events reject settlement preview before dispatch", async () => {
+	for (const state of [
+		{ docstatus: 1 },
+		{ docstatus: 2 },
+		{ docstatus: 0, issue: "unreadable" },
+	]) {
+		const d = recognizedDetail(),
+			calls = [];
+		d.events.push({
+			journal_entry: "JE-payment",
+			operation: "payment",
+			payment_source_id: "pay:1",
+			...state,
+		});
+		const a = create(
+			host(async (req) => {
+				calls.push(req);
+				return {
+					message: req.method.endsWith("get_operating_expense_detail")
+						? d
+						: { fingerprint: "p", source_version: "v1", accounts: [] },
+				};
+			})
+		);
+		const w = a.workflow(drawer(), "source:1");
+		await w.load();
+		await assert.rejects(() => w.preview("pay:1"), /本笔结算/);
+		assert.equal(w.canCreate("pay:1"), false);
+		assert.equal(calls.length, 1);
+	}
+});
+test("a posted event for this payment blocks creation even when a matching preview was cached", async () => {
+	const d = recognizedDetail(),
+		calls = [];
+	const a = create(
+		host(async (req) => {
+			calls.push(req);
+			return {
+				message: req.method.endsWith("get_operating_expense_detail")
+					? d
+					: { fingerprint: "p", source_version: "v1", accounts: [] },
+			};
+		})
+	);
+	const w = a.workflow(drawer(), "source:1");
+	await w.load();
+	await w.preview("pay:1");
+	assert.equal(w.canCreate("pay:1"), true);
+	d.events.push({
+		journal_entry: "JE-payment",
+		docstatus: 1,
+		operation: "payment",
+		payment_source_id: "pay:1",
+	});
+	assert.equal(w.canCreate("pay:1"), false);
+	await assert.rejects(() => w.create("pay:1"), /预览/);
+	assert.equal(
+		calls.length,
+		2,
+		"The cached fingerprint cannot dispatch a draft write for the posted payment"
+	);
 });
 test("source evidence view separates original approved facts, cashier payment evidence, attachments and native JE history", () => {
 	const a = create({
@@ -927,7 +1001,8 @@ test("native recognition history separates immutable expense controls from avail
 		buttons = new Map(),
 		errors = [];
 	let created = false,
-		expenseDocstatus = 0;
+		expenseDocstatus = 0,
+		paymentEvent = null;
 	class Surface {
 		constructor(html = "") {
 			this.htmlValue = html;
@@ -995,6 +1070,7 @@ test("native recognition history separates immutable expense controls from avail
 			item.events = [
 				{ journal_entry: "JE-new", docstatus: expenseDocstatus, operation: "expense" },
 			];
+		if (paymentEvent) item.events.push(paymentEvent);
 		return {
 			message: req.method.endsWith("get_operating_expense_detail")
 				? item
@@ -1067,6 +1143,32 @@ test("native recognition history separates immutable expense controls from avail
 		false
 	);
 	assert.equal(buttons.get("预览结算凭证").disabled, false);
+	expenseDocstatus = 0;
+	for (const state of [
+		{ docstatus: 1 },
+		{ docstatus: 2 },
+		{ docstatus: 0, issue: "unreadable" },
+	]) {
+		paymentEvent = {
+			journal_entry: "JE-payment",
+			operation: "payment",
+			payment_source_id: "pay:1",
+			...state,
+		};
+		await buttons.get("刷新抽屉").handlers["click.dlpDrawer"]();
+		assert.equal(
+			d.controls.find((control) => control.df.fieldname === "bank_account").df.read_only,
+			true
+		);
+		assert.equal(buttons.get("预览结算凭证").disabled, true);
+		assert.equal(buttons.get("生成结算凭证草稿").disabled, true);
+		if (state.docstatus === 1)
+			assert.equal(
+				buttons.get("预览费用凭证").disabled,
+				false,
+				"A posted payment does not make the draft expense posted"
+			);
+	}
 	assert.deepEqual(
 		errors,
 		[],

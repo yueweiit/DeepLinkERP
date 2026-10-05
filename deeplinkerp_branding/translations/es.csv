@@ -453,3 +453,4 @@ Excel 共享文本索引不符合预期。,El índice de texto compartido de Exc
 请先保存费用映射并生成或关联费用确认凭证，再维护本笔结算。,Guarda las correspondencias del gasto y crea o vincula su asiento de reconocimiento antes de gestionar esta liquidación.
 费用确认凭证已记账，只能查看；后续实际付款仍可办理结算。,El asiento de reconocimiento del gasto ya está contabilizado y es de solo lectura. Los pagos posteriores pueden liquidarse.
 来源版本已变化，请刷新抽屉后重新预览。,La versión de origen ha cambiado. Actualiza el panel y vuelve a generar la vista previa.
+本笔结算已记账、已取消或存在问题，只能查看。,Esta liquidación está contabilizada o cancelada o presenta un problema y es de solo lectura.
