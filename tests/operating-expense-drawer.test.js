@@ -539,6 +539,24 @@ test("source evidence view separates original approved facts, cashier payment ev
 	assert.match(html, /草稿 · 未记账/);
 	assert.doesNotMatch(html, /Bearer|api_token/);
 });
+test("derived settlement status is translated without altering raw source evidence", () => {
+	const a = create({
+		__: (text) => text === "尚未核销" ? "Pendiente de conciliación" : text,
+		DeepLinkERPOperatingExpenses:
+			require("../deeplinkerp_branding/public/js/operating_expenses.js")({}),
+	});
+	const d = recognizedDetail();
+	d.source.application_type_raw = "尚未核销";
+	d.events.push({ journal_entry: "JE-pay", docstatus: 0, operation: "payment",
+		payment_source_id: "pay:1", settlement_state: "尚未核销" });
+	const preview = { company: "C", posting_date: "2026-10-01",
+		settlement_state: "尚未核销", accounts: [] };
+	const original = JSON.stringify({ d, preview });
+	assert.match(a.sourceHTML(d), /Pendiente de conciliación/);
+	assert.match(a.sourceHTML(d), /原始申请类型.*尚未核销/);
+	assert.match(a.previewHTML(preview), /Pendiente de conciliación/);
+	assert.equal(JSON.stringify({ d, preview }), original);
+});
 test("native preview renders all account-currency and base-currency rows with explicit rounding and date", () => {
 	const a = create({
 		DeepLinkERPOperatingExpenses:

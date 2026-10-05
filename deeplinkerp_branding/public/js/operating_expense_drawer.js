@@ -22,6 +22,7 @@
 				: value
 		);
 	const boolean = (value) => value === true || value === 1 || value === "1";
+	const stateDisplay = (value) => display(typeof value === "string" && value ? t(value) : value);
 	const recognitionEvents = (detail) =>
 		(detail?.events || []).filter(
 			(event) =>
@@ -511,7 +512,7 @@
 		)}</strong>${(s.payments || []).map((p) => `<p>${display(p.source_id)} · ${display(p.payment_date)} · ${money(p.amount)} ${display(p.currency)} · ${display(p.payer)} · ${display(p.evidence_status)}<br>${display(p.remark)} · ${display(p.bank_reference)}</p>`).join("") || `<p>${esc(t("尚无实际付款证据"))}</p>`}</section>
 		<section class="dlp-operating-section"><strong>${esc(
 			t("原生凭证关联与历史")
-		)}</strong>${(detail.events || []).map((event) => `<p>${event.journal_entry ? nativeLink(event.journal_entry) : display(event.issue)} · ${esc(t(event.operation === "payment" ? "出纳付款结算" : "费用确认"))} ${display(event.payment_source_id)} · ${event.journal_entry ? esc(journalState(event.docstatus)) : ""} ${display(event.settlement_state)} · ${esc(t("来源版本"))} ${display(event.source_version)}</p>`).join("") || `<p>${esc(t("尚无关联原生凭证"))}</p>`}</section>`;
+		)}</strong>${(detail.events || []).map((event) => `<p>${event.journal_entry ? nativeLink(event.journal_entry) : display(event.issue)} · ${esc(t(event.operation === "payment" ? "出纳付款结算" : "费用确认"))} ${display(event.payment_source_id)} · ${event.journal_entry ? esc(journalState(event.docstatus)) : ""} ${stateDisplay(event.settlement_state)} · ${esc(t("来源版本"))} ${display(event.source_version)}</p>`).join("") || `<p>${esc(t("尚无关联原生凭证"))}</p>`}</section>`;
 	}
 	function previewHTML(preview) {
 		const fields = [
@@ -535,7 +536,7 @@
 		]);
 		return `<p>${display(
 			preview.company
-		)} · ${esc(t("凭证日期"))} ${display(preview.posting_date)}${preview.settlement_state ? ` · ${display(preview.settlement_state)}` : ""}</p><div class="dlp-operating-table-wrap"><table class="table table-bordered dlp-operating-preview"><thead><tr>${["科目", "科目币种", "汇率", "科目币种借方", "科目币种贷方", "本位币借方", "本位币贷方", "往来方类型", "往来方", "成本中心", "项目"].map((label) => `<th>${esc(t(label))}</th>`).join("")}</tr></thead><tbody>${preview.accounts.map((row) => `<tr>${fields.map((field) => `<td>${amounts.has(field) ? money(row[field]) : display(row[field])}</td>`).join("")}</tr>`).join("")}</tbody></table></div>${roundingHTML(preview.base_rounding)}<p>${esc(t("仅生成原生凭证草稿，未记账"))}</p>`;
+		)} · ${esc(t("凭证日期"))} ${display(preview.posting_date)}${preview.settlement_state ? ` · ${stateDisplay(preview.settlement_state)}` : ""}</p><div class="dlp-operating-table-wrap"><table class="table table-bordered dlp-operating-preview"><thead><tr>${["科目", "科目币种", "汇率", "科目币种借方", "科目币种贷方", "本位币借方", "本位币贷方", "往来方类型", "往来方", "成本中心", "项目"].map((label) => `<th>${esc(t(label))}</th>`).join("")}</tr></thead><tbody>${preview.accounts.map((row) => `<tr>${fields.map((field) => `<td>${amounts.has(field) ? money(row[field]) : display(row[field])}</td>`).join("")}</tr>`).join("")}</tbody></table></div>${roundingHTML(preview.base_rounding)}<p>${esc(t("仅生成原生凭证草稿，未记账"))}</p>`;
 	}
 	// Presentation only: subtract returned exact/rounded decimal text without binary floats.
 	function roundingDifference(rounded, exact) {
@@ -836,7 +837,7 @@
 		};
 		const resultHTML = (result) =>
 			`${nativeLink(result.journal_entry)} · ${esc(journalState(result.docstatus))}${
-				result.settlement_state ? ` · ${display(result.settlement_state)}` : ""
+				result.settlement_state ? ` · ${stateDisplay(result.settlement_state)}` : ""
 			}`;
 		const renderPreview = (preview, payment) =>
 			(payment
