@@ -461,7 +461,7 @@ def _confirm_payment(doc, workflow_action=None):
 
 
 @frappe.whitelist(methods=["POST"])
-def complete_payment(name, changes, expected_modified, request_id, workflow_action=None):
+def complete_payment(name, changes, expected_modified, request_id, workflow_action=None, attachment_session=None, attachments=None):
     changes = _changes(changes)
 
     def operation():
@@ -470,14 +470,19 @@ def complete_payment(name, changes, expected_modified, request_id, workflow_acti
         if changes:
             update_payment_draft(name, changes, expected_modified)
             doc = _locked("Payment Entry", name)
+        from deeplinkerp_branding.services.purchase_payment_attachments import bind
+        bind(doc, attachment_session, attachments)
         return _confirm_payment(doc, workflow_action)
 
-    return _payment_request(request_id, [name, changes, expected_modified, workflow_action], operation)
+    payload = [name, changes, expected_modified, workflow_action]
+    if attachments:
+        payload += [attachment_session, attachments]
+    return _payment_request(request_id, payload, operation)
 
 
 @frappe.whitelist(methods=["POST"])
 def record_payment(source_doctype, source_name, purchase_invoice, amount_to_pay, bank_account,
-                   request_id, posting_date=None, remarks=None, reference_no=None, confirm=1):
+                   request_id, posting_date=None, remarks=None, reference_no=None, confirm=1, attachment_session=None, attachments=None):
     """Save/submit the existing native PE flow; a discovered draft requires review first."""
     args = dict(source_doctype=source_doctype, source_name=source_name, purchase_invoice=purchase_invoice,
                 amount_to_pay=amount_to_pay, bank_account=bank_account, posting_date=posting_date,
@@ -512,9 +517,14 @@ def record_payment(source_doctype, source_name, purchase_invoice, amount_to_pay,
             return result
         saved = service.create_payment_draft(**args)
         doc = _locked("Payment Entry", saved["name"])
+        from deeplinkerp_branding.services.purchase_payment_attachments import bind
+        bind(doc, attachment_session, attachments)
         return _confirm_payment(doc) if confirm else _payment(doc)
 
-    return _payment_request(request_id, [args, confirm], operation)
+    payload = [args, confirm]
+    if attachments:
+        payload += [attachment_session, attachments]
+    return _payment_request(request_id, payload, operation)
 
 
 @frappe.whitelist(methods=["POST"])

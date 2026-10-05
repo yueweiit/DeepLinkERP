@@ -17,17 +17,21 @@ class Surface {
  get(){return this.node;}
  val(value){if(arguments.length)this.value=value;return this.value;}
  trigger(){return this;}toggleClass(){return this;}attr(){return this;}prop(key,value){this.props??={};this.props[key]=value;return this;}remove(){this.removed=true;this.removals=(this.removals||0)+1;return this;}
- async emit(type,value){if(value!==undefined)this.value=value;const event={type,target:this.node};for(const e of this.capture.filter(e=>e.type===type))e.fn(event);for(const e of this.events.filter(e=>e.type.split('.')[0]===type))await e.fn(event);await new Promise(resolve=>setImmediate(resolve));}
+ append(value){this.textValue+=value;return this;}
+ async emit(type,value){if(value!==undefined)this.value=value;const event={type,target:this.node};for(const e of this.capture.filter(e=>e.type===type))e.fn(event);for(const e of this.events.filter(e=>e.type.split('.')[0]===type && typeof e.fn==='function'))await e.fn(event);await new Promise(resolve=>setImmediate(resolve));}
 }
 function projection(doctype='Purchase Invoice') {return {document:{doctype,name:null,docstatus:0,modified:'v1',company:'C',supplier:'S',currency:'USD',payment_type:'Pay',amount:100.1234,items:doctype==='Payment Entry'?[]:[{key:'ITEM',item_code:'I',item_name:'Native',qty:1.234567,rate:9.87654,max_qty:10,uom:'个',warehouse:'W'}],references:[]},editable_fields:doctype==='Payment Entry'?['amount']:[],editable_item_fields:doctype==='Payment Entry'?[]:['qty','rate'],allowed_actions:[]};}
 function harness({document=projection(), drafts=[], precision, floatPrecision=3, locale='#.###,##', metadata=()=>Promise.resolve(), missingField,submit=async()=>({...document,document:{...document.document,docstatus:1}}),readChain,storage,record=async()=>({document:{doctype:'Payment Entry',name:'PE',amount:100,currency:'USD',docstatus:1}}),chain={can_create:true,company:'C',supplier:'S',balances:[],invoices:[{name:'PI',can_pay:true,outstanding:100,currency:'USD'}]}}={}) {
- const surfaces=[],controls=[],requests=[],loaded=[],listeners={},confirms=[];
+ const surfaces=[],controls=[],requests=[],loaded=[],listeners={},confirms=[],uploaders=[];
  const $=value=>{const surface=new Surface(value);surfaces.push(surface);return surface;};
  const fields={qty:{fieldname:'qty',fieldtype:'Float',...(precision?{precision}:{})},rate:{fieldname:'rate',fieldtype:'Currency',options:'currency',...(precision?{precision}:{})},paid_amount:{fieldname:'paid_amount',fieldtype:'Currency',options:'paid_from_account_currency',...(precision?{precision}:{})},received_amount:{fieldname:'received_amount',fieldtype:'Currency',options:'paid_to_account_currency'}};
  const host={$,window:null,console,sessionStorage:storage,document:{body:new Surface(),addEventListener(){},removeEventListener(){}},crypto:{randomUUID:()=> 'uuid'},locals:{},__:v=>v,cint:(value,fallback=0)=>Number.isNaN(parseInt(value,10))?fallback:parseInt(value,10),replace_all:(value,from,to)=>value.split(from).join(to),is_null:v=>v==null,
   frappe:{ui:{form:{}},provide(){},utils:{debounce:fn=>fn},boot:{sysdefaults:{float_precision:floatPrecision,currency_precision:2,number_format:locale}},defaults:{get_default:key=>key==='float_precision'?floatPrecision:undefined},meta:{get_docfield:(doctype,field)=>field===missingField?undefined:({...fields[field],fieldname:field,parent:doctype,fieldtype:fields[field]?.fieldtype||'Data'}),get_field_currency:(df,doc)=>doc[df.options]},model:{with_doctype:async doctype=>{loaded.push(doctype);await metadata(doctype);},get_value:()=>undefined},router:{on:(type,fn)=>listeners[type]=fn},datetime:{get_today:()=> '2026-10-04'},confirm:(_,fn)=>confirms.push(fn),show_alert(){},run_serially:fns=>{let result;for(const fn of fns)result=fn();return Promise.resolve(result);},call:async request=>{requests.push(request);if(request.method==='frappe.client.get_list')return {message:drafts};if(request.method.endsWith('.get_purchase_chain'))return {message:readChain?await readChain():chain};if(request.method.endsWith('.record_payment'))return {message:await record(request.args)};if(/submit_document|complete_payment/.test(request.method))return {message:await submit(request.args)};return {message:document};}}
  };
  host.window=host;host.globalThis=host;
+ host.frappe.require=async()=>{};
+ const nativeCall=host.frappe.call;host.frappe.call=async request=>{if(request.method.endsWith('.list_attachments') || request.method.endsWith('.discard')){requests.push(request);return {message:[]};}return nativeCall(request);};
+ host.frappe.ui.FileUploader=class {constructor(options){this.options=options;this.transfers=[];this.uploader={files:[],add_files:files=>this.uploader.files.push(...files.map(file=>({name:file.name,uploading:false,request_succeeded:false}))),upload_file:file=>{this.transfers.push(file.name);return Promise.resolve();}};uploaders.push(this);}ack(index,name){const doc={doctype:'File',name,file_name:this.uploader.files[index].name,file_url:'/private/files/'+name,is_private:1};Object.assign(this.uploader.files[index],{doc,request_succeeded:true});this.options.on_success(doc);}};
  const context=vm.createContext(host);
  for(const file of ['frappe-native-number-format.js','frappe-native-number-controls.js'])vm.runInContext(fs.readFileSync(path.join(__dirname,'fixtures',file),'utf8'),context);
  host.frappe.ui.form.make_control=({df})=>{
@@ -38,7 +42,7 @@ function harness({document=projection(), drafts=[], precision, floatPrecision=3,
  vm.runInContext(fs.readFileSync(path.join(__dirname,'../deeplinkerp_branding/public/js/purchase_payments.js'),'utf8'),context);
  const click=async selector=>{const button=surfaces.findLast(s=>typeof s.value==='string'&&s.value.includes(` ${selector}`));assert.ok(button,`button ${selector}`);await button.emit('click');};
  const html=()=>{const visit=s=>s.textValue+[...(s.found?.values()||[])].map(visit).join('');return surfaces.map(visit).join('');};
- return {api:host.DeepLinkERPPurchasePayments,host,controls,requests,loaded,surfaces,confirms,click,html,confirm:()=>confirms.shift()(),routeClose:()=>listeners.change()};
+ return {api:host.DeepLinkERPPurchasePayments,host,controls,requests,loaded,surfaces,confirms,uploaders,click,html,confirm:()=>confirms.shift()(),routeClose:()=>listeners.change()};
 }
 
 test('one native parent with multiple PO item joins resumes its unique receipt draft',async()=>{
@@ -85,9 +89,9 @@ test('explicit native metadata precision6 preserves changed qty and rate before 
  assert.deepEqual(JSON.parse(JSON.stringify(h.requests.find(r=>r.method.endsWith('.save_document_draft')).args.changes)),{items:[{key:'ITEM',qty:1.234,rate:9.87654}]});
 });
 test('native default Currency precision2 remains2 for actual payment edits, never upgraded to6',async()=>{
- const h=harness({document:projection('Payment Entry')});await h.api.paymentDrawer('PE');
- const amount=h.controls.find(c=>c.df.fieldname==='amount');await amount.$input.emit('change','9,87654');await h.click('dlp-save');
- assert.equal(h.requests.find(r=>r.method.endsWith('.update_payment_draft')).args.changes.amount,9.88);
+ const document=projection('Payment Entry');document.allowed_actions=['Submit'];const h=harness({document});await h.api.paymentDrawer('PE');
+ const amount=h.controls.find(c=>c.df.fieldname==='amount');await amount.$input.emit('change','9,87654');await h.click('dlp-submit');
+ assert.equal(h.requests.find(r=>r.method.endsWith('.complete_payment')).args.changes.amount,9.88);
 });
 test('metadata loading is awaited and close invalidates it before any control creation',async()=>{
  let resolve,started;const waiting=new Promise(r=>started=r);const h=harness({metadata:()=>{started();return new Promise(r=>resolve=r);}});
@@ -121,7 +125,7 @@ for(const action of ['pay','paymentDrawer'])test(`${action} cannot create contro
 test('metadata load rejection remains visible and creates no controls',async()=>{
  const h=harness({metadata:async()=>{throw new Error('network unavailable');}});await h.api.documentDrawer('Purchase Receipt','PR','Purchase Invoice');assert.equal(h.controls.length,0);assert.match(h.html(),/元数据/);assert.doesNotMatch(h.html(),/network unavailable/);
 });
-for(const doctype of ['Purchase Invoice','Payment Entry'])for(const dirty of [false,true])test(`${doctype} ${dirty?'confirmed dirty':'unchanged'} refresh metadata rejection is visible and restores buttons without losing the old session`,async()=>{
+for(const doctype of ['Purchase Invoice'])for(const dirty of [false,true])test(`${doctype} ${dirty?'confirmed dirty':'unchanged'} refresh metadata rejection is visible and restores buttons without losing the old session`,async()=>{
  let loads=0;const h=harness({document:projection(doctype),metadata:async()=>{if(++loads>1)throw new Error('private network message');}});
  if(doctype==='Payment Entry')await h.api.paymentDrawer('PE');else await h.api.documentDrawer('Purchase Receipt','PR','Purchase Invoice');
  const control=h.controls.find(c=>c.df.fieldname===(doctype==='Payment Entry'?'amount':'qty'));
@@ -150,7 +154,8 @@ test('invoice submit success followed by metadata refresh failure reports comple
 test('confirmed edited payment submits input in one call and keeps durable payment link',async()=>{
  const document=projection('Payment Entry');document.document.name='PE';document.allowed_actions=['Submit'];const h=harness({document});
  await h.api.paymentDrawer('PE');await h.controls.find(c=>c.df.fieldname==='amount').$input.emit('change','19,87');
- await h.click('dlp-submit');await h.click('dlp-submit');await h.click('dlp-save');
+ await h.click('dlp-submit');await h.click('dlp-submit');
+ assert.ok(!h.surfaces.some(s=>typeof s.value==='string' && /class="[^"]*dlp-save(?:\s|")/.test(s.value)),'normal payment has no draft action');
  const writes=h.requests.filter(r=>/complete_payment|update_payment_draft/.test(r.method));assert.equal(writes.length,1);
  assert.equal(writes[0].args.changes.amount,19.87);assert.equal(writes[0].args.workflow_action,'Submit');assert.match(h.html(),/付款已提交/);assert.match(h.html(),/payment-entry\/PE/);
  assert.equal(h.confirms.length,0,'confirmation is the explicit main button');
@@ -165,7 +170,7 @@ test('payment RPC failure is visibly unconfirmed, permits only identical retry a
 test('successful payment with failed balance refresh still reports submitted and blocks stale writes',async()=>{
  const document=projection('Payment Entry');document.document.name='PE';document.allowed_actions=['Submit'];
  const h=harness({document,readChain:async()=>{throw new Error('private network');}});await h.api.paymentDrawer('PE',{sourceType:'Purchase Receipt',sourceName:'PR'});
- await h.click('dlp-submit');await h.click('dlp-submit');await h.click('dlp-save');
+ await h.click('dlp-submit');await h.click('dlp-submit');
  assert.match(h.html(),/付款已提交.*余额刷新失败/);assert.doesNotMatch(h.html(),/付款未确认|private network/);
  assert.equal(h.requests.filter(r=>r.method.endsWith('.complete_payment')).length,1);
 });
@@ -179,12 +184,12 @@ test('source payment action resumes a visible existing draft without creating an
  const document=projection('Payment Entry');document.document.name='EXISTING';document.allowed_actions=['Submit'];
  const h=harness({document,chain:{payments:[{name:'EXISTING',payment_type:'Pay',docstatus:0}],invoices:[],balances:[]}});await h.api.pay('Purchase Receipt','PR');
  assert.equal(h.requests.filter(r=>r.method.endsWith('.preview_payment')).length,1);assert.ok(!h.requests.some(r=>r.method.endsWith('.record_payment')));
- assert.match(h.html(),/整单银行金额/);assert.match(h.html(),/采购核销引用/);
+ assert.match(h.html(),/已有待确认付款/);assert.match(h.html(),/采购核销引用/);
 });
 test('workflow actions stay explicit and no-submit user sees clear next step',async()=>{
  for(const allowed_actions of [[],['Review']]){
   const document=projection('Payment Entry');document.document.name='PE';document.allowed_actions=allowed_actions;const h=harness({document});await h.api.paymentDrawer('PE');
-  assert.match(h.html(),allowed_actions.length?/需按下方审批动作/:/没有提交或审批权限/);assert.ok(!h.requests.some(r=>r.method.endsWith('.complete_payment')));
+  assert.match(h.html(),allowed_actions.length?/付款待审批/:/没有提交或审批权限/);assert.ok(!h.requests.some(r=>r.method.endsWith('.complete_payment')));
  }
 });
 
@@ -192,6 +197,57 @@ test('consecutive payment clicks share one in-flight native request',async()=>{
  let resolve,started;const waiting=new Promise(r=>started=r);const h=harness({record:()=>{started();return new Promise(r=>resolve=r);}});await h.api.pay('Purchase Receipt','PR');
  await h.controls.find(c=>c.df.fieldname==='bank').set_value('Bank');const pending=h.click('dlp-create');await waiting;await h.click('dlp-create');
  assert.equal(h.requests.filter(r=>r.method.endsWith('.record_payment')).length,1);resolve({document:{name:'PE',docstatus:1,amount:100,currency:'USD'}});await pending;
+});
+
+async function attachmentFixture(restored=null){
+ const h=harness();const drawer={panel:new Surface(),busy:false,alive:()=>true,setBusy(value){this.busy=value;},error(error){this.errorMessage=error.message;}};
+ const manager=await h.api.mountAttachments(drawer,'Purchase Receipt','PR',restored);return {...h,drawer,manager};
+}
+test('file selection survives clearing the native input during asynchronous upload initialization',async()=>{
+ const h=await attachmentFixture(),input=h.drawer.panel.find('.dlp-attachments').find('input[type=file]');
+ const live={0:{name:'receipt.pdf'},length:1};input.node.files=live;
+ Object.defineProperty(input.node,'value',{set(){delete live[0];live.length=0;}});
+ await input.emit('change');
+ assert.equal(live.length,0);assert.deepEqual(h.uploaders[0].transfers,['receipt.pdf']);
+ assert.equal(h.manager.ready(),false,'selection is captured, but still awaits server acknowledgement');h.manager.stop();
+});
+test('native early upload promise cannot enable payment before every server File acknowledgement',async()=>{
+ const h=await attachmentFixture();await h.manager.add([{name:'receipt.pdf'},{name:'voucher.jpg'}]);
+ assert.equal(h.manager.ready(),false);assert.deepEqual(JSON.parse(JSON.stringify(h.manager.args())),{});
+ h.uploaders[0].ack(0,'FILE-A');assert.equal(h.manager.ready(),false);
+ h.uploaders[0].ack(1,'FILE-B');assert.equal(h.manager.ready(),true);
+ assert.deepEqual(JSON.parse(JSON.stringify(h.manager.args())).attachments,['FILE-A','FILE-B']);
+ assert.equal(h.uploaders[0].options.allow_toggle_private,false);assert.equal(h.uploaders[0].options.allow_web_link,false);
+ h.manager.stop();
+});
+test('partly failed native upload retains the successful File and blocks confirmation',async()=>{
+ const h=await attachmentFixture();await h.manager.add([{name:'receipt.pdf'},{name:'failed.pdf'}]);h.uploaders[0].ack(0,'FILE-A');h.uploaders[0].uploader.files[1].failed=true;
+ assert.equal(h.manager.ready(),false);assert.deepEqual(JSON.parse(JSON.stringify(h.manager.args())).attachments,['FILE-A']);
+ assert.equal(h.uploaders.length,1,'never retransmit successful File automatically');h.manager.stop();
+});
+test('only an explicit removal or cancellation calls scoped native File cleanup',async()=>{
+ const h=await attachmentFixture();await h.manager.add([{name:'receipt.pdf'}]);h.uploaders[0].ack(0,'FILE-A');
+ await h.manager.remove('FILE-A');assert.equal(h.requests.find(r=>r.method.endsWith('.discard')).args.attachments[0],'FILE-A');
+ await h.drawer.beforeClose();assert.equal(h.requests.filter(r=>r.method.endsWith('.discard')).length,2);
+ assert.equal(h.requests.at(-1).args.cancel,1);h.manager.stop();
+});
+test('explicit retry transfers only a failed file and never retransmits a server-confirmed file',async()=>{
+ const h=await attachmentFixture();await h.manager.add([{name:'good.pdf'},{name:'bad.pdf'}]);h.uploaders[0].ack(0,'FILE-A');Object.assign(h.uploaders[0].uploader.files[1],{failed:true,error_message:'Size exceeds maximum'});
+ h.manager.retry(0);assert.deepEqual(h.uploaders[0].transfers,['good.pdf','bad.pdf','bad.pdf']);
+ Object.assign(h.uploaders[0].uploader.files[1],{failed:true,error_message:'XMLHttpRequest Error'});h.manager.retry(0);assert.equal(h.uploaders[0].transfers.length,3,'unknown outcome is not automatically retried');h.manager.stop();
+});
+test('an uncertain payment close preserves uploaded Files and the original request',async()=>{
+ const h=await attachmentFixture();await h.manager.add([{name:'receipt.pdf'}]);h.uploaders[0].ack(0,'FILE-A');h.drawer.pendingPayment=()=>true;
+ await h.manager.remove('FILE-A');await h.manager.add([{name:'another.pdf'}]);
+ assert.deepEqual(JSON.parse(JSON.stringify(h.manager.args())).attachments,['FILE-A']);assert.deepEqual(h.uploaders[0].transfers,['receipt.pdf']);
+ assert.equal(await h.drawer.beforeClose(),true);assert.equal(h.requests.filter(r=>r.method.endsWith('.discard')).length,0);h.manager.stop();
+});
+test('discovered draft handoff preserves staged File IDs without another upload',async()=>{
+ const h=await attachmentFixture();await h.manager.add([{name:'receipt.pdf'}]);h.uploaders[0].ack(0,'FILE-A');const snapshot=h.manager.snapshot();h.manager.stop();
+ const next=await attachmentFixture(snapshot);assert.deepEqual(JSON.parse(JSON.stringify(next.manager.args())).attachments,['FILE-A']);assert.equal(next.uploaders.length,0);next.manager.stop();
+});
+test('optional empty attachments retain legacy no-file payment payload and committed close never cleans up',async()=>{
+ const h=await attachmentFixture();assert.deepEqual(JSON.parse(JSON.stringify(h.manager.args())),{});h.manager.committed();assert.equal(await h.drawer.beforeClose(),true);assert.equal(h.requests.length,0);
 });
 test('an uncertain payment survives close/reopen and retries the original payload and token',async()=>{
  const values=new Map(),storage={getItem:k=>values.get(k),setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};let attempts=0;

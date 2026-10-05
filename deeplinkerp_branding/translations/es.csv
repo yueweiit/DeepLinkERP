@@ -240,3 +240,27 @@ Excel 共享文本索引不符合预期。,El índice de texto compartido de Exc
 供应商,Proveedor,
 刷新,Actualizar,
 共享 / 混合,Compartida / mixta,
+付款凭证,Comprobantes de pago
+可多选,Varios archivos
+拖放文件,Arrastra archivos
+选择文件,Elegir archivos
+已上传,Subido
+移除,Quitar
+重试,Reintentar
+正在上传…,Subiendo…
+上传失败,Error de carga
+上传未确认,Carga sin confirmar
+本次付款金额,Importe de este pago
+付款账户,Cuenta de pago
+已有待确认付款,Pago pendiente de confirmar
+已有待确认付款，请核对后继续。,Hay un pago pendiente. Revísalo para continuar.
+付款待审批，尚未计已付。,Pago pendiente de aprobación; aún no contabilizado.
+当前没有提交或审批权限。,No tienes permiso para enviar ni aprobar.
+请等待附件上传完成，或移除失败文件。,Espera a que termine la carga o quita los archivos fallidos.
+附件会话失效，请重新选择文件,La sesión de archivos caducó. Vuelve a elegirlos.
+附件列表无效,Lista de archivos inválida
+附件不可用于本次付款,Este archivo no puede usarse en este pago
+附件已用于其他付款,El archivo ya se usó en otro pago
+附件上传未完成,La carga del archivo no terminó
+付款已提交，附件读取失败。请打开付款单核对。,Pago enviado; no se pudieron leer los archivos. Abre el pago para revisarlo.
+采购核销引用,Referencias de compra

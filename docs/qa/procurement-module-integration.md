@@ -1,6 +1,6 @@
 # Procurement module integration acceptance
 
-Candidate base: `c4ea01e46a3ba2be7fc3984d1f586a685e93548d`, also the remote HEAD at the final read-only check. This is a local branding candidate on `codex/procurement-integration-recovery`; it has not been pushed or deployed. Implementation follows the three approved procurement drawings, whose pixels were inspected. Group finance restructuring and operating expenses remain outside this change.
+Candidate base: `c4ea01e46a3ba2be7fc3984d1f586a685e93548d`, also the remote HEAD at the final read-only check. This is a local branding candidate on `codex/procurement-integration-recovery`; it has not been pushed or deployed. It includes recovered procurement commit `bd8607b4594cb87df2d7d73215ccdf93df13b549` and the approved attachment/direct-payment increment. The three procurement drawings and payment drawing v2 were inspected as actual pixels. Group finance restructuring and operating expenses remain outside this change.
 
 ## Delivered behavior
 
@@ -10,7 +10,11 @@ Purchase Orders use the Sales compact engine's inline detail table: the row arro
 
 The new payables Page includes a native PI only when it has a readable PO or PR source. A PI referencing both is listed once. Operating-only invoices and unreadable sources are excluded. Amount and outstanding remain the entire native invoice; shared or mixed invoices have a visible label and explanation. Draft, submitted, cancelled and return states remain distinct.
 
-Finance keeps the existing payment drawer: Confirm payment is primary, Save draft secondary, an existing draft is reviewed and continued, and native document/record links and return context are retained. Clicking a particular invoice does not resume an unrelated invoice's draft; a now-ineligible clicked invoice is not silently substituted. Native accounting, company permissions, field permissions and workflow approval remain authoritative.
+Finance uses the existing payment drawer with the approved v2 compact upload area, optional multiple private attachments, folded remarks, and Cancel/Confirm payment footer. Normal confirmation creates/submits once through the existing native transaction; it has no Save draft button. Native workflow/submit permissions still control whether a payment actually posts. Existing drafts require explicit review/continuation and are not deleted or silently replaced. Clicking a particular invoice does not resume an unrelated invoice's draft; a now-ineligible clicked invoice is not silently substituted. Native document/record links and return context remain available.
+
+Uploads reuse native FileUploader and the native multipart handler. Every selected file must receive a private File acknowledgement before confirmation is enabled; the native uploader's early Promise resolution is insufficient. Failed files retain successful siblings, and explicit retry addresses only a known failed file. An unknown payment response retains the original payload/token and uploaded files for explicit retry; attachment additions/removals/retries are locked until that request is resolved. File selections are captured before clearing the browser's live FileList, a bug found and corrected in actual Chrome testing.
+
+The server binds only files registered in this user's source-scoped session, with native source/company/PE and File permission checks, matching ownership, private status, and no prior attachment. Binding uses native `File.create_attachment_copy`, which preserves the existing blob without PDF text re-encoding or a custom storage path. Attachment links, payment changes and native ledger posting share the existing c4 transaction/rollback boundary. Exact upload/payment retries do not duplicate Files or ledger entries. Explicit remove/cancel deletes only this session's owned, private, unbound native Files; a committed/uncertain payment never triggers product cleanup.
 
 ## Permission boundary
 
@@ -20,15 +24,21 @@ In native synthetic QA, a Purchase User + Purchase Manager can read permitted or
 
 The new payables Page allows System Manager, Accounts User and Accounts Manager. Existing payment-records Page role rows are unchanged. Procurement financial controls and navigation are disabled when native Payment Entry read access is absent; this is supplemented by server/API and native document checks.
 
+Attachment upload, binding and listing preserve the finance boundary. Procurement cannot begin a financial upload session or list PE attachments. Real HTTP downloads return 200 for finance and 403 for procurement, including after native submission. No bank-account read scope or role/user assignment is added.
+
 Production custom DocPerm, user-role and User Permission assignments, including Nelly, could not be inspected because production SSH authentication was unavailable. No shared production permission or user assignment has been changed. Any necessary permission change must first identify affected roles, users and companies for the release owner to approve.
 
 ## Reuse and changes
 
 Recovered task-3 work was read and copied serially into this independently registered local worktree. The old worktree, database, Redis, volumes and containers were not modified. The recovery manifest is outside Git at `../evidence/recovered-source-manifest.json`.
 
-Reused: compact list paging/filter/sort/selection/viewport support; Sales' detail table; `_RecordReader`, `_read`, `_source_links`, `_invoice_row` and native `invoice_balance`; existing payment drawer, draft continuation, company/workflow checks and return context. There is no second compact engine, balance formula, ledger, permission allocator or payment drawer.
+Reused: compact list paging/filter/sort/selection/viewport support; Sales' detail table; `_RecordReader`, `_read`, `_source_links`, `_invoice_row` and native `invoice_balance`; existing payment drawer, draft continuation, company/workflow checks, request idempotency and return context; native FileUploader, private File lifecycle and attachment-copy API. There is no second compact engine, balance formula, ledger, permission allocator, payment drawer or file storage.
 
-Source/test diff excluding this report: **21 files, +893 / -147 lines**. Product/configuration/translations: **+576 / -136**. Tests and guarded native QA: **+317 / -11**. The six new files are the Page JS/JSON, navigation reconciler, PO summary service, navigation contract tests and native integration QA. Fifteen existing files are modified; no whole file is deleted. Most CSS replacements extend shared selectors to the new Page. The former Sales-specific table-render loop is removed in favor of the shared renderer; stale default-column and exact old asset-version assertions are updated.
+Final cumulative source/test diff against c4, excluding this report: **26 files, +1493 / -188 lines**; product/configuration/translations **+881 / -166**, tests/guarded QA **+612 / -22**. Nine source/test files are added and seventeen modified; none are deleted.
+
+The recovered procurement portion before attachments changed **21 source/test files, +893 / -147 lines**: product/configuration/translations **+576 / -136**, tests/guarded native QA **+317 / -11**. It added six files and changed fifteen. The former Sales-specific table-render loop was removed for the shared renderer.
+
+The attachment increment changes **10 source/test files, +604 / -45 lines**: product/configuration/translations **+308 / -33**, tests/guarded native QA **+296 / -12**. Its three new files are the session/scope attachment service, service contract tests and guarded native attachment QA. Seven existing files change. No whole file is deleted. The unused PE draft-save frontend function and two obsolete PE refresh-control test variants are removed; generic PI controls and real native save APIs remain. Asset assertions check presence/order rather than stale cache versions. The final JS cache version is `0.0.15`, CSS `0.0.5`.
 
 The existing selection implementation is unchanged. Its test now checks the compact asset's presence and relative ordering without hardcoding the previous cache version; the original baseline assertion is retained in `../evidence/selection-baseline.py`.
 
@@ -38,11 +48,14 @@ Generic native PI/PE callers, OA union mode, existing advance columns and the ex
 
 | Check | Actual result and evidence outside Git |
 | --- | --- |
-| Node | 223 passed, zero failures/skips: `../evidence/candidate-node-final.log`. |
-| Configuration | 55 passed in the original affected-suite run; final expanded run passes all 63 in isolated module processes: `../evidence/candidate-config-isolated.log`. |
-| Branding Python | 328 passed and 46 subtests passed: `../evidence/qa/python-final.log`. |
-| Existing native QA | 22 purchase-payment, 13 document/action and 6 payment-completion cases passed: `../evidence/qa/native-regressions.log`. Each rolled back its changes. |
-| New native QA | Seven business scenarios passed, including actual native RPC mutation denials: `../evidence/qa/integration-final-native-api.log`. |
+| Node | Final 229 passed, zero failures/skips: `../evidence/attachments-node-final.log`. |
+| Configuration | 63 passed in isolated module processes: `../evidence/attachments-config-final.log`; final asset-version follow-up 11 passed: `../evidence/attachments-assets-final.log`. |
+| Branding Python | Final 333 passed and 59 subtests passed: `../evidence/qa/attachments-python-final.log`. |
+| Existing native QA | 22 purchase-payment, 13 document/action and 6 payment-completion cases passed again: `../evidence/qa/attachments-native-regressions.log`. Each rolled back its changes. |
+| Procurement native QA | Seven business scenarios passed again, including actual native RPC mutation denials: `../evidence/qa/attachments-procurement-integration.log`. |
+| Attachment native QA | Five transaction/lifecycle groups plus five scope variants passed: `../evidence/qa/attachments-native-third.log`. Includes post-ledger failure/full rollback and same-token recovery. |
+| Native HTTP | Two real multipart PDF uploads, byte-identical finance downloads, exact retry deduplication, procurement 403 and scoped cancellation: `../evidence/qa/attachments-http.log`. |
+| Actual browser submission | UI-confirmed PE16 posts one native GL pair, PI9 outstanding becomes 0, two private attachments remain byte-identical; downloads finance 200/procurement 403: `../evidence/qa/attachments-ui-submitted-verification.json` / `attachments-ui-submitted-http.json`. |
 | Navigation | First reconcile updates Buying; the second makes no change: `../evidence/qa/initialize.log`. Contract tests preserve existing IDs/custom entries and prohibit Page/Role saves. |
 | Static checks | Node syntax, Python AST parsing and staged/unstaged whitespace checks passed. Python AST checks avoid writing host cache directories. |
 
@@ -52,7 +65,11 @@ The seven new native scenarios are separate business/privilege relationships: (1
 
 The new integration script refuses any site/database other than `po-grid-qa.localhost` / `qa_procurement_5`. Final before/after counts match: PO139, PR114, PI5, PE6, GL16, Payment Ledger8, User6 and User Permission3.
 
+The attachment native script has the same exact site/database guard. Its native File/ledger scenarios all restore counts. Actual Chrome submission is separately protected by a newly created synthetic QA snapshot: after proof, normal-permission cleanup addresses only the two captured URLs/four owner-checked File IDs, then this task's QA database snapshot is restored. Final counts match PO139/PR114/PI5/PE6/GL16/Payment Ledger8/China Voucher8/File2 (the two native folders)/User6/User Permission3; PE16's draft status and exact original modified value are unchanged. Evidence: `../evidence/qa/attachments-ui-restored-verification.json`. No production or other QA snapshot is used.
+
 Five new server scope tests parameterize equivalent PO-only/PR-only/both-source and document-state cases. Three navigation tests cover different identity/content/mutation contracts. Two drawer tests cover clicked-invoice eligibility and draft choice. The added financial-refresh frontend regression covers a changing accounting summary with an unchanged PO timestamp. These assertions exercise independent behavior, rather than reproducing implementation branches line by line; test-runner/subtest counts are not presented as independent scenarios.
+
+Attachments add eight frontend behavior regressions, while removing the two obsolete PE refresh variants: FileList lifetime, per-file acknowledgement gating, partial failure, explicit cleanup, failed-only retry, uncertain-payment retention, staged-draft handoff and optional/no-file compatibility. Five backend methods use 13 subtests for equivalent invalid-file/list/scope inputs. Native QA reuses the existing synthetic seed instead of another fixture/ledger implementation; its five scope variants are parameterized rather than presented as five independent business workflows. The additional service/QA lines implement the upload-request versus payment-transaction boundary and verify its rollback/privilege contracts.
 
 ## Actual browser evidence
 
@@ -60,7 +77,11 @@ All UI screenshots are from the independently running localhost64234 synthetic s
 
 Chinese and Spanish, Classic and DL, and 1920×1080 / 1440×900 / 1024×768 were exercised. Final order screenshots are `../evidence/ui/orders-final-{classic,dl}-{zh,es}-{1920,1440,1024}.jpg`, with matching geometry JSON. At all 12 combinations, document width equals the viewport, expanded detail is present, header/body columns align at zero-pixel displacement and paging remains within the viewport.
 
-The 12 finance drawer screenshots use `finance-{classic,dl}-{zh,es}-drawer-{1920,1440,1024}.jpg`; footer controls remain inside the viewport, including wrapped Spanish labels. Existing synthetic draft ACC-PAY-2026-00016 is resumed; no confirm/save action was performed during UI inspection.
+The original procurement drawer screenshots remain as `finance-{classic,dl}-{zh,es}-drawer-{1920,1440,1024}.jpg`. The final v2 evidence is **12 actual uploaded-file screenshots**: `attachments-{classic,dl}-{zh,es}-uploaded-{1920,1440,1024}.jpg`, with geometry JSON. All pixels were inspected: two acknowledged files, long filenames ellipsized, folded remarks, document width equals viewport, and unobscured Cancel/Confirm footer. Native FileUploader uploads were exercised in all four language/mode combinations. Explicit removal/cancellation is also exercised, with native counts restored.
+
+One real Chrome confirmation on the named synthetic PE16 is saved as `attachments-ui-native-submitted.jpg`; it shows submitted state, the actual payment record link and both private file links. This is the isolated test result before snapshot restoration, not a production payment. The actual browser-downloaded PDF matches the fixture's bytes. No Chrome fault injection or long wait was used.
+
+The user explicitly authorized enabling the ChatGPT Chrome extension's file-URL access. The tool's internal-URL policy blocked opening extension settings; no alternate surface was used. The user completed the setting manually, the same Chrome profile/extension instance reconnected, and the original supported file chooser then succeeded. No other security/access setting was changed by this task; viewport overrides were reset after QA.
 
 Actual mouse drags exercised both scrollbars. An observed failure where horizontal scrolling hid procurement tabs was fixed by placing the tabs outside the result scroller. Final proof is `scroll-classic-zh-fixed-{before,horizontal,both}.jpg` / `.json` and `scroll-dl-es-{horizontal,both}.jpg` / `.json`: frozen select/sequence/name/supplier columns remain interactive, headers stay pinned, expanded material remains reachable and row/header alignment is unchanged. `scroll-pointer-selection.json` verifies an actual coordinate checkbox click preserves horizontal/vertical scroll and expansion.
 
@@ -73,7 +94,7 @@ Two delivery copies are explicitly named as synthetic QA and saved in Library, w
 | 采购隔离QA-合成数据-订单物料与进度.jpg | `libfile_b0247928339c8191b96a66623de957b6` |
 | 采购隔离QA-合成数据-财务付款抽屉.jpg | `libfile_ab6251c81cf48191a4cf1f33da4d31d3` |
 
-They also remain at `../evidence/deliverables/`. Library create confirmations and local metadata evidence are retained outside Git. The prepared helper was unavailable before any preparation/write; the documented direct-create fallback then succeeded for both images.
+They also remain at `../evidence/deliverables/`. The finance image is updated to the actual v2 uploaded-file drawer under its same Library identity; the report is also replaced under its existing identity. Library confirmations and local metadata evidence remain outside Git. The prepared helper was unavailable before any preparation/write; the documented owned-file direct route is used without creating duplicate identities.
 
 ## Release conditions and debt
 
@@ -82,3 +103,5 @@ The release owner must obtain explicit deployment authorization, restore the aut
 The cached synthetic QA image lacks Git metadata for China Finance and CRM; their exact requested revisions `4f019f91` / `b0a9c211` are therefore not claimed as verified. This candidate changes branding only and leaves those application sources untouched. Their production revisions still need the release owner's legitimate read-only audit.
 
 Remaining debt: permission/source filtering currently evaluates candidate invoices before pagination to keep counts exact; it follows the existing reader and bulk preload pattern but scales with candidate count. Shared/cross-currency/return/mismatched/orphan invoice settlement deliberately shows an uncertainty notice instead of invented PO allocation. Complex accounting remains in native forms. Some older untouched native ERP labels retain their previous localization. No unrelated finance redesign or permission migration is introduced.
+
+Native attachment copy retains the uploader's original private File metadata and adds the PE-bound copy, sharing one blob. Product cleanup deliberately excludes committed payment files. Browser exit, navigation, expired session metadata and unconfirmed upload outcomes may therefore retain private uploads; there is no File deletion timer, global orphan scan or automatic cleanup job. Any later retention policy requires separate approval and native permission/ownership rules. Existing real generic/native PI/PE callers and no-attachment request fingerprints remain compatible; removal requires a verified zero-caller retirement, with no invented migration deadline.

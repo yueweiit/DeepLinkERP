@@ -5,12 +5,13 @@
  const t=value=>(root.__ || (text=>text))(value);
  const API='deeplinkerp_branding.services.purchase_payment_service.';
  const ACTIONS='deeplinkerp_branding.services.purchase_document_actions.';
+ const FILES='deeplinkerp_branding.services.purchase_payment_attachments.';
  const esc=value=>String(value ?? '').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
  const slug=type=>({'Purchase Order':'purchase-order','Purchase Receipt':'purchase-receipt','Purchase Invoice':'purchase-invoice','Payment Entry':'payment-entry','China Accounting Voucher':'china-accounting-voucher','China Voucher Sync Issue':'china-voucher-sync-issue','Supplier':'supplier'}[type]);
  const link=(type,name,label=name)=>name && slug(type)?`<a href="/desk/${slug(type)}/${encodeURIComponent(name)}"${['Purchase Order','Purchase Receipt'].includes(type)?` class="dlp-native-document" data-doctype="${esc(type)}" data-name="${esc(name)}"`:""}>${esc(t(label))}</a>`:'—';
  const money=(value,currency)=>value==null?'—':`${Number(value).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}${currency?` ${esc(currency)}`:''}`;
  const quantity=value=>value==null?'—':Number(value).toLocaleString(undefined,{maximumFractionDigits:2});
- const call=async(method,args,namespace=API)=>(await frappe.call({method:namespace+method,args})).message;
+ const call=async(method,args,namespace=API)=>(await frappe.call({method:namespace+method,args,silent:true})).message;
  const state=value=>({Posted:'已记账',Reversed:'已冲销',Cancelled:'已取消',Draft:'草稿',Pending:'待同步'}[value] || value || '—');
  const balanceHTML=chain=>`${chain.shared_payable || (chain.invoices || []).some(invoice=>invoice.shared)?'<p class="text-warning">共享应付整单余额，不是本张入库的已付金额</p>':''}${(chain.balances || []).map(b=>`<span>${esc(t('应付'))} ${money(b.total,b.currency)}　${esc(t('已付 / 核销'))} ${money(b.settled,b.currency)}　<b>${esc(t('未付'))} ${money(b.outstanding,b.currency)}</b></span>`).join('<br>') || '尚未形成应付 / 余额不可见'}`;
  const vouchersHTML=rows=>(rows || []).map(v=>`<button type="button" class="btn btn-link btn-xs dlp-voucher-preview" data-name="${esc(v.name)}">${esc(v.statutory_number || v.name)} · ${esc(state(v.status))} · ${esc(v.source_event==='Posting'?'记账':v.source_event==='Cancellation'?'冲销':v.source_event)}</button>`).join(' · ') || '—';
@@ -40,9 +41,10 @@
   try{
    const result=await call('record_payment',{...args,request_id:token.forPayload(args)},ACTIONS);token.succeeded();if(!drawer.alive())return;
    if(result.failed){drawer.error(new Error(result.error || t('付款未提交，请核对后重试。')));return;}
+   if(!result.needs_review)drawer.attachments?.committed();
    drawer.paymentCompleted=result.document.docstatus===1;
    if(drawer.paymentCompleted){await paymentResult(drawer,result,context);await refreshSurface();}
-   else{drawer.close(true);await paymentDrawer(result.document.name,{...context,notice:result.needs_review?'发现已有付款草稿，请核对金额、账户与引用后确认；没有新建付款单。':args.confirm?'付款尚未提交，请按下方审批动作处理；没有可用动作时需有权限的财务人员继续。':'付款草稿已保存，尚未计已付。'});}
+   else{const staged=result.needs_review?drawer.attachments?.snapshot():null;drawer.close(true);await paymentDrawer(result.document.name,{...context,staged,notice:result.needs_review?'已有待确认付款，请核对后继续。':args.confirm?'付款待审批，尚未计已付。':'付款草稿已保存，尚未计已付。'});}
   }catch(error){if(drawer.alive())drawer.error(new Error(drawer.paymentCompleted?'付款已提交，页面刷新失败。请查看付款记录，勿重复提交。':error.message || '操作未确认：相同内容可重试；响应不确定时先核对付款记录。'));}
   finally{if(drawer.alive())drawer.setBusy(false);}
  }
@@ -82,9 +84,9 @@
   const id=gate.begin(),opener=root.document.activeElement;
   const panel=$(`<div class="dlp-payment-overlay"><section class="dlp-payment-drawer${wide?' dlp-document-drawer':''}" role="dialog" aria-modal="true" aria-label="${esc(t(title))}"><header><h3>${esc(t(title))}</h3><button type="button" class="btn btn-default dlp-close" aria-label="${esc(t('关闭'))}">×</button></header><div class="dlp-payment-body"><p role="status">${esc(t('正在读取…'))}</p></div><footer><button type="button" class="btn btn-default dlp-cancel">${esc(t('取消'))}</button></footer></section></div>`).appendTo(root.document.body);
   const drawer={id,panel,controls:[],busy:false,loadId:0,alive:()=>activeDrawer===drawer && gate.current(id),
-   close(force=false){if(this.busy && !force)return;gate.cancel();disposeControls(this.controls);panel.remove();root.document.removeEventListener('keydown',keys);if(activeDrawer===this)activeDrawer=null;if(!force)opener?.focus?.();},
-   error(error){panel.find('.dlp-error').text(error?.message || '操作失败，请核对系统提示。');},
-   setBusy(value){this.busy=value;panel.find('.dlp-payment-drawer').toggleClass('dlp-busy',value);panel.find('.dlp-payment-body').attr('aria-busy',String(value));panel.find('button').prop('disabled',value);},
+   close(force=false,cleaned=false){if(this.busy && !force)return;if(!force && !cleaned && this.beforeClose)return this.beforeClose().then(ok=>{if(ok!==false)this.close(false,true);});gate.cancel();this.attachments?.stop();disposeControls(this.controls);panel.remove();root.document.removeEventListener('keydown',keys);if(activeDrawer===this)activeDrawer=null;if(!force)opener?.focus?.();},
+   error(error){panel.find('.dlp-error').text(t(error?.message || '操作失败，请核对系统提示。'));},
+   setBusy(value){this.busy=value;panel.find('.dlp-payment-drawer').toggleClass('dlp-busy',value);panel.find('.dlp-payment-body').attr('aria-busy',String(value));panel.find('button').prop('disabled',value);this.attachments?.refresh();},
   };
   const keys=e=>{if(e.target.closest?.('.modal'))return;if(e.key==='Escape'){e.preventDefault();drawer.close();}if(e.key==='Tab'){const elements=panel.find('button,input,select,textarea,summary,a[href]').filter(':visible:not(:disabled)').toArray();if(!elements.length)return;const first=elements[0],last=elements[elements.length-1];if(e.shiftKey && root.document.activeElement===first){e.preventDefault();last.focus();}else if(!e.shiftKey && root.document.activeElement===last){e.preventDefault();first.focus();}}};
   activeDrawer=drawer;root.document.addEventListener('keydown',keys);panel.find('.dlp-close,.dlp-cancel').on('click.dlpDrawer',()=>drawer.close());panel.find('.dlp-close').trigger('focus');return drawer;
@@ -92,6 +94,52 @@
  const destroyedDatepickers=new WeakSet();
  function disposeControls(controls){for(const control of controls.splice(0)){control.dlpDisposeInput?.();delete control.dlpDisposeInput;control.$input?.off('.dlpDrawer .dlpInvoice');const picker=control.datepicker;if(picker?.destroy && !destroyedDatepickers.has(picker)){destroyedDatepickers.add(picker);picker.destroy();}}}
  function body(drawer,html){disposeControls(drawer.controls);drawer.panel.find('.dlp-payment-body').html(`${html}<div class="dlp-error text-danger" role="alert"></div>`);}
+ async function mountAttachments(drawer,doctype,name,restored=null) {
+  const holder=drawer.panel.find('.dlp-attachments'),docs=new Map((restored?.files || []).map(doc=>[doc.name,doc]));
+  let uploader=null,timer=null,started=0,removing=false,committed=false,stopped=false;
+  const context=restored?.context || [doctype,name],sessionId=restored?.sessionId || root.crypto.randomUUID();
+  holder.html(`<div class="dlp-attachment-title"><strong>${esc(t('付款凭证'))}</strong><span>${esc(t('可多选'))}</span></div><div class="dlp-attachment-drop"><span>${esc(t('拖放文件'))}</span><button type="button" class="btn btn-default dlp-choose-files">${esc(t('选择文件'))}</button><input type="file" multiple hidden></div><div class="dlp-attachment-list"></div><div class="dlp-native-uploader" hidden></div><p class="dlp-attachment-error text-danger" role="alert"></p>`);
+  const queue=()=>uploader?.uploader.files || [];
+  const pending=()=>queue().filter(file=>!docs.has(file.doc?.name));
+  const canRetry=file=>file.failed && file.error_message && !/XMLHttpRequest|network|Network|^0\b/.test(file.error_message);
+  const manager={
+   add:files=>add(files),
+   retry(index){const file=pending()[index];if(file && canRetry(file) && !drawer.busy && !drawer.pendingPayment?.()){file.failed=false;file.error_message=null;started=Date.now();monitor();uploader.uploader.upload_file(file,queue().indexOf(file)).catch(()=>refresh());}},
+   refresh,
+   ready:()=>!removing && !pending().length,
+   args:()=>docs.size?{attachment_session:sessionId,attachments:[...docs.keys()]}:{},
+   snapshot:()=>({sessionId,context,files:[...docs.values()]}),
+   committed(){committed=true;docs.clear();this.stop();},
+   stop(){stopped=true;if(timer)root.clearTimeout?.(timer);},
+   async remove(id){if(drawer.busy || drawer.pendingPayment?.() || removing || !docs.has(id))return;removing=true;refresh();try{await call('discard',{session_id:sessionId,attachments:[id]},FILES);docs.delete(id);if(uploader)uploader.uploader.files=queue().filter(file=>file.doc?.name!==id);}catch(error){holder.find('.dlp-attachment-error').text(error.message);}finally{removing=false;refresh();}},
+  };
+  function refresh(){
+   if(stopped || !drawer.alive())return;
+   const waiting=pending();
+   holder.find('.dlp-attachment-list').html([...docs.values()].map(doc=>`<div class="dlp-attachment-row"><a href="${esc(doc.file_url)}" target="_blank" rel="noopener" title="${esc(doc.file_name)}">${esc(doc.file_name)}</a><span class="text-success">${esc(t('已上传'))}</span><button type="button" class="btn btn-link dlp-remove-file" data-id="${esc(doc.name)}">${esc(t('移除'))}</button></div>`).join('')+waiting.map((file,index)=>`<div class="dlp-attachment-row"><span title="${esc(file.name)}">${esc(file.name)}</span><span class="${file.failed?'text-danger':''}">${esc(t(file.failed?(canRetry(file)?'上传失败':'上传未确认'):started && Date.now()-started>45000?'上传未确认':'正在上传…'))}</span>${canRetry(file)?`<button type="button" class="btn btn-link dlp-retry-file" data-index="${index}">${esc(t('重试'))}</button>`:''}<button type="button" class="btn btn-link dlp-remove-pending" data-index="${index}">${esc(t('移除'))}</button></div>`).join(''));
+   drawer.panel.find('.dlp-create,.dlp-submit').prop('disabled',drawer.busy || !manager.ready());
+   holder.find('.dlp-choose-files,.dlp-remove-file,.dlp-remove-pending,.dlp-retry-file').prop('disabled',drawer.busy || Boolean(drawer.pendingPayment?.()));
+  }
+  function monitor(){refresh();if(!stopped && drawer.alive() && pending().length && root.setTimeout)timer=root.setTimeout(monitor,250);}
+  let initialization=null;
+  async function ensure(){
+   initialization ||= (async()=>{await call('begin_upload',{doctype:context[0],name:context[1],session_id:sessionId},FILES);await frappe.require('file_uploader.bundle.js');if(!drawer.alive())return;
+    uploader=new frappe.ui.FileUploader({wrapper:holder.find('.dlp-native-uploader'),method:FILES+'upload_file',fieldname:sessionId,allow_multiple:true,make_attachments_public:false,allow_toggle_private:false,allow_toggle_optimize:false,disable_file_browser:true,allow_web_link:false,allow_take_photo:false,allow_google_drive:false,
+     on_success:doc=>{if(doc?.doctype==='File' && doc.name && doc.is_private){docs.set(doc.name,doc);refresh();}else holder.find('.dlp-attachment-error').text(t('附件上传未完成'));}});
+   })();return initialization;
+  }
+  async function add(files){if(drawer.busy || drawer.pendingPayment?.() || stopped || !files?.length)return;try{await ensure();if(!uploader)return;const previous=new Set(queue());uploader.uploader.add_files(files);started=Date.now();monitor();for(const file of queue().filter(row=>!previous.has(row)))uploader.uploader.upload_file(file,queue().indexOf(file)).catch(()=>refresh());}catch(error){initialization=null;holder.find('.dlp-attachment-error').text(error.message || t('附件上传未完成'));}}
+  holder.find('.dlp-choose-files').on('click.dlpDrawer',()=>holder.find('input[type=file]').trigger('click'));
+  holder.find('input[type=file]').on('change.dlpDrawer',event=>{add(Array.from(event.target.files || []));event.target.value='';});
+  holder.find('.dlp-attachment-drop').on('dragover.dlpDrawer',event=>event.preventDefault()).on('drop.dlpDrawer',event=>{event.preventDefault();add((event.originalEvent || event).dataTransfer?.files);});
+  holder.on('click.dlpDrawer','.dlp-remove-file',event=>manager.remove(event.currentTarget.dataset.id));
+  holder.on('click.dlpDrawer','.dlp-retry-file',event=>manager.retry(Number(event.currentTarget.dataset.index)));
+  holder.on('click.dlpDrawer','.dlp-remove-pending',event=>{if(drawer.busy || drawer.pendingPayment?.())return;const file=pending()[Number(event.currentTarget.dataset.index)];if(!file || file.uploading)return;uploader.uploader.files=queue().filter(row=>row!==file);refresh();});
+  drawer.attachments=manager;
+  drawer.beforeClose=async()=>{if(committed || (!initialization && !docs.size && !queue().length))return true;if(drawer.pendingPayment?.())return true;drawer.setBusy(true);try{if(initialization)await initialization;await call('discard',{session_id:sessionId,cancel:1},FILES);return true;}catch(error){drawer.error(error);return false;}finally{drawer.setBusy(false);}};
+  refresh();return manager;
+ }
+ async function showAttachments(drawer,name){const files=await call('list_attachments',{name},FILES);if(drawer.alive())drawer.panel.find('.dlp-existing-attachments').html((files || []).map(doc=>`<div class="dlp-attachment-row"><a href="${esc(doc.file_url)}" target="_blank" rel="noopener" title="${esc(doc.file_name)}">${esc(doc.file_name)}</a></div>`).join(''));}
  function advancedHTML(projection,type,name,sourceType,sourceName){return `<details${projection.advanced_reason?' open':''}><summary>${esc(t('高级处理 / 原生单据'))}</summary><p>${esc(projection.advanced_reason || '复杂税费、共享来源、跨币种、退款和付款计划沿用原生单据；此处不改变业务规则。')}</p>${name?link(type,name,'打开原生单据'):link(sourceType,sourceName,'打开来源单据')} ${sourceName?link(sourceType,sourceName,'查看来源'):''}</details>`;}
  function metadataError(){const error=new Error('单据字段元数据读取失败，请刷新或在原生单据核对。');error.dlpMetadata=true;return error;}
  async function loadMetadata(doctype){try{await frappe.model.with_doctype(doctype);}catch(error){throw metadataError();}}
@@ -123,7 +171,7 @@
  }
  function actionButtons(drawer,projection,session,onSave,onReload,onPaymentSubmit=null){
   const footer=drawer.panel.find('footer');let writeCompleted=false;footer.find('.dlp-save,.dlp-submit,.dlp-reload').remove();
-  if(!projection.advanced_reason && projection.document.docstatus===0 && (projection.editable_fields?.length || projection.editable_item_fields?.length))$(`<button type="button" class="btn ${onPaymentSubmit?'btn-default':'btn-primary'} dlp-save">${esc(t('保存草稿'))}</button>`).appendTo(footer).on('click.dlpDrawer',()=>{if(drawer.alive() && !writeCompleted)return onSave();});
+  if(!onPaymentSubmit && !projection.advanced_reason && projection.document.docstatus===0 && (projection.editable_fields?.length || projection.editable_item_fields?.length))$(`<button type="button" class="btn btn-primary dlp-save">${esc(t('保存草稿'))}</button>`).appendTo(footer).on('click.dlpDrawer',()=>{if(drawer.alive() && !writeCompleted)return onSave();});
   for(const action of projection.allowed_actions || []){
    const label=action==='Submit'?(onPaymentSubmit?'确认付款':'提交并记账'):action;
    $(`<button type="button" class="btn ${onPaymentSubmit?'btn-primary':'btn-default'} dlp-submit">${esc(t(label))}</button>`).appendTo(footer).on('click.dlpDrawer',()=>{
@@ -150,7 +198,7 @@
    catch(error){if(drawer.alive())drawer.error(new Error(error.dlpMetadata?error.message:'刷新未完成，请核对权限或原生单据后重试。'));}
    finally{if(drawer.alive())drawer.setBusy(false);}
   };
-  $(`<button type="button" class="btn btn-default dlp-reload">${esc(t('刷新抽屉'))}</button>`).appendTo(footer).on('click.dlpDrawer',async()=>{
+  if(!onPaymentSubmit)$(`<button type="button" class="btn btn-default dlp-reload">${esc(t('刷新抽屉'))}</button>`).appendTo(footer).on('click.dlpDrawer',async()=>{
    if(!drawer.alive() || drawer.busy)return;
    if(session.dirty()){frappe.confirm('刷新会丢弃尚未保存的输入，继续？',reload);}else await reload();
   });
@@ -220,9 +268,9 @@
 
    const drafts=(chain.payments || []).filter(row=>row.docstatus===0 && row.payment_type==='Pay' && (!invoiceName || (row.references || []).some(ref=>ref.doctype==='Purchase Invoice' && ref.name===invoiceName)));
    if(drafts.length){
-    if(drafts.length===1){drawer.close(true);return paymentDrawer(drafts[0].name,{sourceType,sourceName});}
+    if(drafts.length===1){drawer.close(true);return paymentDrawer(drafts[0].name,{sourceType,sourceName,chain});}
     body(drawer,`<p>已有付款草稿，请核对金额、账户与采购引用后选择继续处理。</p>${drafts.map(row=>`<p><button type="button" class="btn btn-default dlp-continue-payment" data-name="${esc(row.name)}">继续 ${esc(row.name)}</button> · ${money(row.amount,row.currency)} · ${esc(row.bank_account || '账户不可见')}</p>`).join('')}`);
-    drawer.panel.find('.dlp-continue-payment').on('click.dlpDrawer',event=>{drawer.close(true);paymentDrawer(event.currentTarget.dataset.name,{sourceType,sourceName});});return;
+    drawer.panel.find('.dlp-continue-payment').on('click.dlpDrawer',event=>{drawer.close(true);paymentDrawer(event.currentTarget.dataset.name,{sourceType,sourceName,chain});});return;
    }
    if(!chain.can_create){body(drawer,`<p>${esc(chain.reason)}</p>${link(sourceType,sourceName,'打开原生来源')}`);return;}
    const eligible=chain.invoices.filter(invoice=>invoice.can_pay),controls={};let amountTouched=false,amountInput,invoiceGeneration=0;
@@ -230,26 +278,27 @@
    const selected=invoiceName?eligible.find(invoice=>invoice.name===invoiceName):eligible[0];
    if(!selected){body(drawer,`<p>${esc(t('当前应付单已不可快捷付款，请刷新并核对来源。'))}</p>${link(sourceType,sourceName,'打开原生来源')}`);return;}
    await loadMetadata('Payment Entry');if(!drawer.alive())return;
-   body(drawer,`<p>${link(sourceType,sourceName)} · ${esc(chain.supplier)}</p><div class="dlp-payment-balances">${balanceHTML(chain)}</div>${(chain.warnings || []).map(w=>`<p class="text-warning">${esc(w)}</p>`).join('')}<p class="text-muted">${esc(t('填完后点“确认付款”直接登记并提交 ERP 付款；可部分付款。需审批时会在这里显示下一步。'))}</p><div class="dlp-fields"></div><details><summary>${esc(t('高级处理'))}</summary><p>共享、跨币种、退款、扣款及复杂付款计划沿用原生应付单。</p>${eligible.map(i=>link('Purchase Invoice',i.name)).join(' · ')}</details>`);
+   body(drawer,`<p><strong>${esc(chain.supplier)}</strong><br>${link(sourceType,sourceName)}</p><div class="dlp-payment-balances">${balanceHTML(chain)}</div>${(chain.warnings || []).map(w=>`<p class="text-warning">${esc(w)}</p>`).join('')}<div class="dlp-fields"></div><section class="dlp-attachments"></section><details class="dlp-remarks"><summary>${esc(t('备注'))}</summary><div class="dlp-remarks-field"></div></details>`);
    drawer.setBusy(true);
    const currencyContext={currency:selected.currency,paid_from_account_currency:selected.currency};
    const add=async(df,value,touched)=>controls[df.fieldname]=await input(drawer,$('<div></div>').appendTo(drawer.panel.find('.dlp-fields')),{native_doctype:'Payment Entry',...df},value,touched);
    await add({native_doctype:'Payment Entry Reference',native_fieldname:'reference_name',fieldname:'invoice',fieldtype:'Select',label:'关联采购应付单',options:eligible.map(i=>i.name).join('\n'),reqd:1},selected.name);
-   await add({native_fieldname:'paid_amount',currency_context:currencyContext,fieldname:'amount',fieldtype:'Currency',label:'本次付款金额（应付账户币种）',reqd:1},selected.outstanding,value=>{amountTouched=true;amountInput=value;});
-   await add({native_fieldname:'paid_from',fieldname:'bank',fieldtype:'Link',options:'Account',label:'银行 / 现金记账账户',reqd:1},'');
+   await add({native_fieldname:'paid_amount',currency_context:currencyContext,fieldname:'amount',fieldtype:'Currency',label:'本次付款金额',reqd:1},selected.outstanding,value=>{amountTouched=true;amountInput=value;});
+   await add({native_fieldname:'paid_from',fieldname:'bank',fieldtype:'Link',options:'Account',label:'付款账户',reqd:1},'');
    controls.bank.get_query=()=>({filters:{company:chain.company,is_group:0,disabled:0,account_type:['in',['Bank','Cash']],account_currency:eligible.find(i=>i.name===controls.invoice.get_value())?.currency}});
    await add({native_fieldname:'posting_date',fieldname:'date',fieldtype:'Date',label:'付款日期',reqd:1},frappe.datetime.get_today());
-   await add({native_fieldname:'reference_no',fieldname:'reference',fieldtype:'Data',label:'银行参考号（银行必填，现金可空）'},'');
-   await add({fieldname:'remarks',fieldtype:'Small Text',label:'备注'},'');
+   await add({native_fieldname:'reference_no',fieldname:'reference',fieldtype:'Data',label:'银行参考号'},'');
+   controls.remarks=await input(drawer,drawer.panel.find('.dlp-remarks-field'),{native_doctype:'Payment Entry',fieldname:'remarks',fieldtype:'Small Text',label:'备注'},'');
+   await mountAttachments(drawer,sourceType,sourceName);drawer.pendingPayment=()=>Boolean(token.pending());
    controls.invoice.$input?.on('change.dlpInvoice',async()=>{const generation=++invoiceGeneration,chosen=eligible.find(i=>i.name===controls.invoice.get_value());if(chosen && drawer.alive()){currencyContext.currency=currencyContext.paid_from_account_currency=chosen.currency;await controls.amount.set_value(chosen.outstanding);if(drawer.alive() && generation===invoiceGeneration)amountTouched=false;}});
    if(!drawer.alive())return;
    const record=async confirm=>{
     if(drawer.busy || drawer.paymentCompleted)return;const chosen=eligible.find(i=>i.name===controls.invoice.get_value()),amount=amountTouched?amountInput:chosen?.outstanding;
+    if(!drawer.attachments.ready()){drawer.error(new Error(t('请等待附件上传完成，或移除失败文件。')));return;}
     if(!chosen || !Number.isFinite(Number(amount)) || Number(amount)<=0 || Number(amount)>Number(chosen.outstanding) || !controls.bank.get_value() || !controls.date.get_value()){drawer.error(new Error('请填写账户、日期，以及不超过未付余额的正数金额。'));return;}
-    const args={source_doctype:sourceType,source_name:sourceName,purchase_invoice:chosen.name,amount_to_pay:amount,bank_account:controls.bank.get_value(),posting_date:controls.date.get_value(),reference_no:controls.reference.get_value(),remarks:controls.remarks.get_value(),confirm};
-    return sendPayment(drawer,args,token,{sourceType,sourceName});
+    const args={source_doctype:sourceType,source_name:sourceName,purchase_invoice:chosen.name,amount_to_pay:amount,bank_account:controls.bank.get_value(),posting_date:controls.date.get_value(),reference_no:controls.reference.get_value(),remarks:controls.remarks.get_value(),confirm,...drawer.attachments.args()};
+    return sendPayment(drawer,args,token,{sourceType,sourceName,chain});
    };
-   $(`<button type="button" class="btn btn-default dlp-save-payment">${esc(t('保存草稿'))}</button>`).appendTo(drawer.panel.find('footer')).on('click.dlpDrawer',()=>record(0));
    $(`<button type="button" class="btn btn-primary dlp-create">${esc(t('确认付款'))}</button>`).appendTo(drawer.panel.find('footer')).on('click.dlpDrawer',()=>record(1));drawer.setBusy(false);
   }catch(error){if(drawer.alive()){body(drawer,`<p class="text-danger">${error.dlpMetadata?esc(error.message):'无法读取付款信息，请核对系统提示。'}</p>${link(sourceType,sourceName,'打开原生来源')}`);drawer.setBusy(false);}}
  }
@@ -258,27 +307,37 @@
   drawer.panel.find('footer').find('.dlp-save,.dlp-submit,.dlp-reload,.dlp-save-payment,.dlp-create').remove();drawer.panel.find('.dlp-cancel').text(t('完成'));
   if(context.sourceName){try{const chain=await call('get_purchase_chain',{source_doctype:context.sourceType,source_name:context.sourceName});if(drawer.alive())drawer.panel.find('.dlp-payment-balances').html(balanceHTML(chain));}catch(error){if(drawer.alive())drawer.error(new Error('付款已提交，余额刷新失败。请刷新来源或查看本次付款，勿重复提交。'));}}
   else drawer.panel.find('.dlp-payment-balances').remove();
+  if(!drawer.alive())return;
+  drawer.panel.find('.dlp-payment-body').append('<section class="dlp-existing-attachments"></section>');
+  try{await showAttachments(drawer,doc.name);}catch(error){if(drawer.alive())drawer.error(new Error(t('付款已提交，附件读取失败。请打开付款单核对。')));}
  }
  async function paymentDrawer(name,context={}){
-  const drawer=newDrawer('采购付款 · 核对与确认');if(!drawer)return;let projection,session,completed=false;const token=retryToken(()=>root.crypto.randomUUID());
+  const drawer=newDrawer('采购付款');if(!drawer)return;let projection,session,completed=false;const token=retryToken(()=>root.crypto.randomUUID(),`dlp-existing-payment:${frappe.boot?.sitename || root.location?.host}:${frappe.session?.user}:${name}`);drawer.pendingPayment=()=>Boolean(token.pending());
   async function load(){const generation=++drawer.loadId,result=await call('preview_payment',{name},ACTIONS);if(!drawer.alive() || generation!==drawer.loadId)return;await loadMetadata('Payment Entry');if(!drawer.alive() || generation!==drawer.loadId)return;projection=result;session=editSession(result);await render();}
   async function render(){
-   const doc=projection.document;body(drawer,`${context.notice?`<p class="text-warning" role="status">${esc(t(context.notice))}</p>`:''}<p>${link('Payment Entry',name)} · ${esc(doc.supplier)}</p><p>${esc(t('整单银行金额'))} ${money(doc.amount,doc.currency)} · ${esc(t({0:'草稿 · 未计已付',1:'已提交',2:'已取消 · 未计已付'}[doc.docstatus]))}</p><p>${esc(doc.company)}</p>${doc.docstatus===0?`<p>${esc(t(projection.allowed_actions?.includes('Submit')?'核对后点“确认付款”，本次输入与提交一次完成。':projection.allowed_actions?.length?'付款需按下方审批动作处理，审批完成前不计已付。':'当前没有提交或审批权限，请由有权限的财务人员继续处理。'))}</p>`:''}<div class="dlp-fields"></div><details open><summary>${esc(t('采购核销引用（各引用币种）'))}</summary>${referencesHTML(doc.references)}</details>${advancedHTML(projection,'Payment Entry',name)}`);
+   const doc=projection.document,notice=context.notice || (doc.docstatus===0 && !projection.allowed_actions?.includes('Submit')?(projection.allowed_actions?.length?'付款待审批，尚未计已付。':'当前没有提交或审批权限。'):'');
+   const pending=token.pending();
+   if(doc.docstatus===1 && pending)token.succeeded();
+   if(doc.docstatus===0 && pending){body(drawer,`<p class="text-warning">${esc(t('上次付款响应未确认，请核对后重试同一操作。'))}</p><p>${link('Payment Entry',name)} · ${money(pending.changes?.amount ?? doc.amount,doc.currency)}</p>`);$(`<button type="button" class="btn btn-primary dlp-retry-existing">${esc(t('重试确认付款'))}</button>`).appendTo(drawer.panel.find('footer')).on('click.dlpDrawer',()=>confirm(pending.workflow_action,true));drawer.setBusy(false);return;}
+   body(drawer,`<p><strong>${esc(doc.supplier)}</strong><br>${link('Payment Entry',name)} · ${esc(t({0:'已有待确认付款',1:'已提交',2:'已取消'}[doc.docstatus]))}</p>${notice?`<p class="text-warning" role="status">${esc(t(notice))}</p>`:''}${context.chain?`<div class="dlp-payment-balances">${balanceHTML(context.chain)}</div>`:''}<div class="dlp-fields"></div><section class="dlp-existing-attachments"></section>${doc.docstatus===0 && projection.editable_fields?.length && !projection.advanced_reason?'<section class="dlp-attachments"></section>':''}<details class="dlp-remarks"><summary>${esc(t('备注'))}</summary><div class="dlp-remarks-field"></div></details>${projection.advanced_reason?`<p class="text-warning">${esc(t(projection.advanced_reason))} ${link('Payment Entry',name,'打开原生付款单')}</p>`:''}<details><summary>${esc(t('采购核销引用'))}</summary>${referencesHTML(doc.references)}</details>`);
    drawer.setBusy(true);
-   for(const [field,type,label] of [['posting_date','Date','付款日期'],['amount','Currency','整单金额（银行币种）'],['bank_account','Link','银行 / 现金记账账户'],['reference_no','Data','银行参考号'],['remarks','Small Text','备注']]){
+   for(const [field,type,label] of [['posting_date','Date','付款日期'],['amount','Currency','本次付款金额'],['bank_account','Link','付款账户'],['reference_no','Data','银行参考号'],['remarks','Small Text','备注']]){
     const nativeField=field==='amount'?(doc.payment_type==='Receive'?'received_amount':'paid_amount'):field==='bank_account'?(doc.payment_type==='Receive'?'paid_to':'paid_from'):field;
-    const editable=projection.editable_fields.includes(field),control=await input(drawer,$('<div></div>').appendTo(drawer.panel.find('.dlp-fields')),{native_doctype:'Payment Entry',native_fieldname:nativeField,currency_context:{...doc,paid_from_account_currency:doc.currency,paid_to_account_currency:doc.currency},fieldname:field,fieldtype:type,options:field==='bank_account'?'Account':undefined,label,read_only:!editable},doc[field],editable?value=>session.touch(field,value):null);
+    const editable=projection.editable_fields.includes(field),control=await input(drawer,field==='remarks'?drawer.panel.find('.dlp-remarks-field'):$('<div></div>').appendTo(drawer.panel.find('.dlp-fields')),{native_doctype:'Payment Entry',native_fieldname:nativeField,currency_context:{...doc,paid_from_account_currency:doc.currency,paid_to_account_currency:doc.currency},fieldname:field,fieldtype:type,options:field==='bank_account'?'Account':undefined,label,read_only:!editable},doc[field],editable?value=>session.touch(field,value):null);
     if(field==='bank_account')control.get_query=()=>({filters:{company:doc.company,is_group:0,disabled:0,account_type:['in',['Bank','Cash']],account_currency:doc.currency}});
    }
-   if(!drawer.alive())return;actionButtons(drawer,projection,session,save,load,confirm);drawer.setBusy(false);
+   if(!drawer.alive())return;
+   if(doc.docstatus===0 && projection.editable_fields?.length && !projection.advanced_reason)await mountAttachments(drawer,'Payment Entry',name,context.staged);
+   try{await showAttachments(drawer,name);}catch(error){drawer.error(error);}
+   actionButtons(drawer,projection,session,null,load,confirm);drawer.setBusy(false);
   }
-  async function confirm(action){
-   if(drawer.busy || completed)return;drawer.setBusy(true);
-   try{const args={name,changes:session.changes(),expected_modified:session.document.modified,workflow_action:action};const result=await call('complete_payment',{...args,request_id:token.forPayload(args)},ACTIONS);token.succeeded();if(!drawer.alive())return;if(result.failed){drawer.error(new Error(result.error || t('付款未提交，请核对后重试。')));return;}completed=result.document.docstatus===1;if(completed){await paymentResult(drawer,result,context);await refreshSurface();}else{projection=result;session.reset(result);context.notice='审批动作已完成，付款仍待后续审批，尚未计已付。';await render();}}
+  async function confirm(action,original=false){
+   if(drawer.busy || completed)return;
+   if(drawer.attachments && !drawer.attachments.ready()){drawer.error(new Error(t('请等待附件上传完成，或移除失败文件。')));return;}drawer.setBusy(true);
+   try{const args=original?token.pending():{name,changes:session.changes(),expected_modified:session.document.modified,workflow_action:action,...(drawer.attachments?.args() || {})};const result=await call('complete_payment',{...args,request_id:token.forPayload(args)},ACTIONS);token.succeeded();if(!drawer.alive())return;if(result.failed){drawer.error(new Error(result.error || t('付款未提交，请核对后重试。')));return;}drawer.attachments?.committed();completed=result.document.docstatus===1;if(completed){await paymentResult(drawer,result,context);await refreshSurface();}else{projection=result;session.reset(result);context.staged=null;context.notice='付款待审批，尚未计已付。';await render();}}
    catch(error){if(drawer.alive())drawer.error(new Error(completed?'付款已提交，页面刷新失败。请查看本次付款，勿重复提交。':error.message || '付款未确认：请核对系统提示；相同内容可重试，响应不确定时先查看本次付款。'));}
    finally{if(drawer.alive())drawer.setBusy(false);}
   }
-  async function save(){if(drawer.busy || completed)return;drawer.setBusy(true);try{const result=await call('update_payment_draft',{name,changes:session.changes(),expected_modified:session.document.modified},ACTIONS);if(!drawer.alive())return;projection=result;session.reset(result);await render();refreshSurface();frappe.show_alert({message:'付款草稿已保存',indicator:'green'});}catch(error){if(drawer.alive())drawer.error(new Error('保存未完成，请核对系统提示。版本改变时刷新抽屉，勿重复修改。'));}finally{if(drawer.alive())drawer.setBusy(false);}}
   try{await load();}catch(error){if(drawer.alive()){body(drawer,`<p class="text-danger">${error.dlpMetadata?esc(error.message):'账户或单据不可用 / 无权读取，请在原生单据核对。'}</p>${link('Payment Entry',name,'打开原生付款单')}`);drawer.setBusy(false);}}
  }
  async function voucherDrawer(name){
@@ -349,5 +408,5 @@
   c.$procurementTabs?.remove();
   c.$procurementTabs=c.root.$(`<nav class="dlp-procurement-tabs" aria-label="${esc(t('采购流程'))}">${entries.map(([key,path,label])=>!finance && key.startsWith('purchase-')?`<button type="button" disabled title="${esc(t('财务办理入口；请在订单查看进度'))}">${esc(t(label))}</button>`:`<a class="${key===current?'active':''}" href="/desk/${path}?sidebar=Buying" ${key===current?'aria-current="page"':''}>${esc(t(label))}</a>`).join('')}</nav>`).insertBefore(c.list.$result.parent('.result-container'));
  }
- root.DeepLinkERPPurchasePayments={pay,formRefresh,recordsPage,balanceHTML,documentDrawer,paymentDrawer,voucherDrawer,orderReceiptAction,nativeAction,openNative,vouchersHTML,paymentSummary,editSession,retryToken,operationGate,recordsRequest,recordsExport,receiptDrafts,mountRecordsFilters,disposeControls,mountProcurementTabs};
+ root.DeepLinkERPPurchasePayments={pay,formRefresh,recordsPage,balanceHTML,documentDrawer,paymentDrawer,voucherDrawer,orderReceiptAction,nativeAction,openNative,vouchersHTML,paymentSummary,editSession,retryToken,operationGate,recordsRequest,recordsExport,receiptDrafts,mountRecordsFilters,disposeControls,mountProcurementTabs,mountAttachments};
 })(typeof globalThis!=='undefined'?globalThis:this);

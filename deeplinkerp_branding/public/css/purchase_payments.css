@@ -34,6 +34,19 @@
 .dlp-document-items .frappe-control { margin-bottom: 0; }
 .dlp-document-items [data-edit] small { display: block; }
 .dlp-error:empty { display: none; }
+.dlp-attachment-error:empty { display: none; }
+.dlp-attachment-title { display: flex; justify-content: space-between; margin: 12px 0 6px; }
+.dlp-attachment-title > span { color: var(--text-muted); font-size: 12px; }
+.dlp-attachment-drop { border: 1px dashed var(--border-color,#ccd6e4); border-radius: 5px; padding: 10px 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.dlp-attachment-drop > span { color: var(--text-muted); }
+.dlp-attachment-row { display: flex; align-items: center; gap: 10px; padding: 6px 8px; margin-top: 6px; border: 1px solid var(--border-color,#e1e8f0); border-radius: 4px; min-width: 0; }
+.dlp-attachment-row > :first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dlp-attachment-row > :not(:first-child) { flex-shrink: 0; font-size: 12px; }
+.dlp-attachment-row .btn { padding: 2px 0; }
+.dlp-fields { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 0 12px; }
+.dlp-fields > div { grid-column: 1 / -1; }
+.dlp-fields > div:has([data-fieldname="date"],[data-fieldname="posting_date"]) { grid-column: auto; order: 4; }
+.dlp-fields > div:has([data-fieldname="reference"],[data-fieldname="reference_no"]) { grid-column: auto; order: 5; }
 .dlp-error { padding: 8px 0; }
 .dlp-payment-drawer :focus-visible { outline: 2px solid var(--primary,#1677ff); outline-offset: 2px; }
 body.dlp-purchase-receipt-grid-active .dlp-po-filter[data-fieldname="supplier"] { width: 150px; }

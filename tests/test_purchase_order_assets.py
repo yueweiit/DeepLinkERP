@@ -47,7 +47,8 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.5"
 		self.assertIn(engine, scripts)
 		self.assertLess(scripts.index(engine), scripts.index(adapter))
-		self.assertLess(scripts.index(engine), scripts.index("/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.12"))
+		payments = next(path for path in scripts if path.startswith("/assets/deeplinkerp_branding/js/purchase_payments.js?v="))
+		self.assertLess(scripts.index(engine), scripts.index(payments))
 
 	def test_desk_loads_compact_styles_without_changing_website_assets(self):
 		styles = hooks.app_include_css
