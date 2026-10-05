@@ -1,5 +1,6 @@
 if (!window.dlpPurchasePaymentFormInstalled) {
  window.dlpPurchasePaymentFormInstalled = true;
- frappe.ui.form.on("Purchase Receipt", {refresh: frm => DeepLinkERPPurchasePayments.formRefresh(frm)});
- frappe.ui.form.on("Purchase Order", {refresh: frm => DeepLinkERPPurchasePayments.formRefresh(frm)});
+ for (const doctype of ["Purchase Receipt", "Purchase Order", "Purchase Invoice", "Payment Entry"]) {
+  frappe.ui.form.on(doctype, {refresh: frm => DeepLinkERPPurchasePayments.formRefresh(frm)});
+ }
 }

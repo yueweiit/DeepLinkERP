@@ -105,6 +105,73 @@ class PurchaseLinkTests(unittest.TestCase):
         self.assertEqual(result, {'rows': [], 'total_count': 0, 'totals': []})
 
 
+class PurchasePayableScopeTests(unittest.TestCase):
+    def setUp(self):
+        flags = patch.object(frappe, 'flags', frappe._dict())
+        flags.start()
+        self.addCleanup(flags.stop)
+
+    def invoice(self, name='PI', **changes):
+        values = dict(name=name, docstatus=1, is_return=0, company='C', supplier='S',
+                      currency='CNY', party_account_currency='CNY', grand_total=1200,
+                      rounded_total=0, disable_rounded_total=1, outstanding_amount=300,
+                      posting_date='2026-10-05', status='Partly Paid',
+                      items=[frappe._dict(purchase_order='PO', purchase_receipt='PR')])
+        values.update(changes)
+        return SimpleNamespace(**values, get=lambda field: values.get(field), invoice_is_blocked=lambda: False)
+
+    def scope(self, docs, sources, **args):
+        with patch.object(service, '_require_fields'), patch.object(service, '_read', side_effect=lambda dt, name, fields: docs[name]), \
+             patch.object(service._RecordReader, 'preload'), \
+             patch.object(service, '_source_links', side_effect=lambda doc, dt, field, warnings: sources.get((doc.name, dt), [])), \
+             patch.object(frappe, 'has_permission', return_value=True), \
+             patch.object(frappe, 'get_list', return_value=[frappe._dict(name=name) for name in [*docs, *docs]]):
+            return service.get_purchase_payables(**args)
+
+    def test_po_only_pr_only_both_share_one_native_invoice_scope_contract(self):
+        for orders, receipts in ((['PO'], []), ([], ['PR']), (['PO'], ['PR'])):
+            with self.subTest(orders=orders, receipts=receipts):
+                row = self.scope({'PI': self.invoice()}, {('PI', 'Purchase Order'): orders, ('PI', 'Purchase Receipt'): receipts})['rows'][0]
+                self.assertEqual(row['orders'], orders)
+                self.assertEqual(row['receipts'], receipts)
+                self.assertEqual(row['outstanding'], 300)
+
+    def test_operating_invoice_and_invoice_without_readable_source_do_not_enter_count_or_paging(self):
+        docs = {name: self.invoice(name) for name in ('OPERATING', 'HIDDEN-SOURCE', 'VISIBLE')}
+        result = self.scope(docs, {('VISIBLE', 'Purchase Receipt'): ['PR']}, start=0, page_length=1)
+        self.assertEqual(result['total_count'], 1)
+        self.assertEqual([row['name'] for row in result['rows']], ['VISIBLE'])
+        self.assertNotIn('HIDDEN', str(result))
+
+    def test_mixed_invoice_keeps_whole_native_total_without_inventing_procurement_amount(self):
+        doc = self.invoice(items=[frappe._dict(purchase_order='PO'), frappe._dict(purchase_order=None, purchase_receipt=None)])
+        result = self.scope({'PI': doc}, {('PI', 'Purchase Order'): ['PO']})
+        self.assertEqual(len(result['rows']), 1)
+        self.assertTrue(result['rows'][0]['shared'])
+        self.assertEqual(result['rows'][0]['grand_total'], 1200)
+        self.assertEqual(result['rows'][0]['outstanding'], 300)
+        self.assertNotIn('procurement_amount', result['rows'][0])
+        self.assertIn('整张应付单', result['notice'])
+
+    def test_draft_cancelled_and_return_keep_native_state_and_disable_quick_payment(self):
+        for status, is_return in ((0, 0), (2, 0), (1, 1)):
+            with self.subTest(status=status, is_return=is_return):
+                row = self.scope({'PI': self.invoice(docstatus=status, is_return=is_return)}, {('PI', 'Purchase Order'): ['PO']})['rows'][0]
+                self.assertEqual(row['docstatus'], status)
+                self.assertEqual(row['is_return'], bool(is_return))
+                self.assertFalse(row['can_pay'])
+                if status != 1:
+                    self.assertNotIn('outstanding', row)
+
+    def test_native_doctype_permission_and_field_rejection_are_not_suppressed(self):
+        with patch.object(frappe, 'has_permission', return_value=True), patch.object(service, '_require_fields', side_effect=frappe.PermissionError):
+            with self.assertRaises(frappe.PermissionError):
+                service.get_purchase_payables()
+        with patch.object(frappe, 'has_permission', return_value=True), patch.object(service, '_require_fields'), patch.object(frappe, 'get_list', side_effect=frappe.PermissionError):
+            with self.assertRaises(frappe.PermissionError):
+                service.get_purchase_payables()
+
+
 class PaymentRecordReaderTests(unittest.TestCase):
     def setUp(self):
         flags = patch.object(frappe, 'flags', frappe._dict())

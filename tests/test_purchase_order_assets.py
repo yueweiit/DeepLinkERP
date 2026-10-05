@@ -43,11 +43,11 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 
 	def test_unified_adapter_loads_after_cache_busted_shared_engine(self):
 		scripts = hooks.app_include_js
-		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.13"
-		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.4"
+		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.16"
+		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.5"
 		self.assertIn(engine, scripts)
 		self.assertLess(scripts.index(engine), scripts.index(adapter))
-		self.assertLess(scripts.index(engine), scripts.index("/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.9"))
+		self.assertLess(scripts.index(engine), scripts.index("/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.12"))
 
 	def test_desk_loads_compact_styles_without_changing_website_assets(self):
 		styles = hooks.app_include_css
@@ -66,14 +66,14 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		self.assertIsNotNone(rule, "Only the classic PO menu should override the global right anchor")
 		self.assertRegex(rule.group(1), r"left:\s*0\s*;")
 		self.assertRegex(rule.group(1), r"right:\s*auto\s*;")
-		self.assertIn("/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.12", hooks.app_include_css)
+		self.assertIn("/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.14", hooks.app_include_css)
 
 	def test_header_and_rows_do_not_distribute_extra_width_between_columns(self):
 		css = (
 			Path(__file__).resolve().parents[1]
 			/ "deeplinkerp_branding/public/css/purchase_order_list.css"
 		).read_text()
-		css = css.replace("body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active)", "body.dlp-purchase-order-grid-active")
+		css = re.sub(r"body:is\([^)]*\.dlp-purchase-order-grid-active[^)]*\)", "body.dlp-purchase-order-grid-active", css)
 		shared_grid_rule = re.search(
 			r"\.dlp-po-grid-header-columns,\s*"
 			r"body\.dlp-purchase-order-grid-active \.dlp-po-grid-row\s*\{([^}]+)\}",

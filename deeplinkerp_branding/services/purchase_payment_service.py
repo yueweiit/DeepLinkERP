@@ -351,6 +351,71 @@ def summarize(invoices):
     return [{key: float(value) if isinstance(value, Decimal) else value for key, value in row.items()} for row in groups.values()]
 
 
+@frappe.whitelist()
+def get_purchase_payables(company=None, supplier=None, search=None, from_date=None, to_date=None,
+                          start=0, page_length=100):
+    if not frappe.has_permission("Payment Entry", "read"):
+        frappe.throw("采购人员请在采购订单查看订单进度；应付与付款办理由财务处理", frappe.PermissionError)
+    token = _record_reader.set(_RecordReader())
+    try:
+        return _get_purchase_payables(company, supplier, search, from_date, to_date, start, page_length)
+    finally:
+        _record_reader.reset(token)
+
+
+def _get_purchase_payables(company, supplier, search, from_date, to_date, start, page_length):
+    """Native PI documents with readable procurement sources, once per invoice.
+
+    Totals/balances are whole native invoices, including mixed expense lines.
+    No amount is reallocated or reclassified as a procurement cost.
+    """
+    fields = PI_FIELDS | {"posting_date", "status"}
+    _require_fields("Purchase Invoice", fields)
+    _require_fields("Purchase Invoice Item", {"purchase_order", "purchase_receipt"}, "Purchase Invoice")
+    start, page_length = _pagination(start, page_length)
+    filters = {key: value for key, value in (("company", company), ("supplier", supplier)) if value}
+    if from_date or to_date:
+        filters["posting_date"] = ["between", [from_date or "1900-01-01", to_date or "2999-12-31"]]
+    candidates = frappe.get_list("Purchase Invoice", filters=filters,
+        or_filters=[["Purchase Invoice Item", field, "is", "set"]
+                    for field in ("purchase_order", "purchase_receipt")],
+        fields=["name"], order_by="posting_date desc, name desc", limit_page_length=0)
+    reader = _record_reader.get()
+    reader.preload("Purchase Invoice", [row.name for row in candidates])
+    invoices = [doc for (dt, _), doc in reader.docs.items() if dt == "Purchase Invoice" and doc]
+    reader.preload("Company", {doc.company for doc in invoices})
+    for doctype, field in (("Purchase Order", "purchase_order"), ("Purchase Receipt", "purchase_receipt")):
+        reader.preload(doctype, {item.get(field) for doc in invoices for item in doc.items if item.get(field)})
+    rows, seen = [], set()
+    for candidate in candidates:
+        if candidate.name in seen:
+            continue
+        seen.add(candidate.name)
+        warnings = []
+        with _quiet_link_errors():
+            try:
+                doc = _read("Purchase Invoice", candidate.name, fields)
+                if search and str(search).casefold() not in f"{doc.name} {doc.supplier}".casefold():
+                    continue
+                orders = _source_links(doc, "Purchase Order", "purchase_order", warnings)
+                receipts = _source_links(doc, "Purchase Receipt", "purchase_receipt", warnings)
+            except (frappe.PermissionError, frappe.DoesNotExistError):
+                continue
+        if not orders and not receipts:
+            continue
+        source_type, source_name = ("Purchase Receipt", receipts[0]) if receipts else ("Purchase Order", orders[0])
+        invoice = _invoice_row(doc, source_type, source_name)
+        rows.append({**invoice, "posting_date": doc.posting_date, "supplier": doc.supplier,
+                     "company": doc.company, "invoice_currency": doc.currency, "grand_total": doc.grand_total,
+                     "status": doc.status, "orders": orders, "receipts": receipts, "warnings": warnings,
+                     "source_type": source_type, "source_name": source_name,
+                     "can_pay": bool(invoice["can_pay"] and not warnings
+                                     and frappe.has_permission("Payment Entry", "read")
+                                     and frappe.has_permission("Payment Entry", "create"))})
+    return {"rows": rows[start:start + page_length], "total_count": len(rows),
+            "notice": "仅显示关联可读采购订单或采购入库的原生应付单。金额与余额均为整张应付单，可能包含其他费用；不是采购成本或某张入库的分摊金额。草稿、退货、取消分别显示，草稿和取消不计应付余额。"}
+
+
 def _vouchers(payment_names):
     if not frappe.db.exists("DocType", "China Accounting Voucher") or not frappe.has_permission("China Accounting Voucher", "read"):
         return []

@@ -48,12 +48,13 @@
  }
  function operationGate(){let generation=0;return {begin:()=>++generation,cancel:()=>++generation,current:id=>id===generation};}
  const gate=operationGate();let activeDrawer=null,recordsController=null;
- async function refreshSurface(){const route=frappe.get_route?.() || [];if(recordsController && route[0]==='purchase-payment-records')await recordsController.refresh();else if(route[0]==='Form' && ['Purchase Order','Purchase Receipt'].includes(root.cur_frm?.doctype))await root.cur_frm.reload_doc();else await root.cur_list?.refresh?.();}
+ function currentController(){const route=frappe.get_route?.() || [];return route[0]==='purchase-payables'?root.DeepLinkERPPurchasePayables?.controller:route[0]==='purchase-payment-records'?recordsController:root.cur_list?.dlpReceiptGrid || root.cur_list?.dlpPurchaseOrderGrid;}
+ async function refreshSurface(){const route=frappe.get_route?.() || [],controller=currentController();if(controller)await controller.refresh();else if(route[0]==='Form' && ['Purchase Order','Purchase Receipt'].includes(root.cur_frm?.doctype))await root.cur_frm.reload_doc();else await root.cur_list?.refresh?.();}
  function recordsRoute(chain){frappe.route_options={[chain.source_doctype==='Purchase Receipt'?'purchase_receipt':'purchase_order']:chain.name};frappe.set_route('purchase-payment-records');}
  const returnKey='dlp-procurement-return';
  function nativeAction(type,name,label){return `<button type="button" class="btn btn-xs btn-default dlp-native-document" data-doctype="${esc(type)}" data-name="${esc(name)}" title="${esc(t(label))}" aria-label="${esc(t(label))}">${esc(t(label))}</button>`;}
  function openNative(type,name){
-  const route=frappe.get_route?.() || [],grid=root.cur_list?.dlpReceiptGrid || root.cur_list?.dlpPurchaseOrderGrid;
+  const route=frappe.get_route?.() || [],grid=currentController();
   let previous;try{previous=JSON.parse(root.sessionStorage?.getItem(returnKey) || 'null');}catch(error){/* optional browser storage */}
   const context={...(route[0]==='Form' && previous?previous:{route,quick:grid?.quick,page:grid?.page,scroll:grid?.list?.$result?.get?.(0)?.scrollTop || 0}),type,name};
   try{root.sessionStorage?.setItem(returnKey,JSON.stringify(context));}catch(error){/* The native form remains usable when storage is unavailable. */}
@@ -64,12 +65,12 @@
   if(!context || frm.doctype!==context.type || frm.doc.name!==context.name)return;
   frm.$wrapper.find('.dlp-procurement-return').remove();
   const box=$(`<section class="dlp-procurement-return"><p>${esc(t(frm.doc.docstatus===0?'请核对并处理当前草稿，完成后返回原列表。':'当前单据已处理，可返回原列表继续采购流程。'))}</p><button type="button" class="btn btn-primary">${esc(t('返回原采购列表'))}</button></section>`).prependTo(frm.layout.wrapper);
-  box.find('button').on('click.dlpReturn',async()=>{await frappe.set_route(...context.route);const grid=root.cur_list?.dlpReceiptGrid || root.cur_list?.dlpPurchaseOrderGrid;if(grid && context.quick){grid.resetting=true;await Promise.all(Object.entries(grid.controls).map(([field,control])=>control.set_value(context.quick[field] || '')));grid.quick=context.quick;grid.resetting=false;grid.setPage(context.page || 0);await grid.refresh();const element=grid.list?.$result?.get?.(0);if(element)element.scrollTop=context.scroll;}root.sessionStorage?.removeItem(returnKey);});
+  box.find('button').on('click.dlpReturn',async()=>{await frappe.set_route(...context.route);const grid=currentController();if(grid && context.quick){grid.resetting=true;await Promise.all(Object.entries(grid.controls).map(([field,control])=>control.set_value(context.quick[field] || '')));grid.quick=context.quick;grid.resetting=false;grid.setPage(context.page || 0);await grid.refresh();const element=grid.list?.$result?.get?.(0);if(element)element.scrollTop=context.scroll;}root.sessionStorage?.removeItem(returnKey);});
  }
  function orderReceiptAction(doc){
   if(doc.row_type!=='oa_request' && doc.docstatus===0)return nativeAction('Purchase Order',doc.name,'处理订单草稿');
   if(frappe.model?.can_create?.('Purchase Receipt')===false || doc.row_type==='oa_request' || doc.docstatus!==1 || doc.per_received==null || !Number.isFinite(Number(doc.per_received)) || Number(doc.per_received)>=100 || ['Closed','Cancelled','On Hold','Completed'].includes(doc.status))return '';
-  return `<button type="button" class="btn btn-xs btn-default dlp-order-receipt" data-name="${esc(doc.name)}">剩余入库草稿</button>`;
+  return `<button type="button" class="btn btn-xs btn-default dlp-order-receipt" data-name="${esc(doc.name)}">${esc(t('剩余入库草稿'))}</button>`;
  }
  async function receiptDrafts(sourceName){
   const rows=(await frappe.call({method:'frappe.client.get_list',args:{doctype:'Purchase Receipt',fields:['name','modified'],filters:[['Purchase Receipt','docstatus','=',0],['Purchase Receipt Item','purchase_order','=',sourceName]],order_by:'modified desc',limit_page_length:0}})).message || [];
@@ -210,14 +211,14 @@
    await load();
   }catch(error){if(drawer.alive()){body(drawer,`<p class="text-danger">${error.dlpMetadata?esc(error.message):'无法预览，请核对权限、剩余数量或关联单据。已有草稿请在列表继续编辑。'}</p>${link(sourceType,sourceName,'打开来源单据')}`);drawer.setBusy(false);}}
  }
- async function pay(sourceType,sourceName){
+ async function pay(sourceType,sourceName,invoiceName=null){
   const drawer=newDrawer('采购付款');if(!drawer)return;const token=paymentToken(sourceType,sourceName);
   try{
    const chain=await call('get_purchase_chain',{source_doctype:sourceType,source_name:sourceName});if(!drawer.alive())return;
    const pending=token.pending();
    if(pending){body(drawer,`<p class="text-warning">${esc(t('上次付款响应未确认，请核对后重试同一操作。'))}</p><p>${link('Purchase Invoice',pending.purchase_invoice)} · ${money(pending.amount_to_pay)} · ${esc(pending.bank_account)}</p><a href="/desk/purchase-payment-records">${esc(t('采购付款记录'))}</a>`);$(`<button type="button" class="btn btn-primary dlp-retry-payment">${esc(t(pending.confirm?'重试确认付款':'重试保存草稿'))}</button>`).appendTo(drawer.panel.find('footer')).on('click.dlpDrawer',()=>sendPayment(drawer,pending,token,{sourceType,sourceName}));return;}
 
-   const drafts=(chain.payments || []).filter(row=>row.docstatus===0 && row.payment_type==='Pay');
+   const drafts=(chain.payments || []).filter(row=>row.docstatus===0 && row.payment_type==='Pay' && (!invoiceName || (row.references || []).some(ref=>ref.doctype==='Purchase Invoice' && ref.name===invoiceName)));
    if(drafts.length){
     if(drafts.length===1){drawer.close(true);return paymentDrawer(drafts[0].name,{sourceType,sourceName});}
     body(drawer,`<p>已有付款草稿，请核对金额、账户与采购引用后选择继续处理。</p>${drafts.map(row=>`<p><button type="button" class="btn btn-default dlp-continue-payment" data-name="${esc(row.name)}">继续 ${esc(row.name)}</button> · ${money(row.amount,row.currency)} · ${esc(row.bank_account || '账户不可见')}</p>`).join('')}`);
@@ -226,13 +227,15 @@
    if(!chain.can_create){body(drawer,`<p>${esc(chain.reason)}</p>${link(sourceType,sourceName,'打开原生来源')}`);return;}
    const eligible=chain.invoices.filter(invoice=>invoice.can_pay),controls={};let amountTouched=false,amountInput,invoiceGeneration=0;
    if(!eligible.length){body(drawer,'<p>当前没有可快捷付款的应付余额，请打开原生应付单处理。</p>');return;}
+   const selected=invoiceName?eligible.find(invoice=>invoice.name===invoiceName):eligible[0];
+   if(!selected){body(drawer,`<p>${esc(t('当前应付单已不可快捷付款，请刷新并核对来源。'))}</p>${link(sourceType,sourceName,'打开原生来源')}`);return;}
    await loadMetadata('Payment Entry');if(!drawer.alive())return;
    body(drawer,`<p>${link(sourceType,sourceName)} · ${esc(chain.supplier)}</p><div class="dlp-payment-balances">${balanceHTML(chain)}</div>${(chain.warnings || []).map(w=>`<p class="text-warning">${esc(w)}</p>`).join('')}<p class="text-muted">${esc(t('填完后点“确认付款”直接登记并提交 ERP 付款；可部分付款。需审批时会在这里显示下一步。'))}</p><div class="dlp-fields"></div><details><summary>${esc(t('高级处理'))}</summary><p>共享、跨币种、退款、扣款及复杂付款计划沿用原生应付单。</p>${eligible.map(i=>link('Purchase Invoice',i.name)).join(' · ')}</details>`);
    drawer.setBusy(true);
-   const currencyContext={currency:eligible[0].currency,paid_from_account_currency:eligible[0].currency};
+   const currencyContext={currency:selected.currency,paid_from_account_currency:selected.currency};
    const add=async(df,value,touched)=>controls[df.fieldname]=await input(drawer,$('<div></div>').appendTo(drawer.panel.find('.dlp-fields')),{native_doctype:'Payment Entry',...df},value,touched);
-   await add({native_doctype:'Payment Entry Reference',native_fieldname:'reference_name',fieldname:'invoice',fieldtype:'Select',label:'关联采购应付单',options:eligible.map(i=>i.name).join('\n'),reqd:1},eligible[0].name);
-   await add({native_fieldname:'paid_amount',currency_context:currencyContext,fieldname:'amount',fieldtype:'Currency',label:'本次付款金额（应付账户币种）',reqd:1},eligible[0].outstanding,value=>{amountTouched=true;amountInput=value;});
+   await add({native_doctype:'Payment Entry Reference',native_fieldname:'reference_name',fieldname:'invoice',fieldtype:'Select',label:'关联采购应付单',options:eligible.map(i=>i.name).join('\n'),reqd:1},selected.name);
+   await add({native_fieldname:'paid_amount',currency_context:currencyContext,fieldname:'amount',fieldtype:'Currency',label:'本次付款金额（应付账户币种）',reqd:1},selected.outstanding,value=>{amountTouched=true;amountInput=value;});
    await add({native_fieldname:'paid_from',fieldname:'bank',fieldtype:'Link',options:'Account',label:'银行 / 现金记账账户',reqd:1},'');
    controls.bank.get_query=()=>({filters:{company:chain.company,is_group:0,disabled:0,account_type:['in',['Bank','Cash']],account_currency:eligible.find(i=>i.name===controls.invoice.get_value())?.currency}});
    await add({native_fieldname:'posting_date',fieldname:'date',fieldtype:'Date',label:'付款日期',reqd:1},frappe.datetime.get_today());
@@ -284,6 +287,7 @@
  }
  async function formRefresh(frm){
   returnContext(frm);
+  if(!['Purchase Order','Purchase Receipt'].includes(frm.doctype))return;
   frm.$wrapper.find('.dlp-purchase-chain').remove();if(frm.is_new())return;
   const current=frm.doc.name,generation=frm.dlpChainGeneration=(frm.dlpChainGeneration || 0)+1;
   try{const chain=await call('get_purchase_chain',{source_doctype:frm.doctype,source_name:current});if(frm.doc.name!==current || frm.dlpChainGeneration!==generation)return;
@@ -338,5 +342,12 @@
   root.document.addEventListener('click',event=>{const button=event.target.closest?.('.dlp-receipt-pay,.dlp-receipt-invoice,.dlp-order-receipt,.dlp-payment-preview,.dlp-voucher-preview,.dlp-native-document');if(!button)return;if(button.tagName==='A' && (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button))return;event.preventDefault();event.stopPropagation();const name=button.dataset.name;if(button.classList.contains('dlp-native-document'))openNative(button.dataset.doctype,name);else if(button.classList.contains('dlp-receipt-pay'))pay('Purchase Receipt',name);else if(button.classList.contains('dlp-receipt-invoice'))documentDrawer('Purchase Receipt',name,'Purchase Invoice',button.dataset.target || null);else if(button.classList.contains('dlp-order-receipt'))documentDrawer('Purchase Order',name,'Purchase Receipt');else if(button.classList.contains('dlp-payment-preview'))paymentDrawer(name);else voucherDrawer(name);},true);
   frappe.router?.on('change',()=>{gate.cancel();activeDrawer?.close(true);});
  }
- root.DeepLinkERPPurchasePayments={pay,formRefresh,recordsPage,balanceHTML,documentDrawer,paymentDrawer,voucherDrawer,orderReceiptAction,nativeAction,openNative,vouchersHTML,paymentSummary,editSession,retryToken,operationGate,recordsRequest,recordsExport,receiptDrafts,mountRecordsFilters,disposeControls};
+ function mountProcurementTabs(c) {
+  const route=c.root.frappe.get_route?.() || [], current=route[0]==='List'?route[1]:route[0];
+  const entries=[['Purchase Order','purchase-order','采购订单'],['Purchase Receipt','purchase-receipt','采购入库'],['purchase-payables','purchase-payables','采购应付'],['purchase-payment-records','purchase-payment-records','采购付款记录']];
+  const finance=Boolean(c.root.frappe.model?.can_read?.('Payment Entry'));
+  c.$procurementTabs?.remove();
+  c.$procurementTabs=c.root.$(`<nav class="dlp-procurement-tabs" aria-label="${esc(t('采购流程'))}">${entries.map(([key,path,label])=>!finance && key.startsWith('purchase-')?`<button type="button" disabled title="${esc(t('财务办理入口；请在订单查看进度'))}">${esc(t(label))}</button>`:`<a class="${key===current?'active':''}" href="/desk/${path}?sidebar=Buying" ${key===current?'aria-current="page"':''}>${esc(t(label))}</a>`).join('')}</nav>`).insertBefore(c.list.$result.parent('.result-container'));
+ }
+ root.DeepLinkERPPurchasePayments={pay,formRefresh,recordsPage,balanceHTML,documentDrawer,paymentDrawer,voucherDrawer,orderReceiptAction,nativeAction,openNative,vouchersHTML,paymentSummary,editSession,retryToken,operationGate,recordsRequest,recordsExport,receiptDrafts,mountRecordsFilters,disposeControls,mountProcurementTabs};
 })(typeof globalThis!=='undefined'?globalThis:this);

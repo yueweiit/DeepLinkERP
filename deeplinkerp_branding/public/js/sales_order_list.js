@@ -32,13 +32,7 @@
 		const permitted = new Set(detail.item_fields || []), currency = detail.header.currency;
 		const columns = itemColumns.filter(([field]) => permitted.has(field));
 		if (!columns.length) return `<p>${esc(t("无权查看产品明细"))}</p>`;
-		return `<div class="dlp-sales-items-scroll"><table class="table dlp-sales-items ${full ? "" : "dlp-sales-items-overview"}"><thead><tr>${columns.map(([field, label], i) => `<th${i > 7 ? ' class="dlp-sales-extra-item"' : ""}>${esc(t(label))}</th>`).join("")}</tr></thead><tbody>${(detail.items || []).map(item => `<tr>${columns.map(([field], i) => {
-			let value = item[field] ?? "—";
-			if (["rate", "custom_item_tax_amount", "amount"].includes(field)) value = money(item[field], currency);
-			else if (field === "qty") value = esc(item[field] ?? "—") + (permitted.has("uom") ? ` ${esc(item.uom)}` : "");
-			else value = esc(value);
-			return `<td${i > 7 ? ' class="dlp-sales-extra-item"' : ""}>${value}</td>`;
-		}).join("")}</tr>`).join("")}</tbody></table></div>`;
+		return engine.detailTable({columns,items:detail.items,escape:esc,translate:t,wrapperClass:"dlp-sales-items-scroll",tableClass:`dlp-sales-items ${full ? "" : "dlp-sales-items-overview"}`,columnClass:(_field,i)=>i>7?"dlp-sales-extra-item":"",format:(field,item)=>["rate","custom_item_tax_amount","amount"].includes(field)?money(item[field],currency):field==="qty"?esc(item[field] ?? "—")+(permitted.has("uom")?` ${esc(item.uom)}`:""):undefined});
 	}
 	function detailsHTML(detail) {
 		const header = detail.header;
@@ -84,7 +78,7 @@
 		controller.$salesNotice?.text(t(view === "finance" ? "收款记录未录入不代表未收款；定金由财务按线下约定判断。" : "展开产品行或查看明细；左右滚动查看全部字段。"));
 	}
 	function invalidateExpandedDetails(controller) {
-		for (const [name, detail] of controller.salesExpanded || []) { const row = controller.list.data.find(item => item.name === name); if (!row || (row.modified && row.modified !== detail.header.modified)) controller.salesExpanded.delete(name); }
+		engine.invalidateExpandedDetails(controller.salesExpanded,controller.list.data);
 	}
 	async function onRows(controller) {
 		if (!salesListActive(controller)) return;

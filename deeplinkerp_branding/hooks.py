@@ -28,14 +28,14 @@ add_to_apps_screen = [
 app_include_css = [
 	"/assets/deeplinkerp_branding/css/deeplinkerp_navigation.css?v=0.0.10",
 	"/assets/deeplinkerp_branding/css/purchase_payments.css?v=0.0.4",
-	"/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.12",
+	"/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.14",
 	"/assets/deeplinkerp_branding/css/sales_order_list.css?v=0.0.8",
 	"/assets/deeplinkerp_branding/css/inventory_detail.bundle.css?v=0.0.3",
 ]
 app_include_js = [
-	"/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.13",
-	"/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.9",
-	"/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.4",
+	"/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.16",
+	"/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.12",
+	"/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.5",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_navigation.js?v=0.0.19",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_interface_mode.js?v=0.0.3",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_branding.js?v=0.0.27",
@@ -65,7 +65,7 @@ doctype_list_js = {
 	"Purchase Order": "public/js/purchase_order_list.js",
 	"Material Request": "public/js/material_request_list.js",
 }
-doctype_js = {"Material Request": "public/js/material_request_form.js", "Purchase Order": "public/js/purchase_payment_form.js", "Purchase Receipt": "public/js/purchase_payment_form.js"}
+doctype_js = {"Material Request": "public/js/material_request_form.js", **{doctype: "public/js/purchase_payment_form.js" for doctype in ("Purchase Order", "Purchase Receipt", "Purchase Invoice", "Payment Entry")}}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
 
@@ -109,7 +109,7 @@ boot_session = "deeplinkerp_branding.deeplinkerp_branding.branding.apply_boot_br
 # ------------
 
 # before_install = "deeplinkerp_branding.install.before_install"
-after_install = "deeplinkerp_branding.inventory_install.after_install"
+after_install = ["deeplinkerp_branding.inventory_install.after_install", "deeplinkerp_branding.procurement_navigation.ensure_procurement_navigation"]
 
 # Uninstallation
 # ------------
@@ -141,6 +141,7 @@ after_install = "deeplinkerp_branding.inventory_install.after_install"
 after_migrate = [
 	"deeplinkerp_branding.deeplinkerp_branding.branding.apply_deeplinkerp_settings_branding",
 	"deeplinkerp_branding.inventory_install.after_migrate",
+	"deeplinkerp_branding.procurement_navigation.ensure_procurement_navigation",
 ]
 website_context = {
 	"favicon": "/assets/deeplinkerp_branding/logo/tab_logo.svg?v=0.0.6",

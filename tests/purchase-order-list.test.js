@@ -38,8 +38,8 @@ test("design-specific header labels and widths keep the desktop table within 170
 	const { list, env } = bareList();
 	production("mount")(list, env);
 	const header = list.get_header_html();
-	for (const label of ["订单日期", "采购订单号", "供应商名称", "订单状态", "订单金额", "已预付", "创建人"]) assert.ok(header.includes(label));
-	assert.ok(grid.COLUMNS.reduce((width, col) => width + col.width, 76) <= 1700);
+	for (const label of ["采购订单号", "供应商名称", "订单状态", "订单金额", "已付 / 核销", "订单未付"]) assert.ok(header.includes(label));
+	assert.ok(header.includes("166px 190px 140px 140px 140px 70px 120px 112px"), "approved primary columns fit without all optional fields");
 });
 
 test("export includes visible columns in order and account currency, without any page limit", () => {
@@ -324,11 +324,31 @@ test("realtime updates reload the bounded second page and its filtered count and
 	assert.equal(controller.page, 1);
 	assert.equal(calls[0].args.start, 20);
 	assert.equal(calls[0].args.page_length, 20);
-	assert.equal(calls.length, 3);
-	for (const call of calls) assert.deepEqual(call.args.filters, [["Purchase Order", "company", "=", "A"]]);
+	const nativeCalls=calls.filter(call=>!call.method.endsWith('get_order_progress'));
+	assert.equal(nativeCalls.length, 3);
+	for (const call of nativeCalls) assert.deepEqual(call.args.filters, [["Purchase Order", "company", "=", "A"]]);
+	assert.deepEqual(calls.find(call=>call.method.endsWith('get_order_progress')).args.purchase_orders,page.map(row=>row.name));
 	assert.equal(controller.total, 61);
 	assert.deepEqual(controller.summary, [{ currency: "USD", _aggregate_column: 620 }]);
 	assert.deepEqual(list.pending_document_refreshes, []);
+});
+
+test("a payment refresh updates expanded progress when the order timestamp is unchanged", async () => {
+	const { list, env } = realtimeList();
+	const order = { name: "PO-1", modified: "unchanged-order" };
+	const progress = { modified: order.modified, settled: 3000, order_unpaid: 7000 };
+	env.frappe.call = async (call) => ({ message: call.method.endsWith("get_order_progress") ? { [order.name]: progress } : call.method.endsWith("get_count") ? 1 : call.method.endsWith("get_list") ? [] : [{ ...order }] });
+	useNativeRefreshFlow(list, env);
+	const controller = production("mount")(list, env);
+	const items = [{ item_code: "material", qty: 4 }];
+	controller.purchaseExpanded = new Map([[order.name, { modified: order.modified, settled: 1000, order_unpaid: 9000, items }]]);
+	list.data = [{ ...order }];
+	list.pending_document_refreshes = [{ name: order.name }];
+	await list.process_document_refreshes();
+	assert.equal(list.data[0].order_progress.settled, 3000);
+	assert.equal(controller.purchaseExpanded.get(order.name).settled, 3000);
+	assert.equal(controller.purchaseExpanded.get(order.name).order_unpaid, 7000);
+	assert.equal(controller.purchaseExpanded.get(order.name).items, items, "retain permitted material detail without another item request");
 });
 
 test("a realtime refresh after a filter change cannot accept the old query response", async () => {
@@ -466,7 +486,8 @@ test("rendered rows retain native selection hooks, native indicator, and escaped
 		assert.equal(precision, 2, "list display must override native global precision without changing data");
 		return value.toFixed(precision);
 	};
-	production("mount")(list, env);
+	const controller=production("mount")(list, env);
+	controller.setColumns(["name","supplier_name","grand_total","advance_paid","advance_payment_status","status"]);
 	const doc = { name: 'PO/"1', supplier: "SUP/1", supplier_name: "Supplier <A>", grand_total: 123.456789, currency: "MXN", advance_paid: 5.6789, party_account_currency: "CNY", advance_payment_status: "Partially Paid", docstatus: 2, _idx: 0 };
 	const html = list.get_list_row_html(doc);
 	assert.match(html, /list-row-container/);
@@ -664,6 +685,7 @@ test("Excel adapter is loaded only on export and receives the unpaginated filter
 	const controller = production("mount")(list, env);
 	assert.equal(loaded.length, 0);
 	controller.quick.company = "A";
+	controller.setColumns(["name","advance_paid"]);
 	controller.setPage(3);
 	assert.equal(typeof controller.exportCurrent, "function");
 	await controller.exportCurrent();

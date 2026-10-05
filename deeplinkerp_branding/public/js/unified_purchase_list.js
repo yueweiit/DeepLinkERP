@@ -24,7 +24,7 @@
 	}
 	function formLink(doc) { return `/desk/${doc.row_type === "oa_request" ? "oa-purchase-request" : "purchase-order"}/${encodeURIComponent(doc.name)}`; }
 	function exportColumns(columns) {
-		const fields = columns.filter(field => field !== 'receipt_action');
+		const fields = columns.filter(field => !['receipt_action','order_settled','order_unpaid'].includes(field));
 		for (const [amount, metadata] of [["grand_total", ["currency"]], ["oa_amount", ["oa_currency", "oa_amount_basis"]], ["advance_paid", ["party_account_currency"]]]) {
 			if (fields.includes(amount)) fields.splice(fields.indexOf(amount) + 1, 0, ...metadata.filter((field) => !fields.includes(field)));
 		}
@@ -70,7 +70,8 @@
 	}
 	function mountControls(controller) {
 		const { root, list } = controller, $ = root.$;
-		controller.$providerScope = $("<select class='form-control input-xs dlp-po-scope' aria-label='查看范围'><option value='all'>全部采购</option><option value='orders'>仅订单</option><option value='oa'>仅 OA</option></select>").prependTo(controller.$toolbar);
+		const tr = text => (root.__ || (value=>value))(text);
+		controller.$providerScope = $(`<select class='form-control input-xs dlp-po-scope' aria-label='${tr('查看范围')}'><option value='all'>${tr('全部采购')}</option><option value='orders'>${tr('仅订单')}</option><option value='oa'>${tr('仅 OA')}</option></select>`).prependTo(controller.$toolbar);
 		controller.$providerScope.on("change.dlpUnified", (e) => controller.setProviderScope(e.target.value));
 		controller.$providerControls = $("<div class='dlp-po-provider-controls'><label>来源 <select class='form-control input-xs' data-filter='source' aria-label='来源'><option value=''>全部来源</option><option value='OA'>OA</option><option value='non_oa'>未关联 OA</option></select></label><label>审批状态 <input class='form-control input-xs' data-filter='approval_status' aria-label='审批状态' placeholder='审批状态（原值）'></label><label><input type='checkbox' data-filter='pending_company'> 公司待确认</label><span class='text-muted'>统一视图仅查看；高级筛选和批量操作请切换“仅订单”。</span></div>").insertAfter(controller.$filters);
 		controller.$providerControls.on("input.dlpUnified change.dlpUnified", "[data-filter]", (e) => {
@@ -115,6 +116,10 @@
 			const canRead = Boolean(root.frappe.model?.can_read?.("Purchase Order"));
 			for (const container of root.document.querySelectorAll(".body-sidebar-container")) {
 				const links = [...container.querySelectorAll("a[href]")], hrefs = links.map((link) => link.getAttribute("href"));
+				for (const link of links) if (['/desk/purchase-payables','/desk/purchase-payment-records'].includes(listPath(link.getAttribute('href')))) {
+					const disabled=!root.frappe.model?.can_read?.('Payment Entry');
+					link.setAttribute('aria-disabled',String(disabled));link.classList.toggle('dlp-finance-disabled',disabled);
+				}
 				for (const link of links) if (shouldHideOANavigation(link.getAttribute("href"), hrefs, canRead)) {
 					const item = link.closest(".standard-sidebar-item, .sidebar-item");
 					if (item) { item.hidden = true; item.dataset.dlpOaCompatibility = "true"; }
@@ -122,6 +127,7 @@
 			}
 		};
 		const start = () => {
+			root.document.addEventListener('click',event=>{const link=event.target.closest?.('a.dlp-finance-disabled');if(link){event.preventDefault();event.stopPropagation();}},true);
 			sync(); new root.MutationObserver(sync).observe(root.document.body, { childList: true, subtree: true });
 			root.frappe.router?.on("change", sync);
 		};

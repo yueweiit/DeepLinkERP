@@ -181,3 +181,62 @@ Excel 共享文本索引不符合预期。,El índice de texto compartido de Exc
 重试确认付款,Reintentar confirmar pago
 重试保存草稿,Reintentar guardar borrador
 付款未提交，请核对后重试。,El pago no se confirmó. Revisa los datos e intenta de nuevo.
+关联采购的应付单,Facturas por pagar vinculadas a compras
+采购付款记录 / 办理,Pagos de compras / gestionar
+应付日期,Fecha de factura
+应付单号,Factura por pagar
+应付单整单金额,Importe total de la factura
+整单未付余额,Saldo pendiente de la factura
+应付状态,Estado de factura
+办理,Gestionar
+查看应付单,Ver factura por pagar
+退货应付,Factura de devolución
+没有符合条件的关联采购应付单,No hay facturas vinculadas a compras que coincidan
+应付单号 / 供应商,Factura / proveedor
+应付开始日期,Fecha inicial de factura
+应付结束日期,Fecha final de factura
+应付元数据读取失败，请刷新或核对权限。,No se pudieron cargar los datos de facturas. Actualice o revise los permisos.
+当前应付单已不可快捷付款，请刷新并核对来源。,Esta factura ya no admite el pago rápido. Actualice y revise el origen.
+仅显示关联可读采购订单或采购入库的原生应付单。金额与余额均为整张应付单，可能包含其他费用；不是采购成本或某张入库的分摊金额。草稿、退货、取消分别显示，草稿和取消不计应付余额。,"Solo se muestran facturas nativas vinculadas a pedidos o recepciones de compra que puede consultar. Los importes y saldos corresponden a la factura completa y pueden incluir otros gastos; no representan el costo de compra ni una asignación a una recepción. Los borradores, devoluciones y documentos cancelados se muestran por separado; los borradores y cancelados no cuentan en el saldo por pagar."
+采购应付,Cuentas por pagar de compras
+订单未付,Pendiente del pedido
+展开物料与订单进度,Desplegar materiales y progreso del pedido
+订单物料 / 订单进度,Materiales / progreso del pedido
+点击行首箭头展开物料与订单进度,Pulsa la flecha de la fila para ver los materiales y el progreso
+到货进度,Progreso de recepción
+物料编码,Código de material
+物料名称,Nombre del material
+已入库数量,Cantidad recibida
+单价,Precio unitario
+金额,Importe
+无权查看物料明细,Sin permiso para ver el detalle de materiales
+订单进度读取失败，请刷新或核对权限。,No se pudo cargar el progreso. Actualiza o revisa los permisos.
+采购流程,Proceso de compras
+财务办理入口；请在订单查看进度,Gestión financiera; consulta el progreso en el pedido
+仅显示有权查看的订单进度；不包含银行账户、应付单或付款单明细。订单未付不是已到货应付余额。,"Solo muestra el progreso de pedidos autorizados, sin cuentas bancarias ni detalles de facturas o pagos. El pendiente del pedido no es el saldo de mercancía recibida."
+共享应付、退货或跨币种无法安全归入本订单，请由财务核对；不将整单金额冒充采购成本。,"Una factura compartida, una devolución o distintas monedas impiden asignar el saldo al pedido. Finanzas debe revisarlo; el importe completo no se presenta como coste de compra."
+采购订单号 / 供应商名称,Pedido / nombre del proveedor
+采购订单号,Pedido de compra
+供应商名称,Proveedor
+订单金额,Importe del pedido
+订单开始日期,Fecha inicial del pedido
+订单结束日期,Fecha final del pedido
+需求日期,Fecha requerida
+已收货%,Recepción %
+已开票%,Facturación %
+预付款状态,Estado del anticipo
+已预付,Anticipado
+创建人,Creado por
+仅订单,Solo pedidos
+全部采购,Todas las compras
+仅 OA,Solo OA
+查看范围,Ámbito
+剩余入库草稿,Borrador de recepción pendiente
+
+共享 / 混合应付整单,Factura completa compartida / mixta,
+采购订单,Pedidos de compra,
+采购入库,Recepciones de compra,
+付款 / 继续付款,Pagar / continuar pago,
+供应商,Proveedor,
+刷新,Actualizar,
+共享 / 混合,Compartida / mixta,

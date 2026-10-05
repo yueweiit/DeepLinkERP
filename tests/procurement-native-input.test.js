@@ -49,6 +49,17 @@ test('one native parent with multiple PO item joins resumes its unique receipt d
  assert.equal(h.requests[0].args.distinct,undefined,'do not invent unsupported native get_list options');
  assert.doesNotMatch(h.html(),/已有 2 张/);
 });
+test('payable entry selects its clicked native invoice and ignores other invoice drafts on the source',async()=>{
+ const h=harness({chain:{can_create:true,company:'C',supplier:'S',balances:[],payments:[{name:'OTHER-DRAFT',docstatus:0,payment_type:'Pay',references:[{doctype:'Purchase Invoice',name:'PI-FIRST'}]}],invoices:[{name:'PI-FIRST',can_pay:true,outstanding:100,currency:'USD'},{name:'PI-CLICKED',can_pay:true,outstanding:250,currency:'CNY'}]}});
+ await h.api.pay('Purchase Receipt','PR','PI-CLICKED');
+ assert.equal(h.controls.find(c=>c.df.fieldname==='invoice').value,'PI-CLICKED');
+ assert.equal(h.controls.find(c=>c.df.fieldname==='amount').value,250);
+ assert.equal(h.requests.filter(r=>r.method.endsWith('.get_payment_document')).length,0);
+});
+test('payable entry whose invoice became ineligible does not switch to another invoice',async()=>{
+ const h=harness();await h.api.pay('Purchase Receipt','PR','MISSING');
+ assert.match(h.html(),/当前应付单已不可快捷付款/);assert.equal(h.controls.length,0);
+});
 test('multiple unique native receipt drafts keep sorted unique choices without guessing or previewing',async()=>{
  const h=harness({drafts:[{name:'PR-NEW',modified:'v2'},{name:'PR-NEW',modified:'v2'},{name:'PR-OLD',modified:'v1'}]});
  await h.api.documentDrawer('Purchase Order','PO','Purchase Receipt');

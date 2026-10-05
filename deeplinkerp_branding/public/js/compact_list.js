@@ -1,5 +1,11 @@
 (function (root, factory) {
- const engine = { create: factory, fitViewport };
+ const engine = { create: factory, fitViewport, detailTable, invalidateExpandedDetails };
+ function invalidateExpandedDetails(expanded,rows,modified=detail=>detail.header?.modified) {
+  for(const [name,detail] of expanded || []) {const row=rows.find(item=>item.name===name);if(!row || (row.modified && row.modified!==modified(detail)))expanded.delete(name);}
+ }
+ function detailTable({columns, items=[], escape, translate=x=>x, format, wrapperClass='', tableClass='', columnClass=()=>''}) {
+  return `<div class="${escape(wrapperClass)}"><table class="table ${escape(tableClass)}"><thead><tr>${columns.map(([field,label],i)=>`<th class="${escape(columnClass(field,i))}">${escape(translate(label))}</th>`).join('')}</tr></thead><tbody>${items.map(item=>`<tr>${columns.map(([field],i)=>`<td class="${escape(columnClass(field,i))}">${format?.(field,item) ?? escape(item[field] ?? '—')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+ }
  // Opt-in sizing shared by Sales and inventory; other list heights stay native.
  function fitViewport(owner, options) {
   if (!owner) return;
@@ -573,7 +579,7 @@
 			controller.savePreferences();
 		});
 		controller.$toolbar.find(".dlp-po-columns").on("click.dlpPO", () => columnDialog(controller));
-		if (root.frappe.model.can_export?.(DOCTYPE)) {
+		if ((!config.pageRoute || config.provider.exportCurrent) && root.frappe.model.can_export?.(DOCTYPE)) {
 			$(`<button class="btn btn-default btn-sm dlp-po-export" type="button">${escapeHTML(t("导出 Excel"))}</button>`).appendTo(controller.$toolbar).on("click.dlpPO", async (event) => {
 				const button = $(event.currentTarget).prop("disabled", true);
 				try { await controller.exportCurrent(); }
@@ -624,6 +630,7 @@
 		controller.savePreferences();
 		config.provider?.mountControls?.(controller);
 		config.mountControls?.(controller);
+		if (["Purchase Order", "Purchase Receipt"].includes(DOCTYPE) || ["purchase-payables", "purchase-payment-records"].includes(config.pageRoute)) controller.root.DeepLinkERPPurchasePayments?.mountProcurementTabs?.(controller);
 		if (config.dismissInitialOnboarding) dismissAutomaticOnboarding(controller, root);
 		paintSummary(controller);
 	}
@@ -798,9 +805,10 @@
 			},
 		};
 		function active() { return (frappe.get_route?.() || [])[0] === config.pageRoute; }
-		function render() { surface.$result.html(headerHTML(c) + c.providerRows.map((row, index) => { row._idx = index; return rowHTML(c, row); }).join('')); if (!c.providerRows.length) surface.$result.append('<div class="dlp-provider-empty text-muted" role="status">没有符合条件的采购付款记录</div>'); config.afterRender?.(c); paintSummary(c); }
+		function render() { surface.$result.html(headerHTML(c) + c.providerRows.map((row, index) => { row._idx = index; return rowHTML(c, row); }).join('')); if (!c.providerRows.length) surface.$result.append(`<div class="dlp-provider-empty text-muted" role="status">${escapeHTML(c.translate(config.emptyLabel || '没有符合条件的采购付款记录'))}</div>`); config.afterRender?.(c); paintSummary(c); }
 		surface.render_list = render; surface.refresh = () => c.refresh();
 		mountControls(c); render(); c.activate();
+		if (config.dismissInitialOnboarding) dismissAutomaticOnboarding(c, root);
 		frappe.router?.on('change', () => { c.activate(); if (!active()) { c.requestId++; c.stopInitialOnboarding?.(); } });
 		return c;
 	}
