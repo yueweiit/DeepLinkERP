@@ -408,5 +408,5 @@
   c.$procurementTabs?.remove();
   c.$procurementTabs=c.root.$(`<nav class="dlp-procurement-tabs" aria-label="${esc(t('采购流程'))}">${entries.map(([key,path,label])=>!finance && key.startsWith('purchase-')?`<button type="button" disabled title="${esc(t('财务办理入口；请在订单查看进度'))}">${esc(t(label))}</button>`:`<a class="${key===current?'active':''}" href="/desk/${path}?sidebar=Buying" ${key===current?'aria-current="page"':''}>${esc(t(label))}</a>`).join('')}</nav>`).insertBefore(c.list.$result.parent('.result-container'));
  }
- root.DeepLinkERPPurchasePayments={pay,formRefresh,recordsPage,balanceHTML,documentDrawer,paymentDrawer,voucherDrawer,orderReceiptAction,nativeAction,openNative,vouchersHTML,paymentSummary,editSession,retryToken,operationGate,recordsRequest,recordsExport,receiptDrafts,mountRecordsFilters,disposeControls,mountProcurementTabs,mountAttachments};
+ root.DeepLinkERPPurchasePayments={pay,formRefresh,recordsPage,balanceHTML,documentDrawer,paymentDrawer,voucherDrawer,orderReceiptAction,nativeAction,openNative,vouchersHTML,paymentSummary,editSession,retryToken,operationGate,recordsRequest,recordsExport,receiptDrafts,mountRecordsFilters,disposeControls,mountProcurementTabs,mountAttachments,createDrawer:newDrawer};
 })(typeof globalThis!=='undefined'?globalThis:this);

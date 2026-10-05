@@ -1,0 +1,84 @@
+/* Opt-in Page/drawer styles; the shared compact list owns rows and scrollbars. */
+body.dlp-operating-expense-grid-active .dlp-po-grid .result-container {
+	max-height: var(--dlp-operating-result-max-height, calc(100dvh - 320px));
+}
+body.dlp-operating-expense-grid-active .dlp-po-filter[data-fieldname="keyword"] {
+	width: 235px;
+}
+body.dlp-operating-expense-grid-active .dlp-po-filter[data-fieldname="date_from"],
+body.dlp-operating-expense-grid-active .dlp-po-filter[data-fieldname="date_to"] {
+	width: 135px;
+}
+body.dlp-operating-expense-grid-active:not(.dlp-mes-navigation-enabled) .dlp-interface-mode-menu {
+	left: 0;
+	right: auto;
+}
+.dlp-operating-ellipsis {
+	display: block;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.dlp-operating-notice {
+	margin: 6px 0;
+	font-size: 12px;
+}
+.dlp-operating-drawer .dlp-operating-section {
+	padding: 10px 0;
+	border-bottom: 1px solid var(--border-color, #e1e8f0);
+}
+.dlp-operating-drawer .dlp-operating-facts {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 6px 16px;
+	word-break: break-word;
+}
+.dlp-operating-drawer .dlp-operating-fields {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 8px 14px;
+}
+.dlp-operating-drawer .frappe-control {
+	margin-bottom: 0;
+}
+.dlp-operating-drawer .dlp-operating-table-wrap {
+	overflow: auto;
+	max-width: 100%;
+}
+.dlp-operating-drawer table {
+	margin: 8px 0;
+	width: 100%;
+}
+.dlp-operating-drawer .dlp-operating-allocations {
+	min-width: 1120px;
+}
+.dlp-operating-drawer .dlp-operating-allocations td {
+	min-width: 130px;
+	padding: 5px;
+	vertical-align: top;
+}
+.dlp-operating-drawer .dlp-operating-allocations td:first-child {
+	min-width: 200px;
+}
+.dlp-operating-drawer .dlp-operating-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin: 8px 0;
+}
+.dlp-operating-drawer .dlp-operating-preview td {
+	white-space: nowrap;
+}
+.dlp-operating-drawer .dlp-operating-proof {
+	overflow-wrap: anywhere;
+	margin-bottom: 4px;
+}
+@media (max-width: 767.98px) {
+	body.dlp-operating-expense-grid-active .page-form {
+		flex-wrap: wrap;
+	}
+	.dlp-operating-drawer .dlp-operating-fields,
+	.dlp-operating-drawer .dlp-operating-facts {
+		grid-template-columns: minmax(0, 1fr);
+	}
+}

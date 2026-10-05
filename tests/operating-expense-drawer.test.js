@@ -1,0 +1,1420 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = "../deeplinkerp_branding/public/js/operating_expense_drawer.js";
+const create = fs.existsSync(require("node:path").join(__dirname, path))
+	? require(path)
+	: () => ({});
+const detail = () => ({
+	source: {
+		source_id: "source:1",
+		version: "v1",
+		application_type: "payment",
+		currency: "CNY",
+		amount: "100.00",
+		approvals: { eligibility: "eligible" },
+		payments: [
+			{ source_id: "pay:1", amount: "25.00", currency: "CNY", evidence_status: "recorded" },
+		],
+	},
+	company: "C",
+	events: [],
+	mapping: {
+		company: "C",
+		party_type: "Supplier",
+		party: "S",
+		payable_account: "Payable",
+		payable_exchange_rate: "1.000000",
+		posting_date: "2026-10-01",
+		classification: "租金",
+		actual_incurred: true,
+		no_existing_erp_coverage: true,
+		recognition_mode: "new",
+		expense_lines: [
+			{
+				account: "Rent",
+				source_amount: "100.00",
+				amount: "100.00",
+				exchange_rate: "1.000000",
+				cost_center: "Main",
+			},
+		],
+		payments: {
+			hidden: {
+				bank_account: "Original",
+				bank_amount: "5.00",
+				payable_exchange_rate: "1.000000",
+				bank_exchange_rate: "1.000000",
+			},
+		},
+		approved_by: "someone",
+		expense_fingerprint: "private",
+	},
+});
+const api = create({});
+function host(call) {
+	return {
+		frappe: {
+			session: { user: "finance" },
+			user_roles: ["Accounts User"],
+			model: { can_create: () => true, can_read: () => true },
+			call,
+		},
+	};
+}
+function drawer() {
+	let alive = true;
+	return {
+		loadId: 0,
+		busy: false,
+		alive: () => alive,
+		close: () => (alive = false),
+		setBusy(value) {
+			this.busy = value;
+		},
+		error() {},
+	};
+}
+
+test("source mapping uses exact decimal strings and preserves hidden payment terms", () => {
+	assert.equal(typeof api.editSession, "function");
+	const s = api.editSession(detail());
+	s.touchLine(0, "amount", "99.123456789");
+	s.touchPayment("pay:1", "bank_amount", "25.000");
+	const payload = s.mapping();
+	assert.equal(payload.expense_lines[0].amount, "99.123456789");
+	assert.equal(payload.payments["pay:1"].bank_amount, "25.000");
+	assert.deepEqual(payload.payments.hidden, detail().mapping.payments.hidden);
+	assert.equal(payload.approved_by, undefined);
+	assert.equal(payload.expense_fingerprint, undefined);
+	assert.equal(payload.application_type, undefined);
+	assert.equal(detail().mapping.expense_lines[0].amount, "100.00");
+});
+test("new mappings require explicit recognition choice and default actual and ERP coverage confirmations to false", () => {
+	assert.equal(typeof api.editSession, "function");
+	const d = detail();
+	d.mapping = null;
+	const s = api.editSession(d);
+	assert.equal(s.mapping().actual_incurred, false);
+	assert.equal(s.mapping().no_existing_erp_coverage, false);
+	assert.equal(s.mapping().existing_erp_coverage_confirmed, false);
+	assert.equal(s.mapping().posting_date, "");
+	assert.equal(s.mapping().payable_exchange_rate, "");
+	assert.equal(s.mapping().recognition_mode, "");
+	assert.equal(s.ready(), false);
+	s.touch("actual_incurred", 1);
+	s.touch("recognition_mode", "existing");
+	s.touch("existing_erp_coverage_confirmed", 1);
+	assert.equal(s.ready(), true);
+});
+test("only unclassified sources can receive explicit audited application type", () => {
+	assert.equal(typeof api.editSession, "function");
+	const s = api.editSession(detail());
+	assert.throws(() => s.touch("application_type", "reimbursement"), /待分类/);
+	const d = detail();
+	d.source.application_type = "unclassified";
+	d.mapping = null;
+	const unknown = api.editSession(d);
+	unknown.touch("application_type", "reimbursement");
+	assert.equal(unknown.mapping().application_type, "reimbursement");
+	assert.equal(unknown.mapping().party_type, "Employee");
+	assert.equal(unknown.mapping().party, "");
+});
+test("clearing an unclassified type choice clears party eligibility and never guesses a master type", () => {
+	const d = detail();
+	d.source.application_type = "unclassified";
+	d.mapping = null;
+	const s = api.editSession(d);
+	s.touch("actual_incurred", true);
+	s.touch("recognition_mode", "new");
+	s.touch("no_existing_erp_coverage", true);
+	assert.equal(s.ready(), false);
+	s.touch("application_type", "payment");
+	s.touch("party", "S");
+	assert.equal(s.ready(), true);
+	assert.doesNotThrow(() => s.touch("application_type", ""));
+	assert.equal(s.mapping().party_type, "");
+	assert.equal(s.mapping().party, "");
+	assert.equal(s.ready(), false);
+});
+test("safe original evidence links accept canonical DingTalk HTTPS only", () => {
+	assert.equal(typeof api.safeOriginalURL, "function");
+	assert.equal(
+		api.safeOriginalURL("https://aflow.dingtalk.com/dingtalk/mobile/homepage.htm?id=1"),
+		"https://aflow.dingtalk.com/dingtalk/mobile/homepage.htm?id=1"
+	);
+	for (const url of [
+		"javascript:alert(1)",
+		"http://aflow.dingtalk.com/a",
+		"https://evil.test/a",
+		"https://dingtalk.com.evil.test",
+		"https://user:secret@aflow.dingtalk.com/a",
+	])
+		assert.equal(api.safeOriginalURL(url), null);
+});
+test("finance eligibility combines finance role and native Journal Entry create/read permission", () => {
+	assert.equal(typeof api.canFinance, "function");
+	assert.equal(create(host()).canFinance(), true);
+	assert.equal(
+		create({
+			...host(),
+			frappe: { ...host().frappe, user_roles: ["System Manager"] },
+		}).canFinance(),
+		false
+	);
+	assert.equal(
+		create({
+			...host(),
+			frappe: { ...host().frappe, model: { can_create: () => false, can_read: () => true } },
+		}).canFinance(),
+		false
+	);
+	assert.equal(
+		create({
+			...host(),
+			frappe: { ...host().frappe, model: { can_create: () => 0, can_read: () => 1 } },
+		}).canFinance(),
+		false
+	);
+	assert.equal(
+		create({
+			...host(),
+			frappe: { ...host().frappe, model: { can_create: () => 1, can_read: () => 0 } },
+		}).canFinance(),
+		false
+	);
+});
+test("saved mapping then preview is the only path to a fingerprint-bound Journal Entry draft", async () => {
+	const requests = [];
+	const h = host(async (req) => {
+		requests.push(req);
+		return {
+			message: req.method.endsWith("get_operating_expense_detail")
+				? detail()
+				: req.method.endsWith("save_mapping")
+				? { mapping: detail().mapping }
+				: req.method.endsWith("preview_voucher")
+				? { fingerprint: "p1", accounts: [{ account: "Rent", debit: "100", credit: "0" }] }
+				: { journal_entry: "JE-1", docstatus: 0 },
+		};
+	});
+	const a = create(h);
+	assert.equal(typeof a.workflow, "function");
+	const d = drawer(),
+		w = a.workflow(d, "source:1");
+	await w.load();
+	await assert.rejects(() => w.create(), /预览/);
+	await w.save();
+	await w.preview();
+	await w.create();
+	assert.equal(
+		requests.at(-1).method,
+		"deeplinkerp_branding.services.operating_expenses.create_voucher_draft"
+	);
+	assert.deepEqual(requests.at(-1).args, { source_id: "source:1", expected_fingerprint: "p1" });
+	assert.ok(requests.every((r) => r.type === "POST"));
+	assert.ok(requests.every((r) => !/(submit|record_payment|GL Entry)/.test(r.method)));
+});
+test("changing any mapping input immediately invalidates a previous preview and create eligibility", async () => {
+	const h = host(async (req) => ({
+		message: req.method.endsWith("get_operating_expense_detail")
+			? detail()
+			: { fingerprint: "old", accounts: [] },
+	}));
+	const a = create(h);
+	assert.equal(typeof a.workflow, "function");
+	const w = a.workflow(drawer(), "source:1");
+	await w.load();
+	await w.preview();
+	assert.equal(w.canCreate(), true);
+	w.session.touch("classification", "changed");
+	assert.equal(w.canCreate(), false);
+	await assert.rejects(() => w.create(), /预览/);
+});
+test("a response from a closed or superseded drawer cannot paint, restore busy, or chain another write", async () => {
+	let finish,
+		paint = 0;
+	const d = drawer(),
+		h = host(() => new Promise((resolve) => (finish = resolve)));
+	const a = create(h);
+	assert.equal(typeof a.workflow, "function");
+	const w = a.workflow(d, "source:1", { onDetail: () => paint++ });
+	const pending = w.load();
+	d.close();
+	finish({ message: detail() });
+	await pending;
+	assert.equal(paint, 0);
+	assert.equal(w.session, null);
+	assert.equal(d.busy, true);
+});
+test("a preview resolving after mapping edits is discarded before it can enable creation", async () => {
+	let finish;
+	const h = host((req) =>
+		req.method.endsWith("get_operating_expense_detail")
+			? Promise.resolve({ message: detail() })
+			: new Promise((resolve) => (finish = resolve))
+	);
+	const a = create(h);
+	assert.equal(typeof a.workflow, "function");
+	const w = a.workflow(drawer(), "source:1");
+	await w.load();
+	const pending = w.preview();
+	w.session.touch("payable_exchange_rate", "2");
+	finish({ message: { fingerprint: "old" } });
+	await pending;
+	assert.equal(w.canCreate(), false);
+});
+test("existing coverage mode permits explicit link after preview and blocks expense creation", async () => {
+	const d = detail();
+	d.mapping.recognition_mode = "existing";
+	d.mapping.no_existing_erp_coverage = false;
+	d.mapping.existing_erp_coverage_confirmed = true;
+	const calls = [];
+	const a = create(
+		host(async (req) => {
+			calls.push(req);
+			return {
+				message: req.method.endsWith("get_operating_expense_detail")
+					? d
+					: req.method.endsWith("preview_voucher")
+					? { fingerprint: "existing", accounts: [] }
+					: { journal_entry: "JE-old", docstatus: 1 },
+			};
+		})
+	);
+	assert.equal(typeof a.workflow, "function");
+	const w = a.workflow(drawer(), "source:1");
+	await w.load();
+	await w.preview();
+	assert.equal(w.canCreate(), false);
+	await assert.rejects(() => w.create(), /已有|预览/);
+	await w.link("JE-old");
+	assert.deepEqual(calls.at(-1).args, {
+		source_id: "source:1",
+		journal_entry: "JE-old",
+		expected_fingerprint: "existing",
+	});
+});
+test("settlement uses the actual source payment identifier and keeps expense event separate", async () => {
+	const calls = [];
+	const a = create(
+		host(async (req) => {
+			calls.push(req);
+			return {
+				message: req.method.endsWith("get_operating_expense_detail")
+					? detail()
+					: req.method.endsWith("preview_voucher")
+					? { fingerprint: "payp", accounts: [], settlement_state: "尚未核销" }
+					: { journal_entry: "JE-pay", docstatus: 0, settlement_state: "尚未核销" },
+			};
+		})
+	);
+	assert.equal(typeof a.workflow, "function");
+	const w = a.workflow(drawer(), "source:1");
+	await w.load();
+	await w.preview("pay:1");
+	await w.create("pay:1");
+	assert.deepEqual(calls.at(-1).args, {
+		source_id: "source:1",
+		payment_source_id: "pay:1",
+		expected_fingerprint: "payp",
+	});
+});
+test("source evidence view separates original approved facts, cashier payment evidence, attachments and native JE history", () => {
+	const a = create({
+		DeepLinkERPOperatingExpenses:
+			require("../deeplinkerp_branding/public/js/operating_expenses.js")({}),
+	});
+	assert.equal(typeof a.sourceHTML, "function");
+	const d = detail();
+	d.source.application_type_raw = "原文<&";
+	d.source.original_source_amount = "98.765";
+	d.source.original_source_currency = "USD";
+	d.source.source_sheet = "BU归档";
+	d.source.attachments = [
+		{ source_id: "att:1", filename: "proof<&.pdf", payment_source_id: "pay:1" },
+	];
+	d.events = [
+		{
+			journal_entry: "JE-1",
+			docstatus: 0,
+			operation: "payment",
+			payment_source_id: "pay:1",
+			settlement_state: "尚未核销",
+		},
+	];
+	const html = a.sourceHTML(d);
+	assert.match(html, /原始批准金额.*98\.77 USD/);
+	assert.match(html, /原文&lt;&amp;/);
+	assert.match(html, /请款网站/);
+	assert.match(html, /实际付款证据/);
+	assert.match(html, /data-attachment="att:1"/);
+	assert.match(html, /尚未核销/);
+	assert.match(html, /草稿 · 未记账/);
+	assert.doesNotMatch(html, /Bearer|api_token/);
+});
+test("native preview renders all account-currency and base-currency rows with explicit rounding and date", () => {
+	const a = create({
+		DeepLinkERPOperatingExpenses:
+			require("../deeplinkerp_branding/public/js/operating_expenses.js")({}),
+	});
+	assert.equal(typeof a.previewHTML, "function");
+	const html = a.previewHTML({
+		company: "Legal",
+		posting_date: "2026-10-01",
+		base_rounding: "0.01",
+		accounts: [
+			{
+				account: "A<&",
+				account_currency: "USD",
+				exchange_rate: "7.123456",
+				debit_in_account_currency: "3.00",
+				credit_in_account_currency: "0",
+				debit: "21.37",
+				credit: "0",
+				cost_center: "Main",
+				project: "P",
+			},
+		],
+	});
+	assert.match(html, /2026-10-01/);
+	assert.match(html, /A&lt;&amp;/);
+	assert.match(html, /USD/);
+	assert.match(html, /7\.123456/);
+	assert.match(html, /21\.37/);
+	assert.match(html, /0\.01/);
+});
+test("native preview amounts show two decimals while missing opposite sides stay unknown and rates retain precision", () => {
+	const a = create({
+		DeepLinkERPOperatingExpenses:
+			require("../deeplinkerp_branding/public/js/operating_expenses.js")({}),
+	});
+	const html = a.previewHTML({
+		accounts: [
+			{
+				account: "Rent",
+				account_currency: "CNY",
+				exchange_rate: "1.000000001",
+				debit_in_account_currency: "100",
+				credit_in_account_currency: "0",
+				debit: "100.000",
+				credit: null,
+			},
+		],
+		base_rounding: [{ account: "Rent", exact_base: "100", rounded_base: "100.00" }],
+	});
+	assert.match(html, /<td>100\.00<\/td><td>0\.00<\/td><td>100\.00<\/td><td>—<\/td>/);
+	assert.match(html, /1\.000000001/);
+	assert.match(html, /无舍入差额/);
+	assert.doesNotMatch(html, /\[\{&quot;account&quot;/);
+});
+test("rounding presentation subtracts exact decimal text without float loss and preserves evidence in folded detail", () => {
+	const a = create({
+		DeepLinkERPOperatingExpenses:
+			require("../deeplinkerp_branding/public/js/operating_expenses.js")({}),
+	});
+	const html = a.previewHTML({
+		accounts: [],
+		base_rounding: [
+			{
+				account: "A<&",
+				exact_base: "9007199254740993.014",
+				rounded_base: "9007199254740993.01",
+			},
+			{ account: "tiny", exact_base: "1.00E-11", rounded_base: "0.00" },
+			{ account: "missing", exact_base: null, rounded_base: "0.00" },
+		],
+	});
+	assert.match(html, /A&lt;&amp;.*0\.00/);
+	assert.match(html, /title="[^"]*-0\.004/);
+	assert.match(html, /差额不足 0\.01/);
+	assert.match(html, /<details/);
+	assert.match(html, /9007199254740993\.014/);
+	assert.match(html, /-0\.00000000001/);
+	assert.match(html, /舍入依据不完整，需复核/);
+	assert.doesNotMatch(html, /无舍入差额/);
+});
+test("source and settlement controls use native Link/Date/Data/Check with explicit saved exchange-rate facts", () => {
+	assert.equal(typeof api.controlDefinitions, "function");
+	const definitions = api.controlDefinitions(detail());
+	assert.equal(definitions.find((df) => df.fieldname === "posting_date").fieldtype, "Date");
+	assert.equal(definitions.find((df) => df.fieldname === "party").options, "Supplier");
+	assert.equal(
+		definitions.find((df) => df.fieldname === "payable_exchange_rate").fieldtype,
+		"Data"
+	);
+	assert.ok(
+		definitions
+			.filter((df) => /incurred|coverage/.test(df.fieldname))
+			.every((df) => df.fieldtype === "Check")
+	);
+	const noMapping = detail();
+	noMapping.mapping = null;
+	assert.equal(api.canEditPayment(noMapping), false);
+	assert.equal(api.canEditPayment(detail()), true);
+});
+test("drawer reuses the shared accessible shell factory and stops initializing controls after close", async () => {
+	let made = 0,
+		resolveControl,
+		started,
+		controlsMade = 0,
+		sharedMade = 0;
+	const begin = new Promise((resolve) => (started = resolve));
+	const surface = {
+		length: 1,
+		addClass() {
+			return this;
+		},
+		find() {
+			return this;
+		},
+		html() {
+			return this;
+		},
+		on() {
+			return this;
+		},
+		off() {
+			return this;
+		},
+		append() {
+			return this;
+		},
+		appendTo() {
+			return this;
+		},
+		empty() {
+			return this;
+		},
+		remove() {
+			return this;
+		},
+		attr() {
+			return this;
+		},
+		prop() {
+			return this;
+		},
+		toggle() {
+			return this;
+		},
+		toggleClass() {
+			return this;
+		},
+		text() {
+			return this;
+		},
+	};
+	const d = drawer();
+	d.panel = surface;
+	d.controls = [];
+	const h = {
+		$: () => surface,
+		DeepLinkERPOperatingExpenses:
+			require("../deeplinkerp_branding/public/js/operating_expenses.js")({}),
+		DeepLinkERPPurchasePayments: {
+			createDrawer() {
+				sharedMade++;
+				return d;
+			},
+			disposeControls: (controls) => {
+				made += controls.length;
+				controls.splice(0);
+			},
+		},
+		frappe: {
+			...host(async () => ({ message: detail() })).frappe,
+			ui: {
+				form: {
+					make_control: () => {
+						controlsMade++;
+						return {
+							$input: surface,
+							get_value: () => "",
+							set_value: () =>
+								new Promise((resolve) => {
+									resolveControl = resolve;
+									started();
+								}),
+						};
+					},
+				},
+			},
+		},
+	};
+	const a = create(h);
+	assert.equal(typeof a.open, "function");
+	const pending = a.open("source:1");
+	await Promise.race([
+		begin,
+		pending.then(() => assert.fail("Drawer did not reach control initialization")),
+	]);
+	d.close();
+	resolveControl();
+	await pending;
+	assert.equal(sharedMade, 1);
+	assert.equal(controlsMade, 1);
+	assert.equal(made, 1);
+});
+test("settings save disables sync and passes a Password token only when deliberately supplied", async () => {
+	const calls = [],
+		settings = {
+			enabled: 1,
+			token_configured: true,
+			company_mappings: { "Legal raw": "C" },
+			source_url: "https://payment.yueweiportal.com",
+		};
+	const a = create({
+		frappe: {
+			...host().frappe,
+			session: { user: "Administrator" },
+			call: async (req) => {
+				calls.push(req);
+				return {
+					message: req.method.endsWith("get_sync_settings")
+						? settings
+						: { ...settings, enabled: 0 },
+				};
+			},
+		},
+	});
+	assert.equal(typeof a.settingsWorkflow, "function");
+	const w = a.settingsWorkflow(drawer());
+	await w.load();
+	await w.save();
+	assert.equal(
+		calls.at(-1).method,
+		"deeplinkerp_branding.services.operating_expenses.save_sync_settings"
+	);
+	assert.equal(calls.at(-1).args.api_token, undefined);
+	assert.equal(w.settings.enabled, 0);
+	w.touchToken("deliberate-secret");
+	await w.save();
+	assert.equal(calls.at(-1).args.api_token, "deliberate-secret");
+	assert.equal(w.token, "");
+});
+test("settings cannot enable before a current complete preview and explicit confirmation, and edits invalidate it", async () => {
+	let previewCount = 0;
+	const a = create({
+		frappe: {
+			...host().frappe,
+			session: { user: "Administrator" },
+			call: async (req) => {
+				const settings = {
+					enabled: 0,
+					token_configured: true,
+					company_mappings: { Legal: "C" },
+				};
+				return {
+					message: req.method.endsWith("preview_sync")
+						? {
+								preview_fingerprint: "setup" + ++previewCount,
+								sources: [
+									{
+										source_id: "a",
+										application_type: "unclassified",
+										source_company: "Legal",
+										company: "C",
+									},
+								],
+								has_more: true,
+						  }
+						: settings,
+				};
+			},
+		},
+	});
+	assert.equal(typeof a.settingsWorkflow, "function");
+	const w = a.settingsWorkflow(drawer());
+	await w.load();
+	await assert.rejects(() => w.enable(), /预览|确认/);
+	await w.preview();
+	assert.equal(w.canEnable(), false);
+	w.confirm(true);
+	assert.equal(w.canEnable(), true);
+	w.touchMap(0, "company", "Other");
+	assert.equal(w.canEnable(), false);
+	assert.equal(w.previewResult, null);
+	await assert.rejects(() => w.preview(), /保存/);
+});
+test("settings manual sync requires explicit enabled state and never dispatches automatically on load or preview", async () => {
+	const calls = [];
+	const a = create({
+		frappe: {
+			...host().frappe,
+			session: { user: "Administrator" },
+			call: async (req) => {
+				calls.push(req.method);
+				return {
+					message: req.method.endsWith("get_sync_settings")
+						? { enabled: 0, token_configured: true, company_mappings: { Legal: "C" } }
+						: req.method.endsWith("preview_sync")
+						? { preview_fingerprint: "p", sources: [], has_more: false }
+						: req.method.endsWith("enable_sync")
+						? {
+								enabled: true,
+								token_configured: true,
+								company_mappings: { Legal: "C" },
+						  }
+						: { count: 5, end: false },
+				};
+			},
+		},
+	});
+	assert.equal(typeof a.settingsWorkflow, "function");
+	const w = a.settingsWorkflow(drawer());
+	await w.load();
+	await w.preview();
+	assert.ok(calls.every((cmd) => !cmd.endsWith("sync_operating_expenses")));
+	await assert.rejects(() => w.sync(), /启用/);
+	w.confirm(true);
+	await w.enable();
+	await w.sync();
+	assert.equal(
+		calls.at(-1),
+		"deeplinkerp_branding.services.operating_expenses.sync_operating_expenses"
+	);
+});
+test("late settings preview after token or mapping edits cannot restore enable eligibility", async () => {
+	let finish;
+	const a = create({
+		frappe: {
+			...host().frappe,
+			session: { user: "Administrator" },
+			call: (req) =>
+				req.method.endsWith("get_sync_settings")
+					? Promise.resolve({
+							message: {
+								enabled: 0,
+								token_configured: true,
+								company_mappings: { Legal: "C" },
+							},
+					  })
+					: new Promise((resolve) => (finish = resolve)),
+		},
+	});
+	assert.equal(typeof a.settingsWorkflow, "function");
+	const w = a.settingsWorkflow(drawer());
+	await w.load();
+	const pending = w.preview();
+	w.touchToken("changed");
+	finish({ message: { preview_fingerprint: "stale", sources: [] } });
+	await pending;
+	w.confirm(true);
+	assert.equal(w.canEnable(), false);
+});
+test("settlement terms stay unavailable until the mapping has a saved explicit payable rate", () => {
+	assert.equal(typeof api.canEditPayment, "function");
+	const d = detail();
+	d.mapping.payable_exchange_rate = "";
+	assert.equal(api.canEditPayment(d), false);
+	d.mapping = null;
+	const s = api.editSession(d);
+	s.touch("payable_exchange_rate", "7.123456");
+	assert.throws(() => s.touchPayment("pay:1", "bank_amount", "10"), /保存/);
+});
+test("settings drawer uses a native Password input and an explicit preview confirmation Check", async () => {
+	const defs = [],
+		html = [];
+	const surface = {
+		length: 1,
+		addClass() {
+			return this;
+		},
+		find() {
+			return this;
+		},
+		html(value) {
+			if (value) html.push(value);
+			return this;
+		},
+		on() {
+			return this;
+		},
+		off() {
+			return this;
+		},
+		append() {
+			return this;
+		},
+		appendTo() {
+			return this;
+		},
+		empty() {
+			return this;
+		},
+		remove() {
+			return this;
+		},
+		attr() {
+			return this;
+		},
+		prop() {
+			return this;
+		},
+		toggle() {
+			return this;
+		},
+		hide() {
+			return this;
+		},
+		show() {
+			return this;
+		},
+		toggleClass() {
+			return this;
+		},
+		text() {
+			return this;
+		},
+	};
+	const d = drawer();
+	d.panel = surface;
+	d.controls = [];
+	const a = create({
+		$: () => surface,
+		DeepLinkERPPurchasePayments: {
+			createDrawer: () => d,
+			disposeControls: (controls) => controls.splice(0),
+		},
+		frappe: {
+			...host(async () => ({
+				message: {
+					enabled: 0,
+					token_configured: true,
+					company_mappings: { Legal: "C" },
+					source_url: "https://payment.yueweiportal.com",
+				},
+			})).frappe,
+			session: { user: "Administrator" },
+			ui: {
+				form: {
+					make_control: ({ df }) => {
+						defs.push(df);
+						return {
+							df,
+							$input: surface,
+							set_value: async () => {},
+							get_value: () => "",
+						};
+					},
+				},
+			},
+		},
+	});
+	assert.equal(typeof a.openSettings, "function");
+	await a.openSettings();
+	assert.equal(defs.find((df) => df.fieldname === "api_token").fieldtype, "Password");
+	assert.equal(defs.find((df) => df.fieldname === "confirm_sync_preview").fieldtype, "Check");
+	assert.match(html.join(""), /固定来源/);
+	assert.doesNotMatch(html.join(""), /name="source_url"/);
+});
+test("successful native draft creation reloads history so expense controls become immutable", async () => {
+	const requests = [],
+		buttons = new Map(),
+		errors = [];
+	let created = false;
+	class Surface {
+		constructor(html = "") {
+			this.htmlValue = html;
+			this.length = 1;
+			this.handlers = {};
+			this.disabled = false;
+			if (html.includes("<button")) buttons.set(html.replace(/<[^>]+>/g, ""), this);
+		}
+		addClass() {
+			return this;
+		}
+		find() {
+			return new Surface();
+		}
+		html() {
+			return this;
+		}
+		on(name, fn) {
+			this.handlers[name] = fn;
+			return this;
+		}
+		off() {
+			return this;
+		}
+		append() {
+			return this;
+		}
+		appendTo() {
+			return this;
+		}
+		empty() {
+			return this;
+		}
+		remove() {
+			return this;
+		}
+		attr() {
+			return this;
+		}
+		prop(key, value) {
+			if (key === "disabled") this.disabled = value;
+			return this;
+		}
+		toggle() {
+			return this;
+		}
+		toggleClass() {
+			return this;
+		}
+		text() {
+			return this;
+		}
+		val() {
+			return this;
+		}
+	}
+	const d = drawer();
+	d.panel = new Surface();
+	d.controls = [];
+	d.error = (error) => errors.push(error?.message || "操作失败，请核对系统提示。");
+	const f = host(async (req) => {
+		requests.push(req.method);
+		const item = detail();
+		if (created)
+			item.events = [{ journal_entry: "JE-new", docstatus: 0, operation: "expense" }];
+		return {
+			message: req.method.endsWith("get_operating_expense_detail")
+				? item
+				: req.method.endsWith("preview_voucher")
+				? { fingerprint: "p", accounts: [], company: "C", posting_date: "2026-10-01" }
+				: ((created = true), { journal_entry: "JE-new", docstatus: 0 }),
+		};
+	}).frappe;
+	const a = create({
+		$: (value) => new Surface(value),
+		DeepLinkERPOperatingExpenses:
+			require("../deeplinkerp_branding/public/js/operating_expenses.js")({}),
+		DeepLinkERPPurchasePayments: {
+			createDrawer: () => d,
+			nativeAction: (_type, name) => `<button>${name}</button>`,
+			disposeControls: (controls) => controls.splice(0),
+		},
+		frappe: {
+			...f,
+			ui: {
+				form: {
+					make_control: ({ df }) => ({
+						df,
+						$input: new Surface(),
+						set_value: async () => {},
+						get_value: () => "",
+					}),
+				},
+			},
+		},
+	});
+	await a.open("source:1");
+	await buttons.get("预览费用凭证").handlers["click.dlpDrawer"]();
+	await buttons.get("生成费用凭证草稿").handlers["click.dlpDrawer"]();
+	assert.equal(
+		requests.at(-1),
+		"deeplinkerp_branding.services.operating_expenses.get_operating_expense_detail"
+	);
+	assert.equal(buttons.get("保存财务映射").disabled, true);
+	assert.deepEqual(
+		errors,
+		[],
+		"Successful actions clear the error node without calling the shared fallback error renderer"
+	);
+});
+test("a failed re-preview cannot leave the previous fingerprint eligible for creation", async () => {
+	let previews = 0;
+	const a = create(
+		host(async (req) => {
+			if (req.method.endsWith("get_operating_expense_detail")) return { message: detail() };
+			if (++previews === 1) return { message: { fingerprint: "old", accounts: [] } };
+			throw new Error("changed source");
+		})
+	);
+	const w = a.workflow(drawer(), "source:1");
+	await w.load();
+	await w.preview();
+	assert.equal(w.canCreate(), true);
+	await assert.rejects(() => w.preview(), /changed source/);
+	assert.equal(w.canCreate(), false);
+});
+test("cancelled or unreadable native associations block further voucher creation", async () => {
+	const d = detail();
+	d.events = [{ journal_entry: "cancelled", docstatus: 2, operation: "expense" }];
+	const a = create(
+		host(async (req) => ({
+			message: req.method.endsWith("get_operating_expense_detail")
+				? d
+				: { fingerprint: "p", accounts: [] },
+		}))
+	);
+	const w = a.workflow(drawer(), "source:1");
+	await w.load();
+	await w.preview();
+	assert.equal(w.canCreate(), false);
+});
+test("same-value native Link Date Data Check validation and empty payment controls never dirty a saved mapping", () => {
+	const s = api.editSession(detail());
+	const revision = s.revision;
+	s.touch("party", "S");
+	s.touch("posting_date", "2026-10-01");
+	s.touch("payable_exchange_rate", "1.000000");
+	s.touch("actual_incurred", 1);
+	s.touch("no_existing_erp_coverage", "1");
+	s.touchLine(0, "account", "Rent");
+	s.touchLine(0, "project", "");
+	s.touchPayment("pay:1", "bank_account", "");
+	s.touchPayment("pay:1", "bank_amount", "");
+	assert.equal(s.revision, revision);
+	assert.equal(s.dirty(), false);
+	assert.equal(s.mapping().payments["pay:1"], undefined);
+});
+test("real drawer stays previewable after late native validation callbacks including readonly account rate", async () => {
+	const buttons = new Map(),
+		late = [],
+		errors = [];
+	class Surface {
+		constructor(html = "") {
+			this.length = 1;
+			this.handlers = {};
+			if (html.includes("<button")) buttons.set(html.replace(/<[^>]+>/g, ""), this);
+		}
+		addClass() {
+			return this;
+		}
+		find() {
+			return new Surface();
+		}
+		html() {
+			return this;
+		}
+		on(name, fn) {
+			this.handlers[name] = fn;
+			return this;
+		}
+		off() {
+			return this;
+		}
+		append() {
+			return this;
+		}
+		appendTo() {
+			return this;
+		}
+		empty() {
+			return this;
+		}
+		remove() {
+			return this;
+		}
+		attr() {
+			return this;
+		}
+		prop(key, value) {
+			if (key === "disabled") this.disabled = value;
+			return this;
+		}
+		toggle() {
+			return this;
+		}
+		toggleClass() {
+			return this;
+		}
+		text() {
+			return this;
+		}
+	}
+	const d = drawer();
+	d.panel = new Surface();
+	d.controls = [];
+	d.error = (error) => errors.push(error.message);
+	const a = create({
+		$: (value) => new Surface(value),
+		DeepLinkERPOperatingExpenses:
+			require("../deeplinkerp_branding/public/js/operating_expenses.js")({}),
+		DeepLinkERPPurchasePayments: {
+			createDrawer: () => d,
+			nativeAction: (_type, name) => name,
+			disposeControls: (controls) => controls.splice(0),
+		},
+		frappe: {
+			...host(async () => ({ message: detail() })).frappe,
+			ui: {
+				form: {
+					make_control: ({ df }) => {
+						let value;
+						return {
+							df,
+							$input: new Surface(),
+							set_value: async (next) => {
+								value = df.fieldtype === "Check" ? (next ? 1 : 0) : next;
+								late.push(() => df.change());
+							},
+							get_value: () => value,
+						};
+					},
+				},
+			},
+		},
+	});
+	await a.open("source:1");
+	for (const nativeChange of late) assert.doesNotThrow(nativeChange);
+	assert.equal(buttons.get("预览费用凭证").disabled, false);
+	assert.deepEqual(errors, []);
+});
+test("readonly native Check renders persisted boolean confirmations through its integer-only contract without dirtying mapping", async () => {
+	const checks = new Map(),
+		decimalDisplays = [];
+	class Surface {
+		constructor() {
+			this.length = 1;
+		}
+		addClass() {
+			return this;
+		}
+		find() {
+			return new Surface();
+		}
+		html() {
+			return this;
+		}
+		on() {
+			return this;
+		}
+		off() {
+			return this;
+		}
+		append() {
+			return this;
+		}
+		appendTo() {
+			return this;
+		}
+		empty() {
+			return this;
+		}
+		remove() {
+			return this;
+		}
+		attr() {
+			return this;
+		}
+		prop() {
+			return this;
+		}
+		toggle() {
+			return this;
+		}
+		toggleClass() {
+			return this;
+		}
+		text() {
+			return this;
+		}
+		val(value) {
+			decimalDisplays.push(value);
+			return this;
+		}
+	}
+	const d = drawer();
+	d.panel = new Surface();
+	d.controls = [];
+	const item = detail();
+	item.events = [{ journal_entry: "JE-expense", docstatus: 0, operation: "expense" }];
+	item.mapping.expense_lines[0].source_amount = "100";
+	item.mapping.expense_lines[0].amount = "100";
+	const a = create({
+		$: () => new Surface(),
+		DeepLinkERPOperatingExpenses:
+			require("../deeplinkerp_branding/public/js/operating_expenses.js")({}),
+		DeepLinkERPPurchasePayments: {
+			createDrawer: () => d,
+			nativeAction: (_type, name) => name,
+			disposeControls: (controls) => controls.splice(0),
+		},
+		frappe: {
+			...host(async () => ({ message: item })).frappe,
+			ui: {
+				form: {
+					make_control: ({ df }) => {
+						let value;
+						const input = new Surface();
+						return {
+							df,
+							$input: input,
+							set_value: async (next) => {
+								value = df.fieldtype === "Check" ? parseInt(next, 10) || 0 : next;
+								if (df.fieldtype === "Check") checks.set(df.fieldname, value);
+							},
+							get_value: () => value,
+						};
+					},
+				},
+			},
+		},
+	});
+	await a.open("source:1");
+	assert.equal(checks.get("actual_incurred"), 1);
+	assert.equal(checks.get("no_existing_erp_coverage"), 1);
+	assert.equal(checks.get("existing_erp_coverage_confirmed"), 0);
+	assert.ok(decimalDisplays.includes("100.00"));
+	assert.equal(item.mapping.actual_incurred, true);
+	assert.equal(item.mapping.expense_lines[0].amount, "100");
+	assert.equal(await d.beforeClose(), true);
+});
+test("opening an unmapped blocked source starts clean and cancellation asks only after a real edit", async () => {
+	const item = detail();
+	item.mapping = null;
+	item.source.approvals.eligibility = "blocked";
+	const session = api.editSession(item);
+	assert.equal(session.dirty(), false);
+	assert.equal(session.ready(), false);
+	session.touch("classification", "edited");
+	assert.equal(session.dirty(), true);
+	let asked = 0;
+	const surface = {
+		length: 1,
+		addClass() {
+			return this;
+		},
+		find() {
+			return this;
+		},
+		html() {
+			return this;
+		},
+		on() {
+			return this;
+		},
+		off() {
+			return this;
+		},
+		append() {
+			return this;
+		},
+		appendTo() {
+			return this;
+		},
+		empty() {
+			return this;
+		},
+		remove() {
+			return this;
+		},
+		attr() {
+			return this;
+		},
+		prop() {
+			return this;
+		},
+		toggle() {
+			return this;
+		},
+		toggleClass() {
+			return this;
+		},
+		text() {
+			return this;
+		},
+	};
+	const d = drawer();
+	d.panel = surface;
+	d.controls = [];
+	const a = create({
+		$: () => surface,
+		DeepLinkERPOperatingExpenses:
+			require("../deeplinkerp_branding/public/js/operating_expenses.js")({}),
+		DeepLinkERPPurchasePayments: {
+			createDrawer: () => d,
+			disposeControls: (controls) => controls.splice(0),
+		},
+		frappe: {
+			...host(async () => ({ message: item })).frappe,
+			confirm: (_message, yes) => {
+				asked++;
+				yes();
+			},
+			ui: {
+				form: {
+					make_control: ({ df }) => ({
+						df,
+						$input: surface,
+						set_value: async () => {},
+						get_value: () => "",
+					}),
+				},
+			},
+		},
+	});
+	await a.open("source:1");
+	assert.equal(await d.beforeClose(), true);
+	assert.equal(asked, 0);
+	const calls = [];
+	const w = create(
+		host(async (req) => {
+			calls.push(req.method);
+			return { message: item };
+		})
+	).workflow(drawer(), "source:1");
+	await w.load();
+	await assert.rejects(() => w.preview(), /保存/);
+	assert.equal(calls.length, 1);
+});
+test("server validation messages remain readable through silent RPC rejection and failed save keeps edits", async () => {
+	let saved = 0;
+	const a = create(
+		host(async (req) => {
+			if (req.method.endsWith("get_operating_expense_detail")) return { message: detail() };
+			throw {
+				responseJSON: {
+					exc_type: "ValidationError",
+					_server_messages: JSON.stringify([
+						JSON.stringify({
+							message: "<b>科目公司不符</b>，请复核",
+							indicator: "red",
+						}),
+					]),
+				},
+			};
+		})
+	);
+	const w = a.workflow(drawer(), "source:1", { onSaved: () => saved++ });
+	await w.load();
+	w.session.touchPayment("pay:1", "bank_amount", "20");
+	await assert.rejects(() => w.save(), /科目公司不符.*请复核/);
+	assert.equal(w.session.dirty(), true);
+	assert.equal(w.session.mapping().payments["pay:1"].bank_amount, "20");
+	assert.equal(saved, 0);
+	assert.equal(w.canCreate("pay:1"), false);
+});
+test("unclassified type switching rebuilds searchable native party Links and isolates old control callbacks", async () => {
+	const controls = [],
+		disposed = [];
+	const item = detail();
+	item.mapping = null;
+	item.source.application_type = "unclassified";
+	item.source.application_type_raw = "raw unknown";
+	class Surface {
+		constructor() {
+			this.length = 1;
+			this.attrs = {};
+		}
+		addClass() {
+			return this;
+		}
+		find() {
+			return new Surface();
+		}
+		html() {
+			return this;
+		}
+		on() {
+			return this;
+		}
+		off() {
+			return this;
+		}
+		append() {
+			return this;
+		}
+		appendTo() {
+			return this;
+		}
+		empty() {
+			return this;
+		}
+		remove() {
+			return this;
+		}
+		attr(key, value) {
+			this.attrs[key] = value;
+			return this;
+		}
+		prop() {
+			return this;
+		}
+		toggle() {
+			return this;
+		}
+		toggleClass() {
+			return this;
+		}
+		text() {
+			return this;
+		}
+	}
+	const d = drawer();
+	d.panel = new Surface();
+	d.controls = [];
+	const a = create({
+		$: () => new Surface(),
+		DeepLinkERPOperatingExpenses:
+			require("../deeplinkerp_branding/public/js/operating_expenses.js")({}),
+		DeepLinkERPPurchasePayments: {
+			createDrawer: () => d,
+			disposeControls: (items) => {
+				disposed.push(...items);
+				items.splice(0);
+			},
+		},
+		frappe: {
+			...host(async () => ({ message: item })).frappe,
+			ui: {
+				form: {
+					make_control: ({ df }) => {
+						const control = {
+							df,
+							$input:
+								df.fieldtype === "Link" && df.read_only
+									? undefined
+									: new Surface(),
+							set_value: async function (value) {
+								this.value = value;
+							},
+							get_value() {
+								return this.value;
+							},
+						};
+						controls.push(control);
+						return control;
+					},
+				},
+			},
+		},
+	});
+	const current = (field) => controls.filter((control) => control.df.fieldname === field).at(-1);
+	await a.open("source:1");
+	assert.equal(current("party").$input, undefined);
+	const initialType = current("application_type");
+	await current("classification").set_value("retain this");
+	current("classification").df.change();
+	await initialType.set_value("payment");
+	initialType.df.change();
+	await new Promise((resolve) => setImmediate(resolve));
+	const supplier = current("party");
+	assert.ok(supplier.$input, "Readonly initial Link must become a real input");
+	assert.equal(supplier.df.options, "Supplier");
+	assert.equal(supplier.$input.attrs["aria-label"], "往来方");
+	assert.equal(current("classification").value, "retain this");
+	await supplier.set_value("S");
+	supplier.df.change();
+	initialType.df.change();
+	assert.equal(current("party").value, "S");
+	const paymentType = current("application_type");
+	await paymentType.set_value("reimbursement");
+	paymentType.df.change();
+	await new Promise((resolve) => setImmediate(resolve));
+	const employee = current("party");
+	assert.ok(employee.$input);
+	assert.equal(employee.df.options, "Employee");
+	assert.deepEqual(employee.get_query(), { filters: { company: "C" } });
+	assert.equal(employee.value, "");
+	supplier.df.change();
+	assert.equal(employee.value, "");
+	assert.equal(current("classification").value, "retain this");
+	assert.ok(disposed.includes(supplier));
+	assert.equal(item.source.application_type, "unclassified");
+	assert.equal(item.source.application_type_raw, "raw unknown");
+});

@@ -90,7 +90,7 @@
 		const defaults = definitions === COLUMNS ? config.defaultColumns : config.provider?.defaultColumns;
 		const selected = Array.isArray(value?.columns) ? value.columns : (defaults || candidates);
 		const columns = [...new Set(selected.filter((field) => candidates.includes(field)))];
-		if (!columns.includes("name") && allowed.has("name")) columns.unshift("name");
+		if (!columns.includes("name") && candidates.includes("name")) columns.unshift("name");
 		return { density: value?.density === "standard" ? "standard" : "tight", columns, ...(config.preferenceVersion ? { version: config.preferenceVersion } : {}) };
 	}
 

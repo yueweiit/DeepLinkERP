@@ -28,13 +28,16 @@ add_to_apps_screen = [
 app_include_css = [
 	"/assets/deeplinkerp_branding/css/deeplinkerp_navigation.css?v=0.0.10",
 	"/assets/deeplinkerp_branding/css/purchase_payments.css?v=0.0.5",
-	"/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.14",
+	"/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.16",
+	"/assets/deeplinkerp_branding/css/operating_expenses.css?v=0.0.1",
 	"/assets/deeplinkerp_branding/css/sales_order_list.css?v=0.0.8",
 	"/assets/deeplinkerp_branding/css/inventory_detail.bundle.css?v=0.0.3",
 ]
 app_include_js = [
-	"/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.16",
-    "/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.15",
+	"/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.17",
+    "/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.16",
+	"/assets/deeplinkerp_branding/js/operating_expense_drawer.js?v=0.0.6",
+	"/assets/deeplinkerp_branding/js/operating_expenses.js?v=0.0.2",
 	"/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.5",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_navigation.js?v=0.0.19",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_interface_mode.js?v=0.0.3",
@@ -109,7 +112,7 @@ boot_session = "deeplinkerp_branding.deeplinkerp_branding.branding.apply_boot_br
 # ------------
 
 # before_install = "deeplinkerp_branding.install.before_install"
-after_install = ["deeplinkerp_branding.inventory_install.after_install", "deeplinkerp_branding.procurement_navigation.ensure_procurement_navigation"]
+after_install = ["deeplinkerp_branding.inventory_install.after_install", "deeplinkerp_branding.procurement_navigation.ensure_procurement_navigation", "deeplinkerp_branding.operating_navigation.ensure_operating_navigation"]
 
 # Uninstallation
 # ------------
@@ -143,6 +146,7 @@ after_migrate = [
 	"deeplinkerp_branding.inventory_install.after_migrate",
 	"deeplinkerp_branding.procurement_navigation.ensure_procurement_navigation",
 	"deeplinkerp_branding.operating_expense_install.after_migrate",
+	"deeplinkerp_branding.operating_navigation.ensure_operating_navigation",
 ]
 
 permission_query_conditions = {

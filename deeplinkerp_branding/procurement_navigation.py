@@ -13,24 +13,29 @@ ENTRIES = (
 TARGETS = {entry[2] for entry in ENTRIES} | {"Purchase Invoice"}
 
 
-def reconcile_links(doc, table, type_field="link_type"):
+def reconcile_links(doc, table, type_field="link_type", entries=None, targets=None, anchor=None):
 	"""One ordered upsert for Sidebar items, Workspace links and shortcuts.
 
 	Existing canonical child rows keep their identity; filtered/custom routes stay.
 	"""
+	entries = ENTRIES if entries is None else entries
+	targets = (
+		(TARGETS if entries is ENTRIES else {entry[2] for entry in entries}) if targets is None else targets
+	)
 	original = list(doc.get(table) or [])
 	matches = [
 		row
 		for row in original
-		if row.get("link_to") in TARGETS
+		if row.get("link_to") in targets
 		and not any(row.get(key) for key in ("filters", "route_options", "url"))
 	]
 	by_target = {row.link_to: row for row in reversed(matches)}
 	remaining = [row for row in original if row not in matches]
-	anchor = next((original.index(row) for row in matches if row.link_to == "Purchase Order"), 0)
+	if anchor is None:
+		anchor = next((original.index(row) for row in matches if row.link_to == "Purchase Order"), 0)
 	index = sum(row in remaining for row in original[:anchor])
-	targets, changed = [], False
-	for label, kind, name, icon in ENTRIES:
+	rows, changed = [], False
+	for label, kind, name, icon in entries:
 		row = by_target.get(name)
 		if row is None:
 			row = doc.append(table, {})
@@ -44,8 +49,8 @@ def reconcile_links(doc, table, type_field="link_type"):
 			if row.get(key) != value:
 				row.set(key, value)
 				changed = True
-		targets.append(row)
-	result = remaining[:index] + targets + remaining[index:]
+		rows.append(row)
+	result = remaining[:index] + rows + remaining[index:]
 	if result != original:
 		changed = True
 	doc.set(table, result)
@@ -56,28 +61,46 @@ def reconcile_links(doc, table, type_field="link_type"):
 	return changed
 
 
-def reconcile_workspace(doc):
+def reconcile_workspace(doc, prefix="dlp-procurement-", entries=None, targets=None, anchor=None):
+	entries = ENTRIES if entries is None else entries
+	targets = (
+		(TARGETS if entries is ENTRIES else {entry[2] for entry in entries}) if targets is None else targets
+	)
+	custom_labels = (
+		{
+			row.label
+			for row in doc.get("shortcuts") or []
+			if any(row.get(key) for key in ("filters", "route_options", "url"))
+		}
+		if entries is not ENTRIES
+		else set()
+	)
 	labels = {
 		row.label
 		for row in doc.get("shortcuts") or []
-		if row.get("link_to") in TARGETS
+		if row.get("link_to") in targets
 		and not any(row.get(key) for key in ("filters", "route_options", "url"))
 	}
-	changed = reconcile_links(doc, "links")
-	changed = reconcile_links(doc, "shortcuts", "type") or changed
+	changed = reconcile_links(doc, "links", entries=entries, targets=targets, anchor=anchor)
+	changed = (
+		reconcile_links(doc, "shortcuts", "type", entries=entries, targets=targets, anchor=anchor) or changed
+	)
 	content = json.loads(doc.content or "[]")
-	labels.update(entry[0] for entry in ENTRIES)
+	labels.update(entry[0] for entry in entries)
 	blocks = [
 		block
 		for block in content
 		if not (
-			block.get("id", "").startswith("dlp-procurement-")
-			or (block.get("type") == "shortcut" and block.get("data", {}).get("shortcut_name") in labels)
+			block.get("id", "").startswith(prefix)
+			or (
+				block.get("type") == "shortcut"
+				and block.get("data", {}).get("shortcut_name") in labels - custom_labels
+			)
 		)
 	]
 	shortcuts = [
-		{"id": f"dlp-procurement-{index}", "type": "shortcut", "data": {"shortcut_name": label, "col": 3}}
-		for index, (label, *_rest) in enumerate(ENTRIES)
+		{"id": f"{prefix}{index}", "type": "shortcut", "data": {"shortcut_name": label, "col": 3}}
+		for index, (label, *_rest) in enumerate(entries)
 	]
 	desired = shortcuts + blocks
 	if desired != content:

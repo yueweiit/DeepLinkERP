@@ -264,3 +264,186 @@ Excel 共享文本索引不符合预期。,El índice de texto compartido de Exc
 附件上传未完成,La carga del archivo no terminó
 付款已提交，附件读取失败。请打开付款单核对。,Pago enviado; no se pudieron leer los archivos. Abre el pago para revisarlo.
 采购核销引用,Referencias de compra
+运营费用,Gastos operativos
+运营费用办理,Gestión de gastos operativos
+运营费用同步设置,Configuración de sincronización de gastos operativos
+申请日期,Fecha de solicitud
+申请编号,Número de solicitud
+申请类型,Tipo de solicitud
+收款人,Beneficiario
+申请人,Solicitante
+法律公司,Entidad legal
+申请金额,Importe solicitado
+出纳已付,Pagado por tesorería
+出纳待付,Pendiente de pago en tesorería
+来源审批,Aprobación en origen
+财务状态,Estado contable
+待分类,Pendiente de clasificar
+付款申请,Solicitud de pago
+费用报销,Reembolso de gastos
+来源审批通过,Aprobación del origen válida
+需复核,Requiere revisión
+未确认,Sin confirmar
+已确认待生成,Confirmado; pendiente de generar
+草稿已生成,Borrador generado
+关联已记账,Asociado a un asiento contabilizado
+币种未明确,Moneda sin especificar
+金额不完整，需复核,Importes incompletos; requiere revisión
+申请编号 / 摘要 / 收款人,Solicitud / descripción / beneficiario
+来源付款状态,Estado de pago en origen
+未付款,Sin pagar
+部分付款,Pagado parcialmente
+已付款,Pagado
+申请开始日期,Fecha inicial de solicitud
+申请结束日期,Fecha final de solicitud
+同步设置,Configuración de sincronización
+出纳已付 / 待付来自请款网站；ERP 财务状态单独显示。凭证在此仅保存草稿。,Los pagos y saldos pendientes vienen del portal de solicitudes. El estado contable del ERP se muestra aparte. Aquí solo se guardan borradores de asientos.
+没有符合条件的运营费用来源,No hay gastos operativos que coincidan con los filtros
+来源元数据读取失败，请刷新或核对权限。,No se pudieron cargar los metadatos del origen. Actualiza o revisa los permisos.
+原始申请类型,Tipo de solicitud original
+来源版本,Versión del origen
+来源公司,Entidad indicada en origen
+来源归档表,Archivo semanal de origen
+当前来源金额,Importe actual del origen
+原始批准金额,Importe aprobado originalmente
+请款网站,Portal de solicitudes de pago
+钉钉审批来源,Aprobación original en DingTalk
+来源审批与待处理问题,Aprobaciones en origen y asuntos pendientes
+审批状态原文,Estado de aprobación original
+审批结果原文,Resultado de aprobación original
+负责人确认,Confirmación del responsable
+财务复核,Revisión de finanzas
+财务经理审批,Aprobación del gerente de finanzas
+总经理审批,Aprobación de la dirección general
+来源附件,Archivos adjuntos de origen
+实际付款附件,Comprobante del pago realizado
+申请附件,Archivo adjunto de la solicitud
+暂无附件,Sin archivos adjuntos
+实际付款证据（来自出纳）,Comprobantes de pagos realizados por tesorería
+尚无实际付款证据,Sin comprobantes de pagos realizados
+原生凭证关联与历史,Asientos nativos asociados e historial
+出纳付款结算,Registro contable del pago de tesorería
+费用确认,Reconocimiento del gasto
+尚无关联原生凭证,Sin asientos nativos asociados
+草稿 · 未记账,Borrador; sin contabilizar
+已取消 · 需复核,Cancelado; requiere revisión
+凭证日期,Fecha del asiento
+科目,Cuenta contable
+科目币种,Moneda de la cuenta
+汇率,Tipo de cambio
+科目币种借方,Debe en moneda de la cuenta
+科目币种贷方,Haber en moneda de la cuenta
+本位币借方,Debe en moneda base
+本位币贷方,Haber en moneda base
+往来方类型,Tipo de tercero
+往来方,Tercero
+成本中心,Centro de costos
+本位币舍入差额,Diferencia de redondeo en moneda base
+仅生成原生凭证草稿，未记账,Solo genera un borrador de asiento nativo; sin contabilizar
+费用分类,Clasificación del gasto
+应付科目,Cuenta por pagar
+应付账面汇率,Tipo de cambio contable de la cuenta por pagar
+费用凭证日期,Fecha del asiento de gasto
+费用确认方式,Modo de reconocimiento del gasto
+确认费用已实际发生,Confirmo que el gasto se ha realizado
+确认 ERP 尚未覆盖本项费用,Confirmo que este gasto aún no está registrado en el ERP
+确认费用已有 ERP 覆盖,Confirmo que este gasto ya está registrado en el ERP
+明确申请类型,Especificar el tipo de solicitud
+新确认费用,Reconocer un gasto nuevo
+关联已有 ERP 凭证,Asociar un asiento existente del ERP
+财务确认,Confirmación contable
+当前需复核或缺少财务权限，来源仍可查看。,Se requiere revisión o faltan permisos contables. Puedes consultar el origen.
+已有原生凭证关联，费用确认不可覆盖。,Existe un asiento nativo asociado; el reconocimiento del gasto no se puede sobrescribir.
+明确法律公司,Especificar la entidad legal
+保存法律公司,Guardar entidad legal
+费用 / 税费科目,Cuenta de gasto / impuestos
+来源金额,Importe en moneda de origen
+科目币种金额,Importe en moneda de la cuenta
+新增费用分摊,Agregar asignación de gasto
+保存财务映射,Guardar correspondencias contables
+预览费用凭证,Vista previa del asiento de gasto
+生成费用凭证草稿,Generar borrador del asiento de gasto
+选择已有原生凭证,Seleccionar un asiento nativo existente
+明确关联已有凭证,Confirmar asociación con el asiento existente
+按实际出纳付款生成结算草稿,Generar borradores contables de los pagos reales de tesorería
+先保存费用映射并生成或关联费用确认凭证，再逐笔维护银行科目与汇率。此处不登记或执行付款。,Primero guarda las correspondencias y genera o asocia el asiento de gasto. Después indica la cuenta bancaria y los tipos de cambio de cada pago. Aquí no se registra ni se ejecuta un pago nuevo.
+实际付款银行 / 现金科目,Cuenta bancaria / caja del pago realizado
+银行科目币种金额,Importe en moneda de la cuenta bancaria
+已保存应付账面汇率,Tipo de cambio contable guardado de la cuenta por pagar
+银行汇率,Tipo de cambio bancario
+汇兑损益科目,Cuenta de pérdidas y ganancias cambiarias
+汇兑损益成本中心,Centro de costos de diferencias cambiarias
+请先保存费用映射，再维护本笔结算。,Guarda primero las correspondencias del gasto para gestionar este pago.
+保存付款映射,Guardar correspondencias del pago
+预览结算凭证,Vista previa del asiento de pago
+生成结算凭证草稿,Generar borrador del asiento de pago
+尚未核销,Pendiente de conciliación
+刷新抽屉,Actualizar panel
+原生凭证已返回，刷新失败。请核对已显示凭证，勿重复办理。,El asiento nativo fue devuelto pero la actualización falló. Revisa el asiento mostrado antes de repetir la operación.
+输入尚未保存，关闭会丢弃当前输入，继续？,Hay datos sin guardar. ¿Cerrar y descartarlos?
+同步状态,Estado de sincronización
+已启用,Activada
+未启用,Desactivada
+同步密钥,Clave de sincronización
+已配置,Configurada
+未配置,Sin configurar
+固定来源,Origen fijo
+上次同步,Última sincronización
+保存设置会停用同步，并使已有同步预览失效。密钥留空则保留原密钥。,Guardar desactiva la sincronización e invalida la vista previa. Deja la clave vacía para conservar la actual.
+新的同步密钥（可选）,Nueva clave de sincronización (opcional)
+来源法律标识 → ERP 法律公司,Identidad legal del origen → entidad legal del ERP
+来源法律标识,Identidad legal del origen
+业务单元和归档表不代表法律公司，请明确映射。,Las unidades de negocio y los archivos semanales no identifican una entidad legal. Especifica la correspondencia.
+新增公司映射,Agregar correspondencia de entidad
+保存设置并停用同步,Guardar y desactivar la sincronización
+停用同步,Desactivar sincronización
+预览来源与公司映射,Ver origen y correspondencias de entidades
+请核对来源类型、来源法律标识与 ERP 法律公司。,Revisa los tipos de origen y las correspondencias entre sus identidades legales y las entidades del ERP.
+仅预览前 100 条，来源还有更多记录。,La vista previa muestra solo los primeros 100 registros. Hay más registros en origen.
+我已核对来源类型和法律公司映射，确认启用同步,He revisado los tipos de origen y las correspondencias de entidades legales; confirmo activar la sincronización
+确认启用同步,Confirmar activación de sincronización
+手动同步并刷新,Sincronizar manualmente y actualizar
+刷新设置,Actualizar configuración
+本次同步记录,Registros sincronizados en esta ejecución
+同步到当前边界,Sincronización completa hasta el límite actual
+还有后续记录，请再次手动同步,Hay más registros; ejecuta otra sincronización manual
+设置尚未保存，关闭会丢弃当前输入，继续？,Hay cambios de configuración sin guardar. ¿Cerrar y descartarlos?
+来源审批状态,Estado de aprobación en origen
+来源付款状态无效,Estado de pago en origen no válido
+来源审批状态无效,Estado de aprobación en origen no válido
+排序字段无效,Campo de ordenación no válido
+查看,Ver
+导出组件加载失败，请刷新。,No se pudo cargar el componente de exportación. Actualiza la página.
+映射字段无效,Campo de correspondencia no válido
+只能明确待分类来源的申请类型,Solo se puede especificar el tipo de un origen pendiente de clasificar
+申请类型无效,Tipo de solicitud no válido
+费用分摊字段无效,Campo de asignación de gasto no válido
+最多 100 行费用分摊,Se permiten hasta 100 asignaciones de gasto
+付款映射字段无效,Campo de correspondencia del pago no válido
+请等待当前操作完成,Espera a que termine la operación actual
+请明确费用已发生及 ERP 覆盖情况,Confirma que el gasto se ha realizado y si ya está registrado en el ERP
+请先保存当前财务映射，再预览,Guarda las correspondencias contables actuales antes de la vista previa
+凭证预览无效，请刷新后复核,Vista previa del asiento no válida. Actualiza y revísala.
+请先取得当前映射的有效预览；已有 ERP 覆盖不能新建费用,Obtén una vista previa válida de las correspondencias actuales. Un gasto ya registrado en el ERP no se puede reconocer otra vez.
+请预览并明确选择已有原生凭证,Genera la vista previa y selecciona un asiento nativo existente
+附件下载需要同源请求和 CSRF 验证，请刷新。,La descarga requiere una solicitud al mismo origen y verificación CSRF. Actualiza la página.
+附件下载失败，请核对权限或附件版本。,No se pudo descargar el archivo. Revisa los permisos o su versión.
+附件过大，请在请款网站核对。,El archivo es demasiado grande. Consúltalo en el portal de solicitudes de pago.
+附件,Archivo adjunto
+仅系统管理员可管理同步,Solo los administradores del sistema pueden gestionar la sincronización
+公司映射字段无效,Campo de correspondencia de entidades no válido
+最多 200 行公司映射,Se permiten hasta 200 correspondencias de entidades
+请明确每行来源法律标识和 ERP 公司，来源标识不能重复,Indica la identidad legal de origen y la entidad del ERP en cada fila. Las identidades de origen deben ser únicas.
+请先保存公司映射和同步密钥，再预览,Guarda las correspondencias de entidades y la clave de sincronización antes de la vista previa
+同步预览无效，请重新预览,Vista previa de sincronización no válida. Genérala de nuevo.
+请先取得当前同步预览并明确确认法律公司映射,Obtén una vista previa actual y confirma las correspondencias de entidades legales
+同步尚未启用，或设置存在未保存修改,La sincronización está desactivada o hay cambios de configuración sin guardar
+舍入依据不完整，需复核,Datos de redondeo incompletos; revisa el origen
+精确差额,Diferencia exacta
+差额不足 0.01,Diferencia inferior a 0.01
+无舍入差额,Sin diferencia de redondeo
+精确舍入依据,Detalle exacto del redondeo
+精确本位币金额,Importe exacto en moneda base
+舍入后本位币金额,Importe redondeado en moneda base
+差额（舍入后 - 精确）,Diferencia (redondeado menos exacto)
+操作失败，请核对系统提示。,La operación falló. Revisa el aviso del sistema.

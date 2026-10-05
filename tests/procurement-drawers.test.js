@@ -12,6 +12,10 @@ function payments(call, extras={}, capture=()=>{}) {
 }
 function functionFrom(name) { const fn = payments()[name]; assert.equal(typeof fn, 'function', `${name} is used by drawers`); return fn; }
 
+test('operating expenses can reuse the accessible procurement drawer shell factory', () => {
+  assert.equal(typeof payments().createDrawer,'function');
+});
+
 test('drawer edit session sends only touched fields, never rounded initialized quantities or money', () => {
   const session = functionFrom('editSession')({document:{qty:1.234567,amount:9.87654,remarks:'old',items:[{key:'row',qty:1.234567,rate:9.87654}]}});
   assert.deepEqual(JSON.parse(JSON.stringify(session.changes())), {});

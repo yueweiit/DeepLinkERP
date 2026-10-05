@@ -1,0 +1,12 @@
+{
+  "doctype": "Page",
+  "name": "operating-expenses",
+  "module": "Deeplinkerp Branding",
+  "title": "运营费用",
+  "standard": "Yes",
+  "roles": [
+    { "role": "System Manager" },
+    { "role": "Accounts User" },
+    { "role": "Accounts Manager" }
+  ]
+}
