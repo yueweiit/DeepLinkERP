@@ -26,6 +26,8 @@ EVIDENCE_FIELD = "custom_cashier_payment_evidence"
 BOUND_FIELD = "custom_purchase_bound_version"
 SOURCE_ID_FIELD = "custom_purchase_source_id"
 RECONCILIATION_FIELD = "custom_purchase_payment_reconciliation"
+SOURCE_PAGE_SIZE = 100  # Keep each upstream read below its fixed 10-second deadline.
+MAX_SOURCE_ROWS = 20000
 _managed = ContextVar("purchase_source_managed", default=False)
 
 
@@ -346,7 +348,7 @@ def _reconcile_cached_sources(connection,until,seen,cashier):
     # must not remain actionable merely because it disappeared from the scan.
     # Preserve originals and all manual native fields; only invalidate the cache.
     cached=frappe.get_all(DOCTYPE,filters={SOURCE_ID_FIELD:["!=",""]},fields=["name",SOURCE_FIELD],limit_page_length=0)
-    if len(cached)>20000:
+    if len(cached)>MAX_SOURCE_ROWS:
         frappe.throw("已接入采购来源超过核对上限，请管理员核对")
     for record in cached:
         old=_json(record.get(SOURCE_FIELD))
@@ -370,8 +372,8 @@ def sync_purchase_sources():
     with frappe.cache.lock("purchase-source-sync:"+frappe.local.site,timeout=300):
         cashier = _cashier_snapshot(until)
         connection=_oa_connection()._connection
-        for _ in range(40):
-            rows,cursor = oa.read_page(connection,500,until,cursor=cursor,process_codes=contract.PROCESS_CODES)
+        for _ in range(MAX_SOURCE_ROWS // SOURCE_PAGE_SIZE):
+            rows,cursor = oa.read_page(connection,SOURCE_PAGE_SIZE,until,cursor=cursor,process_codes=contract.PROCESS_CODES)
             selected = [r for r in rows if contract.in_scope(r)]
             applicants = [oa.resolution_applicant(r,cashier) for r in selected]
             resolutions = _request("/api/integrations/erp/resolve-applicant-companies",data={"applicants":applicants})["items"] if applicants else []

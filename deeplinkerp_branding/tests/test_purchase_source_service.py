@@ -2,7 +2,7 @@
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import frappe
 from deeplinkerp_branding.services import purchase_source_service as service
@@ -89,6 +89,56 @@ class PurchaseSourceServiceTests(unittest.TestCase):
             values=save.call_args.args[2]
             self.assertNotIn("items",values); self.assertNotIn("target_company",values)
             self.assertNotIn("payment_amount",values); self.assertNotIn("purchase_order",values)
+
+    def test_source_sync_uses_small_pages_without_dropping_or_duplicating_sources(self):
+        from deeplinkerp_branding.services import operating_expenses
+        rows = [{"source_id": "source-" + str(index)} for index in range(201)]
+        def read_page(connection, limit, until, cursor=None, **kwargs):
+            start = int(cursor or 0)
+            end = min(start + limit, len(rows))
+            return rows[start:end], str(end) if end < len(rows) else None
+        applicant = {"user_id": "u", "employee_name": "Synthetic"}
+        def resolve(path, data):
+            return {"items": [{**value, "status": "unknown"} for value in data["applicants"]]}
+        with patch.object(frappe,"cache",Mock(lock=Mock(return_value=MagicMock()))), \
+             patch.object(frappe,"local",SimpleNamespace(site="synthetic-source-test")), \
+             patch.object(frappe,"get_meta",return_value=SimpleNamespace(has_field=lambda _: True)), \
+             patch.object(operating_expenses,"_manager"), \
+             patch.object(operating_expenses,"_oa_connection",return_value=SimpleNamespace(_connection=object())), \
+             patch.object(operating_expenses,"_request",side_effect=resolve), \
+             patch.object(service,"_cashier_snapshot",return_value=[]), \
+             patch.object(service.oa,"read_page",side_effect=read_page) as read, \
+             patch.object(service.oa,"resolution_applicant",return_value=applicant), \
+             patch.object(service.contract,"in_scope",return_value=True), \
+             patch.object(service,"_normalize",side_effect=lambda row: dict(row)), \
+             patch.object(service.contract,"payment_evidence",return_value={}), \
+             patch.object(service,"_cache_source") as save, \
+             patch.object(service,"_reconcile_cached_sources") as reconcile:
+            result = service.sync_purchase_sources()
+        self.assertEqual(result["count"], 201)
+        self.assertEqual([call.args[0]["source_id"] for call in save.call_args_list], [row["source_id"] for row in rows])
+        self.assertEqual([call.args[1] for call in read.call_args_list], [100, 100, 100])
+        self.assertEqual([call.kwargs["cursor"] for call in read.call_args_list], [None, "100", "200"])
+        self.assertEqual(reconcile.call_args.args[2], {row["source_id"] for row in rows})
+        self.db.commit.assert_not_called()
+
+    def test_small_page_sync_keeps_original_twenty_thousand_source_bound(self):
+        from deeplinkerp_branding.services import operating_expenses
+        with patch.object(frappe,"cache",Mock(lock=Mock(return_value=MagicMock()))), \
+             patch.object(frappe,"local",SimpleNamespace(site="synthetic-source-test")), \
+             patch.object(frappe,"get_meta",return_value=SimpleNamespace(has_field=lambda _: True)), \
+             patch.object(operating_expenses,"_manager"), \
+             patch.object(operating_expenses,"_oa_connection",return_value=SimpleNamespace(_connection=object())), \
+             patch.object(service,"_cashier_snapshot",return_value=[]), \
+             patch.object(service.oa,"read_page",side_effect=lambda *args,**kwargs: ([], str(int(kwargs.get("cursor") or 0) + args[1]))) as read, \
+             patch.object(service,"_reconcile_cached_sources") as reconcile:
+            with self.assertRaisesRegex(frappe.ValidationError, "超过本次同步上限"):
+                service.sync_purchase_sources()
+        self.assertEqual(len(read.call_args_list), 200)
+        self.assertEqual({call.args[1] for call in read.call_args_list}, {100})
+        self.assertEqual(len(read.call_args_list) * read.call_args.args[1], 20000)
+        reconcile.assert_not_called()
+        self.db.commit.assert_not_called()
 
     def test_clearing_managed_payload_cannot_erase_provenance_guard(self):
         changed=frappe._dict(self.doc); changed.custom_purchase_source_json=""
