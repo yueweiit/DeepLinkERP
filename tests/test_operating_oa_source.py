@@ -156,7 +156,13 @@ class OriginalOperatingSourceTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertTrue(cursor)
         self.assertEqual(self.source.decode_cursor(cursor), ("2026-10-06T00:00:00Z", "corp", "instance-1"))
-        self.assertIn("form_component_values::text", query.sql)
+        self.assertIn("CASE WHEN jsonb_typeof(form_component_values)='array' THEN", query.sql)
+        self.assertIn("jsonb_agg(jsonb_build_object('name',component->'name','value',component->'value') ORDER BY ordinal),'[]'::jsonb)", query.sql)
+        self.assertIn("jsonb_array_elements(form_component_values) WITH ORDINALITY AS form(component,ordinal)", query.sql)
+        self.assertIn("WHERE jsonb_typeof(component)='object' AND component->>'name' ~ '申请类型|执行地区|金额|币种|事项说明|收款人|付款日期'", query.sql)
+        self.assertIn("ELSE form_component_values END)::text AS form_component_values", query.sql)
+        self.assertNotIn("btrim", query.sql)
+        self.assertNotIn("DISTINCT", query.sql)
         self.assertNotIn("SELECT *", query.sql)
         self.assertEqual(query.params[-1], 2)
         with self.assertRaises(ValueError):
@@ -193,6 +199,12 @@ class OriginalOperatingSourceTest(unittest.TestCase):
                 self.assertTrue(query.sql.startswith("WITH page AS MATERIALIZED ("), query.sql)
                 self.assertEqual(query.sql.count("), counts AS MATERIALIZED ("), 1, query.sql)
                 page = query.sql.split("), counts AS MATERIALIZED (", 1)[0]
+                if process_codes == self.source.PROCESS_CODES:
+                    self.assertIn("jsonb_array_elements(form_component_values)", page)
+                    self.assertNotIn("form_component_values::text AS form_component_values", page)
+                else:
+                    self.assertIn("form_component_values::text AS form_component_values", page)
+                    self.assertNotIn("jsonb_array_elements", page)
                 self.assertIn("(corp_id, process_instance_id) > (%s, %s)", page)
                 self.assertIn("corp_id=%s AND process_instance_id=%s", page)
                 for value in (after_corp, after_instance, *identity.values()):

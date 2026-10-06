@@ -39,6 +39,18 @@ TYPES = {"付款申请solicitud de pago": "payment", "付款申请 solicitud de 
          "费用报销": "reimbursement", "reembolso de gastos": "reimbursement"}
 CURRENCIES = {"人民币": "CNY", "人民币cny": "CNY", "人民币rmb": "CNY", "cny": "CNY", "美元": "USD", "usd": "USD", "美元usd": "USD", "美元dólar": "USD",
               "比索": "MXN", "mxn": "MXN", "peso": "MXN", "pesos": "MXN"}
+_FORM_ALIASES = {"申请类型": "type", "执行地区": "region", "金额": "amount", "币种": "currency",
+                 "事项说明": "summary", "收款人": "payee", "付款日期": "needed_date"}
+# Contains matching conservatively retains names with Unicode prefix whitespace;
+# fields() remains authoritative. Keep every occurrence, JSON type and order.
+_OPERATING_FORM_VALUES = (
+    "(CASE WHEN jsonb_typeof(form_component_values)='array' THEN "
+    "(SELECT COALESCE(jsonb_agg(jsonb_build_object('name',component->'name','value',component->'value') ORDER BY ordinal),'[]'::jsonb) "
+    "FROM jsonb_array_elements(form_component_values) WITH ORDINALITY AS form(component,ordinal) "
+    "WHERE jsonb_typeof(component)='object' AND component->>'name' ~ '"
+    + "|".join(re.escape(prefix) for prefix in _FORM_ALIASES).replace("'", "''")
+    + "') ELSE form_component_values END)"
+)
 
 
 def timestamp(value):
@@ -55,13 +67,11 @@ def fields(row):
     result = {}
     if not isinstance(components, list):
         return result
-    aliases = {"申请类型": "type", "执行地区": "region", "金额": "amount", "币种": "currency",
-               "事项说明": "summary", "收款人": "payee", "付款日期": "needed_date"}
     for component in components:
         if not isinstance(component, dict):
             continue
         name = str(component.get("name") or "").strip()
-        for prefix, key in aliases.items():
+        for prefix, key in _FORM_ALIASES.items():
             if name.startswith(prefix):
                 # Duplicate components are ambiguous, not last-value-wins.
                 result[key] = None if key in result else component.get("value")
@@ -233,10 +243,11 @@ def read_page(connection_factory, limit, until, cursor=None, identity=None, *, p
     # Bound the projection first; count only its business numbers across the entire source.
     # A collision outside this page, company, year or template still blocks fallback joins.
     count_instances = tuple(process_codes) != PROCESS_CODES
+    form_values = "form_component_values" if count_instances else _OPERATING_FORM_VALUES
     sql = (
         "WITH page AS MATERIALIZED (SELECT corp_id,process_instance_id,business_id,process_code,status,result,"
         "originator_user_id,originator_user_name,create_time,updated_at,deleted_at,"
-        "form_component_values::text AS form_component_values FROM costing_read.approval_instances_v2 WHERE "
+        + form_values + "::text AS form_component_values FROM costing_read.approval_instances_v2 WHERE "
         + " AND ".join(conditions)
         + " ORDER BY corp_id,process_instance_id LIMIT %s), "
         "counts AS MATERIALIZED (SELECT business_id,count(*) AS business_count FROM costing_read.approval_instances_v2 "
