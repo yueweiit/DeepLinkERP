@@ -30,7 +30,9 @@ python3 deploy/production/dedicated_source_sync.py rollback
 
 ## 后续 ERP 发布
 
-发布前必须先暂停该 user timer、停止 service；发布脚本和启动器复用 `/tmp/deeplinkerp-erp-release.lock`，同步另有自身运行锁，防止发布切换与同步重叠。只有定时 run 抢锁失败可返回 Skipped/exit 0；install/rollback 抢锁失败返回 Failed/非 0，控制动作不可误认成功。新镜像切换后按新 image ID、branding revision 和 runner checksum 重新 staged install，验收后显式启用 timer。旧 identity 会拒绝执行，不能直接重启旧配置绕过核验。
+发布前必须在**当前已核验镜像**上先用已安装 launcher 执行 `rollback`：停用 user timer、停止 service，并按首次安装证据恢复两项 `create_log`。仅暂停 timer 不够，原发布安装器会严格比对完整 Scheduled Job Type 定义，本次首次记录的两项日志初值均为 0；不要放宽校验或直接改写固定值。此操作不删除缓存、游标或原生日志，安装证据也保留，供新版本再次安装。
+
+发布脚本和启动器复用 `/tmp/deeplinkerp-erp-release.lock`，同步另有自身运行锁，防止发布切换与同步重叠。只有定时 run 抢锁失败可返回 Skipped/exit 0；install/rollback 抢锁失败返回 Failed/非 0，控制动作不可误认成功。新镜像切换后按新 image ID、branding revision 和 runner checksum 重新 staged install，验收后显式启用 timer。旧 identity 会拒绝执行，不能直接重启旧配置绕过核验。
 
 ## 验证与范围
 
