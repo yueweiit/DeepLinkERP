@@ -36,7 +36,7 @@ def attachment_path(value):
     return value
 
 
-def fields(row):
+def _field_occurrences(row):
     components = row.get("form_component_values") or []
     if isinstance(components, str):
         components = json.loads(components, parse_float=Decimal)
@@ -47,9 +47,38 @@ def fields(row):
         name = re.sub(r"\s+", "", str(component.get("name") or component.get("label") or ""))
         for key, aliases in ALIASES.items():
             if any(name.casefold().startswith(alias.casefold()) for alias in aliases):
-                result[key] = None if key in result else component.get("value")
+                result.setdefault(key, []).append(component.get("value"))
                 break
     return result
+
+
+def _populated(values):
+    # Conditional form branches can repeat a label with an inactive null control.
+    # Zero, false and malformed structures are not blank evidence.
+    return [value for value in values if value is not None and not (isinstance(value, str) and not value.strip())]
+
+
+def fields(row):
+    result = {}
+    for key, values in _field_occurrences(row).items():
+        if len(values) == 1:
+            result[key] = values[0]
+        elif key == "region":
+            # Do not relax the execution-region scope, even for equal values.
+            result[key] = None
+        elif key == "currency":
+            result[key] = values
+        else:
+            populated = _populated(values)
+            # Multiple populated amounts may be installments; never sum or pick.
+            result[key] = populated[0] if len(populated) == 1 else None
+    return result
+
+
+def _currency(row):
+    values = _populated(_field_occurrences(row).get("currency", []))
+    currencies = [oa.CURRENCIES.get(oa.normalized(item)) for item in values]
+    return currencies[0] if currencies and all(item and item == currencies[0] for item in currencies) else None
 
 
 def in_scope(row):
@@ -107,14 +136,15 @@ def normalize(row, parser=None, *, detail_rows=None):
         "originator_user_id": row.get("originator_user_id"), "originator_user_name": row.get("originator_user_name"),
         "eligible": bool(in_scope(row) and row.get("status") == "COMPLETED" and row.get("result") == "agree" and not row.get("deleted_at")),
         "status": row.get("status"), "result": row.get("result"), "deleted_at": str(row.get("deleted_at") or ""),
-        "currency": oa.CURRENCIES.get(oa.normalized(form.get("currency"))), "region": form.get("region"),
+        "currency": _currency(row), "region": form.get("region"),
         "payee": form.get("payee"), "requested_amount": requested, "detail_total_amount": total,
         "items": items, "processors": form.get("processors"), "description": form.get("description"),
         "schedule_date": form.get("schedule_date"), "department": form.get("department"),
         "project": form.get("project"), "order_no": form.get("order_no"),
         "attachments": form.get("attachments"), "issues": issues,
         "updated_at": str(row.get("updated_at") or row["create_time"]),
-        "original_fields": copy.deepcopy(form)}
+        "original_fields": copy.deepcopy({key: values[0] if len(values) == 1 else values
+                                          for key, values in _field_occurrences(row).items()})}
     # Approval evidence can change independently of product facts.
     result["version"] = digest(result)
     return result

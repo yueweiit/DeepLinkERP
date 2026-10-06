@@ -57,6 +57,78 @@ class PurchaseSourceContractTest(unittest.TestCase):
         item = self.module.normalize(row)
         self.assertIsNone(item["items"][0]["qty"])
 
+    def test_inactive_duplicate_controls_keep_the_single_populated_value_and_raw_evidence(self):
+        for empty in (None, "", "  "):
+            for empty_first in (False, True):
+                with self.subTest(empty=empty, empty_first=empty_first):
+                    row = source()
+                    original = copy.deepcopy(row["form_component_values"][1:4])
+                    inactive = [{**component, "value": empty} for component in original]
+                    row["form_component_values"] = (inactive + row["form_component_values"] if empty_first
+                                                   else row["form_component_values"] + inactive)
+                    before = copy.deepcopy(row)
+                    item = self.module.normalize(row)
+                    self.assertEqual(item["currency"], "CNY")
+                    self.assertEqual(item["payee"], "Vendor")
+                    self.assertEqual(item["requested_amount"], "100")
+                    self.assertEqual(item["detail_total_amount"], "100")
+                    for key, component in zip(("currency", "payee", "requested_amount"), original):
+                        values = [empty, component["value"]] if empty_first else [component["value"], empty]
+                        self.assertEqual(item["original_fields"][key], values)
+                    self.assertEqual(row, before)
+
+    def test_multiple_equivalent_currency_values_can_verify_matching_payment_evidence(self):
+        row = source()
+        row["form_component_values"].extend([
+            {"name": "币种Moneda", "value": "CNY"}, {"name": "币种Moneda", "value": None}])
+        item = self.module.normalize(row)
+        self.assertEqual(item["currency"], "CNY")
+        self.assertEqual(item["original_fields"]["currency"], ["人民币RMB", "CNY", None])
+        proof = dict(source_id="c1", process_instance_id="i1", source_type="purchase", currency="CNY",
+                     payment_evidence_status="recorded", paid_amount="20", amount="100", payments=[])
+        self.assertEqual(self.module.payment_evidence(item, [proof])["paid_amount"], "20")
+
+    def test_conflicting_or_unknown_populated_currency_keeps_payments_hidden(self):
+        for value in ("USD", "待确认", [], {}, 0):
+            with self.subTest(value=value):
+                row = source()
+                row["form_component_values"].append({"name": "币种Moneda", "value": value})
+                item = self.module.normalize(row)
+                self.assertIsNone(item["currency"])
+                self.assertEqual(item["original_fields"]["currency"], ["人民币RMB", value])
+                proof = dict(source_id="c1", process_instance_id="i1", source_type="purchase", currency="CNY",
+                             payment_evidence_status="recorded", paid_amount="20", attachments=[{"source_id":"private"}])
+                evidence = self.module.payment_evidence(item, [proof])
+                self.assertIsNone(evidence["paid_amount"])
+                self.assertEqual(evidence["attachments"], [])
+
+    def test_multiple_populated_amounts_are_never_summed_or_coalesced(self):
+        for value in ("100", "200"):
+            with self.subTest(value=value):
+                row = source()
+                row["form_component_values"].append({"name": "金额importe", "value": value})
+                item = self.module.normalize(row)
+                self.assertIsNone(item["requested_amount"])
+                self.assertEqual(item["detail_total_amount"], "100")
+                self.assertEqual(item["original_fields"]["requested_amount"], ["100", value])
+
+    def test_single_currency_control_with_a_structured_value_is_not_guessed(self):
+        for value in (["CNY"], ["CNY", "CNY"], {"value": "CNY"}):
+            with self.subTest(value=value):
+                row = source()
+                row["form_component_values"][1]["value"] = value
+                item = self.module.normalize(row)
+                self.assertIsNone(item["currency"])
+                self.assertEqual(item["original_fields"]["currency"], value)
+
+    def test_inactive_control_does_not_erase_zero_or_relax_execution_region_scope(self):
+        row = source()
+        row["form_component_values"][3]["value"] = "0"
+        row["form_component_values"].append({"name": "金额importe", "value": None})
+        self.assertEqual(self.module.normalize(row)["requested_amount"], "0")
+        row["form_component_values"].append({"name": "执行地区Región de ejecución", "value": None})
+        self.assertFalse(self.module.in_scope(row))
+
     def test_payment_requires_exact_identity_scope_and_recorded_currency_proof(self):
         item = self.module.normalize(source())
         proof = dict(source_id="c1", process_instance_id="i1", source_type="purchase", currency="CNY",
