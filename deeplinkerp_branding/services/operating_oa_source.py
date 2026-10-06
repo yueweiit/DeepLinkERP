@@ -239,7 +239,7 @@ def read_page(connection_factory, limit, until, cursor=None, identity=None, *, p
         "form_component_values::text AS form_component_values FROM costing_read.approval_instances_v2 WHERE "
         + " AND ".join(conditions)
         + " ORDER BY corp_id,process_instance_id LIMIT %s), "
-        "counts AS (SELECT business_id,count(*) AS business_count FROM costing_read.approval_instances_v2 "
+        "counts AS MATERIALIZED (SELECT business_id,count(*) AS business_count FROM costing_read.approval_instances_v2 "
         "WHERE business_id IN (SELECT business_id FROM page WHERE NULLIF(business_id,'') IS NOT NULL) "
         "GROUP BY business_id) "
         # Materialize global duplicate counts once, not once per joined page row.

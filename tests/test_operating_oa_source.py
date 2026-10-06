@@ -168,7 +168,8 @@ class OriginalOperatingSourceTest(unittest.TestCase):
         sql = " ".join(query.sql.split())
         self.assertTrue(sql.startswith("WITH page AS MATERIALIZED (SELECT "), sql)
         self.assertNotIn(" OVER ", sql.upper())
-        page, counts = sql.split("), counts AS (", 1)
+        self.assertEqual(sql.count("), counts AS MATERIALIZED ("), 1, sql)
+        page, counts = sql.split("), counts AS MATERIALIZED (", 1)
         self.assertIn("FROM costing_read.approval_instances_v2 WHERE process_code = ANY(%s)", page)
         self.assertIn("create_time >= %s AND create_time < %s AND updated_at <= %s", page)
         self.assertTrue(page.endswith("ORDER BY corp_id,process_instance_id LIMIT %s"), page)
@@ -178,22 +179,27 @@ class OriginalOperatingSourceTest(unittest.TestCase):
                                        datetime(2026, 10, 6, tzinfo=timezone.utc), 501))
 
     def test_read_page_cursor_and_identity_are_parameterized_in_bounded_page(self):
+        from deeplinkerp_branding.services.purchase_source_contract import PROCESS_CODES as purchase_codes
         until = "2026-10-06T00:00:00Z"
         after_corp, after_instance = "corp-after", "instance-after"
         identity = {"corp_id": "corp'identity", "process_instance_id": "instance'identity"}
-        query = RecordingConnection([])
         cursor = self.source.encode_cursor(until, after_corp, after_instance)
-        rows, next_cursor = self.source.read_page(query, 7, until, cursor=cursor, identity=identity)
-        self.assertEqual((rows, next_cursor), ([], None))
-        self.assertTrue(query.sql.startswith("WITH page AS MATERIALIZED ("), query.sql)
-        page = query.sql.split("), counts AS (", 1)[0]
-        self.assertIn("(corp_id, process_instance_id) > (%s, %s)", page)
-        self.assertIn("corp_id=%s AND process_instance_id=%s", page)
-        for value in (after_corp, after_instance, *identity.values()):
-            self.assertNotIn(value, query.sql)
-        self.assertEqual(query.params, (list(self.source.PROCESS_CODES), self.source.START, self.source.END,
-            datetime(2026, 10, 6, tzinfo=timezone.utc), after_corp, after_instance,
-            identity["corp_id"], identity["process_instance_id"], 8))
+        for process_codes in (self.source.PROCESS_CODES, purchase_codes):
+            with self.subTest(process_codes=process_codes):
+                query = RecordingConnection([])
+                rows, next_cursor = self.source.read_page(query, 7, until, cursor=cursor, identity=identity,
+                                                          process_codes=process_codes)
+                self.assertEqual((rows, next_cursor), ([], None))
+                self.assertTrue(query.sql.startswith("WITH page AS MATERIALIZED ("), query.sql)
+                self.assertEqual(query.sql.count("), counts AS MATERIALIZED ("), 1, query.sql)
+                page = query.sql.split("), counts AS MATERIALIZED (", 1)[0]
+                self.assertIn("(corp_id, process_instance_id) > (%s, %s)", page)
+                self.assertIn("corp_id=%s AND process_instance_id=%s", page)
+                for value in (after_corp, after_instance, *identity.values()):
+                    self.assertNotIn(value, query.sql)
+                self.assertEqual(query.params, (list(process_codes), self.source.START, self.source.END,
+                    datetime(2026, 10, 6, tzinfo=timezone.utc), after_corp, after_instance,
+                    identity["corp_id"], identity["process_instance_id"], 8))
 
     def test_attachment_manifest_is_scoped_and_proves_file_version(self):
         row = approval()
