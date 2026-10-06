@@ -120,7 +120,11 @@ def _cashier_snapshot(until):
     items, cursor = [], None
     for _ in range(40):
         result = _request("/api/integrations/erp/purchase-expenses", {"limit":500, "until":until, **({"cursor":cursor} if cursor else {})})
-        if result.get("until") != until:
+        try:
+            same_instant = oa.timestamp(result.get("until")) == oa.timestamp(until)
+        except (ValueError, TypeError):
+            same_instant = False
+        if not same_instant:
             frappe.throw("采购出纳快照时间不符")
         items.extend(result["items"])
         if result["end"]:

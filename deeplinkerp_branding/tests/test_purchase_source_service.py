@@ -59,6 +59,28 @@ class PurchaseSourceServiceTests(unittest.TestCase):
         self.assertFalse(service.cashier_payment_reason({"paid_amount":"0","payment_evidence_status":"recorded"},None))
         self.assertFalse(service.cashier_payment_reason({"paid_amount":"20","payment_evidence_status":"recorded"},{"verified":True}))
 
+    def test_cashier_snapshot_accepts_equivalent_timezone_serializations(self):
+        from deeplinkerp_branding.services import operating_expenses
+        until = "2026-10-06T09:00:00.123456+00:00"
+        for returned in ("2026-10-06T09:00:00.123456Z", "2026-10-06T17:00:00.123456+08:00"):
+            with self.subTest(returned=returned), patch.object(operating_expenses, "_request", return_value={
+                "until": returned, "items": [{"source_id": "purchase-1"}], "end": True,
+            }) as request:
+                self.assertEqual(service._cashier_snapshot(until), [{"source_id": "purchase-1"}])
+                self.assertEqual(request.call_args.args[1]["until"], until)
+        self.db.commit.assert_not_called()
+
+    def test_cashier_snapshot_rejects_different_or_unverifiable_instant(self):
+        from deeplinkerp_branding.services import operating_expenses
+        until = "2026-10-06T09:00:00.123456+00:00"
+        for returned in ("2026-10-06T09:00:00.123457Z", "2026-10-06T09:00:00.123456", "invalid", None):
+            with self.subTest(returned=returned), patch.object(operating_expenses, "_request", return_value={
+                "until": returned, "items": [], "end": True,
+            }):
+                with self.assertRaisesRegex(frappe.ValidationError, "快照时间不符"):
+                    service._cashier_snapshot(until)
+        self.db.commit.assert_not_called()
+
     def test_source_refresh_does_not_overwrite_manual_fields(self):
         incoming={**self.source,"source_id":"oa:test","oa_identity":{"corp_id":"corp","process_instance_id":"instance"},"status":"COMPLETED","result":"agree"}
         self.doc.items=[{"qty":99}]; self.doc.target_company="Manual Company"
