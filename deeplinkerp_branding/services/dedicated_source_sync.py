@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import signal
 import sys
 import time
 import uuid
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 import frappe
@@ -34,10 +36,18 @@ def log_name(task, run_id):
 
 
 def ensure_allowed():
-    # Never use the cached System Settings value when another operator can
-    # enable the native scheduler. Check again at every operating page boundary.
-    if (frappe.conf.get("maintenance_mode") or frappe.conf.get("scheduler_disabled")
-            or frappe.db.get_single_value("System Settings", "enable_scheduler", cache=False)):
+    # frappe.conf is an init-time snapshot. Re-read native common/site config
+    # and the database setting at every entry and operating page boundary.
+    try:
+        # Native config errors may print values before raising. Keep them private.
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            config = frappe.get_site_config(cached=False)
+    except Exception:
+        raise SourceSyncRefused("Dedicated source sync configuration is invalid") from None
+    switches = [config.get(key) for key in ("maintenance_mode", "scheduler_disabled")]
+    if any(value is not None and (type(value) not in (bool, int) or value not in (0, 1)) for value in switches):
+        raise SourceSyncRefused("Dedicated source sync configuration is invalid")
+    if any(switches) or frappe.db.get_single_value("System Settings", "enable_scheduler", cache=False):
         raise SourceSyncRefused("Dedicated source sync requires maintenance off and global scheduler disabled")
 
 
@@ -54,12 +64,20 @@ def _job(task, require_logging=True):
     return job
 
 
+def _idle_jobs():
+    jobs = [_job(task, require_logging=False) for task in TASKS]
+    if any(job.is_job_in_queue() for job in jobs):
+        raise SourceSyncRefused("A fixed native source job is queued or running")
+    return jobs
+
+
 def execute_task(task, run_id, timeout=TASK_TIMEOUT):
     """Run one existing native job, and inspect its swallowed-exception outcome."""
     deadline = time.monotonic() + timeout
     name = log_name(task, run_id)
     frappe.db.rollback()  # A reused process cannot carry a prior task's transaction.
     ensure_allowed()
+    _idle_jobs()
     job = _job(task)
     if job.is_job_in_queue() or frappe.db.exists("Scheduled Job Log", name):
         raise SourceSyncRefused("Source task is already queued or this run identity was used")
@@ -134,7 +152,7 @@ def finalize_task(task, run_id):
 def logging_snapshot():
     """Read-only evidence; intentionally internal and non-whitelisted."""
     ensure_allowed()
-    jobs = [_job(task, require_logging=False) for task in TASKS]
+    jobs = _idle_jobs()
     return {"version": 1, "jobs": [{"name": job.name, "method": job.method,
                                      "create_log": int(job.create_log)} for job in jobs]}
 

@@ -1,6 +1,7 @@
 """Host installation/rollback and actual container-child cancellation contracts."""
 
 import importlib.util
+import io
 import json
 import subprocess
 import tempfile
@@ -151,3 +152,27 @@ class DedicatedSourceHostTests(unittest.TestCase):
                 self.host.verify_identity(self.config)
         with patch.object(self.host.subprocess, "run", side_effect=[SimpleNamespace(stdout=json.dumps(expected)), SimpleNamespace(stdout="d" * 64 + " file")]), self.assertRaises(RuntimeError):
             self.host.verify_identity(self.config)
+
+    def test_installer_rechecks_native_jobs_immediately_before_starting_timer(self):
+        before = {"version": 1, "jobs": [{"name": "op", "method": self.host.METHODS[0], "create_log": 0},
+                                             {"name": "pur", "method": self.host.METHODS[1], "create_log": 0}]}
+        with patch.object(self.host, "verify_identity"), patch.object(self.host, "systemctl") as systemctl, \
+             patch.object(self.host, "container_call", side_effect=[{"outcome": before}, {"outcome": before}, RuntimeError("native job became queued")]):
+            with self.assertRaises(RuntimeError):
+                self.host.install(self.config, start_timer=True)
+        self.assertNotIn(("enable", "--now", "deeplinkerp-source-sync.timer"), [call.args for call in systemctl.call_args_list])
+
+    def test_control_action_mutex_refusal_is_nonzero_and_never_skipped(self):
+        for action, function in (("install", "install"), ("rollback", "rollback")):
+            with self.subTest(action=action), patch.object(self.host.Path, "home", return_value=Path("/home/yuewei")), \
+                 patch.object(self.host, function, side_effect=BlockingIOError()), patch.object(self.host.sys, "stdout", io.StringIO()) as output:
+                self.assertNotEqual(self.host.main([action]), 0)
+                self.assertEqual(json.loads(output.getvalue())["outcome"], "Failed")
+
+    def test_run_mutex_refusal_remains_skipped_with_zero_exit(self):
+        self.host.save_json(self.host.STATE / "config.json", self.config)
+        with patch.object(self.host.Path, "home", return_value=Path("/home/yuewei")), \
+             patch.object(self.host.signal, "signal"), patch.object(self.host, "locked", side_effect=BlockingIOError()), \
+             patch.object(self.host.sys, "stdout", io.StringIO()) as output:
+            self.assertEqual(self.host.main(["run"]), 0)
+            self.assertEqual(json.loads(output.getvalue())["outcome"], "Skipped")

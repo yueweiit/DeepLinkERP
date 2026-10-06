@@ -2,7 +2,7 @@
 
 只执行既有 `operating_expenses.scheduled_sync` 和 `purchase_source_service.scheduled_sync`。宿主机 user timer 每个整点、15、30、45 分触发；两项任务串行、各自一个容器进程，单项总预算 300 秒。运营支出逐页提交缓存与游标，未完成页失败回滚；采购沿用既有 300 秒 Redis 锁及整个扫描的单事务。两项既有启用开关和手动同步保持原用途。
 
-System Settings.enable_scheduler 必须保持 0；不能开启其余自动任务。执行前检查维护模式、scheduler_disabled 和全局开关，运营支出每页重新检查。只允许两项固定方法，内部 runner 和日志安装函数均不提供 HTTP 白名单接口。业务分类、China/2026 范围、流程代码、原生订单/付款/凭证操作没有新增规则。
+System Settings.enable_scheduler 必须保持 0；不能开启其余自动任务。执行前用 Frappe 原生无缓存读取重新合并 common/site 配置，检查维护模式、scheduler_disabled 和无缓存全局开关，运营支出每页重新检查；无效配置安全拒绝且不输出配置内容。两条固定原生 RQ job 任一 QUEUED/STARTED 均拒绝执行或 metadata 安装，不改变 RQ 状态。只允许两项固定方法，内部 runner 和日志安装函数均不提供 HTTP 白名单接口。业务分类、China/2026 范围、流程代码、原生订单/付款/凭证操作没有新增规则。
 
 ## 安装与启动
 
@@ -12,7 +12,7 @@ System Settings.enable_scheduler 必须保持 0；不能开启其余自动任务
 python3 deploy/production/dedicated_source_sync.py install --revision <SHA> --image-id <sha256:IMAGE> --runner-sha256 <RUNNER_SHA256>
 ```
 
-默认只为**原有两条** Scheduled Job Type 打开 create_log、保存原始值的持久证据、暂存 user units，timer 保持停止。缺少、重复、脚本化、stopped 或 cron 不符的 job 会拒绝安装，不做 broad migration/sync_jobs。先采集部署所需的 `before-timer.json`，再用同样参数加 `--start-timer`；该命令不会手动执行任务，随后由日历的下个时点触发。`Persistent=false` 不补跑停机错过的轮次。
+默认只为**原有两条** Scheduled Job Type 打开 create_log、保存原始值的持久证据、暂存 user units，timer 保持停止。写 create_log 前必须确认两条原生 job 均空闲，启动 timer 前再次核查。缺少、重复、脚本化、stopped 或 cron 不符的 job 会拒绝安装，不做 broad migration/sync_jobs。先采集部署所需的 `before-timer.json`，再用同样参数加 `--start-timer`；该命令不会手动执行任务，随后由日历的下个时点触发。`Persistent=false` 不补跑停机错过的轮次。
 
 配置、原始 create_log 证据和当前运行记录存于 `/home/yuewei/.local/state/deeplinkerp-source-sync`；启动器独立保存于 `.local/share/deeplinkerp-source-sync/launcher.py`，不依赖临时发布目录。重复安装保留首次原始 create_log 证据。
 
@@ -30,7 +30,7 @@ python3 deploy/production/dedicated_source_sync.py rollback
 
 ## 后续 ERP 发布
 
-发布前必须先暂停该 user timer、停止 service；发布脚本和启动器复用 `/tmp/deeplinkerp-erp-release.lock`，同步另有自身运行锁，防止发布切换与同步重叠。新镜像切换后按新 image ID、branding revision 和 runner checksum 重新 staged install，验收后显式启用 timer。旧 identity 会拒绝执行，不能直接重启旧配置绕过核验。
+发布前必须先暂停该 user timer、停止 service；发布脚本和启动器复用 `/tmp/deeplinkerp-erp-release.lock`，同步另有自身运行锁，防止发布切换与同步重叠。只有定时 run 抢锁失败可返回 Skipped/exit 0；install/rollback 抢锁失败返回 Failed/非 0，控制动作不可误认成功。新镜像切换后按新 image ID、branding revision 和 runner checksum 重新 staged install，验收后显式启用 timer。旧 identity 会拒绝执行，不能直接重启旧配置绕过核验。
 
 ## 验证与范围
 

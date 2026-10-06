@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import uuid
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -58,6 +59,15 @@ class DedicatedSourceSyncTests(unittest.TestCase):
         self.db = Mock()
         self.db.get_single_value.return_value = 0
         self.conf = frappe._dict(maintenance_mode=0, scheduler_disabled=0)
+        self.configuration = tempfile.TemporaryDirectory()
+        self.addCleanup(self.configuration.cleanup)
+        self.sites_path = Path(self.configuration.name)
+        self.site_path = self.sites_path / "source-test"
+        self.site_path.mkdir()
+        self.common_file = self.sites_path / "common_site_config.json"
+        self.site_file = self.site_path / "site_config.json"
+        self.common_file.write_text("{}")
+        self.site_file.write_text("{}")
         self.jobs = {key: Job(method) for key, method in self.runner.TASKS.items()}
         self.logs = {}
         self.method = Mock()
@@ -80,7 +90,8 @@ class DedicatedSourceSyncTests(unittest.TestCase):
         self.db.get_value.side_effect = get_value
         self.db.exists.side_effect = lambda doctype, name: name in self.logs
         for item in [patch.object(frappe, "db", self.db), patch.object(frappe, "conf", self.conf),
-                     patch.object(frappe, "local", SimpleNamespace(site="source-test")),
+                     patch.object(frappe, "local", SimpleNamespace(site="source-test", sites_path=str(self.sites_path),
+                         site_path=str(self.site_path), flags=frappe._dict(new_site=False))),
                      patch.object(frappe, "flags", frappe._dict()), patch.object(frappe, "job", None),
                      patch.object(frappe, "get_system_settings", return_value="UTC"),
                      patch.object(frappe, "debug_log", []), patch.object(frappe, "logger", return_value=Mock()),
@@ -127,8 +138,7 @@ class DedicatedSourceSyncTests(unittest.TestCase):
         for field in ("enable_scheduler", "maintenance_mode", "scheduler_disabled"):
             with self.subTest(field=field):
                 self.db.get_single_value.return_value = int(field == "enable_scheduler")
-                self.conf.maintenance_mode = int(field == "maintenance_mode")
-                self.conf.scheduler_disabled = int(field == "scheduler_disabled")
+                self.site_file.write_text(json.dumps({field: 1}) if field != "enable_scheduler" else "{}")
                 with self.assertRaises(RuntimeError):
                     self.runner.execute_task("operating", self.run_id)
         self.method.assert_not_called()
@@ -217,3 +227,61 @@ class DedicatedSourceSyncTests(unittest.TestCase):
              patch.object(frappe, "connect"), patch.object(frappe, "set_user"):
             self.runner._connect()
         chdir.assert_called_once_with(self.runner.BENCH / "sites")
+
+    def test_fresh_native_config_observes_common_and_site_file_switches(self):
+        self.runner.ensure_allowed()
+        for target in (self.common_file, self.site_file):
+            for field in ("maintenance_mode", "scheduler_disabled"):
+                with self.subTest(file=target.name, field=field):
+                    target.write_text(json.dumps({field: 1}))
+                    # The initialized frappe.conf deliberately remains unchanged.
+                    self.assertEqual(self.conf.get(field), 0)
+                    with self.assertRaises(self.runner.SourceSyncRefused):
+                        self.runner.ensure_allowed()
+                    target.write_text("{}")
+                    self.runner.ensure_allowed()
+
+    def test_invalid_config_is_refused_without_native_error_or_config_output(self):
+        for target in (self.common_file, self.site_file):
+            with self.subTest(file=target.name):
+                target.write_text('{"db_password":"SYNTHETIC-PRIVATE",')
+                with patch.object(self.runner.sys, "stdout", io.StringIO()) as output, \
+                     patch.object(self.runner.sys, "stderr", io.StringIO()) as error:
+                    with self.assertRaisesRegex(self.runner.SourceSyncRefused, "configuration"):
+                        self.runner.ensure_allowed()
+                    self.assertEqual(output.getvalue(), "")
+                    self.assertEqual(error.getvalue(), "")
+                target.write_text("{}")
+
+    def test_either_native_job_queued_or_started_refuses_logging_before_mutation(self):
+        from frappe.utils import background_jobs
+        from rq.job import JobStatus
+        before = self.runner.logging_snapshot()
+        self.jobs["operating"].create_log = 0
+        self.jobs["purchase"].create_log = 0
+        for task, job in self.jobs.items():
+            for state in (JobStatus.QUEUED, JobStatus.STARTED):
+                with self.subTest(task=task, state=state):
+                    with patch.object(job, "is_job_in_queue", side_effect=lambda: background_jobs.is_job_enqueued("synthetic-native")), \
+                         patch.object(background_jobs, "get_job", return_value=Mock(get_status=Mock(return_value=state))):
+                        with self.assertRaises(self.runner.SourceSyncRefused):
+                            self.runner.logging_snapshot()
+                        with self.assertRaises(self.runner.SourceSyncRefused):
+                            self.runner.set_logging(before)
+        self.db.set_value.assert_not_called()
+        self.method.assert_not_called()
+
+    def test_other_native_job_queued_or_started_refuses_current_task_before_start(self):
+        from frappe.utils import background_jobs
+        from rq.job import JobStatus
+        for blocked in self.jobs:
+            current = "purchase" if blocked == "operating" else "operating"
+            for state in (JobStatus.QUEUED, JobStatus.STARTED):
+                with self.subTest(blocked=blocked, current=current, state=state):
+                    job = self.jobs[blocked]
+                    with patch.object(job, "is_job_in_queue", side_effect=lambda: background_jobs.is_job_enqueued("synthetic-native")), \
+                         patch.object(background_jobs, "get_job", return_value=Mock(get_status=Mock(return_value=state))):
+                        with self.assertRaises(self.runner.SourceSyncRefused):
+                            self.runner.execute_task(current, str(uuid.uuid4()))
+        self.assertEqual(self.logs, {})
+        self.method.assert_not_called()

@@ -233,6 +233,7 @@ def install(config, start_timer=False):
             atomic_write(UNITS / name, (source.parent / "systemd" / name).read_bytes())
         systemctl("daemon-reload")
         if start_timer:
+            container_call("logging-snapshot")  # Recheck both native jobs before enable.
             systemctl("enable", "--now", UNIT_NAMES[1])
         receipt["status"] = "installed" if start_timer else "staged"
         save_json(receipt_path, receipt)
@@ -289,8 +290,9 @@ def main(argv=None):
             return int(any(item["outcome"] != "Complete" for item in result))
         return 0
     except BlockingIOError:
-        print('{"outcome":"Skipped","reason":"Release or source sync owns the mutex"}')
-        return 0
+        outcome = "Skipped" if args.action == "run" else "Failed"
+        print(json.dumps({"outcome": outcome, "reason": "Release or source sync owns the mutex"}))
+        return int(args.action != "run")
     except (Exception, ParentInterrupted):
         print('{"outcome":"Failed","reason":"Source sync or control action unconfirmed"}')
         return 1

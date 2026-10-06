@@ -10,7 +10,9 @@ import signal
 import time
 import unittest
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 import frappe
@@ -94,6 +96,19 @@ class NativeSourceSchedulerQA(unittest.TestCase):
     def page(self, item=None, end=True, cursor=None):
         return {"items": [item] if item else [], "end": end, "next_cursor": cursor, "until": self.snapshot}
 
+    @contextmanager
+    def temporary_site_config(self):
+        # Only the isolated QA site's real config; preserve its exact bytes.
+        target = Path(frappe.local.site_path) / "site_config.json"
+        original = target.read_bytes()
+        config = json.loads(original)
+        def change(**values):
+            target.write_text(json.dumps({**config, **values}))
+        try:
+            yield change
+        finally:
+            target.write_bytes(original)
+
     def test_native_start_complete_and_all_pages_have_persisted_timestamps(self):
         starts = []
         items = [self.source(), self.source()]
@@ -172,11 +187,12 @@ class NativeSourceSchedulerQA(unittest.TestCase):
 
     def test_maintenance_switch_between_pages_keeps_completed_checkpoint(self):
         item = self.source()
-        def read(params):
-            frappe.conf.maintenance_mode = 1
-            return self.page(item, end=False, cursor="QA-before-maintenance")
-        with patch.dict(frappe.conf, maintenance_mode=0), patch.object(operating, "_source_page", side_effect=read) as source:
-            outcome, _ = self.run_task()
+        with self.temporary_site_config() as configure:
+            def read(params):
+                configure(maintenance_mode=1)
+                return self.page(item, end=False, cursor="QA-before-maintenance")
+            with patch.dict(frappe.conf, maintenance_mode=0), patch.object(operating, "_source_page", side_effect=read) as source:
+                outcome, _ = self.run_task()
         self.assertEqual(outcome, "Failed")
         source.assert_called_once()
         self.assertTrue(frappe.db.exists(operating.SOURCE, item["source_id"]))
@@ -188,8 +204,11 @@ class NativeSourceSchedulerQA(unittest.TestCase):
         with patch.object(frappe.db, "get_single_value", side_effect=lambda doctype, field, **kwargs: 1 if (doctype, field) == ("System Settings", "enable_scheduler") else original(doctype, field, **kwargs)):
             with self.assertRaises(runner.SourceSyncRefused):
                 self.run_task()
-        with patch.dict(frappe.conf, maintenance_mode=1), self.assertRaises(runner.SourceSyncRefused):
-            self.run_task()
+        with self.temporary_site_config() as configure:
+            for field in ("maintenance_mode", "scheduler_disabled"):
+                configure(**{field: 1})
+                with self.subTest(field=field), self.assertRaises(runner.SourceSyncRefused):
+                    self.run_task()
         self.assertEqual(frappe.db.count("Scheduled Job Log"), count)
 
 
