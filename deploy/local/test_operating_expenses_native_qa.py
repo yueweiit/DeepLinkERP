@@ -20,6 +20,214 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         frappe.db.rollback()
         frappe.set_user("Administrator")
 
+    def setUp(self):
+        # The browser demo contains draft fixtures. Remove only their associations
+        # inside each rolled-back test transaction, so every case has a clean start.
+        events = frappe.get_all("Operating Expense Event", fields=["name", "source", "journal_entry"], limit_page_length=0)
+        if events:
+            if any(e.source not in {"1001", "1002"} for e in events):
+                raise RuntimeError("Unexpected QA finance activity; do not isolate")
+            journals = frappe.get_all("Journal Entry", filters={"name": ["in", [e.journal_entry for e in events]]}, fields=["name", "docstatus", "custom_operating_source", "custom_operating_event_key"], limit_page_length=0)
+            if len(journals) != len(events) or any(j.docstatus != 0 or j.custom_operating_source not in {"1001", "1002"} for j in journals):
+                raise RuntimeError("Unexpected QA journals; do not isolate")
+            frappe.db.delete("Operating Expense Event", {"name": ["in", [e.name for e in events]]})
+            frappe.db.delete("Operating Expense Mapping", {"source": ["in", [e.source for e in events]]})
+            for journal in journals:
+                if journal.custom_operating_event_key not in {e.name for e in events}:
+                    raise RuntimeError("Unexpected QA journal event identity")
+                frappe.db.set_value("Journal Entry", journal.name, "custom_operating_event_key", None, update_modified=False)
+
+    def test_oa_provider_reuses_company_resolution_and_does_not_invent_unpaid(self):
+        from deeplinkerp_branding.services import operating_expenses as service
+        from deeplinkerp_branding.services import operating_oa_source as oa
+        from tests.test_operating_oa_source import approval
+        self.assertTrue(hasattr(service, "_source_page"), "Unified source-page dispatcher missing")
+        responses = {
+            "/api/integrations/erp/operating-expenses": {"items": [], "end": True},
+            "/api/integrations/erp/resolve-applicant-companies": {"items": [{"user_id": "u1", "employee_name": "Alice", "status": "matched", "assigned_department": "拉丁购"}]},
+        }
+        with patch.dict(frappe.conf, operating_expense_source_mode="oa_cashier"), patch.object(service, "_oa_connection", return_value=None), patch.object(oa, "read_page", return_value=([approval()], None)), patch.object(service, "_request", side_effect=lambda path, *a, **k: responses[path]):
+            result = service._source_page({"limit": 100})
+        self.assertEqual(result["items"][0]["source_company"], "拉丁购")
+        self.assertIsNone(result["items"][0]["paid_amount"])
+        self.assertEqual(result["items"][0]["source_status"], "付款待核对")
+
+    def test_cached_oa_root_survives_missing_ambiguous_and_new_cashier_matches(self):
+        from deeplinkerp_branding.services import operating_oa_source as oa
+        from tests.test_operating_oa_source import approval
+        service = self._sync()
+        row = approval()
+        cashier = {"source_id": "legacy-root", "process_instance_id": row["process_instance_id"], "amount": "100", "currency": "CNY",
+                   "paid_amount": "0", "pending_amount": "100", "source_status": "未付款", "payment_evidence_status": "recorded", "payments": [], "attachments": []}
+        resolution = {"user_id": "u1", "employee_name": "Alice", "status": "matched", "assigned_department": "QA Operating China"}
+        item = oa.merge_application(row, [cashier], resolution)
+        item["source_id"] = cashier["source_id"]
+        service._upsert(item, service._maps(service._settings()))
+        new_cashier_cache = json.loads(frappe.get_doc(service.SOURCE, "1001").source_json)
+        new_cashier_cache["source_id"] = "new-root"
+        service._upsert(new_cashier_cache, service._maps(service._settings()))
+        responses = {"/api/integrations/erp/operating-expenses": {"items": [cashier], "end": True},
+                     "/api/integrations/erp/resolve-applicant-companies": {"items": [resolution]}}
+        with patch.dict(frappe.conf, operating_expense_source_mode="oa_cashier"), patch.object(service, "_oa_connection", return_value=None), patch.object(oa, "read_page", return_value=([row], None)), patch.object(service, "_request", side_effect=lambda path, *a, **k: responses[path]):
+            service.save_mapping("legacy-root", self._mapping(), service._fresh(service._source("legacy-root"))["version"])
+            preview = service.preview_voucher("legacy-root")
+            draft = service.create_voucher_draft("legacy-root", preview["fingerprint"])
+            mapping_before = frappe.get_doc(service.MAPPING, "legacy-root").mapping_json
+            events_before = frappe.get_all(service.EVENT, filters={"source": "legacy-root"}, fields=["name", "source", "journal_entry", "fingerprint"])
+            for candidates in ([], [cashier, {**cashier, "source_id": "new-root"}], [{**cashier, "source_id": "new-root"}]):
+                with self.subTest(cashier_roots=[c["source_id"] for c in candidates]):
+                    responses["/api/integrations/erp/operating-expenses"]["items"] = candidates
+                    fresh = service._fresh(service._source("legacy-root"))
+                    current = service._source_page({"limit": 100})["items"][0]
+                    self.assertEqual(current["source_id"], "legacy-root")
+                    self.assertEqual(fresh["source_id"], current["source_id"])
+                    if len(candidates) != 1:
+                        self.assertIsNone(current["paid_amount"])
+                        self.assertIsNone(current["pending_amount"])
+                        self.assertEqual(current["payment_evidence_status"], "unknown")
+                    service._upsert(current, service._maps(service._settings()))
+                    self.assertEqual(frappe.get_doc(service.MAPPING, "legacy-root").mapping_json, mapping_before)
+                    self.assertEqual(frappe.get_all(service.EVENT, filters={"source": "legacy-root"}, fields=["name", "source", "journal_entry", "fingerprint"]), events_before)
+                    self.assertEqual(frappe.get_doc("Journal Entry", draft["journal_entry"]).docstatus, 0)
+                    cached = frappe.get_all(service.SOURCE, filters={"source_system": oa.SOURCE_SYSTEM}, fields=["name", "source_json"])
+                    self.assertEqual([d.name for d in cached if json.loads(d.source_json)["oa_identity"] == item["oa_identity"]], ["legacy-root"])
+
+    def test_oa_identity_collision_and_duplicate_cache_fail_closed(self):
+        from deeplinkerp_branding.services import operating_oa_source as oa
+        from tests.test_operating_oa_source import approval
+        service = self._sync()
+        row = approval()
+        other = approval(); other["process_instance_id"] = "other-instance"
+        resolution = {"user_id": "u1", "employee_name": "Alice", "status": "matched", "assigned_department": "QA Operating China"}
+        occupied = oa.merge_application(other, [], resolution)
+        occupied["source_id"] = "legacy-root"
+        service._upsert(occupied, service._maps(service._settings()))
+        responses = {"/api/integrations/erp/operating-expenses": {"items": [{"source_id": "legacy-root", "process_instance_id": row["process_instance_id"], "amount": "100", "currency": "CNY"}], "end": True},
+                     "/api/integrations/erp/resolve-applicant-companies": {"items": [resolution]}}
+        with patch.dict(frappe.conf, operating_expense_source_mode="oa_cashier"), patch.object(service, "_oa_connection", return_value=None), patch.object(oa, "read_page", return_value=([row], None)), patch.object(service, "_request", side_effect=lambda path, *a, **k: responses[path]):
+            with self.subTest(case="different_cached_identity"):
+                current = service._source_page({"limit": 100})["items"][0]
+                self.assertEqual(current["source_id"], oa.application_id(row))
+                self.assertEqual(json.loads(frappe.get_doc(service.SOURCE, "legacy-root").source_json)["oa_identity"], occupied["oa_identity"])
+            collision = {**occupied, "source_id": oa.application_id(row), "oa_identity": {"corp_id": "other-corp", "process_instance_id": "other-instance"}}
+            service._upsert(collision, service._maps(service._settings()))
+            responses["/api/integrations/erp/operating-expenses"]["items"][0]["source_id"] = collision["source_id"]
+            with self.subTest(case="generated_root_collision"), self.assertRaisesRegex(frappe.ValidationError, "身份不符"):
+                service._source_page({"limit": 100})
+            current = oa.merge_application(row, [], resolution)
+            service._upsert(current, service._maps(service._settings()))
+            duplicate = {**current, "source_id": "duplicate-root"}
+            service._upsert(duplicate, service._maps(service._settings()))
+            with self.subTest(case="duplicate_page"), self.assertRaisesRegex(frappe.ValidationError, "身份重复"):
+                service._source_page({"limit": 100})
+            for name in (current["source_id"], "duplicate-root"):
+                with self.subTest(source=name), self.assertRaisesRegex(frappe.ValidationError, "身份重复"):
+                    service._fresh(service._source(name))
+
+    def test_oa_cache_identity_lookup_has_a_bounded_limit(self):
+        from deeplinkerp_branding.services import operating_expenses as service
+        from deeplinkerp_branding.services import operating_oa_source as oa
+        from tests.test_operating_oa_source import approval
+        with patch.dict(frappe.conf, operating_expense_source_mode="oa_cashier"), patch.object(frappe, "get_all", return_value=[None] * 20001), patch.object(service, "_oa_connection", return_value=None), patch.object(oa, "read_page", return_value=([], None)), patch.object(service, "_cashier_snapshot", return_value=[]):
+            with self.assertRaisesRegex(frappe.ValidationError, "上限"):
+                service._source_page({"limit": 100})
+
+    def test_legacy_cashier_identity_conflicts_block_migration_and_preserve_links(self):
+        from copy import deepcopy
+        from deeplinkerp_branding.services import operating_oa_source as oa
+        from tests.test_operating_oa_source import approval
+        service = self._sync()
+        row = approval()
+        legacy = json.loads(frappe.get_doc(service.SOURCE, "1001").source_json)
+        legacy["source_id"] = "legacy-root"
+        for key in ("oa_identity", "corp_id", "process_instance_id", "approval_no", "approval_identity_status", "identity_conflict"):
+            legacy.pop(key, None)
+        maps = service._maps(service._settings())
+        service._upsert(legacy, maps)
+        with patch.object(service, "_request", return_value={"items": [legacy], "end": True}):
+            service.save_mapping("legacy-root", self._mapping(), legacy["version"])
+            preview = service.preview_voucher("legacy-root")
+            draft = service.create_voucher_draft("legacy-root", preview["fingerprint"])
+        mapping_before = frappe.get_doc(service.MAPPING, "legacy-root").as_dict()
+        event_before = frappe.get_doc(service.EVENT, preview["event_key"]).as_dict()
+        journal_before = frappe.get_doc("Journal Entry", draft["journal_entry"]).as_dict()
+        resolution = {"user_id": "u1", "employee_name": "Alice", "status": "matched", "assigned_department": "QA Operating China"}
+        current_cashier = {**legacy, "corp_id": row["corp_id"], "process_instance_id": row["process_instance_id"],
+                           "approval_no": row["business_id"], "approval_identity_status": "explicit"}
+        responses = {"/api/integrations/erp/operating-expenses": {"items": [current_cashier], "end": True},
+                     "/api/integrations/erp/resolve-applicant-companies": {"items": [resolution]}}
+        with patch.dict(frappe.conf, operating_expense_source_mode="oa_cashier"), patch.object(service, "_oa_connection", return_value=None), patch.object(oa, "read_page", return_value=([row], None)), patch.object(service, "_request", side_effect=lambda path, *a, **k: responses[path]):
+            conflicts = ({"corp_id": "old-corp"}, {"process_instance_id": "old-instance"}, {"approval_no": "old-approval"},
+                         {"corp_id": "old-corp", "process_instance_id": "old-instance", "approval_no": "old-approval"},
+                         {"process_instance_id": row["process_instance_id"], "approval_no": "old-approval"}, {"identity_conflict": True})
+            for evidence in conflicts:
+                with self.subTest(cached_evidence=evidence):
+                    service._upsert({**legacy, **evidence}, maps)
+                    source_before = frappe.get_doc(service.SOURCE, "legacy-root").as_dict()
+                    with self.assertRaisesRegex(frappe.ValidationError, "旧出纳来源身份冲突"):
+                        service._source_page({"limit": 100})
+                    self.assertEqual(frappe.get_doc(service.SOURCE, "legacy-root").as_dict(), source_before)
+                    self.assertEqual(frappe.get_doc(service.MAPPING, "legacy-root").as_dict(), mapping_before)
+                    self.assertEqual(frappe.get_doc(service.EVENT, preview["event_key"]).as_dict(), event_before)
+                    self.assertEqual(frappe.get_doc("Journal Entry", draft["journal_entry"]).as_dict(), journal_before)
+            for evidence in ({}, {"corp_id": row["corp_id"], "process_instance_id": row["process_instance_id"], "approval_no": row["business_id"], "approval_identity_status": "explicit"}):
+                with self.subTest(compatible_evidence=evidence):
+                    service._upsert({**legacy, **evidence}, maps)
+                    self.assertEqual(service._source_page({"limit": 100})["items"][0]["source_id"], "legacy-root")
+            service._upsert(legacy, maps)
+            responses["/api/integrations/erp/operating-expenses"]["items"] = [deepcopy(legacy)]
+            self.assertEqual(service._source_page({"limit": 100})["items"][0]["source_id"], oa.application_id(row))
+            self.assertNotIn("oa_identity", json.loads(frappe.get_doc(service.SOURCE, "legacy-root").source_json))
+            self.assertEqual(frappe.get_doc(service.MAPPING, "legacy-root").as_dict(), mapping_before)
+            self.assertEqual(frappe.get_doc(service.EVENT, preview["event_key"]).as_dict(), event_before)
+            self.assertEqual(frappe.get_doc("Journal Entry", draft["journal_entry"]).as_dict(), journal_before)
+
+    def test_oa_cashier_supplement_keeps_existing_expense_draft_valid(self):
+        from copy import deepcopy
+        from deeplinkerp_branding.services import operating_oa_source as oa
+        from tests.test_operating_oa_source import approval
+        service = self._sync()
+        row = approval()
+        cashier = json.loads(frappe.get_doc(service.SOURCE, "1001").source_json)
+        cashier["process_instance_id"] = row["process_instance_id"]
+        cashier["payment_evidence_status"] = "recorded"
+        cashier["approvals"]["raw"]["finance_review"] = "待付款"
+        resolution = {"user_id": "u1", "employee_name": "Alice", "status": "matched", "assigned_department": "QA Operating China"}
+        item = oa.merge_application(row, [cashier], resolution)
+        item["source_id"] = "1001"
+        service._upsert(item, service._maps(service._settings()))
+        responses = {"/api/integrations/erp/operating-expenses": {"items": [cashier], "end": True},
+                     "/api/integrations/erp/resolve-applicant-companies": {"items": [resolution]}}
+        with patch.dict(frappe.conf, operating_expense_source_mode="oa_cashier"), patch.object(service, "_oa_connection", return_value=None), patch.object(oa, "read_page", return_value=([row], None)), patch.object(service, "_request", side_effect=lambda path, *a, **k: responses[path]):
+            service.save_mapping("1001", self._mapping(), service._fresh(service._source("1001"))["version"])
+            before = service.preview_voucher("1001")
+            draft = service.create_voucher_draft("1001", before["fingerprint"])
+            cashier["approvals"]["raw"]["finance_review"] = "已付款"
+            payment = deepcopy(cashier["payments"][0]); payment.update(source_id="2009", amount="10", payment_date="2026-10-03")
+            cashier["payments"].append(payment)
+            cashier.update(paid_amount="60", pending_amount="40")
+            current = service._source_page({"limit": 100})["items"][0]
+            service._upsert(current, service._maps(service._settings()))
+            self.assertNotIn("财务确认后的来源事实已变化", frappe.get_doc(service.SOURCE, "1001").issues)
+            self.assertEqual(service.preview_voucher("1001")["fingerprint"], before["fingerprint"])
+            existing = service.create_voucher_draft("1001", before["fingerprint"])
+            self.assertTrue(existing["existing"])
+            self.assertEqual(existing["journal_entry"], draft["journal_entry"])
+            journal = frappe.get_doc("Journal Entry", draft["journal_entry"])
+            service.validate_operating_journal(journal)
+            self.assertEqual(journal.docstatus, 0)
+
+    def test_blocked_requests_remain_visible_but_do_not_enter_payable_totals(self):
+        service = self._sync()
+        baseline = service.get_operating_expenses()["currency_totals"]["CNY"]["pending_amount"]
+        item = json.loads(frappe.get_doc(service.SOURCE, "1001").source_json)
+        item.update(source_id="blocked-original-test", source_system="dingtalk-oa", amount="500", paid_amount="0", pending_amount="500",
+                    approvals={"eligibility": "blocked", "raw": {"status": "RUNNING", "result": "agree"}})
+        service._upsert(item, {item["source_company"]: "QA Operating China"})
+        result = service.get_operating_expenses()
+        self.assertEqual(result["total_count"], 131)
+        self.assertEqual(result["currency_totals"]["CNY"]["pending_amount"], baseline)
+
     def test_cache_and_mapping_cannot_be_faked_through_native_documents(self):
         self.assertTrue(frappe.db.exists("DocType", "Operating Expense Source"), "Source model is missing")
         with self.assertRaises(frappe.PermissionError):
@@ -29,6 +237,36 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         from deeplinkerp_branding.services import operating_expenses as service
         self.assertFalse(service.get_sync_settings()["enabled"])
         self.assertNotIn("api_token", service.get_sync_settings())
+
+    def test_original_approval_number_is_projected_without_raw_json_or_identity_change(self):
+        service = self._sync()
+        item = json.loads(frappe.get_doc(service.SOURCE, "1001").source_json)
+        item["approval_no"] = "20260101-readable"
+        service._upsert(item, {item["source_company"]: "QA Operating China"})
+        row = next(row for row in service.get_operating_expenses(page_length=500)["rows"] if row["source_id"] == "1001")
+        self.assertEqual(row["approval_no"], "20260101-readable")
+        self.assertNotIn("source_json", row)
+
+    def test_removed_oa_application_stays_auditable_but_not_payable(self):
+        from deeplinkerp_branding.services import operating_oa_source as oa
+        from tests.test_operating_oa_source import approval
+        service = self._sync()
+        item = oa.merge_application(approval(), [], {"status": "matched", "assigned_department": "QA Operating China"})
+        item.update(paid_amount="0", pending_amount="100", source_status="未付款")
+        service._upsert(item, service._maps(service._settings()))
+        class Connection:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def cursor(self): return self
+            def execute(self, *args): pass
+            def fetchall(self): return []
+            def _connection(self): return self
+        with patch.object(service, "_oa_connection", return_value=Connection()):
+            self.assertEqual(service._reconcile_oa_cache("2026-10-06T00:00:00Z", service._maps(service._settings())), 1)
+            self.assertEqual(service._reconcile_oa_cache("2026-10-06T00:00:00Z", service._maps(service._settings())), 0)
+        doc = frappe.get_doc(service.SOURCE, item["source_id"])
+        self.assertEqual(doc.approval_state, "blocked")
+        self.assertIsNone(doc.pending_amount)
 
     def _sync(self):
         from deeplinkerp_branding.services import operating_expenses as service
@@ -199,11 +437,15 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         original["opaque_private_party"] = "must-not-leak"
         original["payments"][0]["opaque_private_party"] = "must-not-leak"
         original["approvals"]["raw"]["opaque_private_party"] = "must-not-leak"
+        original["approvals"]["raw"].update(cashier_general_manager_approval="同意付款", cashier_finance_review="已付款", cashier_opaque_private_party="must-not-leak")
         service._upsert(original, service._maps(service._settings()))
         detail = service.get_operating_expense_detail("1001")["source"]
         self.assertNotIn("opaque_private_party", detail)
         self.assertNotIn("opaque_private_party", detail["payments"][0])
         self.assertNotIn("opaque_private_party", detail["approvals"]["raw"])
+        self.assertNotIn("cashier_opaque_private_party", detail["approvals"]["raw"])
+        self.assertEqual(detail["approvals"]["raw"].get("cashier_general_manager_approval"), "同意付款")
+        self.assertEqual(detail["approvals"]["raw"].get("cashier_finance_review"), "已付款")
         self.assertEqual(detail["version"], original["version"])
         for field in sorted(service.SOURCE_FIELDS):
             frappe.db.set_value("DocField", {"parent": service.SOURCE, "fieldname": field}, "permlevel", 1)
@@ -334,6 +576,38 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         copied["attachments"][0]["url"] = "https://evil.invalid/proof"
         with patch.object(service, "_request", return_value={"items": [copied], "end": True}), self.assertRaises(ValueError):
             service.download_operating_expense_attachment("1001", "attachment:qa")
+
+    def test_oa_archive_checks_current_hash_again_before_download(self):
+        from types import SimpleNamespace
+        from deeplinkerp_branding.services import operating_oa_source as oa
+        service = self._sync()
+        item = json.loads(frappe.get_doc(service.SOURCE, "1001").source_json)
+        item["oa_identity"] = {"corp_id": "corp", "process_instance_id": "i"}
+        manifest = {**item["oa_identity"], "file_id": "f", "file_name": "invoice.pdf", "archive_status": "archived", "sha256": "a" * 64, "actual_size": 20}
+        item["attachments"] = oa.archive_attachments(item["oa_identity"], [manifest])
+        service._upsert(item, service._maps(service._settings()))
+        with patch.object(service, "_fresh", return_value=item), patch.object(service, "_oa_connection", return_value=SimpleNamespace(get_attachment_manifest=lambda *a: {**manifest, "sha256": "b" * 64})):
+            with self.assertRaisesRegex(frappe.ValidationError, "附件已变化"):
+                service.download_operating_expense_attachment("1001", item["attachments"][0]["source_id"])
+
+        for invalid in ({"sha256": None}, {"sha256": "not-a-hash"}, {"actual_size": None}, {"actual_size": -1}):
+            invalid_manifest = {**manifest, **invalid}
+            item["attachments"] = oa.archive_attachments(item["oa_identity"], [invalid_manifest])
+            service._upsert(item, service._maps(service._settings()))
+            with patch.object(service, "_fresh", return_value=item), patch.object(service, "_oa_connection", return_value=SimpleNamespace(get_attachment_manifest=lambda *a: invalid_manifest)), patch("overseas_costing.services.import_service._get_minio_archive_client", side_effect=AssertionError("Invalid archive must not download")):
+                with self.assertRaisesRegex(frappe.ValidationError, "归档校验信息"):
+                    service.download_operating_expense_attachment("1001", item["attachments"][0]["source_id"])
+        import hashlib
+        content = b"QA archived proof"
+        manifest.update(sha256=hashlib.sha256(content).hexdigest(), actual_size=len(content))
+        item["attachments"] = oa.archive_attachments(item["oa_identity"], [manifest])
+        service._upsert(item, service._maps(service._settings()))
+        with patch.object(service, "_fresh", return_value=item), patch.object(service, "_oa_connection", return_value=SimpleNamespace(get_attachment_manifest=lambda *a: manifest)), patch("overseas_costing.services.import_service._get_minio_archive_client", return_value=SimpleNamespace(download=lambda m: (content, "application/pdf"))):
+            service.download_operating_expense_attachment("1001", item["attachments"][0]["source_id"])
+            self.assertEqual(frappe.response["filecontent"], content)
+        with patch.object(service, "_fresh", return_value=item), patch.object(service, "_oa_connection", return_value=SimpleNamespace(get_attachment_manifest=lambda *a: manifest)), patch("overseas_costing.services.import_service._get_minio_archive_client", return_value=SimpleNamespace(download=lambda m: (b"tampered proof", "application/pdf"))):
+            with self.assertRaisesRegex(frappe.ValidationError, "校验不一致"):
+                service.download_operating_expense_attachment("1001", item["attachments"][0]["source_id"])
 
     def test_native_source_field_permissions_deny_detail_and_financial_actions(self):
         service = self._sync()

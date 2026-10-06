@@ -432,8 +432,22 @@ def _joint_plan(before, contract, *, when, seed):
 	assert not frappe.db.sql("select name from `tabDocField` where parent='Journal Entry' and fieldname in (" + ",".join(["%s"] * len(CUSTOM_FIELD_ORDER)) + ")", CUSTOM_FIELD_ORDER), "Operating fields conflict with standard Journal Entry DocFields"
 	expected = copy.deepcopy(scope)
 	new = []
+	page_title_updates = []
 	for name, definition in contract["definitions"].items():
-		matching = _definition_matches(scope, name, definition)
+		page = next((row for row in scope["Page"] if row["name"] == name), None) if name == "operating-expenses" else None
+		upgrade_title = page is not None and page.get("title") == "运营费用" and definition["source"].get("doctype") == "Page" and definition["source"].get("name") == name and definition["source"].get("title") == "运营支出" and definition["native"]["Page"][0].get("title") == "运营支出"
+		matching_definition = definition
+		if upgrade_title:
+			# Only this approved same-route title transition is compatible. Reuse
+			# the ordinary strict matcher for every other native parent/child field.
+			matching_definition = copy.deepcopy(definition)
+			matching_definition["source"]["title"] = "运营费用"
+			matching_definition["native"]["Page"][0]["title"] = "运营费用"
+		matching = _definition_matches(scope, name, matching_definition)
+		if upgrade_title:
+			assert matching
+			expected["Page"] = [dict(row, title="运营支出") if row["name"] == name else row for row in expected["Page"]]
+			page_title_updates.append({"name": name, "field": "title", "before": "运营费用", "after": "运营支出"})
 		if name in JOINT_MODELS:
 			actual = before["models"][name]["schema"]
 			assert actual == contract["model_schemas"][name] if matching else actual is None, "Conflicting/orphan model SQL table: " + name
@@ -470,7 +484,7 @@ def _joint_plan(before, contract, *, when, seed):
 			meta.fields.append(frappe._dict(field))
 	for query in _native_schema_sql("Journal Entry", meta):
 		_validate_je_ddl(query, {key for key in contract["custom_fields"] if key not in columns})
-	return {"scope": expected, "new_definitions": new}
+	return {"scope": expected, "new_definitions": new, "page_title_updates": page_title_updates}
 
 
 def _je_column(count, *, position=None):

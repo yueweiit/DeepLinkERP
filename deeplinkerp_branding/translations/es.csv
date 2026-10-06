@@ -265,6 +265,18 @@ Excel 共享文本索引不符合预期。,El índice de texto compartido de Exc
 付款已提交，附件读取失败。请打开付款单核对。,Pago enviado; no se pudieron leer los archivos. Abre el pago para revisarlo.
 采购核销引用,Referencias de compra
 运营费用,Gastos operativos
+运营支出,Gastos operativos
+运营支出办理,Gestión de gastos operativos
+运营支出同步设置,Configuración de sincronización de gastos operativos
+付款待核对,Pago pendiente de verificación
+出纳原付款状态,Estado de pago original de tesorería
+出纳审批状态原文,Estado de aprobación original de tesorería
+出纳审批结果原文,Resultado de aprobación original de tesorería
+出纳负责人确认,Confirmación del responsable en tesorería
+出纳财务审批,Aprobación de finanzas en tesorería
+出纳财务主管审批,Aprobación del supervisor financiero en tesorería
+出纳总经理审批,Aprobación del director general en tesorería
+没有符合条件的运营支出来源,No hay gastos operativos que coincidan con los filtros
 运营费用办理,Gestión de gastos operativos
 运营费用同步设置,Configuración de sincronización de gastos operativos
 申请日期,Fecha de solicitud

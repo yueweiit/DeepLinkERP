@@ -37,7 +37,7 @@ def identifier(value):
 
 
 def attachment_path(value):
-    if not isinstance(value, str) or not re.fullmatch(r"/api/integrations/erp/(attachments|payment-vouchers)/[1-9][0-9]{0,18}", value):
+    if not isinstance(value, str) or not re.fullmatch(r"(?:/api/integrations/erp/(attachments|payment-vouchers)/[1-9][0-9]{0,18}|/oa-archive/[0-9a-f]{64})", value):
         raise ValueError("附件下载路径无效")
     return value
 
@@ -51,7 +51,7 @@ def currency(value):
 def validate_source(item):
     if not isinstance(item, dict) or len(json.dumps(item).encode()) > MAX_JSON_BYTES:
         raise ValueError("来源数据过大或格式无效")
-    if item.get("source_system") != SOURCE_SYSTEM or item.get("application_type") not in {"payment", "reimbursement", "unclassified"}:
+    if item.get("source_system") not in {SOURCE_SYSTEM, "dingtalk-oa"} or item.get("application_type") not in {"payment", "reimbursement", "unclassified"}:
         raise ValueError("来源协议无效")
     identifier(item.get("source_id"))
     identifier(item.get("version"))
@@ -89,6 +89,10 @@ def attachment_facts(rows):
 
 def expense_facts(item):
     facts = {key: item.get(key) for key in ("source_system", "source_id", "source_company", "application_type", "application_type_raw", "applicant", "payee_name", "summary", "request_date", "currency", "original_source_amount", "original_source_currency", "storage_precision_warning", "source_conflict", "currency_conflict", "approvals")}
+    if item.get("source_system") == "dingtalk-oa" and isinstance(facts["approvals"], dict):
+        approvals = facts["approvals"]
+        if isinstance(approvals.get("raw"), dict):
+            facts["approvals"] = {**approvals, "raw": {key: value for key, value in approvals["raw"].items() if not key.startswith("cashier_")}}
     facts["amount"] = format(money(item["amount"]).normalize(), "f")
     facts["attachments"] = attachment_facts([row for row in item.get("attachments", []) if not row.get("payment_source_id")])
     return facts

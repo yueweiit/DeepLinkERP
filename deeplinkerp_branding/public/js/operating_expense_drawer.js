@@ -482,7 +482,7 @@
 		return `<section class="dlp-operating-section"><div class="dlp-operating-facts">${fact(
 			"申请编号",
 			s.source_id
-		)}${fact("原始审批编号", s.approval_no)}${fact("原始钉钉实例编号", s.dingding_id)}${fact("原始来源请求编号", s.source_request_id)}${fact("原始申请类型", s.application_type_raw)}${fact("来源版本", s.version)}${fact("法律公司", detail.company)}${fact("来源公司", s.source_company)}${fact("来源归档表", s.source_sheet)}${fact("申请日期", s.request_date)}${fact("收款人", s.payee_name)}${fact("申请人", s.applicant)}${fact("当前来源金额", `${money(s.amount)} ${s.currency || t("币种未明确")}`)}${fact("原始批准金额", s.original_source_amount == null ? "—" : `${money(s.original_source_amount)} ${s.original_source_currency || t("币种未明确")}`)}${fact("出纳已付", `${money(s.paid_amount)} ${s.currency || ""}`)}${fact("出纳待付", `${money(s.pending_amount)} ${s.currency || ""}`)}</div><p>${display(s.summary)}</p><p><a href="https://payment.yueweiportal.com/" target="_blank" rel="noopener noreferrer">${esc(t("请款网站"))}</a>${original ? ` · <a href="${esc(original)}" target="_blank" rel="noopener noreferrer">${esc(t("钉钉审批来源"))}</a>` : ""}</p></section>
+		)}${fact("原始审批编号", s.approval_no)}${fact("原始钉钉实例编号", s.dingding_id)}${fact("原始来源请求编号", s.source_request_id)}${fact("原始申请类型", s.application_type_raw)}${fact("来源版本", s.version)}${fact("法律公司", detail.company)}${fact("来源公司", s.source_company)}${fact("来源归档表", s.source_sheet)}${fact("申请日期", s.request_date)}${fact("收款人", s.payee_name)}${fact("申请人", s.applicant)}${fact("当前来源金额", `${money(s.amount)} ${s.currency || t("币种未明确")}`)}${fact("原始批准金额", s.original_source_amount == null ? "—" : `${money(s.original_source_amount)} ${s.original_source_currency || t("币种未明确")}`)}${fact("出纳已付", `${money(s.paid_amount)} ${s.currency || ""}`)}${fact("出纳待付", `${money(s.pending_amount)} ${s.currency || ""}`)}${fact("付款状态", s.source_status)}${fact("出纳原付款状态", s.cashier_reported_payment_status)}</div><p>${display(s.summary)}</p><p><a href="https://payment.yueweiportal.com/" target="_blank" rel="noopener noreferrer">${esc(t("请款网站"))}</a>${original ? ` · <a href="${esc(original)}" target="_blank" rel="noopener noreferrer">${esc(t("钉钉审批来源"))}</a>` : ""}</p></section>
 		<section class="dlp-operating-section"><strong>${esc(
 			t("来源审批与待处理问题")
 		)}</strong><p class="${s.approvals?.eligibility === "eligible" ? "text-success" : "text-warning"}">${esc(root.DeepLinkERPOperatingExpenses.approvalLabel(s.approvals?.eligibility))}</p><div class="dlp-operating-facts">${Object.entries(
@@ -497,6 +497,12 @@
 						finance_review: "财务复核",
 						finance_manager_approval: "财务经理审批",
 						general_manager_approval: "总经理审批",
+						cashier_status: "出纳审批状态原文",
+						cashier_result: "出纳审批结果原文",
+						cashier_owner_confirmation: "出纳负责人确认",
+						cashier_finance_review: "出纳财务审批",
+						cashier_finance_manager_approval: "出纳财务主管审批",
+						cashier_general_manager_approval: "出纳总经理审批",
 					}[key] || key,
 					value
 				)
@@ -801,7 +807,7 @@
 	}
 	async function open(sourceId, onRefresh = () => {}) {
 		const shared = root.DeepLinkERPPurchasePayments,
-			drawer = shared.createDrawer(t("运营费用办理"), true);
+			drawer = shared.createDrawer(t("运营支出办理"), true);
 		if (!drawer) return;
 		configureDrawer(drawer);
 		let w,
@@ -1489,7 +1495,7 @@
 	}
 	async function openSettings(onRefresh = () => {}) {
 		if (!isManager()) throw new Error(t("仅系统管理员可管理同步"));
-		const drawer = root.DeepLinkERPPurchasePayments.createDrawer(t("运营费用同步设置"), true);
+		const drawer = root.DeepLinkERPPurchasePayments.createDrawer(t("运营支出同步设置"), true);
 		if (!drawer) return;
 		configureDrawer(drawer);
 		let w,

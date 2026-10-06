@@ -7,6 +7,11 @@ const create = fs.existsSync(require("node:path").join(__dirname, listPath))
 	: () => ({});
 const api = create({});
 
+test("original application number is readable and payment uncertainty is filterable", () => {
+	assert.equal(api.filters({source_status: "付款待核对"}).source_status, "付款待核对");
+	assert.match(api.renderValue("source_id", {source_id:"oa:technical", approval_no:"20260101001"}), /20260101001/);
+});
+
 test("operating filters retain only the exact backend predicates without type inference", () => {
 	assert.equal(typeof api.filters, "function");
 	assert.deepEqual(
@@ -126,14 +131,14 @@ test("full-filter Excel snapshots filters, sort and ordered supported columns be
 	await pending;
 	assert.deepEqual(JSON.parse(args.filters), { company: "C", keyword: "old" });
 	assert.equal(args.order_by, "source_id asc");
-	assert.deepEqual(JSON.parse(args.columns), ["summary", "amount", "currency", "source_id"]);
+	assert.deepEqual(JSON.parse(args.columns), ["summary", "amount", "currency", "approval_no", "source_id"]);
 	assert.equal(args.start, undefined);
 	assert.equal(args.page_length, undefined);
 	assert.equal(
 		method,
 		"deeplinkerp_branding.services.operating_expenses.export_operating_expenses"
 	);
-	assert.equal(downloaded, "运营费用");
+	assert.equal(downloaded, "运营支出");
 });
 test("list opens source drawer directly and preserves raw backend finance status", () => {
 	assert.equal(typeof api.renderValue, "function");
@@ -166,7 +171,7 @@ test("operating Page reuses the shared readonly engine with scalar permission al
 	assert.equal(config.pageFieldMap.actions, "source_id");
 	assert.equal(
 		config.controls.find((c) => c.fieldname === "source_status").options,
-		"\n未付款\n部分付款\n已付款"
+		"\n未付款\n部分付款\n已付款\n付款待核对"
 	);
 	assert.equal(config.controls.find((c) => c.fieldname === "company").fieldtype, "Link");
 	assert.ok(config.controls.every((c) => c.permission_field));

@@ -1,15 +1,19 @@
 """Add one operating-expense route to existing finance navigation only."""
 
 import frappe
+from urllib.parse import urlsplit
 
 from deeplinkerp_branding.procurement_navigation import reconcile_links, reconcile_workspace
 
-ENTRIES = (("运营费用", "Page", "operating-expenses", "receipt-text"),)
+ENTRIES = (("运营支出", "Page", "operating-expenses", "receipt-text"),)
 TARGETS = {"operating-expenses"}
 
 
 def _anchor(doc, table):
 	rows = list(doc.get(table) or [])
+	for index, row in enumerate(rows):
+		if row.get("link_to") == "Account" or urlsplit(row.get("url") or "").path.rstrip("/") in {"/desk/chart-of-accounts", "/app/chart-of-accounts", "/desk/account/view/tree", "/app/account/view/tree"}:
+			return index + 1
 	return next(
 		(
 			index

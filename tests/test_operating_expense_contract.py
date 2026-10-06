@@ -38,6 +38,38 @@ class OperatingExpenseContractTest(unittest.TestCase):
         copied["evidence_status"] = "conflict"
         self.assertNotEqual(contract.payment_facts(payment), contract.payment_facts(copied))
 
+    def test_oa_cashier_updates_preserve_expense_confirmation_and_event(self):
+        before = source()
+        before["source_system"] = "dingtalk-oa"
+        before["approvals"]["raw"]["cashier_finance_review"] = "待付款"
+        mapping = {"party": "Supplier", "payments": {"p1": {"bank_amount": "20"}, "p2": {"bank_amount": "30"}}}
+        after = copy.deepcopy(before)
+        after["approvals"]["raw"].update(cashier_finance_review="已付款", cashier_general_manager_approval="同意付款")
+        after["payments"].append({"source_id": "p2", "amount": "30", "currency": "CNY", "payment_date": "2026-10-03", "evidence_status": "recorded"})
+        self.assertEqual(contract.expense_facts(before), contract.expense_facts(after))
+        self.assertEqual(contract.event_fingerprint(before, mapping), contract.event_fingerprint(after, mapping))
+        self.assertEqual(contract.event_fingerprint(before, mapping, "p1"), contract.event_fingerprint(after, mapping, "p1"))
+        after["payments"][0]["bank_reference"] = "new-bank-proof"
+        self.assertEqual(contract.expense_facts(before), contract.expense_facts(after))
+        self.assertNotEqual(contract.event_fingerprint(before, mapping, "p1"), contract.event_fingerprint(after, mapping, "p1"))
+        self.assertEqual(before["approvals"]["raw"]["cashier_finance_review"], "待付款")
+        self.assertEqual(after["approvals"]["raw"]["cashier_finance_review"], "已付款")
+
+    def test_original_oa_changes_and_legacy_cashier_approvals_still_invalidate_expense(self):
+        before = source()
+        before["source_system"] = "dingtalk-oa"
+        for field, value in (("amount", "101"), ("source_company", "legal-2"), ("approvals", {"eligibility": "blocked", "raw": {"status": "COMPLETED", "result": "refuse"}}),
+                             ("approvals", {"eligibility": "eligible", "raw": {"status": "COMPLETED", "result": "agree", "finance_review": "changed-original"}})):
+            with self.subTest(field=field, value=value):
+                after = {**before, field: value}
+                self.assertNotEqual(contract.expense_facts(before), contract.expense_facts(after))
+                self.assertNotEqual(contract.event_fingerprint(before, {}), contract.event_fingerprint(after, {}))
+        legacy = source()
+        after = copy.deepcopy(legacy)
+        after["approvals"]["raw"]["cashier_finance_review"] = "changed-legacy"
+        self.assertNotEqual(contract.expense_facts(legacy), contract.expense_facts(after))
+        self.assertNotEqual(contract.event_fingerprint(legacy, {}), contract.event_fingerprint(after, {}))
+
     def test_money_rejects_nonfinite_missing_float_and_excess_precision(self):
         for value in (None, "", "NaN", "Infinity", 0.1, "0.001", "1e100"):
             with self.subTest(value=value), self.assertRaises(ValueError):
@@ -61,6 +93,11 @@ class OperatingExpenseContractTest(unittest.TestCase):
         for path in ("https://evil.test/a", "//127.0.0.1/a", "/api/integrations/erp/attachments/12?token=x", "/api/integrations/erp/attachments/../12"):
             with self.subTest(path=path), self.assertRaises(ValueError):
                 contract.attachment_path(path)
+
+    def test_original_oa_contract_and_scoped_archive_token_are_supported(self):
+        item = source(); item["source_system"] = "dingtalk-oa"
+        self.assertEqual(contract.validate_source(item)["source_system"], "dingtalk-oa")
+        self.assertEqual(contract.attachment_path("/oa-archive/" + "a" * 64), "/oa-archive/" + "a" * 64)
 
     def test_financial_fingerprint_normalizes_decimal_formatting(self):
         before = source()

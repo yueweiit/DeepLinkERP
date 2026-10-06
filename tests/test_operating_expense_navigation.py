@@ -16,6 +16,20 @@ MODULE = ROOT / "deeplinkerp_branding/operating_navigation.py"
 
 
 class OperatingNavigationTest(unittest.TestCase):
+	def test_renamed_entry_moves_immediately_after_account_url_without_duplicates(self):
+		self.check_account_anchor("/desk/chart-of-accounts")
+		self.check_account_anchor("/desk/account/view/tree?sidebar=China%20Finance")
+	def check_account_anchor(self, account_url):
+		doc = Doc(items=[Row(name="account", link_type="URL", url=account_url, label="科目表"),
+			Row(name="daily", type="Section Break", label="日常工作"),
+			Row(name="old", link_to="operating-expenses", label="运营费用"),
+			Row(name="mine", link_to="operating-expenses", label="自定义", filters="mine")])
+		module = self.load_module(types.ModuleType("frappe"))
+		navigation.reconcile_links(doc, "items", entries=module.ENTRIES, targets=module.TARGETS, anchor=module._anchor(doc, "items"))
+		self.assertEqual([r.name for r in doc["items"]], ["account", "old", "daily", "mine"])
+		self.assertEqual(doc["items"][1].label, "运营支出")
+		self.assertEqual(doc["items"][1].child, 0)
+		self.assertFalse(navigation.reconcile_links(doc, "items", entries=module.ENTRIES, targets=module.TARGETS, anchor=module._anchor(doc, "items")))
 	def test_shared_reconcile_accepts_narrow_entries_without_reordering_custom_links(self):
 		doc = Doc(
 			items=[

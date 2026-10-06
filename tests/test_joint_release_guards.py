@@ -97,6 +97,76 @@ class JointReleaseGuardTests(unittest.TestCase):
 				self.assertTrue(module._definition_matches(scope, "operating-expenses", definition))
 			self.assertEqual(scope, before)
 
+	def page_title_fixture(self, module, *, route=None, title="运营费用"):
+		page = {"name": "operating-expenses", "page_name": route, "title": title, "module": "Deeplinkerp Branding", "standard": "Yes", "idx": 0, "creation": "original", "modified": "original", "owner": "original-user", "modified_by": "original-user"}
+		role = {"name": "original-role-id", "parent": page["name"], "parenttype": "Page", "parentfield": "roles", "role": "System Manager", "idx": 1, "creation": "original", "modified": "original"}
+		before = {"metadata": {"scope": {"Page": [page], "Has Role": [role], "Custom Field": []}}, "models": {}, "operating_singles": [], "je": {"schema": {"columns": {}, "indexes": {}}}}
+		definition = {"source": {"doctype": "Page", "name": page["name"], "title": "运营支出"}, "native": {"Page": [self.module().semantic_row(dict(page, page_name=None, title="运营支出"))], "Has Role": [self.module().semantic_row(role)]}}
+		contract = {"definitions": {page["name"]: definition}, "custom_fields": {}, "native_metadata_schemas": {"DocField": {"columns": {}}}}
+		return before, contract
+
+	def page_title_plan(self, module, before, contract):
+		fake = types.SimpleNamespace(db=types.SimpleNamespace(sql=lambda *a, **kw: [], exists=lambda *a: True), get_meta=lambda *a, **kw: types.SimpleNamespace(fields=[]))
+		with patch.dict(sys.modules, {"frappe": fake, "frappe.model.meta": types.SimpleNamespace(Meta=object), "audit_unified_purchase": types.SimpleNamespace(table_schema=lambda *a: None)}), patch.object(module, "_desired_navigation", lambda scope, **kw: scope), patch.object(module, "_native_schema_sql", lambda *a: []):
+			return module._joint_plan(before, contract, when="frozen-now", seed="frozen")
+
+	def test_joint_plan_records_only_approved_operating_title_upgrade_and_preserves_raw_parent_children(self):
+		module = self.metadata_module()
+		for route in (None, "operating-expenses"):
+			with self.subTest(route=route):
+				before, contract = self.page_title_fixture(module, route=route)
+				original, frozen = copy.deepcopy(before), copy.deepcopy(contract)
+				with self.assertRaisesRegex(AssertionError, "Conflicting full native definition"):
+					module._definition_matches(before["metadata"]["scope"], "operating-expenses", contract["definitions"]["operating-expenses"])
+				plan = self.page_title_plan(module, before, contract)
+				wanted = copy.deepcopy(before["metadata"]["scope"])
+				wanted["Page"][0]["title"] = "运营支出"
+				self.assertEqual(plan["scope"], wanted)
+				self.assertEqual(plan["new_definitions"], [])
+				self.assertEqual(plan["page_title_updates"], [{"name": "operating-expenses", "field": "title", "before": "运营费用", "after": "运营支出"}])
+				self.assertEqual(before, original)
+				self.assertEqual(contract, frozen)
+
+	def test_title_upgrade_rejects_other_titles_routes_parent_fields_children_and_pages(self):
+		module = self.metadata_module()
+		for conflict in ("other-title", "wrong-route", "module", "standard", "extra-parent-field", "role", "child-parentfield", "child-idx", "extra-child", "other-page", "wrong-source-title"):
+			with self.subTest(conflict=conflict):
+				before, contract = self.page_title_fixture(module)
+				page, role = before["metadata"]["scope"]["Page"][0], before["metadata"]["scope"]["Has Role"][0]
+				if conflict == "other-title":
+					page["title"] = "自定义标题"
+				elif conflict == "wrong-route":
+					page["page_name"] = "other-page"
+				elif conflict in {"module", "standard"}:
+					page[conflict] = "unapproved"
+				elif conflict == "extra-parent-field":
+					page["show_title"] = 1
+				elif conflict in {"role", "child-parentfield", "child-idx"}:
+					role[{"role": "role", "child-parentfield": "parentfield", "child-idx": "idx"}[conflict]] = "unapproved"
+				elif conflict == "extra-child":
+					before["metadata"]["scope"]["Has Role"].append(dict(role, name="extra", idx=2))
+				elif conflict == "wrong-source-title":
+					contract["definitions"]["operating-expenses"]["source"]["title"] = "其他新标题"
+					contract["definitions"]["operating-expenses"]["native"]["Page"][0]["title"] = "其他新标题"
+				else:
+					page["name"] = role["parent"] = "purchase-payables"
+					definition = contract["definitions"].pop("operating-expenses")
+					definition["source"]["name"] = "purchase-payables"
+					definition["native"]["Has Role"][0]["parent"] = "purchase-payables"
+					contract["definitions"]["purchase-payables"] = definition
+				original = copy.deepcopy(before)
+				with self.assertRaises(AssertionError):
+					self.page_title_plan(module, before, contract)
+				self.assertEqual(before, original)
+
+	def test_exact_new_title_is_noop_and_never_records_an_upgrade(self):
+		module = self.metadata_module()
+		before, contract = self.page_title_fixture(module, route="operating-expenses", title="运营支出")
+		plan = self.page_title_plan(module, before, contract)
+		self.assertEqual(plan["scope"], before["metadata"]["scope"])
+		self.assertEqual(plan["new_definitions"], [])
+		self.assertEqual(plan.get("page_title_updates"), [])
+
 	def test_existing_exact_scheduled_method_keeps_native_generated_row_identity(self):
 		module = self.metadata_module()
 		row = {"name": "native-hash-id", "method": module.OPERATING_METHOD, "frequency": "Cron", "cron_format": "*/15 * * * *", "stopped": 0, "creation": "original"}

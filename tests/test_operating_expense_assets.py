@@ -10,6 +10,10 @@ ROOT = Path(__file__).parents[1]
 
 
 class OperatingExpenseAssetsTest(unittest.TestCase):
+	def test_business_title_is_operating_expenses_without_route_rename(self):
+		values = json.loads((ROOT / "deeplinkerp_branding/deeplinkerp_branding/page/operating_expenses/operating_expenses.json").read_text())
+		self.assertEqual(values["title"], "运营支出")
+		self.assertEqual(values["name"], "operating-expenses")
 	def test_page_metadata_uses_only_existing_finance_roles(self):
 		page = (
 			ROOT / "deeplinkerp_branding/deeplinkerp_branding/page/operating_expenses/operating_expenses.json"
@@ -30,7 +34,7 @@ class OperatingExpenseAssetsTest(unittest.TestCase):
 		self.assertIn(provider, files)
 		self.assertLess(files.index(shell), files.index(drawer))
 		self.assertLess(files.index(drawer), files.index(provider))
-		self.assertIn(drawer + "?v=0.0.10", hooks.app_include_js)
+		self.assertIn(drawer + "?v=0.0.11", hooks.app_include_js)
 		self.assertNotIn("Operating Expense Source", hooks.doctype_list_js)
 		self.assertEqual(len([p for p in hooks.app_include_css if "operating_expenses.css" in p]), 1)
 

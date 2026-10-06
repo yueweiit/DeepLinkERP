@@ -24,6 +24,7 @@
 		["amount", "申请金额", 125],
 		["paid_amount", "出纳已付", 125],
 		["pending_amount", "出纳待付", 125],
+		["source_status", "付款状态", 120],
 		["approval_state", "来源审批", 125],
 		["finance_status", "财务状态", 135],
 		["actions", "操作", 85],
@@ -42,6 +43,7 @@
 	const exportFields = new Set([
 		"company",
 		"source_id",
+		"approval_no",
 		"effective_application_type",
 		"application_type_raw",
 		"applicant",
@@ -65,7 +67,7 @@
 				result[field] = String(values[field]);
 		for (const [field, allowed, label] of [
 			["application_type", ["payment", "reimbursement", "unclassified"], "申请类型"],
-			["source_status", ["未付款", "部分付款", "已付款"], "来源付款状态"],
+			["source_status", ["未付款", "部分付款", "已付款", "付款待核对"], "来源付款状态"],
 			["approval_state", ["eligible", "blocked"], "来源审批状态"],
 		]) {
 			if (result[field] && !allowed.includes(result[field]))
@@ -126,6 +128,7 @@
 			.join("<br>");
 	}
 	function renderValue(field, doc) {
+		if (field === "source_id") return `<span title="${esc(doc.source_id)}">${esc(doc.approval_no || doc.source_id || "—")}</span>`;
 		if (["amount", "paid_amount", "pending_amount"].includes(field)) return money(doc[field]);
 		if (field === "effective_application_type") return esc(typeLabel(doc[field]));
 		if (field === "approval_state")
@@ -149,6 +152,7 @@
 				...new Set([
 					...c.preferences.columns.filter((field) => exportFields.has(field)),
 					"currency",
+					"approval_no",
 					"source_id",
 				]),
 			]),
@@ -160,7 +164,7 @@
 		exporter.downloadWorkbook(
 			root,
 			await exporter.fetchNativeWorkbook(root, args, API + "export_operating_expenses"),
-			t("运营费用")
+			t("运营支出")
 		);
 	}
 	function fit(c, active = true) {
@@ -236,7 +240,7 @@
 			["company", "Link", "Company", "法律公司"],
 			["application_type", "Select", "\npayment\nreimbursement\nunclassified", "申请类型"],
 			["applicant", "Data", null, "申请人"],
-			["source_status", "Select", "\n未付款\n部分付款\n已付款", "来源付款状态"],
+			["source_status", "Select", "\n未付款\n部分付款\n已付款\n付款待核对", "来源付款状态"],
 			["approval_state", "Select", "\neligible\nblocked", "来源审批"],
 			["date_from", "Date", null, "申请开始日期"],
 			["date_to", "Date", null, "申请结束日期"],
@@ -280,7 +284,7 @@
 				onPayload: (c) => fit(c),
 			},
 			afterRender: (c) => fit(c),
-			emptyLabel: "没有符合条件的运营费用来源",
+			emptyLabel: "没有符合条件的运营支出来源",
 		});
 	}
 	const api = {
@@ -305,7 +309,7 @@
 	api.onPageLoad = (wrapper) => {
 		const page = root.frappe.ui.make_app_page({
 			parent: wrapper,
-			title: t("运营费用"),
+			title: t("运营支出"),
 			single_column: true,
 		});
 		const ready = root.frappe.model.with_doctype("Operating Expense Source").then(() => {

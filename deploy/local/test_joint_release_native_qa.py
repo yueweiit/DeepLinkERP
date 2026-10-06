@@ -118,6 +118,70 @@ class JointNativeRehearsal(unittest.TestCase):
 		self.assertEqual([row for row in after["metadata"]["scope"]["Page"] if row["name"] == "operating-expenses"], original_page)
 		self.restore()
 
+	def test_installed_page_title_upgrade_has_zero_ddl_strict_children_noop_and_exact_rollback(self):
+		from joint_release_guards import serialized
+
+		baseline, baseline_receipt = self.original, self.receipt
+		self.assertEqual(self.contract["definitions"]["operating-expenses"]["source"]["title"], "运营费用", "Use the immutable old package for the installation fixture")
+		installed = None
+		title_receipt = self.evidence / (self.run_prefix + "-page-title-upgrade.json")
+		try:
+			# Fixture only: establish the already-installed 41ba-style metadata.
+			# The actual title release below must perform no native DDL at all.
+			self.assertEqual(release.apply_joint_metadata(CANDIDATE_SHA, baseline_receipt)["ddl_boundaries"], 9)
+			installed = self.capture()
+			candidate = release.load_joint_contract()
+			# Exercise the exact new Page literal on the native DB while keeping
+			# the mounted old app/source map immutable; no source-sync invocation.
+			candidate["definitions"]["operating-expenses"]["source"]["title"] = "运营支出"
+			candidate["definitions"]["operating-expenses"]["native"]["Page"][0]["title"] = "运营支出"
+			with patch.object(release, "load_joint_contract", lambda: copy.deepcopy(candidate)), patch.object(frappe.db, "sql_ddl", side_effect=AssertionError("Title release must not execute DDL")):
+				# A real child definition conflict must stop before receipt/writes.
+				role = next(row for row in installed["metadata"]["scope"]["Has Role"] if row["parent"] == "operating-expenses")
+				frappe.db.sql("update `tabHas Role` set idx=idx+10 where name=%s", (role["name"],))
+				conflicted = self.capture()
+				conflict_receipt = self.evidence / (self.run_prefix + "-page-title-child-conflict.json")
+				with patch.object(frappe.db, "commit", side_effect=AssertionError("Conflicting title release attempted commit")), self.assertRaisesRegex(AssertionError, "Conflicting native child definitions"):
+					release.apply_joint_metadata(CANDIDATE_SHA, conflict_receipt)
+				self.assertFalse(conflict_receipt.exists())
+				self.assert_state_equal(self.capture(), conflicted)
+				frappe.db.rollback()
+				self.assert_state_equal(self.capture(), installed)
+
+				result = release.apply_joint_metadata(CANDIDATE_SHA, title_receipt)
+				self.assertEqual(result["ddl_boundaries"], 0)
+				after = self.capture()
+				wanted = copy.deepcopy(installed)
+				for row in wanted["metadata"]["scope"]["Page"]:
+					if row["name"] == "operating-expenses":
+						row["title"] = "运营支出"
+				self.assert_state_equal(after, wanted)
+				state = json.loads(title_receipt.read_bytes())
+				self.assertEqual(state["contract"]["metadata_plan"]["page_title_updates"], [{"name": "operating-expenses", "field": "title", "before": "运营费用", "after": "运营支出"}])
+				self.assertEqual([(step["kind"], step["status"]) for step in state["steps"]], [("metadata", "complete")])
+				first = title_receipt.read_bytes()
+				with patch.object(frappe.db, "commit", side_effect=AssertionError("Repeated title release attempted commit")), patch.object(release, "_write_scope", side_effect=AssertionError("Repeated title release attempted metadata write")):
+					self.assertTrue(release.apply_joint_metadata(CANDIDATE_SHA, title_receipt)["unchanged"])
+					noop = self.evidence / (self.run_prefix + "-page-title-new-receipt-noop.json")
+					self.assertTrue(release.apply_joint_metadata(CANDIDATE_SHA, noop)["unchanged"])
+					self.assertEqual(json.loads(noop.read_bytes())["contract"]["metadata_plan"]["page_title_updates"], [])
+					self.assertTrue(release.restore_joint_metadata(noop, candidate_sha=CANDIDATE_SHA)["restored"])
+				self.assertEqual(title_receipt.read_bytes(), first)
+				self.assert_state_equal(self.capture(), after)
+				self.assertTrue(release.restore_joint_metadata(title_receipt, candidate_sha=CANDIDATE_SHA)["restored"])
+				self.assert_state_equal(self.capture(), installed)
+		finally:
+			# Do not erase a newer row or ignore drift; both durable receipts use
+			# the production exact rollback gates before fixture DDL is removed.
+			if title_receipt.exists() and json.loads(title_receipt.read_bytes())["status"] != "restored":
+				self.assertTrue(release.restore_joint_metadata(title_receipt, candidate_sha=CANDIDATE_SHA)["restored"])
+			if installed is not None:
+				self.assert_state_equal(self.capture(), installed)
+			if baseline_receipt.exists():
+				self.assertTrue(release.restore_joint_metadata(baseline_receipt, candidate_sha=CANDIDATE_SHA)["restored"])
+			self.assert_state_equal(self.capture(), baseline)
+			print("page-title fixture restored:", json.dumps({"candidate_base_sha": CANDIDATE_SHA, "receipt": title_receipt.name, "title_phase_ddl": 0, "original_and_final_full_state_sha256": hashlib.sha256(serialized(baseline)).hexdigest(), "maintenance": frappe.conf.maintenance_mode, "GL": frappe.db.count("GL Entry"), "PE": frappe.db.count("Payment Entry")}), flush=True)
+
 	def test_legacy_nullable_sidebar_column_preserves_bytes_through_nine_ddl_noop_and_restore(self):
 		from audit_unified_purchase import table_schema
 		from joint_release_guards import serialized

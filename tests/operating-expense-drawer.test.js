@@ -57,6 +57,17 @@ const recognizedDetail = (docstatus = 0) => {
 	return d;
 };
 const api = create({});
+test("cashier approval decisions and reported payment state remain separately labelled", () => {
+	const d = detail();
+	d.source.source_status = "付款待核对";
+	d.source.cashier_reported_payment_status = "已付款";
+	d.source.approvals.raw = { cashier_general_manager_approval: "同意付款", cashier_finance_review: "已付款" };
+	const a = create({ DeepLinkERPOperatingExpenses: { money: String, approvalLabel: () => "需复核" } });
+	const html = a.sourceHTML(d);
+	assert.match(html, /出纳总经理审批.*同意付款/);
+	assert.match(html, /出纳原付款状态.*已付款/);
+	assert.match(html, /付款状态.*付款待核对/);
+});
 function host(call) {
 	return {
 		frappe: {
