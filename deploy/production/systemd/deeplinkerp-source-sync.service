@@ -1,0 +1,12 @@
+[Unit]
+Description=DeepLinkERP dedicated source cache synchronization
+After=default.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/yuewei/ERPNext-Docker/frappe_docker
+ExecStart=/usr/bin/python3 %h/.local/share/deeplinkerp-source-sync/launcher.py run --config %h/.local/state/deeplinkerp-source-sync/config.json
+TimeoutStartSec=14min
+TimeoutStopSec=90s
+KillMode=control-group
+UMask=0077

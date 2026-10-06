@@ -84,6 +84,9 @@ finance_files = {'services/cash_flow_assignment.py', 'services/voucher.py', 'tes
 deploy_files = {'deploy/production/deploy_unified_purchase.sh', 'deploy/production/audit_unified_purchase.py',
 		        'deploy/production/procurement_release_metadata.py',
                 'deploy/production/joint_release_guards.py',
+                'deploy/production/dedicated_source_sync.py',
+                'deploy/production/systemd/deeplinkerp-source-sync.service',
+                'deploy/production/systemd/deeplinkerp-source-sync.timer',
                 'deploy/local/Dockerfile.unified-purchase'}
 archives = []
 manifest = None

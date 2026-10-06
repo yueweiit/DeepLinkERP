@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh only DeepLinkERP operating and procurement source caches
+
+[Timer]
+OnCalendar=*-*-* *:00,15,30,45:00
+AccuracySec=1s
+Persistent=false
+Unit=deeplinkerp-source-sync.service
+
+[Install]
+WantedBy=timers.target

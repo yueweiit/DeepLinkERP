@@ -570,12 +570,25 @@ def scheduled_sync():
     if not frappe.db.exists("DocType", SETTINGS) or not _settings().enabled:
         return
     try:
-        _sync_page()
+        while _settings().enabled:
+            if frappe.flags.get("dedicated_source_sync"):
+                from .dedicated_source_sync import ensure_allowed
+                ensure_allowed()
+            result = _sync_page()
+            # Keep the existing cursor/cache transaction together. A later page
+            # failure must not discard an already completed checkpoint.
+            frappe.db.commit()
+            if result["end"]:
+                return result
     except Exception:
         frappe.db.rollback()
-        settings = _settings()
-        settings.last_error = "同步失败，请管理员重试"
-        _save(settings)
+        notice = "同步失败，请管理员重试"
+        # Write only the error field; a concurrent manual page can advance its
+        # cursor after our rollback without being overwritten by a stale doc.
+        frappe.db.set_single_value(SETTINGS, "last_error", notice)
+        frappe.db.commit()
+        # Native ScheduledJobType.execute must record Failed, not Complete.
+        raise RuntimeError(notice) from None
 
 
 def _fresh(doc):
