@@ -6,34 +6,52 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
 	"use strict";
 	const SERVICE = "deeplinkerp_branding.services.unified_purchase_service.";
-	const virtualFields = ["row_type", "source", "oa_number", "approval_status", "oa_amount"];
+	const virtualFields = ["row_type", "source", "oa_number", "approval_status", "oa_amount", "requested_amount", "cashier_paid_amount"];
 	const additions = [
 		["row_type", "单据类型", 104], ["source", "来源", 108], ["oa_number", "OA 来源单", 180],
-		["approval_status", "审批状态", 120], ["oa_amount", "OA 申请金额", 180],
+		["approval_status", "审批状态", 120], ["oa_amount", "来源明细金额", 180],
+		["requested_amount", "来源申请金额", 180], ["cashier_paid_amount", "出纳实付（证据）", 180],
 	].map(([fieldname, label, width]) => ({ fieldname, label, width }));
 	function filters(controller) {
 		const quick = controller.quick || {}, result = { scope: controller.providerScope };
-		for (const key of ["search", "from_date", "to_date", "company", "source", "approval_status"]) {
+		for (const key of ["search", "from_date", "to_date", "company", "source", "approval_status", "status", "advance_payment_status"]) {
 			if (quick[key] !== undefined && quick[key] !== null && quick[key] !== "") result[key] = quick[key];
 		}
 		if (quick.pending_company) result.company = "__unconfirmed__";
 		return result;
 	}
-	function request(controller) {
-		return { method: `${SERVICE}get_unified_purchase_list`, args: { filters: JSON.stringify(filters(controller)), start: controller.page * controller.pageSize, page_length: controller.pageSize, order_by: controller.providerOrderBy || "transaction_date desc" } };
+	function nativeSort(orderBy) {
+		const primary = String(orderBy || "").split(",")[0].trim();
+		const match = /^(?:`tabPurchase Order`\.)?`?([a-z_][a-z0-9_]*)`?\s+(asc|desc)$/i.exec(primary);
+		return match ? `${match[1]} ${match[2].toLowerCase()}` : null;
 	}
+	function getArgs(controller, nativeArgs = controller.originals?.get_args?.call(controller.list) || {}) {
+		const order = nativeSort(nativeArgs.order_by);
+		if (order) {
+			const changed = controller.providerNativeOrder !== undefined && controller.providerNativeOrder !== order;
+			if (controller.providerSortSource !== "header" || changed) {
+				controller.providerOrderBy = order; controller.providerSortSource = "native";
+				if (changed) controller.setPage?.(0);
+			}
+			controller.providerNativeOrder = order;
+		}
+		return { filters: JSON.stringify(filters(controller)), native_filters: JSON.stringify(nativeArgs.filters || []), native_or_filters: JSON.stringify(nativeArgs.or_filters || []), start: controller.page * controller.pageSize, page_length: controller.pageSize, order_by: controller.providerOrderBy || "transaction_date desc" };
+	}
+	function request(controller, nativeArgs) { return { method: `${SERVICE}get_unified_purchase_list`, args: getArgs(controller, nativeArgs) }; }
 	function formLink(doc) { return `/desk/${doc.row_type === "oa_request" ? "oa-purchase-request" : "purchase-order"}/${encodeURIComponent(doc.name)}`; }
 	function exportColumns(columns) {
 		const fields = columns.filter(field => !['receipt_action','order_settled','order_unpaid'].includes(field));
-		for (const [amount, metadata] of [["grand_total", ["currency"]], ["oa_amount", ["oa_currency", "oa_amount_basis"]], ["advance_paid", ["party_account_currency"]]]) {
+		for (const [amount, metadata] of [["grand_total", ["currency"]], ["oa_amount", ["oa_currency", "oa_amount_basis"]], ["requested_amount", ["oa_currency"]], ["cashier_paid_amount", ["cashier_currency"]], ["advance_paid", ["party_account_currency"]]]) {
 			if (fields.includes(amount)) fields.splice(fields.indexOf(amount) + 1, 0, ...metadata.filter((field) => !fields.includes(field)));
 		}
 		for (const field of ["oa_warning", "oa_references"]) if (!fields.includes(field)) fields.push(field);
 		return fields;
 	}
 	function renderValue(field, doc, formatters = {}, escape = String) {
-		if (field === "row_type") return escape(doc.row_type === "oa_request" ? "OA 申请" : "采购订单");
-		if (field === "source") return escape(doc.source || "来源待确认");
+		if (field === "name" && doc.row_type === "oa_request") return escape(`待完善 · ${doc.oa_number || doc.name}`);
+		if (field === "receipt_action" && doc.row_type === "oa_request") return `<button type="button" class="btn btn-xs btn-default" data-purchase-source="${escape(doc.oa_name || doc.name)}">完善/关联</button>`;
+		if (field === "row_type") return escape(doc.row_type === "oa_request" ? "待完善来源" : "采购订单");
+		if (field === "source") return escape(["OA", "oa"].includes(doc.source) ? "钉钉" : ["non_oa", "未关联 OA"].includes(doc.source) ? "其他来源" : doc.source || "来源待确认");
 		if (field === "company" && !doc.company) return doc.company_visibility === "hidden" ? "公司不可见" : "公司待确认";
 		if (field === "oa_number") {
 			if (doc.oa_references?.length) return doc.oa_references.map((ref) => {
@@ -43,15 +61,19 @@
 			if (!doc.oa_name) return escape(doc.oa_warning || "—");
 			return `<a href="/desk/oa-purchase-request/${encodeURIComponent(doc.oa_name)}" title="查看 OA 申请及钉钉原单">${escape(doc.oa_number || doc.oa_name)}</a>`;
 		}
-		if (field === "oa_amount") {
-			if (doc.oa_amount === undefined || doc.oa_amount === null) return escape(doc.oa_warning || "—");
-			const amount = Number(doc.oa_amount);
+		if (["oa_amount", "requested_amount", "cashier_paid_amount"].includes(field)) {
+			if (doc[field] === undefined || doc[field] === null || doc[field] === "") return escape(field === "oa_amount" ? doc.oa_warning || "—" : "—");
+			const amount = Number(doc[field]);
 			if (!Number.isFinite(amount)) return "—";
 			const number = formatters.number ? formatters.number(amount, field) : amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-			const title = [doc.oa_amount_basis, doc.oa_warning].filter(Boolean).join("；");
-			return `<span title="${escape(title)}">${escape(number)} ${escape(doc.oa_currency || "币种待确认")}${doc.oa_warning ? " ⚠" : ""}</span>`;
+			const title = field === "cashier_paid_amount" ? "出纳实付证据；ERP 登记付款和核销另列" : [field === "oa_amount" ? doc.oa_amount_basis : "来源申请金额", doc.oa_warning].filter(Boolean).join("；");
+			const currency = field === "cashier_paid_amount" ? doc.cashier_currency : doc.oa_currency;
+			return `<span title="${escape(title)}">${escape(number)} ${escape(currency || "币种待确认")}${field !== "cashier_paid_amount" && doc.oa_warning ? " ⚠" : ""}</span>`;
 		}
 		if (field === "approval_status") return escape(doc.approval_status || [...new Set((doc.oa_references || []).map((ref) => ref.approval_status).filter(Boolean))].join("；") || "—");
+	}
+	function renderLink(controller, doc, value, escape = String) {
+		if (doc.row_type === "oa_request") return `<button type="button" class="btn btn-link btn-xs" data-purchase-source="${escape(doc.oa_name || doc.name)}">${value}</button>`;
 	}
 	function summary(controller, escape = String) {
 		const totals = controller.providerPayload?.totals;
@@ -61,7 +83,8 @@
 	}
 	async function exportCurrent(controller) {
 		const { root } = controller;
-		const args = { filters: JSON.stringify(filters(controller)), columns: JSON.stringify(exportColumns(controller.preferences.columns)), order_by: controller.providerOrderBy };
+		const args = { ...getArgs(controller), columns: JSON.stringify(exportColumns(controller.preferences.columns)) };
+		delete args.start; delete args.page_length;
 		if (!root.DeepLinkERPPurchaseOrderExport?.downloadWorkbook) await root.frappe.require("/assets/deeplinkerp_branding/js/purchase_order_export.js");
 		const exporter = root.DeepLinkERPPurchaseOrderExport;
 		if (!exporter?.downloadWorkbook) throw new Error("导出组件加载失败，请刷新重试。");
@@ -70,10 +93,23 @@
 	}
 	function mountControls(controller) {
 		const { root, list } = controller, $ = root.$;
-		const tr = text => (root.__ || (value=>value))(text);
-		controller.$providerScope = $(`<select class='form-control input-xs dlp-po-scope' aria-label='${tr('查看范围')}'><option value='all'>${tr('全部采购')}</option><option value='orders'>${tr('仅订单')}</option><option value='oa'>${tr('仅 OA')}</option></select>`).prependTo(controller.$toolbar);
-		controller.$providerScope.on("change.dlpUnified", (e) => controller.setProviderScope(e.target.value));
-		controller.$providerControls = $("<div class='dlp-po-provider-controls'><label>来源 <select class='form-control input-xs' data-filter='source' aria-label='来源'><option value=''>全部来源</option><option value='OA'>OA</option><option value='non_oa'>未关联 OA</option></select></label><label>审批状态 <input class='form-control input-xs' data-filter='approval_status' aria-label='审批状态' placeholder='审批状态（原值）'></label><label><input type='checkbox' data-filter='pending_company'> 公司待确认</label><span class='text-muted'>统一视图仅查看；高级筛选和批量操作请切换“仅订单”。</span></div>").insertAfter(controller.$filters);
+		const sorter = list.sort_selector;
+		if (sorter) {
+			const change = sorter.onchange || sorter.change;
+			sorter.onchange = function (...args) {
+				if (controller.providerScope !== "orders") { controller.providerSortSource = "native"; controller.setPage(0); }
+				return change?.apply(this, args);
+			};
+		}
+		controller.$providerControls = $("<div class='dlp-po-provider-controls'><label>来源 <select class='form-control input-xs' data-filter='source' aria-label='来源'><option value=''>全部来源</option><option value='oa'>钉钉</option><option value='non_oa'>其他来源</option></select></label><label>审批状态 <input class='form-control input-xs' data-filter='approval_status' aria-label='审批状态' placeholder='审批状态（原值）'></label><label><input type='checkbox' data-filter='pending_company'> 公司待确认</label></div>").insertAfter(controller.$filters);
+		if (root.frappe.session?.user === "Administrator" || root.frappe.user_roles?.includes("System Manager")) $("<button type='button' class='btn btn-default btn-sm dlp-source-sync'>同步钉钉</button>").appendTo(controller.$providerControls).on("click.dlpUnified", async event => {
+			const button = $(event.currentTarget).prop("disabled", true);
+			try {
+				if (!root.deeplinkerp?.purchaseSource?.sync) await root.frappe.require("/assets/deeplinkerp_branding/js/purchase_source.js");
+				await root.deeplinkerp.purchaseSource.sync(); await controller.refresh();
+			} catch (error) { root.frappe.msgprint({ message: error.message || "采购来源同步失败，请核对系统提示。", indicator: "red" }); }
+			finally { button.prop("disabled", false); }
+		});
 		controller.$providerControls.on("input.dlpUnified change.dlpUnified", "[data-filter]", (e) => {
 			const field = e.target.dataset.filter, value = e.target.type === "checkbox" ? e.target.checked : e.target.value;
 			if (controller.quick[field] === value) return;
@@ -83,6 +119,11 @@
 		list.$result.on("click.dlpUnified", "[data-provider-sort]", (e) => {
 			const field = e.currentTarget.dataset.providerSort, previous = controller.providerOrderBy.split(" ");
 			controller.providerOrderBy = `${field} ${previous[0] === field && previous[1] === "asc" ? "desc" : "asc"}`;
+			controller.providerSortSource = "header";
+			if (sorter && controller.allowed?.has(field)) {
+				sorter.set_value(field, controller.providerOrderBy.split(" ")[1]);
+				controller.providerNativeOrder = nativeSort(sorter.get_sql_string());
+			}
 			controller.setPage(0); controller.refresh();
 		});
 		controller.setProviderScope("all", false);
@@ -92,7 +133,10 @@
 		const { root, list } = controller, realtime = root.frappe.realtime;
 		if (!realtime?.on || !realtime?.off) return;
 		controller.oaRealtimeListener ||= (data) => {
-			if (data?.doctype === "OA Purchase Request" && controller.providerScope !== "orders" && root.cur_list === list && list.page.wrapper.is(":visible")) controller.refresh();
+			if (data?.doctype === "OA Purchase Request" && controller.providerScope !== "orders" && root.cur_list === list && list.page.wrapper.is(":visible")) {
+				if (controller.queueRealtimeRefresh) controller.queueRealtimeRefresh(data);
+				else controller.refresh();
+			}
 		};
 		// Native ListView initialization clears list_update listeners, including cached adapters.
 		realtime.off("list_update", controller.oaRealtimeListener);
@@ -137,8 +181,9 @@
 		const columns = [...nativeColumns];
 		columns.splice(2, 0, ...additions.slice(0, 3));
 		columns.splice(columns.findIndex((c) => c.fieldname === "grand_total") + 1, 0, additions[4]);
+		columns.splice(columns.findIndex((c) => c.fieldname === "oa_amount") + 1, 0, ...additions.slice(5));
 		columns.splice(columns.findIndex((c) => c.fieldname === "status") + 1, 0, additions[3]);
-		return { columns: columns.map((c) => ({ ...c, label: c.fieldname === "transaction_date" ? "单据日期" : c.fieldname === "name" ? "单据编号" : c.label })), freezeUntil: "supplier_name", virtualFields, newColumns: virtualFields, useNativeIndicator: doc => doc.row_type === "purchase_order", request, formLink, renderValue, summary, exportCurrent, mountControls, onActivate, onPayload, sortFields: ["transaction_date", "name", "company", "status", "grand_total", "oa_amount", "approval_status"] };
+		return { columns: columns.map((c) => ({ ...c, label: c.fieldname === "transaction_date" ? "单据日期" : c.fieldname === "name" ? "采购订单号 / 待完善来源" : c.label })), freezeUntil: "supplier_name", virtualFields: [...virtualFields], newColumns: [...virtualFields], useNativeIndicator: doc => doc.row_type === "purchase_order", getArgs, request, formLink, renderLink, renderValue, summary, exportCurrent, mountControls, onActivate, onPayload, sortFields: ["transaction_date", "name", "company", "status", "grand_total", "oa_amount", "approval_status"] };
 	}
-	return { configure, request, formLink, renderValue, summary, exportColumns, exportCurrent, shouldHideOANavigation, installNavigation };
+	return { configure, getArgs, request, formLink, renderValue, summary, exportColumns, exportCurrent, shouldHideOANavigation, installNavigation };
 });

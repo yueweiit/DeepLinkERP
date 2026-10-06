@@ -214,7 +214,7 @@ def decode_cursor(value):
         raise ValueError("Invalid OA cursor") from None
 
 
-def read_page(connection_factory, limit, until, cursor=None, identity=None):
+def read_page(connection_factory, limit, until, cursor=None, identity=None, *, process_codes=PROCESS_CODES):
     """Keyset pagination with projected JSON text; reuse OA read-only connection."""
     limit = int(limit)
     if not 1 <= limit <= 500:
@@ -224,7 +224,7 @@ def read_page(connection_factory, limit, until, cursor=None, identity=None):
     if after and after[0] != until:
         raise ValueError("OA snapshot mismatch")
     conditions = ["process_code = ANY(%s)", "create_time >= %s", "create_time < %s", "updated_at <= %s"]
-    params = [list(PROCESS_CODES), START, END, timestamp(until)]
+    params = [list(process_codes), START, END, timestamp(until)]
     if after:
         conditions.append("(corp_id, process_instance_id) > (%s, %s)"); params.extend(after[1:])
     if identity:
@@ -241,6 +241,8 @@ def read_page(connection_factory, limit, until, cursor=None, identity=None):
         "counts AS (SELECT business_id,count(*) AS business_count FROM costing_read.approval_instances_v2 "
         "WHERE business_id IN (SELECT business_id FROM page WHERE NULLIF(business_id,'') IS NOT NULL) "
         "GROUP BY business_id) SELECT page.*,COALESCE(counts.business_count,0) AS business_count "
+        + (", (SELECT count(*) FROM costing_read.approval_instances_v2 duplicate WHERE duplicate.process_instance_id=page.process_instance_id) AS instance_count " if tuple(process_codes) != PROCESS_CODES else "")
+        +
         "FROM page LEFT JOIN counts USING(business_id) ORDER BY page.corp_id,page.process_instance_id"
     )
     params.append(limit + 1)

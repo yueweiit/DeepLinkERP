@@ -202,8 +202,12 @@ def _base_url():
 
 def _request(path, params=None, download=False, data=None):
     resolver = path == "/api/integrations/erp/resolve-applicant-companies"
-    if path != "/api/integrations/erp/operating-expenses" and not resolver:
-        attachment_path(path)
+    if path not in ("/api/integrations/erp/operating-expenses", "/api/integrations/erp/purchase-expenses") and not resolver:
+        if path.startswith("/api/integrations/erp/purchase-expenses/"):
+            from .purchase_source_contract import attachment_path as purchase_attachment_path
+            purchase_attachment_path(path)
+        else:
+            attachment_path(path)
         if path.startswith("/oa-archive/"):
             frappe.throw("OA 归档只能通过授权附件标识读取")
     settings = _settings()

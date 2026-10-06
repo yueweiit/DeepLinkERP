@@ -625,5 +625,364 @@ class JointReleaseGuardTests(unittest.TestCase):
 				module.main()
 
 
+class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
+	module = JointReleaseGuardTests.module
+	metadata_module = JointReleaseGuardTests.metadata_module
+	schema = JointReleaseGuardTests.schema
+	page_title_fixture = JointReleaseGuardTests.page_title_fixture
+	page_title_plan = JointReleaseGuardTests.page_title_plan
+
+	def active_plan_fixture(self, module):
+		before, contract = self.page_title_fixture(module, title="运营支出")
+		before["metadata"]["scope"]["DocType"] = []
+		contract["model_schemas"] = {}
+		for name, single in (("Operating Expense Source", 0), ("Operating Expense Sync Settings", 1)):
+			row = {"name": name, "issingle": single, "idx": 0, "creation": "original"}
+			before["metadata"]["scope"]["DocType"].append(row)
+			contract["definitions"][name] = {"source": {"doctype": "DocType", "name": name}, "native": {"DocType": [self.module().semantic_row(row)]}}
+			contract["model_schemas"][name] = None if single else self.schema()
+			before["models"][name] = {"schema": contract["model_schemas"][name], "rows": [] if single else [{"name": f"source-{i}", "original_evidence": '{"manual": 1 }'} for i in range(372)]}
+		before["operating_singles"] = [{"doctype": "Operating Expense Sync Settings", "field": "sync_enabled", "value": "0"}]
+		return before, contract
+
+	def test_joint_plan_preserves_372_existing_operating_rows_and_configured_single(self):
+		module = self.metadata_module()
+		before, contract = self.active_plan_fixture(module)
+		original = copy.deepcopy(before)
+		plan = self.page_title_plan(module, before, contract)
+		self.assertEqual(plan["new_definitions"], [])
+		self.assertEqual(plan["scope"], before["metadata"]["scope"])
+		self.assertEqual(before, original)
+
+	def test_active_model_and_single_cannot_be_recreated_without_matching_existing_metadata(self):
+		module = self.metadata_module()
+		before, contract = self.active_plan_fixture(module)
+		before["metadata"]["scope"]["DocType"] = []
+		with self.assertRaises(AssertionError):
+			self.page_title_plan(module, before, contract)
+
+	def invariant_fixture(self, module):
+		je = self.schema()
+		for field in module.CUSTOM_FIELD_ORDER:
+			je["columns"][field] = module._je_column(len(je["columns"]))
+		je["indexes"]["custom_operating_event_key"] = [{"sequence": 1, "column": "custom_operating_event_key", "unique": 1, "prefix": None, "collation": "A", "type": "BTREE", "nullable": "YES"}]
+		metadata = {"scope": {"Has Role": [], "Custom Field": []}, "outside": {"Custom Field": module.digest([{"name": "Purchase Order-custom_oa_purchase_expense", "fieldtype": "Data"}])}, "outside_rows": {"Custom Field": [{"name": "Purchase Order-custom_oa_purchase_expense", "fieldtype": "Data"}], "Has Role": []}}
+		rows = [{"name": f"source-{i}", "original_evidence": '{"manual": 1 }'} for i in range(372)]
+		before = {"metadata": metadata, "je": {"schema": je, "rows": [{"name": "old-je"}], "original_columns": list(je["columns"])}, "models": {"Operating Expense Source": {"schema": self.schema(), "rows": rows}}, "operating_singles": [{"doctype": "Operating Expense Sync Settings", "field": "sync_enabled", "value": "0"}], "audit": {"release_sources_all": {"branding": "candidate"}, "tables": {"Has Role": module.digest([]), "OA Purchase Request": module.digest([{"name": "OA-old", "manual": "keep"}])}, "schemas": {"Journal Entry": je}, "singles": "same", "configuration_sha256": "same"}}
+		contract = {"sources_after": before["audit"]["release_sources_all"], "model_schemas": {"Operating Expense Source": self.schema()}}
+		return types.SimpleNamespace(state={"before": before, "contract": contract}), copy.deepcopy(before)
+
+	def assert_invariants(self, module, receipt, current):
+		fake = types.SimpleNamespace(db=types.SimpleNamespace(sql=lambda *a, **kw: [[0]]))
+		with patch.dict(sys.modules, {"frappe": fake}):
+			module._assert_joint_invariants(receipt, current)
+
+	def test_joint_invariants_accept_exact_active_business_rows_and_single(self):
+		module = self.metadata_module()
+		receipt, current = self.invariant_fixture(module)
+		self.assert_invariants(module, receipt, current)
+
+	def test_active_row_or_single_drift_is_rejected_without_normalization(self):
+		module = self.metadata_module()
+		for changed in ("row", "removed", "added", "single", "outside"):
+			with self.subTest(changed=changed):
+				receipt, current = self.invariant_fixture(module)
+				if changed == "row": current["models"]["Operating Expense Source"]["rows"][-1]["original_evidence"] = '{"manual":1}'
+				elif changed == "removed": current["models"]["Operating Expense Source"]["rows"].pop()
+				elif changed == "added": current["models"]["Operating Expense Source"]["rows"].append({"name": "new"})
+				elif changed == "single": current["operating_singles"][0]["value"] = "1"
+				else: current["metadata"]["outside_rows"]["Custom Field"][0]["fieldtype"] = "Link"
+				with self.assertRaises(AssertionError): self.assert_invariants(module, receipt, current)
+
+	def test_only_five_exact_oa_fields_are_in_scope_not_existing_po_or_native_oa_flags(self):
+		module = self.metadata_module()
+		fields = ("custom_purchase_source_id", "custom_purchase_source_json", "custom_cashier_payment_evidence", "custom_purchase_bound_version", "custom_purchase_payment_reconciliation")
+		for field in fields:
+			self.assertTrue(module._in_joint_scope("Custom Field", {"name": "OA Purchase Request-" + field, "dt": "OA Purchase Request", "fieldname": field}))
+			self.assertTrue(module._in_joint_scope("Custom Field", {"name": "orphan-alias", "dt": "OA Purchase Request", "fieldname": field}))
+		for dt, field in (("Purchase Order", "custom_oa_purchase_expense"), ("OA Purchase Request", "source_stale"), ("OA Purchase Request", "target_company")):
+			self.assertFalse(module._in_joint_scope("Custom Field", {"name": dt + "-" + field, "dt": dt, "fieldname": field}))
+
+	def test_source_cf_definitions_reuse_installer_without_invoking_it_and_keep_security(self):
+		module = self.metadata_module()
+		self.assertTrue(hasattr(module, "_source_custom_fields"))
+		fake = types.SimpleNamespace(get_app_path=lambda app, filename: str(ROOT / app / filename))
+		with patch.dict(sys.modules, {"frappe": fake}): fields = module._source_custom_fields()
+		self.assertEqual(len(fields), 5)
+		for name, field in fields.items():
+			self.assertEqual((field["hidden"], field["read_only"], field["no_copy"]), (1, 1, 1))
+			self.assertFalse(field.get("default") or field.get("reqd"))
+			self.assertEqual(field.get("unique", 0), int(name == "custom_purchase_source_id"))
+			self.assertEqual(field.get("permlevel", 0), 9 if field["fieldtype"] == "Long Text" else 0)
+
+	def test_scheduled_definitions_match_only_their_own_method_and_preserve_original_identity(self):
+		module = self.metadata_module()
+		source_method = "deeplinkerp_branding.services.purchase_source_service.scheduled_sync"
+		rows = [{"name": "old-native-id", "method": module.OPERATING_METHOD, "frequency": "Cron", "cron_format": "*/15 * * * *", "creation": "original"}, {"name": source_method, "method": source_method, "frequency": "Cron", "cron_format": "*/15 * * * *", "creation": "new"}]
+		scope = {"Scheduled Job Type": rows}
+		for row in rows:
+			definition = {"source": {"doctype": "Scheduled Job Type", "name": row["method"], "method": row["method"]}, "native": {"Scheduled Job Type": [self.module().semantic_row(row)]}}
+			self.assertTrue(module._definition_matches(scope, row["method"], definition))
+		self.assertEqual(rows[0]["name"], "old-native-id")
+		scope["Scheduled Job Type"].append(dict(rows[1], name="duplicate"))
+		with self.assertRaises(AssertionError): module._definition_matches(scope, source_method, definition)
+
+	def test_scheduled_runtime_is_preserved_but_definition_and_security_drift_is_rejected(self):
+		module = self.metadata_module()
+		row = {"name": "original-job-id", "method": module.OPERATING_METHOD, "frequency": "Cron", "cron_format": "*/15 * * * *", "stopped": 0, "server_script": None, "last_execution": "2026-10-06 08:00:00"}
+		definition = {"source": {"doctype": "Scheduled Job Type", "method": module.OPERATING_METHOD}, "native": {"Scheduled Job Type": [self.module().semantic_row(dict(row, last_execution=None))]}}
+		scope = {"Scheduled Job Type": [row]}
+		original = copy.deepcopy(scope)
+		self.assertTrue(module._definition_matches(scope, module.OPERATING_METHOD, definition))
+		self.assertEqual(scope, original)
+		for flag in ("stopped", "server_script", "frequency", "cron_format"):
+			with self.subTest(flag=flag), self.assertRaises(AssertionError):
+				module._definition_matches({"Scheduled Job Type": [dict(row, **{flag: "unapproved"})]}, module.OPERATING_METHOD, definition)
+
+	def test_oa_ddl_guard_allows_only_five_nullable_native_types_and_full_unique_identity(self):
+		module = self.metadata_module()
+		self.assertTrue(hasattr(module, "_validate_oa_ddl"))
+		fields = {"custom_purchase_source_id": {"fieldtype": "Data"}, "custom_purchase_source_json": {"fieldtype": "Long Text"}}
+		for name, field in fields.items():
+			kind = "varchar(140)" if field["fieldtype"] == "Data" else "longtext"
+			module._validate_oa_ddl(f"ALTER TABLE `tabOA Purchase Request` ADD COLUMN `{name}` {kind}", set(fields), fields)
+		module._validate_oa_ddl("ALTER TABLE `tabOA Purchase Request` ADD UNIQUE INDEX IF NOT EXISTS custom_purchase_source_id (`custom_purchase_source_id`)", set(fields), fields)
+		for sql in ("ALTER TABLE `tabPurchase Order` ADD COLUMN `custom_purchase_source_id` varchar(140)", "ALTER TABLE `tabOA Purchase Request` MODIFY COLUMN `currency` varchar(140)", "ALTER TABLE `tabOA Purchase Request` ADD COLUMN `custom_purchase_source_json` varchar(140)", "ALTER TABLE `tabOA Purchase Request` ADD COLUMN `custom_purchase_source_id` varchar(140) NOT NULL", "ALTER TABLE `tabOA Purchase Request` ADD UNIQUE INDEX IF NOT EXISTS custom_purchase_source_id (`custom_purchase_source_id`(40))"):
+			with self.subTest(sql=sql), self.assertRaises(AssertionError): module._validate_oa_ddl(sql, set(fields), fields)
+
+	def test_pending_oa_schema_intent_accepts_only_exact_recorded_before_or_after(self):
+		module = self.metadata_module()
+		for state in ("before", "after", "foreign"):
+			with self.subTest(state=state), tempfile.TemporaryDirectory() as directory:
+				before = {"metadata": {"scope": {}}, "je": {"schema": self.schema()}, "models": {}, "oa": {"schema": self.schema()}}
+				after_schema = copy.deepcopy(before["oa"]["schema"])
+				after_schema["columns"]["custom_purchase_source_json"] = {"type": "longtext"}
+				receipt = self.module().DDLReceipt.create(Path(directory) / "receipt.json", {"candidate_sha": "a" * 40, "contract_sha256": "b" * 64}, before, {})
+				receipt.plan("oa-column", before["oa"]["schema"], after_schema, kind="ddl", doctype="OA Purchase Request")
+				current = copy.deepcopy(before)
+				if state != "before": current["oa"]["schema"] = copy.deepcopy(after_schema)
+				if state == "foreign": current["oa"]["schema"]["columns"]["unapproved"] = {}
+				if state == "foreign":
+					with self.assertRaises(AssertionError): module._assert_recorded_rollback_state(receipt, current)
+				else: module._assert_recorded_rollback_state(receipt, current)
+
+	def source_fields(self, module):
+		with patch.dict(sys.modules, {"frappe": types.SimpleNamespace(get_app_path=lambda app, filename: str(ROOT / app / filename))}):
+			return module._source_custom_fields()
+
+	def test_source_schema_additions_are_only_five_nullable_columns_and_one_unique_index(self):
+		module = self.metadata_module()
+		self.assertTrue(hasattr(module, "_source_schema_additions"))
+		before = {"schema": self.schema()}
+		fields = self.source_fields(module)
+		additions = module._source_schema_additions(before, fields)
+		self.assertEqual(set(additions["columns"]), set(fields))
+		self.assertEqual(set(additions["indexes"]), {"custom_purchase_source_id"})
+		for name, definition in additions["columns"].items():
+			self.assertEqual(definition["type"], "varchar(140)" if fields[name]["fieldtype"] == "Data" else "longtext")
+			self.assertEqual((definition["nullable"], definition["default_value"]), ("YES", "NULL"))
+		index = additions["indexes"]["custom_purchase_source_id"]
+		self.assertEqual((len(index), index[0]["unique"], index[0]["prefix"]), (1, 1, None))
+		after = copy.deepcopy(before)
+		for kind in additions: after["schema"][kind].update(additions[kind])
+		self.assertEqual(module._source_schema_additions(after, fields), {"columns": {}, "indexes": {}})
+
+	def test_original_oa_projection_is_held_in_snapshot_after_new_null_columns(self):
+		queries = []
+		fake = types.SimpleNamespace(db=types.SimpleNamespace(sql=lambda query, **kw: queries.append(query) or ([{"name": "OA-old", "manual": "keep"}] if "tabOA Purchase Request`" in query else [])))
+		with patch.dict(sys.modules, {"frappe": fake}):
+			spec = importlib.util.spec_from_file_location("audit", ROOT / "deploy/production/audit_unified_purchase.py")
+			audit = importlib.util.module_from_spec(spec)
+			spec.loader.exec_module(audit)
+		module = self.metadata_module()
+		schema = self.schema()
+		with patch.dict(sys.modules, {"procurement_release_metadata": module}), patch.object(audit, "table_schema", side_effect=lambda dt: schema if dt in {"Journal Entry", "OA Purchase Request"} else None), patch.object(audit, "capture_audit", return_value={}), patch.object(module, "capture_joint_metadata", return_value={}):
+			state = audit.capture_joint_state(original_columns=["name"], original_oa_columns=["name", "manual"])
+		self.assertEqual(state["oa"]["original_columns"], ["name", "manual"])
+		self.assertEqual(state["oa"]["rows"], [{"name": "OA-old", "manual": "keep"}])
+		self.assertIn("select `name`,`manual` from `tabOA Purchase Request` order by name", queries)
+
+	def test_oa_guard_preserves_original_rows_and_refuses_non_null_new_fields(self):
+		module = self.metadata_module()
+		receipt, current = self.invariant_fixture(module)
+		fields = self.source_fields(module)
+		before_oa = {"schema": self.schema(), "rows": [{"name": "OA-old", "manual": "keep"}], "original_columns": ["name", "manual"]}
+		receipt.state["before"]["oa"] = before_oa
+		receipt.state["contract"]["source_custom_fields"] = fields
+		current["oa"] = copy.deepcopy(before_oa)
+		for kind, values in module._source_schema_additions(before_oa, fields).items(): current["oa"]["schema"][kind].update(values)
+		for snapshot in (receipt.state["before"], current): snapshot["audit"]["schemas"]["OA Purchase Request"] = snapshot["oa"]["schema"]
+		self.assert_invariants(module, receipt, current)
+		current["oa"]["rows"][0]["manual"] = "changed"
+		with self.assertRaises(AssertionError): self.assert_invariants(module, receipt, current)
+		current["oa"]["rows"][0]["manual"] = "keep"
+		with patch.dict(sys.modules, {"frappe": types.SimpleNamespace(db=types.SimpleNamespace(sql=lambda *a, **kw: [[1]]))}), self.assertRaisesRegex(AssertionError, "non-NULL"):
+			module._assert_joint_invariants(receipt, current)
+
+	def test_source_sync_enabled_is_a_release_and_rollback_blocker(self):
+		module = self.metadata_module()
+		receipt, current = self.invariant_fixture(module)
+		current["audit"]["purchase_source_sync_enabled"] = True
+		receipt.state["before"]["audit"]["purchase_source_sync_enabled"] = True
+		with self.assertRaisesRegex(AssertionError, "sync.*disabled|sync.*enabled"):
+			self.assert_invariants(module, receipt, current)
+
+	def native_oa_boundary(self, module, path, *, crash=None):
+		"""Real apply/receipt/rollback guards, with only native IO/DDL substituted."""
+		receipt, current = self.invariant_fixture(module)
+		fields = self.source_fields(module)
+		current["oa"] = {"schema": self.schema(), "rows": [{"name": "OA-old", "manual": "keep"}], "original_columns": ["name", "manual"]}
+		current["oa"]["schema"]["columns"]["manual"] = module._je_column(1)
+		current["audit"]["schemas"]["OA Purchase Request"] = current["oa"]["schema"]
+		current["audit"]["preserved_apps"] = {"china_finance": "finance", "crm_integration": "crm"}
+		current["audit"]["tables"]["Journal Entry"] = module.digest(current["je"]["rows"])
+		current["audit"]["purchase_source_sync_enabled"] = False
+		current["audit"]["oa_new_columns"] = {}
+		for name in module.JOINT_MODELS:
+			current["models"].setdefault(name, {"schema": None, "rows": []})
+		current["audit"]["operating_models"] = {name: {"schema": model["schema"], "rows": module.digest(model["rows"])} for name, model in current["models"].items()}
+		before = copy.deepcopy(current)
+		contract = dict(receipt.state["contract"], custom_fields={}, source_custom_fields=fields, model_schemas={name: model["schema"] for name, model in current["models"].items()})
+		plan = {"scope": copy.deepcopy(current["metadata"]["scope"]), "new_definitions": [], "page_title_updates": []}
+		plan["scope"]["Custom Field"] = [dict(field, name="OA Purchase Request-" + key, dt="OA Purchase Request") for key, field in fields.items()]
+		plan["scope"]["Scheduled Job Type"] = [{"name": "preserved-operating-job", "method": module.OPERATING_METHOD}, {"name": module.PURCHASE_SOURCE_METHOD, "method": module.PURCHASE_SOURCE_METHOD}]
+		before["metadata"]["scope"]["Scheduled Job Type"] = [plan["scope"]["Scheduled Job Type"][0]]
+		current["metadata"]["scope"]["Scheduled Job Type"] = copy.deepcopy(before["metadata"]["scope"]["Scheduled Job Type"])
+		events, control = [], {"crash": crash, "added": 0, "nonnull": False}
+		class Field(dict):
+			def __getattr__(self, name):
+				try:
+					return self[name]
+				except KeyError:
+					raise AttributeError(name) from None
+			__setattr__ = dict.__setitem__
+		meta = types.SimpleNamespace(fields=[Field(field) for field in fields.values()])
+		def schema(name): return copy.deepcopy(current["oa"]["schema"] if name == "OA Purchase Request" else current["je"]["schema"])
+		def native_sql(name, wanted):
+			if name != "OA Purchase Request": return []
+			result = []
+			for field in wanted.fields:
+				if field.fieldname not in current["oa"]["schema"]["columns"]:
+					kind = "varchar(140)" if field.fieldtype == "Data" else "longtext"
+					result.append(f"ALTER TABLE `tabOA Purchase Request` ADD COLUMN `{field.fieldname}` {kind}")
+			if any(field.fieldname == "custom_purchase_source_id" and field.get("unique") for field in wanted.fields) and "custom_purchase_source_id" not in current["oa"]["schema"]["indexes"]:
+				result.append("ALTER TABLE `tabOA Purchase Request` ADD UNIQUE INDEX IF NOT EXISTS custom_purchase_source_id (`custom_purchase_source_id`)")
+			return result
+		def ddl(query, **kwargs):
+			stored = self.module().DDLReceipt.load(path)
+			self.assertEqual(stored.state["steps"][-1]["status"], "pending")
+			self.assertEqual(stored.state["steps"][-1]["sql"], query)
+			events.append(query)
+			columns, indexes = current["oa"]["schema"]["columns"], current["oa"]["schema"]["indexes"]
+			if " ADD COLUMN " in query:
+				key = query.split(" ADD COLUMN `")[1].split("`")[0]
+				columns[key] = module._source_column(fields[key], len(columns))
+			elif " ADD UNIQUE INDEX " in query: indexes["custom_purchase_source_id"] = module._source_index()
+			elif " DROP COLUMN " in query:
+				key = query.rsplit("`", 2)[1]; columns.pop(key)
+				if key == "custom_purchase_source_id": indexes.pop(key, None)
+			else: self.fail("DDL escaped narrow OA scope: " + query)
+			if " ADD " in query:
+				control["added"] += 1
+				if control["crash"] == control["added"]: raise RuntimeError("crash after native autocommit")
+		def write_scope(old, wanted): current["metadata"]["scope"] = copy.deepcopy(wanted)
+		fake = types.SimpleNamespace(conf=types.SimpleNamespace(maintenance_mode=1), get_meta=lambda name, **kw: meta if name == "OA Purchase Request" else types.SimpleNamespace(fields=[]), clear_cache=lambda **kw: None, scrub=lambda name: name.lower().replace(" ", "_"))
+		fake.db = types.SimpleNamespace(sql=lambda *a, **kw: [[int(control["nonnull"])]], commit=lambda: events.append("commit"), rollback=lambda: None, sql_ddl=ddl)
+		fake.db.updatedb = lambda name, wanted: [fake.db.sql_ddl(query) for query in native_sql(name, wanted)]
+		def capture_state(**kwargs):
+			current["audit"]["oa_new_columns"] = {key: int(control["nonnull"]) for key in current["oa"]["schema"]["columns"] if key not in before["oa"]["schema"]["columns"]}
+			return copy.deepcopy(current)
+		audit = types.SimpleNamespace(capture_joint_state=capture_state, table_schema=schema)
+		stack = __import__("contextlib").ExitStack()
+		self.addCleanup(stack.close)
+		stack.enter_context(patch.dict(sys.modules, {"frappe": fake, "frappe.model.meta": types.SimpleNamespace(Meta=object), "frappe.utils": types.SimpleNamespace(now_datetime=lambda: "2026-10-06"), "audit_unified_purchase": audit}))
+		stack.enter_context(patch.object(module, "load_joint_contract", side_effect=lambda: copy.deepcopy(contract)))
+		stack.enter_context(patch.object(module, "_joint_plan", return_value=plan))
+		stack.enter_context(patch.object(module, "_native_schema_sql", side_effect=native_sql))
+		stack.enter_context(patch.object(module, "_write_scope", side_effect=write_scope))
+		stack.enter_context(patch.object(module, "capture_joint_metadata", side_effect=lambda: copy.deepcopy(current["metadata"])))
+		stack.enter_context(patch.object(module, "_desired_navigation", side_effect=lambda scope, **kw: scope))
+		return before, current, events, control
+
+	def test_five_oa_column_intents_and_unique_index_are_durable_and_second_apply_is_idle(self):
+		module = self.metadata_module()
+		with tempfile.TemporaryDirectory() as directory:
+			path = Path(directory) / "receipt.json"
+			before, current, events, _ = self.native_oa_boundary(module, path)
+			result = module.apply_joint_metadata("a" * 40, path)
+			self.assertEqual(result["ddl_boundaries"], 6)
+			self.assertEqual(current["models"], before["models"])
+			self.assertEqual(current["operating_singles"], before["operating_singles"])
+			first = path.read_bytes(); events.clear()
+			self.assertTrue(module.apply_joint_metadata("a" * 40, path)["unchanged"])
+			self.assertEqual(events, [])
+			self.assertEqual(path.read_bytes(), first)
+
+	def test_each_interrupted_oa_autocommit_rolls_back_only_new_null_columns_and_job(self):
+		for crash in range(1, 7):
+			with self.subTest(crash=crash), tempfile.TemporaryDirectory() as directory:
+				module = self.metadata_module()
+				path = Path(directory) / "receipt.json"
+				before, current, events, control = self.native_oa_boundary(module, path, crash=crash)
+				with self.assertRaisesRegex(RuntimeError, "autocommit"): module.apply_joint_metadata("a" * 40, path)
+				self.assertEqual(self.module().DDLReceipt.load(path).state["steps"][-1]["status"], "pending")
+				control["crash"] = None
+				self.assertTrue(module.restore_joint_metadata(path, candidate_sha="a" * 40)["restored"])
+				self.assertEqual(current, before)
+
+	def test_full_joint_final_gate_allows_only_receipted_oa_schema_with_old_rows_and_outside_metadata(self):
+		module = self.metadata_module()
+		with tempfile.TemporaryDirectory() as directory:
+			path = Path(directory) / "receipt.json"
+			before, current, _, _ = self.native_oa_boundary(module, path)
+			module.apply_joint_metadata("a" * 40, path)
+			receipt = self.module().DDLReceipt.load(path).state
+			old, new = copy.deepcopy(before["audit"]), copy.deepcopy(current["audit"])
+			old.update(joint_metadata=before["metadata"], approved_sources_after=receipt["contract"]["sources_after"])
+			new["joint_metadata"] = copy.deepcopy(current["metadata"])
+			module.verify_joint_audit_delta(old, new, receipt)
+
+	def test_final_gate_rejects_raw_active_data_and_fresh_outside_or_original_oa_drift(self):
+		module = self.metadata_module()
+		with tempfile.TemporaryDirectory() as directory:
+			path = Path(directory) / "receipt.json"
+			before, current, _, _ = self.native_oa_boundary(module, path)
+			module.apply_joint_metadata("a" * 40, path)
+			receipt = self.module().DDLReceipt.load(path).state
+			old, new = copy.deepcopy(before["audit"]), copy.deepcopy(current["audit"])
+			old.update(joint_metadata=before["metadata"], approved_sources_after=receipt["contract"]["sources_after"])
+			new["joint_metadata"] = copy.deepcopy(current["metadata"])
+			for drift in ("oa-row", "oa-hash", "oa-new-nonnull", "oa-column", "oa-index", "operating-row", "operating-hash", "operating-single", "outside-po-data", "sync"):
+				with self.subTest(drift=drift):
+					bad, native = copy.deepcopy(new), copy.deepcopy(receipt)
+					if drift == "oa-row": native["after"]["oa"]["rows"][0]["manual"] = "changed"
+					elif drift == "oa-hash": bad["tables"]["OA Purchase Request"] = module.digest([])
+					elif drift == "oa-new-nonnull": bad["oa_new_columns"]["custom_purchase_source_json"] = 1
+					elif drift in {"oa-column", "oa-index"}:
+						kind, key = ("columns", "currency") if drift == "oa-column" else ("indexes", "custom_purchase_source_id")
+						value = {} if drift == "oa-column" else [dict(module._source_index()[0], prefix=40)]
+						bad["schemas"][module.OA_DOCTYPE][kind][key] = value
+						native["after"]["oa"]["schema"][kind][key] = value
+					elif drift == "operating-row": native["after"]["models"]["Operating Expense Source"]["rows"][-1]["original_evidence"] = '{"manual":1}'
+					elif drift == "operating-hash": bad["operating_models"]["Operating Expense Source"]["rows"] = module.digest([])
+					elif drift == "operating-single": native["after"]["operating_singles"][0]["value"] = "1"
+					elif drift == "outside-po-data":
+						bad["joint_metadata"]["outside_rows"]["Custom Field"][0]["fieldtype"] = "Link"
+						native["after"]["metadata"] = copy.deepcopy(bad["joint_metadata"])
+					else: bad["purchase_source_sync_enabled"] = True
+					with self.assertRaises(AssertionError): module.verify_joint_audit_delta(copy.deepcopy(old), bad, native)
+
+	def test_rollback_refuses_new_nonnull_oa_evidence_before_any_destructive_ddl(self):
+		module = self.metadata_module()
+		with tempfile.TemporaryDirectory() as directory:
+			path = Path(directory) / "receipt.json"
+			_, _, events, control = self.native_oa_boundary(module, path, crash=1)
+			with self.assertRaises(RuntimeError): module.apply_joint_metadata("a" * 40, path)
+			control.update(crash=None, nonnull=True)
+			events.clear()
+			with self.assertRaisesRegex(AssertionError, "non-NULL"): module.restore_joint_metadata(path)
+			self.assertEqual(events, [])
+
+
 if __name__ == "__main__":
 	unittest.main()

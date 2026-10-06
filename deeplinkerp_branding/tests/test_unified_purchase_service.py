@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import sys
 from datetime import datetime
 from io import BytesIO
 from types import SimpleNamespace
@@ -89,6 +90,24 @@ def test_inaccessible_linked_order_keeps_oa_without_leaking_order_name():
 	assert row["grand_total"] is None
 	assert row["supplier"] is None
 	assert row["docstatus"] is None
+
+
+def test_managed_source_keeps_zero_and_separates_request_cashier_and_erp():
+	request=oa(currency="USD",custom_purchase_source_json=json.dumps({"eligible":True,"version":"v1","currency":"CNY","requested_amount":"999","detail_total_amount":"0","issues":[]}),
+		custom_cashier_payment_evidence=json.dumps({"paid_amount":"20","currency":"CNY","payment_evidence_status":"recorded"}))
+	row=backend().build_unified_purchase_payload([po(custom_oa_purchase_expense="OA-1",grand_total=100,advance_paid=5)],[request])["rows"][0]
+	assert row["oa_amount"] == "0"
+	assert row["oa_currency"] == "CNY"
+	assert row["requested_amount"] == "999"
+	assert row["cashier_paid_amount"] == "20"
+	assert row["grand_total"] == 100 and row["advance_paid"] == 5
+	assert row["source_version"] == "v1" and row["source_eligible"] is True
+
+
+def test_quick_order_status_and_advance_status_are_not_ignored():
+	s=backend()
+	assert s.build_unified_purchase_payload([po()],[],filters={"status":"Draft"})["total_count"] == 0
+	assert s.build_unified_purchase_payload([po()],[],filters={"advance_payment_status":"Paid"})["total_count"] == 0
 
 
 def test_conflicting_order_links_do_not_assign_the_same_oa_amount_twice():
@@ -337,7 +356,7 @@ class ReadBoundary:
 		assert set(kwargs["fields"]) <= self.fields[doctype]
 		return [{field: row.get(field) for field in kwargs["fields"]} for row in self.records[doctype]]
 
-	def throw(self, message, exception):
+	def throw(self, message, exception=ValueError):
 		raise exception(message)
 
 
@@ -345,7 +364,166 @@ def connect(monkeypatch, boundary):
 	s = backend()
 	monkeypatch.setattr(s, "frappe", boundary)
 	monkeypatch.setattr(s, "get_permitted_fields", boundary.permitted_fields)
+	monkeypatch.setattr(s, "get_workflow_name", lambda doctype: "")
 	return s
+
+
+def connect_native_queries(monkeypatch, boundary, *, workflow_field=None, fieldtypes=None):
+	"""Use the existing query guards; substitute only Frappe metadata/IO boundaries."""
+	s = connect(monkeypatch, boundary)
+	fieldtypes = fieldtypes or {}
+	metadata = {dt: set(fields) | set().union(*(row.keys() for row in boundary.records.get(dt, [])))
+		for dt, fields in boundary.fields.items()}
+	metadata.setdefault("Purchase Order Item", set()).update({"name", "item_code", "qty"})
+	metadata["Purchase Order"].add("items")
+	def get_meta(doctype):
+		fields = []
+		for name in metadata[doctype]:
+			values = {"fieldname": name, "fieldtype": fieldtypes.get(name, "Data"), "permlevel": 0}
+			if name == "items":
+				values.update(fieldtype="Table", options="Purchase Order Item",
+					permlevel=0 if name in boundary.fields[doctype] else 1)
+			fields.append(SimpleNamespace(**values, get=values.get))
+		return SimpleNamespace(fields=fields, default_fields={"name", "creation", "modified"},
+			get_valid_columns=lambda: metadata[doctype],
+			get_permlevel_access=lambda **kwargs: {0},
+			get_field=lambda name: next((df for df in fields if df.fieldname == name), None))
+	monkeypatch.setattr(boundary, "get_meta", get_meta, raising=False)
+	monkeypatch.setattr(boundary, "whitelist", lambda **kwargs: lambda fn: fn, raising=False)
+	monkeypatch.setitem(sys.modules, "frappe", boundary)
+	monkeypatch.setitem(sys.modules, "frappe.model", SimpleNamespace(get_permitted_fields=boundary.permitted_fields))
+	monkeypatch.setitem(sys.modules, "frappe.utils", SimpleNamespace(getdate=lambda value: value, nowdate=lambda: "2026-10-06"))
+	name = "deeplinkerp_branding.services.purchase_payment_service"
+	spec = importlib.util.spec_from_file_location(name, __import__("pathlib").Path(s.__file__).with_name("purchase_payment_service.py"))
+	queries = importlib.util.module_from_spec(spec)
+	monkeypatch.setitem(sys.modules, name, queries)
+	spec.loader.exec_module(queries)
+	monkeypatch.setattr(queries, "_normalize_filter", lambda dt, field, op, value: [dt, field, op, value])
+	monkeypatch.setattr(s, "get_workflow_name", lambda dt: "Active Purchase Workflow" if workflow_field else "", raising=False)
+	monkeypatch.setattr(s, "get_workflow", lambda dt: SimpleNamespace(workflow_state_field=workflow_field), raising=False)
+	return s
+
+
+@pytest.mark.parametrize("field", ["creation", "modified"])
+def test_native_timestamp_sort_uses_each_records_own_timestamp_and_export_order(monkeypatch, capture_xlsx, field):
+	orders = [po("PO-1", **{field: datetime(2026, 10, 1, 8)}), po("PO-2", **{field: datetime(2026, 10, 3, 8)})]
+	request = oa(**{field: datetime(2026, 10, 2, 8)}, apply_date="2026-09-01")
+	b = ReadBoundary(orders, [request])
+	s = connect_native_queries(monkeypatch, b)
+	result = s.get_unified_purchase_list(order_by=f"{field} desc", page_length=1)
+	assert result["total_count"] == 3 and result["has_next"] is True
+	assert result["rows"][0]["name"] == "PO-2"
+	assert result["rows"][0][field] == orders[1][field]
+	assert [row["name"] for row in s.get_unified_purchase_list(order_by=f"{field} desc")["rows"]] == ["PO-2", "OA-1", "PO-1"]
+	s.export_unified_purchase_list(order_by=f"{field} desc", columns=["name"])
+	content = b.response["filecontent"]
+	assert content.index(b"PO-2") < content.index("待完善 · 审批-1".encode()) < content.index(b"PO-1")
+
+
+def test_active_native_workflow_state_is_projected_and_sortable_without_exposing_other_fields(monkeypatch):
+	orders = [po("PO-1", custom_workflow_state="Submitted", private_notes="private"), po("PO-2", custom_workflow_state="Approved")]
+	b = ReadBoundary(orders, [oa()])
+	s = connect_native_queries(monkeypatch, b, workflow_field="custom_workflow_state")
+	result = s.get_unified_purchase_list()
+	assert next(row for row in result["rows"] if row["name"] == "PO-1")["custom_workflow_state"] == "Submitted"
+	assert all("private_notes" not in row for row in result["rows"])
+	result = s.get_unified_purchase_list(order_by="custom_workflow_state asc")
+	assert [row["name"] for row in result["rows"]] == ["PO-2", "PO-1", "OA-1"]
+	assert result["rows"][-1].get("custom_workflow_state") is None
+
+
+def test_permitted_native_scalar_sort_is_projected_and_numeric(monkeypatch):
+	orders = [po("PO-1", total_qty=20), po("PO-2", total_qty=3)]
+	b = ReadBoundary(orders, [oa()])
+	s = connect_native_queries(monkeypatch, b, fieldtypes={"total_qty": "Float"})
+	result = s.get_unified_purchase_list(order_by="total_qty asc")
+	assert [row["name"] for row in result["rows"]] == ["PO-2", "PO-1", "OA-1"]
+	assert result["rows"][0]["total_qty"] == 3
+
+
+@pytest.mark.parametrize("field", ["creation", "modified", "custom_workflow_state", "total_qty"])
+def test_denied_native_sort_field_is_not_inferred_and_fails_closed(monkeypatch, field):
+	order = po(**{field: "private"})
+	b = ReadBoundary([order], fields={"Purchase Order": set(order) - {field}, "OA Purchase Request": {"name"}})
+	s = connect_native_queries(monkeypatch, b, workflow_field="custom_workflow_state")
+	assert field not in s.get_unified_purchase_list()["rows"][0]
+	with pytest.raises(PermissionError):
+		s.get_unified_purchase_list(order_by=f"{field} asc")
+
+
+@pytest.mark.parametrize("argument", ["native_filters", "native_or_filters"])
+def test_native_item_filters_keep_list_count_totals_and_export_identical(monkeypatch, capture_xlsx, argument):
+	order = po(custom_oa_purchase_expense="OA-1", grand_total=12)
+	b = ReadBoundary([order, dict(order)], [oa(), oa("OA-UNCONVERTED", detail_total_amount=999)])
+	b.fields["Purchase Order"].add("items")
+	b.fields["Purchase Order Item"] = {"name", "item_code", "qty"}
+	s = connect_native_queries(monkeypatch, b)
+	conditions = [["Purchase Order Item", "item_code", "=", "ITEM-1"], ["Purchase Order", "company", "=", "Yuewei"]]
+	args = {argument: json.dumps(conditions)}
+	result = s.get_unified_purchase_list(**args, page_length=1)
+	assert result["total_count"] == 1 and result["has_next"] is False
+	assert result["totals"] == {"orders": [{"currency": "USD", "amount": 12.0}], "oa": [{"currency": "CNY", "amount": 10.0}], "oa_unknown_currency_count": 0}
+	assert result["rows"][0]["oa_name"] == "OA-1"
+	s.export_unified_purchase_list(**args, columns=["name", "grand_total", "oa_amount"])
+	assert b"PO-1" in b.response["filecontent"] and b"OA-UNCONVERTED" not in b.response["filecontent"]
+	po_calls = [kwargs for dt, kwargs in b.calls if dt == "Purchase Order"]
+	assert len(po_calls) == 2 and po_calls[0] == po_calls[1]
+	assert po_calls[0][argument.removeprefix("native_")] == conditions
+	assert ("Purchase Order Item", {"parenttype": "Purchase Order", "permission_type": "read"}) in b.field_calls
+
+
+@pytest.mark.parametrize("denied", ["items", "qty"])
+def test_native_item_filter_requires_parent_table_and_child_field_permissions(monkeypatch, denied):
+	b = ReadBoundary([po()])
+	b.fields["Purchase Order"].add("items")
+	b.fields["Purchase Order Item"] = {"name", "item_code", "qty"}
+	b.fields["Purchase Order" if denied == "items" else "Purchase Order Item"].discard(denied)
+	s = connect_native_queries(monkeypatch, b)
+	with pytest.raises(PermissionError):
+		s.get_unified_purchase_list(native_filters=[["Purchase Order Item", "qty", ">", 1]])
+	assert not b.calls
+
+
+@pytest.mark.parametrize("doctype, field", [("Payment Entry", "paid_amount"), ("Purchase Invoice Item", "item_code"), ("Purchase Order Item", "not_a_field")])
+def test_native_item_filter_rejects_foreign_or_unknown_fields_before_query(monkeypatch, doctype, field):
+	b = ReadBoundary([po()])
+	b.fields["Purchase Order"].add("items")
+	b.fields["Purchase Order Item"] = {"name", "item_code", "qty"}
+	s = connect_native_queries(monkeypatch, b)
+	with pytest.raises(ValueError):
+		s.get_unified_purchase_list(native_filters=[[doctype, field, "=", "private"]])
+	assert not b.calls
+
+
+@pytest.mark.parametrize("empty", ["[]", "{}", "null"])
+def test_serialized_empty_native_filters_do_not_hide_unconverted_sources(monkeypatch, capture_xlsx, empty):
+	b = ReadBoundary([po()], [oa()])
+	s = connect_native_queries(monkeypatch, b)
+	args = {"native_filters": empty, "native_or_filters": empty}
+	result = s.get_unified_purchase_list(**args)
+	assert result["total_count"] == 2
+	assert {row["name"] for row in result["rows"]} == {"PO-1", "OA-1"}
+	assert all("filters" not in kwargs for dt, kwargs in b.calls)
+	s.export_unified_purchase_list(**args, columns=["name"])
+	assert "待完善 · 审批-1".encode() in b.response["filecontent"]
+
+
+@pytest.mark.parametrize("invalid", [0, False, "0", "false", '""'])
+def test_malformed_native_filter_shape_is_not_silently_treated_as_no_filter(monkeypatch, invalid):
+	b = ReadBoundary([po()], [oa()])
+	s = connect_native_queries(monkeypatch, b)
+	with pytest.raises(ValueError):
+		s.get_unified_purchase_list(native_filters=invalid)
+	assert not b.calls
+
+
+def test_native_sort_rejects_unknown_table_and_sql_fragments_before_query(monkeypatch):
+	b = ReadBoundary([po()])
+	s = connect_native_queries(monkeypatch, b)
+	for invalid in ("items asc", "not_a_field asc", "total_qty desc; select 1", "`tabPayment Entry`.`paid_amount` asc"):
+		with pytest.raises(ValueError):
+			s.get_unified_purchase_list(order_by=invalid)
+	assert not b.calls
 
 
 @pytest.fixture
@@ -358,6 +536,13 @@ def capture_xlsx(monkeypatch):
 
 		def __enter__(self):
 			return self
+
+		def get_worksheet_by_name(self, name):
+			return SimpleNamespace(set_column=lambda *args: None)
+
+		def add_format(self, values):
+			assert values == {"num_format":"0.00"}
+			return values
 
 		def __exit__(self, *_args):
 			self.output.write(repr(self.data).encode())
@@ -556,7 +741,7 @@ def test_export_builder_uses_complete_same_filtered_result_and_selected_columns(
 		rows, [], filters={"company": "Yuewei"}, columns=["name", "grand_total", "party_account_currency"],
 	)
 	assert result["total_count"] == 2
-	assert data == [["单号", "订单金额", "预付款币种"], ["PO-1", 1, "CNY"], ["PO-2", 2, "CNY"]]
+	assert data == [["采购订单号 / 待完善来源", "订单金额", "预付款币种"], ["PO-1", 1, "CNY"], ["PO-2", 2, "CNY"]]
 	with pytest.raises(ValueError):
 		s.build_unified_purchase_export(rows, [], columns=["process_instance_id"])
 
@@ -577,13 +762,43 @@ def test_export_structured_oa_references_keep_original_evidence_as_text():
 	order = po(custom_oa_purchase_expense="OA-1")
 	request = oa(oa_code="=1+1", detail_total_amount=-7.890123)
 	data = s.build_unified_purchase_export([order], [request], columns=["name", "oa_references"])
-	assert data[0] == ["单号", "OA 来源明细"]
+	assert data[0] == ["采购订单号 / 待完善来源", "OA 来源明细"]
 	assert isinstance(data[1][1], str)
 	assert json.loads(data[1][1]) == [{
 		"name": "OA-1", "number": "=1+1", "approval_status": "APPROVED", "amount": -7.890123,
 		"currency": "CNY", "amount_basis": "采购明细合计", "company": "Yuewei", "warning": None,
 	}]
 	assert "采购明细合计" in data[1][1]
+
+
+def test_export_source_display_keeps_cache_identity_and_exact_evidence_immutable():
+	s = backend()
+	request = oa("DT-PUR-internal-identity", oa_code="DT-ORIGINAL",
+		custom_purchase_source_json=json.dumps({"business_id": "DT-ORIGINAL", "currency": "CNY",
+			"detail_total_amount": "0.00000", "requested_amount": "100.123456789"}))
+	rows = s.build_unified_purchase_payload([po()], [request])["rows"]
+	original = json.dumps(rows, ensure_ascii=False, default=str)
+	columns = ["name", "source", "oa_amount", "requested_amount", "oa_currency", "oa_references"]
+	data = s._export_data(rows, columns)
+	assert data[2][:5] == ["待完善 · DT-ORIGINAL", "钉钉", 0.0, 100.123456789, "CNY"]
+	assert data[1][:2] == ["PO-1", "其他来源"]
+	assert data[0] == ["采购订单号 / 待完善来源", "来源", "来源明细金额", "来源申请金额", "OA 币种", "OA 来源明细"]
+	assert isinstance(data[2][2], float) and isinstance(data[2][3], float)
+	assert json.loads(data[2][5]) == rows[1]["oa_references"]
+	assert json.loads(data[2][5])[0]["amount"] == "0.00000"
+	assert json.dumps(rows, ensure_ascii=False, default=str) == original
+	assert rows[1]["name"] == "DT-PUR-internal-identity" and rows[1]["source"] == "OA"
+	assert s.build_unified_purchase_export([po()], [request], columns=columns) == data
+
+
+@pytest.mark.parametrize("source, label", [
+	("OA", "钉钉"), ("oa", "钉钉"), ("non_oa", "其他来源"), ("未关联 OA", "其他来源"),
+	(None, "来源待确认"), ("自有来源", "自有来源"),
+])
+def test_export_source_labels_match_visible_list_without_changing_codes(source, label):
+	row = {"name": "PO-1", "row_type": "purchase_order", "source": source}
+	assert backend()._export_data([row], ["name", "source"])[1] == ["PO-1", label]
+	assert row["source"] == source
 
 
 def test_export_xlsx_preserves_literal_formula_and_url_strings(monkeypatch):
@@ -608,6 +823,7 @@ def test_export_xlsx_preserves_literal_formula_and_url_strings(monkeypatch):
 		order["supplier_name"], request["oa_code"], 42.123456, -7.890123, order["project"],
 	]
 	assert [sheet.cell(2, index).data_type for index in range(1, 6)] == ["s", "s", "n", "n", "s"]
+	assert sheet.cell(2, 3).number_format == sheet.cell(2, 4).number_format == "0.00"
 	assert sheet.cell(2, 6).data_type == "s"
 	assert json.loads(sheet.cell(2, 6).value)[0]["amount"] == -7.890123
 	assert json.loads(sheet.cell(2, 6).value)[0]["number"] == request["oa_code"]
@@ -620,3 +836,20 @@ def test_export_download_calls_frappe_xlsx_without_pagination_or_business_writes
 	assert b.response["filename"].endswith(".xlsx")
 	assert b.response["type"] == "binary"
 	assert b"PO-1" in b.response["filecontent"] and b"PO-2" in b.response["filecontent"]
+
+
+def test_private_projection_does_not_reveal_denied_approval_or_financial_fields(monkeypatch):
+	request=oa(custom_purchase_source_id="source",custom_purchase_source_json=json.dumps({"eligible":True,"version":"v1","business_id":"DT-ORIGINAL","requested_amount":"999","detail_total_amount":"998","currency":"CNY","issues":["采购明细与申请金额不一致，请核对原单"]}),custom_cashier_payment_evidence=json.dumps({"paid_amount":"8","currency":"CNY","payment_evidence_status":"recorded"}))
+	b=ReadBoundary([], [request], read={"Purchase Order","OA Purchase Request","Payment Entry"}, fields={"Purchase Order":{"name"},"OA Purchase Request":set(request)-{"approval_status","payment_amount","detail_total_amount","custom_purchase_source_json","custom_cashier_payment_evidence"},"Payment Entry":{"name"}})
+	b.db.get_value=lambda *args,**kwargs: request
+	row=connect(monkeypatch,b).get_unified_purchase_list()["rows"][0]
+	assert row["approval_status"] is None and row["source_eligible"] is None
+	assert row["requested_amount"] is None and row["cashier_paid_amount"] is None
+	assert "不一致" not in (row["oa_warning"] or "")
+
+
+def test_source_original_number_is_preserved_independently_of_native_field_autoname(monkeypatch):
+	request=oa(oa_code="DT-PUR-internal-identity",custom_purchase_source_id="source",custom_purchase_source_json=json.dumps({"business_id":"DT-ORIGINAL","eligible":True,"currency":"CNY","detail_total_amount":"0","requested_amount":"0"}))
+	b=ReadBoundary([], [request],fields={"Purchase Order":{"name"},"OA Purchase Request":set(request)}); b.db.get_value=lambda *args,**kwargs: request
+	row=connect(monkeypatch,b).get_unified_purchase_list()["rows"][0]
+	assert row["oa_number"] == "DT-ORIGINAL"

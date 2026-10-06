@@ -10,6 +10,7 @@ import frappe
 SITE = "deeplinkerp.com"
 BENCH = Path("/home/frappe/frappe-bench")
 REQUIRED_SOURCE_APPS = ("deeplinkerp_branding", "china_finance", "crm_integration")
+OPERATING_MODELS = ("Operating Expense Company Map", "Operating Expense Source", "Operating Expense Mapping", "Operating Expense Event", "Operating Expense Sync Settings")
 
 
 def source_files(app):
@@ -107,7 +108,7 @@ def table_schema(doctype):
 	return json.loads(json.dumps(result, default=str))
 
 
-def capture_audit(*, je_columns=None):
+def capture_audit(*, je_columns=None, oa_columns=None):
 	"""Capture inside the caller's transaction; the CLI remains read-only."""
 	for app in set(REQUIRED_SOURCE_APPS) | set(frappe.get_installed_apps()):
 		assert (BENCH / "apps" / app / app).is_dir(), "Missing required/installed app source: " + app
@@ -197,10 +198,11 @@ def capture_audit(*, je_columns=None):
 		# Doctype names come only from this fixed allowlist and installed metadata; quote defensively.
 		table = ("tab" + doctype).replace("`", "``")
 		projection = "*"
-		if doctype == "Journal Entry" and je_columns is not None:
-			assert je_columns and "name" in je_columns and len(je_columns) == len(set(je_columns))
-			assert all(isinstance(field, str) and field.isidentifier() for field in je_columns)
-			projection = ",".join("`" + field + "`" for field in je_columns)
+		original = je_columns if doctype == "Journal Entry" else oa_columns if doctype == "OA Purchase Request" else None
+		if original is not None:
+			assert original and "name" in original and len(original) == len(set(original))
+			assert all(isinstance(field, str) and field.isidentifier() for field in original)
+			projection = ",".join("`" + field + "`" for field in original)
 		rows = frappe.db.sql(f"select {projection} from `{table}` order by name", as_dict=True)
 		result["tables"][doctype] = {
 			"count": len(rows),
@@ -209,6 +211,23 @@ def capture_audit(*, je_columns=None):
 			).hexdigest(),
 		}
 		result["schemas"][doctype] = table_schema(doctype)
+	# Original rows remain hashed using their frozen projection. Independently
+	# inspect every newly added OA column so later source writes cannot hide
+	# behind that projection during the fresh final release audit.
+	result["oa_new_columns"] = {}
+	if oa_columns is not None and result["schemas"].get("OA Purchase Request"):
+		for field in set(result["schemas"]["OA Purchase Request"]["columns"]) - set(oa_columns):
+			assert field.isidentifier()
+			result["oa_new_columns"][field] = frappe.db.sql("select count(*) from `tabOA Purchase Request` where `" + field + "` is not null")[0][0]
+	# These already-active rows must remain protected by the fresh final audit,
+	# not only the earlier private receipt snapshot. New absent-before models
+	# are allowed solely as exact-contract empty tables by the receipt verifier.
+	result["operating_models"] = {}
+	for doctype in OPERATING_MODELS:
+		schema = table_schema(doctype)
+		rows = frappe.db.sql("select * from `" + ("tab" + doctype).replace("`", "``") + "` order by name", as_dict=True) if schema else []
+		result["operating_models"][doctype] = {"schema": schema, "rows": {"count": len(rows), "sha256": hashlib.sha256(json.dumps(rows, sort_keys=True, default=str, ensure_ascii=False).encode()).hexdigest()}}
+	result["purchase_source_sync_enabled"] = bool(getattr(frappe, "conf", {}).get("purchase_source_sync_enabled"))
 	# Single settings have no per-DocType SQL table. Preserve every installed Single, including integration URLs.
 	singles = frappe.db.sql(
 		"select doctype, field, value from `tabSingles` order by doctype, field, value", as_dict=True
@@ -233,20 +252,27 @@ def capture_audit(*, je_columns=None):
 	return result
 
 
-def capture_joint_state(*, original_columns=None):
+def capture_joint_state(*, original_columns=None, original_oa_columns=None):
 	"""Private receipt snapshot. Raw JE projection and all scoped metadata stay private."""
 	from procurement_release_metadata import JOINT_MODELS, capture_joint_metadata
+	assert OPERATING_MODELS == JOINT_MODELS, "Operating audit scope drift"
 
 	schema = table_schema("Journal Entry")
 	assert schema, "Native Journal Entry table is required"
 	columns = original_columns or list(schema["columns"])
 	assert all(isinstance(field, str) and field.isidentifier() for field in columns)
 	rows = frappe.db.sql("select " + ",".join("`" + field + "`" for field in columns) + " from `tabJournal Entry` order by name", as_dict=True)
+	oa_schema = table_schema("OA Purchase Request")
+	oa = None
+	if oa_schema:
+		oa_columns = original_oa_columns or list(oa_schema["columns"])
+		assert "name" in oa_columns and len(oa_columns) == len(set(oa_columns)) and all(isinstance(field, str) and field.isidentifier() for field in oa_columns)
+		oa = {"schema": oa_schema, "original_columns": oa_columns, "rows": frappe.db.sql("select " + ",".join("`" + field + "`" for field in oa_columns) + " from `tabOA Purchase Request` order by name", as_dict=True)}
 	models = {}
 	for doctype in JOINT_MODELS:
 		model_schema = table_schema(doctype)
 		models[doctype] = {"schema": model_schema, "rows": frappe.db.sql("select * from `" + ("tab" + doctype).replace("`", "``") + "` order by name", as_dict=True) if model_schema else []}
-	result = {"audit": capture_audit(je_columns=columns), "metadata": capture_joint_metadata(),
+	result = {"audit": capture_audit(je_columns=columns, oa_columns=oa["original_columns"] if oa else None), "metadata": capture_joint_metadata(), "oa": oa,
 		"je": {"schema": schema, "original_columns": columns, "rows": rows}, "models": models,
 		"operating_singles": frappe.db.sql("select * from `tabSingles` where doctype='Operating Expense Sync Settings' order by field", as_dict=True)}
 	return json.loads(json.dumps(result, default=str, ensure_ascii=False))
@@ -266,11 +292,13 @@ def main():
 	try:
 		if args.purchase_payment_page_source:
 			verify_purchase_payment_page(json.loads(Path(args.purchase_payment_page_source).read_text()))
-		original_columns = None
+		original_columns = original_oa_columns = None
 		if args.joint_receipt:
 			from joint_release_guards import DDLReceipt
-			original_columns = DDLReceipt.load(args.joint_receipt).state["before"]["je"]["original_columns"]
-		result = capture_audit(je_columns=original_columns)
+			before = DDLReceipt.load(args.joint_receipt).state["before"]
+			original_columns = before["je"]["original_columns"]
+			original_oa_columns = before["oa"]["original_columns"] if before.get("oa") else None
+		result = capture_audit(je_columns=original_columns, oa_columns=original_oa_columns)
 		if args.procurement_metadata:
 			from procurement_release_metadata import capture
 

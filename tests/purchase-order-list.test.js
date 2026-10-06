@@ -507,6 +507,38 @@ test("rendered rows retain native selection hooks, native indicator, and escaped
 	assert.equal(doc.advance_payment_status, "Partially Paid", "display translation must not alter the query/export field value");
 });
 
+test("purchase order union enables native order selection while source rows only open the completion drawer", () => {
+	const { list, env } = bareList();
+	const controller = production("mount")(list, env);
+	controller.setProviderScope("all", false);
+	const call = dispatch(list);
+	const po = { name: "PO-1", row_type: "purchase_order", docstatus: 0 };
+	const oa = { name: "OA-1", oa_number: "2026-申请", row_type: "oa_request" };
+	const response = { message: { rows: [oa, po], total_count: 2 } };
+	call.callback(response); list.prepare_data(response);
+	assert.deepEqual(list.data, [po]);
+	assert.match(list.get_header_html(), /list-check-all/);
+	const sourceHTML = list.get_list_row_html(oa);
+	assert.match(sourceHTML, /待完善 · 2026-申请/);
+	assert.match(sourceHTML, /data-purchase-source="OA-1"/);
+	assert.doesNotMatch(sourceHTML, /list-row-checkbox|purchase-order\/OA-1|data-doctype="Purchase Order"/);
+	assert.match(list.get_list_row_html(po), /list-row-checkbox/);
+});
+
+test("purchase selection leaves its column headers visible and preserves native bulk actions", () => {
+	const { list, env } = bareList();
+	let nativeSelections = 0, shown = 0, hidden = 0, selectAll;
+	list.on_row_checked = () => nativeSelections++;
+	production("mount")(list, env);
+	list.data = [{ name: "PO-1" }, { name: "PO-2" }];
+	list.$checks = [{ name: "PO-1" }];
+	const input = { prop(key, value) { if (key === "indeterminate") selectAll = value; return this; } };
+	list.$list_head_subject = { show() { shown++; }, find() { return input; } };
+	list.$checkbox_actions = { hide() { hidden++; } };
+	list.on_row_checked();
+	assert.equal(nativeSelections, 1); assert.equal(shown, 1); assert.equal(hidden, 1); assert.equal(selectAll, true);
+});
+
 function selectionList() {
 	const { list, env } = bareList();
 	const rows = new Map();

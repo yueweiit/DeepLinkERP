@@ -20,10 +20,10 @@ function fixture(options={}) {
 		summary: () => "分别汇总",
 		onActivate(c) { c.list.realtimeBindings ||= []; c.list.realtimeBindings.push("OA"); },
 	};
-	const grid = engine.create({ doctype: "Purchase Order", controllerKey: "grid", routeClass: "test", columns: native, provider });
+	const grid = engine.create({ doctype: "Purchase Order", controllerKey: "grid", routeClass: "test", columns: native, provider, providerSelectable: options.providerSelectable, keepColumnHeader: options.keepColumnHeader });
 	const list = {
 		doctype: "Purchase Order", view_name: "List", meta: options.meta || { fields: [] }, fields: [["name", "Purchase Order"]], data: [],
-		get_args() { return { filters: [], fields: ["name"], start: this.start, page_length: this.page_length }; },
+		get_args() { return { filters: this.filters || [], or_filters: this.or_filters || [], fields: ["name"], order_by: this.order_by, start: this.start, page_length: this.page_length }; },
 		get_call_args() { return { method: "native", args: this.get_args() }; },
 		no_change() { return false; }, prepare_data(r) { this.data = r.message; }, reset_defaults() {},
 		refresh() { return Promise.resolve(); }, get_header_html() {}, get_list_row_html() {}, render_header() {}, render_list() {}, render_count() {}, toggle_result_area() {},
@@ -31,6 +31,13 @@ function fixture(options={}) {
 		setup_realtime_updates() { this.realtimeBindings = ["Purchase Order"]; },
 	};
 	const root = { frappe: { model: { std_fields_list: ["name"] }, perm: { has_perm: () => true }, get_route: () => ["List", "Purchase Order", "List"], session: {}, boot: {} } };
+	if (options.realtime) {
+		list.pending_document_refreshes = [];
+		list.process_document_refreshes = () => assert.fail("native incremental append must not run on a bounded provider page");
+		list.page = { wrapper: { is: () => true } };
+		root.cur_list = list;
+		root.frappe.utils = { debounce: callback => callback };
+	}
 	const controller = grid.mount(list, root);
 	return { grid, list, controller };
 }
@@ -66,6 +73,45 @@ test("optional provider keeps OA rows outside native PO data and selection", () 
 	assert.ok(!list.get_header_html().includes("list-check-all"));
 });
 
+test("selectable procurement provider retains only real orders in native selection and bulk hooks", () => {
+	const { list, controller } = fixture({ providerSelectable: doc => doc.row_type === "purchase_order", keepColumnHeader: true });
+	let nativeBefore = 0, nativeRestore = 0;
+	controller.originals.before_render = () => nativeBefore++;
+	controller.originals.set_rows_as_checked = () => nativeRestore++;
+	controller.originals.get_checked_items = names => names ? ["PO", "OA"] : [{ name: "PO" }, { name: "OA" }];
+	controller.setProviderScope("all", false);
+	const call = list.get_call_args(); list.no_change(call);
+	const po = { name: "PO", row_type: "purchase_order" }, oa = { name: "OA", row_type: "oa_request" };
+	const response = { message: { rows: [oa, po], total_count: 2 } };
+	call.callback(response); list.prepare_data(response);
+	assert.deepEqual(list.data, [po]);
+	assert.deepEqual(controller.providerRows, [oa, po]);
+	assert.deepEqual(list.get_checked_items(true), ["PO"]);
+	assert.deepEqual(list.get_checked_items(), [{ name: "PO" }]);
+	assert.match(list.get_list_row_html(po), /list-row-checkbox/);
+	assert.match(list.get_list_row_html(po), /class="level list-row /);
+	assert.doesNotMatch(list.get_list_row_html(oa), /list-row-checkbox|class="level list-row /);
+	assert.match(list.get_header_html(), /list-check-all/);
+	list.before_render(); list.set_rows_as_checked();
+	assert.equal(nativeBefore, 1); assert.equal(nativeRestore, 1);
+});
+
+test("selectable provider forwards changing native AND and OR filters and rejects an old response", () => {
+	const { list, controller } = fixture({ provider: adapter.configure([{ fieldname: "name", label: "单据号", width: 166 }]), providerSelectable: doc => doc.row_type === "purchase_order" });
+	controller.setProviderScope("all", false);
+	list.filters = [["Purchase Order", "project", "=", "P1"]];
+	list.or_filters = [["Purchase Order", "name", "like", "PO%"]];
+	const call = list.get_call_args(); list.no_change(call);
+	assert.equal(typeof call.args.native_filters, "string");
+	assert.deepEqual(JSON.parse(call.args.native_filters), list.filters);
+	assert.deepEqual(JSON.parse(call.args.native_or_filters), list.or_filters);
+	controller.setPage(2);
+	list.filters = [["Purchase Order", "project", "=", "P2"]];
+	const response = { message: { rows: [{ name: "OLD", row_type: "purchase_order" }], total_count: 1 } };
+	call.callback(response); list.prepare_data(response);
+	assert.deepEqual(list.data, []); assert.equal(controller.page, 0);
+});
+
 test("returning to orders restores native query, links, preferences and selection", () => {
 	const { list, controller } = fixture();
 	assert.equal(typeof controller.setProviderScope, "function");
@@ -95,12 +141,85 @@ test("OA realtime binding follows the native setup which clears event listeners"
 	assert.deepEqual(list.realtimeBindings, ["Purchase Order", "OA"]);
 });
 
-test("provider request omits native advanced filters and explicitly filters unknown company", () => {
+test("provider request preserves native advanced filters and every quick predicate", () => {
 	assert.equal(typeof adapter.request, "function");
-	const request = adapter.request({ providerScope: "all", quick: { search: "A", pending_company: 1, company: "Known", status: "Draft" }, page: 2, pageSize: 100, providerOrderBy: "oa_amount asc" });
-	assert.deepEqual(JSON.parse(request.args.filters), { scope: "all", search: "A", company: "__unconfirmed__" });
+	const native = { filters: [["Purchase Order", "project", "=", "P1"]], or_filters: [["Purchase Order", "name", "like", "PO%"]] };
+	const request = adapter.request({ providerScope: "all", quick: { search: "A", pending_company: 1, company: "Known", status: "Draft", advance_payment_status: "Initiated" }, page: 2, pageSize: 100, providerOrderBy: "oa_amount asc" }, native);
+	assert.deepEqual(JSON.parse(request.args.filters), { scope: "all", search: "A", company: "__unconfirmed__", status: "Draft", advance_payment_status: "Initiated" });
+	assert.deepEqual(JSON.parse(request.args.native_filters), native.filters);
+	assert.deepEqual(JSON.parse(request.args.native_or_filters), native.or_filters);
 	assert.equal(request.args.start, 200);
 	assert.equal(request.args.order_by, "oa_amount asc");
+});
+
+test("native sort changes become canonical provider args and reset pagination", () => {
+	const { list, controller } = fixture({ provider: adapter.configure([{ fieldname: "name", label: "单号", width: 166 }]), providerSelectable: doc => doc.row_type === "purchase_order" });
+	controller.setProviderScope("all", false);
+	list.order_by = "`tabPurchase Order`.`creation` desc";
+	assert.equal(list.get_args().order_by, "creation desc");
+	controller.setPage(2);
+	list.order_by = "`tabPurchase Order`.`modified` asc";
+	const call = list.get_call_args();
+	assert.equal(call.args.order_by, "modified asc"); assert.equal(call.args.start, 0);
+	controller.setPage(3);
+	list.order_by = "`tabPurchase Order`.`custom_workflow_state` asc, `tabPurchase Order`.`name` asc";
+	assert.equal(list.get_args().order_by, "custom_workflow_state asc"); assert.equal(controller.page, 0);
+});
+
+test("explicit header sorting wins until a native sort choice and both controls keep native labels in sync", () => {
+	let headerClick, nativeChanges = 0;
+	const surface = { insertAfter() { return this; }, on(event, selector, handler) { if (selector === "[data-provider-sort]") headerClick = handler; return this; } };
+	const sorter = { sort_by: "creation", sort_order: "desc", args: { options: ["name", "creation", "modified"].map(fieldname => ({ fieldname })) },
+		get_sql_string() { return "`tabPurchase Order`.`" + this.sort_by + "` " + this.sort_order; },
+		set_value(field, order) { this.sort_by = field; this.sort_order = order; }, onchange() { nativeChanges++; } };
+	const list = { $result: surface, sort_selector: sorter };
+	const controller = { root: { $: () => surface, frappe: {} }, list, $filters: surface, allowed: new Set(["name", "creation", "modified"]), quick: {}, page: 0, pageSize: 100, providerOrderBy: "transaction_date desc",
+		originals: { get_args: () => ({ order_by: sorter.get_sql_string() }) }, setProviderScope(scope) { this.providerScope = scope; }, setPage(page) { this.page = page; }, refresh() {} };
+	adapter.configure([]).mountControls(controller);
+	assert.equal(adapter.getArgs(controller).order_by, "creation desc");
+	headerClick({ currentTarget: { dataset: { providerSort: "name" } } });
+	assert.equal(adapter.getArgs(controller).order_by, "name asc"); assert.equal(sorter.sort_by, "name"); assert.equal(sorter.sort_order, "asc");
+	headerClick({ currentTarget: { dataset: { providerSort: "oa_amount" } } });
+	assert.equal(adapter.getArgs(controller).order_by, "oa_amount asc");
+	controller.setPage(2); sorter.onchange("name", "asc");
+	assert.equal(adapter.getArgs(controller).order_by, "name asc"); assert.equal(controller.page, 0); assert.equal(nativeChanges, 1);
+});
+
+test("unified list uses one scope and source labels without a separate source view", () => {
+	const markup = [];
+	const surface = { prependTo() { return this; }, insertAfter() { return this; }, on() { return this; } };
+	let scope;
+	adapter.configure([]).mountControls({ root: { $: html => { markup.push(html); return surface; }, frappe: {} }, list: { $result: surface }, $toolbar: surface, $filters: surface, setProviderScope: value => scope = value });
+	assert.equal(scope, "all");
+	assert.doesNotMatch(markup.join(""), /dlp-po-scope|仅订单|仅 OA|仅查看/);
+	assert.match(markup.join(""), /钉钉/); assert.match(markup.join(""), /其他来源/);
+});
+
+test("only administrators and system managers see the inline procurement source sync action", () => {
+	for (const [user, roles, allowed] of [["buyer", ["Purchase User"], false], ["Administrator", [], true], ["manager", ["System Manager"], true]]) {
+		const markup = [];
+		const surface = { appendTo() { return this; }, insertAfter() { return this; }, on() { return this; } };
+		adapter.configure([]).mountControls({ root: { $: html => { markup.push(html); return surface; }, frappe: { session: { user }, user_roles: roles } }, list: { $result: surface }, $filters: surface, setProviderScope() {} });
+		assert.equal(markup.join("").includes("同步钉钉"), allowed, user);
+	}
+});
+
+test("source row labels and actions use OA identity without pretending it is an order", () => {
+	const escape = value => String(value).replaceAll("<", "&lt;").replaceAll('"', "&quot;");
+	const doc = { name: "OA/1", row_type: "oa_request", oa_number: "2026-原单<1>" };
+	assert.equal(adapter.renderValue("name", doc, {}, escape), "待完善 · 2026-原单&lt;1>");
+	assert.match(adapter.renderValue("receipt_action", doc, {}, escape), /完善\/关联/);
+	assert.match(adapter.renderValue("receipt_action", doc, {}, escape), /data-purchase-source="OA\/1"/);
+	assert.doesNotMatch(adapter.renderValue("receipt_action", doc, {}, escape), /确认订单|入库|付款/);
+	for (const source of ["non_oa", "未关联 OA"]) assert.equal(adapter.renderValue("source", { source }), "其他来源");
+});
+
+test("cashier paid evidence is a separate amount with its own currency and unknown remains blank", () => {
+	const amount = adapter.renderValue("cashier_paid_amount", { cashier_paid_amount: "25.12345", cashier_currency: "CNY", currency: "USD", advance_paid: 10 });
+	assert.match(amount, /25\.12 CNY/);
+	assert.equal(adapter.renderValue("cashier_paid_amount", { cashier_paid_amount: null }), "—");
+	assert.match(adapter.renderValue("cashier_paid_amount", { cashier_paid_amount: "0", cashier_currency: "CNY" }), /0\.00 CNY/);
+	assert.ok(adapter.configure([]).virtualFields.includes("cashier_paid_amount"));
 });
 
 test("hidden company is not presented as a pending company assignment", () => {
@@ -185,6 +304,28 @@ test("cached unified list reinstalls only its own OA realtime listener after nat
 	assert.equal(nativeEvents, 1);
 });
 
+test("OA realtime events enter the existing guarded native refresh queue and retain selected-page context", async () => {
+	const { EventEmitter } = require("node:events");
+	for (const guard of ["selection", "bulk", "editing", "avoid"]) {
+		const { list, controller } = fixture({ provider: adapter.configure([{ fieldname: "name", label: "单号", width: 166 }]), providerSelectable: doc => doc.row_type === "purchase_order", realtime: true });
+		let refreshed = 0; list.refresh = () => { refreshed++; };
+		controller.root.frappe.realtime = new EventEmitter();
+		adapter.configure([]).onActivate(controller);
+		controller.setProviderScope("all", false); controller.setPage(2);
+		list.data = [{ name: "SELECTED-PO", row_type: "purchase_order" }];
+		if (guard === "selection") list.$checks = [{ name: "SELECTED-PO" }];
+		if (guard === "bulk") list.disable_list_update = true;
+		if (guard === "editing") list.filter_area = { is_being_edited: () => true };
+		if (guard === "avoid") list.avoid_realtime_update = () => true;
+		controller.root.frappe.realtime.emit("list_update", { doctype: "OA Purchase Request", name: "NEW-OA" });
+		assert.equal(refreshed, 0, guard); assert.equal(list.pending_document_refreshes.length, 1, guard);
+		assert.deepEqual(list.data.map(doc => doc.name), ["SELECTED-PO"]); assert.equal(controller.page, 2);
+		list.$checks = []; list.disable_list_update = false; list.filter_area = { is_being_edited: () => false }; list.avoid_realtime_update = () => false;
+		await list.process_document_refreshes();
+		assert.equal(refreshed, 1, guard); assert.deepEqual(list.pending_document_refreshes, []); assert.equal(controller.page, 2);
+	}
+});
+
 test("provider text filters react to typing without duplicate refresh on blur", () => {
 	const handlers = new Map();
 	const element = { prependTo() { return this; }, insertAfter() { return this; }, on(events, selector, handler) {
@@ -204,15 +345,22 @@ test("provider text filters react to typing without duplicate refresh on blur", 
 	assert.equal(refreshed, 2);
 });
 
-test("export captures the clicked scope, filters and columns before lazy library loading", async () => {
+test("export captures clicked native filters and columns before lazy library loading", async () => {
 	let resolve, captured;
 	const root = { frappe: { require: () => new Promise((done) => { resolve = done; }) } };
-	const controller = { root, providerScope: "all", quick: { company: "A" }, preferences: { columns: ["name", "oa_amount"] }, providerOrderBy: "name asc" };
+	const native = { filters: [["Purchase Order", "project", "=", "P1"]], or_filters: [["Purchase Order", "owner", "=", "buyer"]], order_by: "`tabPurchase Order`.`modified` desc" };
+	const controller = { root, originals: { get_args: () => native }, providerScope: "all", quick: { company: "A" }, preferences: { columns: ["name", "oa_amount", "cashier_paid_amount"] }, providerOrderBy: "name asc" };
 	const downloading = adapter.exportCurrent(controller);
 	controller.providerScope = "oa"; controller.quick.company = "B"; controller.preferences.columns = ["name", "grand_total"];
+	native.filters = []; native.or_filters = []; native.order_by = "`tabPurchase Order`.`creation` asc";
 	root.DeepLinkERPPurchaseOrderExport = { fetchNativeWorkbook: async (_, args) => { captured = args; return new Uint8Array(); }, downloadWorkbook() {} };
 	resolve(); await downloading;
 	assert.deepEqual(JSON.parse(captured.filters), { scope: "all", company: "A" });
 	assert.ok(JSON.parse(captured.columns).includes("oa_amount"));
 	assert.ok(!JSON.parse(captured.columns).includes("grand_total"));
+	assert.deepEqual(JSON.parse(captured.native_filters), [["Purchase Order", "project", "=", "P1"]]);
+	assert.deepEqual(JSON.parse(captured.native_or_filters), [["Purchase Order", "owner", "=", "buyer"]]);
+	assert.ok(JSON.parse(captured.columns).includes("cashier_currency"));
+	assert.equal(captured.order_by, "modified desc");
+	assert.equal(captured.start, undefined); assert.equal(captured.page_length, undefined);
 });

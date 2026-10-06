@@ -433,11 +433,13 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 			new_schema["columns"]["custom_operating_event_key"] = {"type": "varchar(140)"}
 			new_schema["indexes"]["custom_operating_event_key"] = [{"column": "custom_operating_event_key", "unique": 1, "prefix": None, "type": "BTREE"}]
 			before["schemas"], after["schemas"] = {"Journal Entry": old_schema}, {"Journal Entry": new_schema}
+			for audit in (before, after): audit["tables"]["Journal Entry"] = digest([])
+			models = {name: {"schema": None, "rows": []} for name in runpy.run_path(str(Path(__file__).parents[1] / "deploy/production/procurement_release_metadata.py"))["JOINT_MODELS"]}
 			receipt = {
 				"status": "applied", "steps": [{"status": "complete"}],
-				"before": {"metadata": metadata, "je": {"schema": old_schema}},
-				"after": {"metadata": metadata, "je": {"schema": new_schema}},
-				"contract": {"sources_before": before["release_sources_all"], "sources_after": before["approved_sources_after"]},
+				"before": {"metadata": metadata, "je": {"schema": old_schema, "rows": [], "original_columns": ["name"]}, "models": models, "operating_singles": []},
+				"after": {"metadata": metadata, "je": {"schema": new_schema, "rows": [], "original_columns": ["name"]}, "models": models, "operating_singles": []},
+				"contract": {"sources_before": before["release_sources_all"], "sources_after": before["approved_sources_after"], "model_schemas": {name: None for name in models}},
 			}
 			(root / "joint-receipt.json").write_text(json.dumps(receipt))
 			deployment = root / "deploy/production"
@@ -494,6 +496,7 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 			config = root / "sites/deeplinkerp.com/site_config.json"
 			config.write_text('{"maintenance_mode": 1, "mes_callback_url": "updated"}')
 			queried = []
+			new_oa = {"present": False, "nonnull": 0}
 			_, page = self.purchase_payment_page_fixture()
 			roles = page["roles"]
 			settings = {"CRM Integration Settings", "MES Integration Settings", "China Finance Settings"}
@@ -507,7 +510,9 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 			def sql(query, values=None, **kwargs):
 				queried.append(query)
 				if "information_schema.COLUMNS" in query:
-					return [{"name": "name", "position": 1, "type": "varchar(140)", "nullable": "NO", "default_value": None, "charset": "utf8mb4", "collation": "utf8mb4_unicode_ci", "extra": "", "expression": None}]
+					rows = [{"name": "name", "position": 1, "type": "varchar(140)", "nullable": "NO", "default_value": None, "charset": "utf8mb4", "collation": "utf8mb4_unicode_ci", "extra": "", "expression": None}]
+					if new_oa["present"] and values == ("tabOA Purchase Request",): rows.append(dict(rows[0], name="custom_purchase_source_json", position=2, type="longtext", nullable="YES", default_value="NULL"))
+					return rows
 				if "information_schema.STATISTICS" in query:
 					return [{"name": "PRIMARY", "sequence": 1, "column": "name", "unique": 1, "prefix": None, "collation": "A", "type": "BTREE", "nullable": ""}]
 				if "information_schema.TABLES" in query:
@@ -515,6 +520,7 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 				if "tabHas Role`" in query:
 					self.assertEqual(query, "select * from `tabHas Role` order by name")
 					return roles
+				if query.startswith("select count(*) from `tabOA Purchase Request`"): return [[new_oa["nonnull"]]]
 				return (
 					[{"doctype": "MES Integration Settings", "field": "callback_url", "value": "updated"}]
 					if "tabSingles" in query
@@ -532,6 +538,14 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 			capture.__globals__["BENCH"] = root
 			capture.__globals__["source_digest"] = lambda app: "source"
 			before = capture()
+			capture(oa_columns=["name", "manual_user_text"])
+			self.assertIn("select `name`,`manual_user_text` from `tabOA Purchase Request` order by name", queried)
+			self.assertIn("Operating Expense Source", before["operating_models"])
+			new_oa["present"] = True
+			self.assertEqual(capture(oa_columns=["name"])["oa_new_columns"], {"custom_purchase_source_json": 0})
+			new_oa["nonnull"] = 1
+			self.assertEqual(capture(oa_columns=["name"])["oa_new_columns"], {"custom_purchase_source_json": 1})
+			new_oa["present"] = False
 			self.assertEqual(
 				before["tables"]["Has Role"],
 				{

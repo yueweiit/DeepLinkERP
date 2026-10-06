@@ -16,6 +16,16 @@ test('operating expenses can reuse the accessible procurement drawer shell facto
   assert.equal(typeof payments().createDrawer,'function');
 });
 
+test('shared procurement numeric presentation helpers keep business parse precision unchanged', () => {
+  const api=payments();
+  assert.equal(typeof api.formatMoney,'function'); assert.equal(typeof api.formatQuantity,'function'); assert.equal(typeof api.formatNumericInput,'function');
+  assert.equal(api.formatMoney(123.45678,'CNY'),'123.46 CNY'); assert.equal(api.formatQuantity(2.00001),'2');
+  const control={df:{precision:8},get_precision(){return this.df.precision;},format_for_input(value){return Number(value).toFixed(this.get_precision());}};
+  api.formatNumericInput(control);
+  assert.equal(control.format_for_input(2.00001),'2.00'); assert.equal(control.format_for_input(49.99975000125),'50.00');
+  assert.equal(control.get_precision(),8); assert.equal(control.df.precision,8);
+});
+
 test('drawer edit session sends only touched fields, never rounded initialized quantities or money', () => {
   const session = functionFrom('editSession')({document:{qty:1.234567,amount:9.87654,remarks:'old',items:[{key:'row',qty:1.234567,rate:9.87654}]}});
   assert.deepEqual(JSON.parse(JSON.stringify(session.changes())), {});

@@ -62,3 +62,14 @@ body.dlp-purchase-payment-grid-active .dlp-payment-native-filters { width: 100%;
 body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active) .dlp-po-grid-cell .dlp-native-document { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .dlp-order-actions { display: inline-flex; gap: 6px; white-space: nowrap; }
+
+.dlp-source-facts { display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap: 8px 16px; padding: 12px; margin-bottom: 8px; background: var(--control-bg,#f4f7fb); border-radius: 4px; }
+.dlp-source-facts > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.dlp-source-facts strong { font-weight: 500; color: var(--text-muted); }
+.dlp-source-text { white-space: pre-wrap; }
+.dlp-source-evidence dl { display: grid; grid-template-columns: minmax(100px,160px) minmax(0,1fr); gap: 6px 12px; }
+.dlp-source-evidence dt { font-weight: 500; color: var(--text-muted); }
+.dlp-source-evidence dd { margin: 0; min-width: 0; }
+.dlp-source-items [data-source-field] { min-width: 130px; }
+.dlp-source-items .control-label { display: none; }
+.dlp-source-reconciliation { padding: 12px; margin-top: 12px; border: 1px solid var(--border-color,#e1e8f0); border-radius: 4px; }

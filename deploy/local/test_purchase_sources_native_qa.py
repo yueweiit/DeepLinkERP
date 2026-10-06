@@ -1,0 +1,117 @@
+"""Dedicated synthetic site: real native docs, with only external source reads stubbed."""
+import json
+import unittest
+from copy import deepcopy
+from datetime import datetime,timezone
+from unittest.mock import patch
+
+import frappe
+from deeplinkerp_branding.services import purchase_source_service as service
+from deeplinkerp_branding.services import purchase_source_contract as contract
+from deeplinkerp_branding.services import unified_purchase_service as listing
+
+
+def fixture(instance="QA-PUR-SOURCE-1", business="QA-DT-PUR-1"):
+    row={"corp_id":"QA-CORP","process_instance_id":instance,"business_id":business,
+         "process_code":contract.PROCESS_CODES[0],"status":"COMPLETED","result":"agree",
+         "create_time":datetime(2026,1,1,tzinfo=timezone.utc),"updated_at":datetime(2026,1,1,tzinfo=timezone.utc),
+         "originator_user_name":"QA applicant","form_component_values":[
+            {"name":"执行地区Región de ejecución","value":"中国China"},
+            {"name":"币种Moneda","value":"人民币RMB"},
+            {"name":"金额importe","value":"100"},
+            {"name":"收款人beneficiario","value":"QA Operating Supplier"},
+            {"name":"需求明细Desglose de los gastos","componentType":"TableField","value":json.dumps([[
+                {"name":"物品编码Código","value":"QA-JOINT-PO-ITEM"},
+                {"name":"物品名称Nombre del artículo","value":"QA synthetic item"},
+                {"name":"数量Cantidad","value":"2"},
+                {"name":"单位Unidad","value":"Nos"},
+                {"name":"总金额Monto Total","value":"100"},
+            ]])}]}
+    source=service._normalize(row)
+    proof={"source_id":"QA-cashier-1","source_type":"purchase","corp_id":"QA-CORP","process_instance_id":instance,
+           "currency":"CNY","paid_amount":"0","payment_evidence_status":"recorded","payments":[],"attachments":[]}
+    return source,contract.payment_evidence(source,[proof])
+
+
+def seed():
+    if frappe.local.site!="operating-expenses-qa.localhost" or frappe.conf.db_host!="db":
+        raise RuntimeError("Isolated synthetic QA site only")
+    from deeplinkerp_branding.purchase_source_install import after_migrate
+    after_migrate(); frappe.set_user("Administrator")
+    source,evidence=fixture()
+    name=service._cache_source(source,evidence,"QA Operating China")
+    return name
+
+
+class NativePurchaseSourcesQA(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.name=seed()
+        frappe.db.commit()  # Dedicated cache fixture only, no orders or accounting data.
+
+    def setUp(self):
+        frappe.set_user("Administrator")
+        self.source,self.evidence=fixture()
+        self.before={dt:frappe.db.count(dt) for dt in ("Purchase Receipt","Payment Entry","GL Entry","Purchase Order")}
+
+    def tearDown(self):
+        frappe.db.rollback(); frappe.set_user("Administrator")
+
+    def test_native_draft_and_idempotency_without_receipt_payment_or_gl(self):
+        with patch.object(service,"_fresh_source",return_value=(self.source,self.evidence)):
+            result=service.create_purchase_order_from_source(self.name,service._version(self.source,self.evidence),"QA Operating China","QA Operating Supplier","CNY","2026-10-08",
+                [{"item_code":"QA-JOINT-PO-ITEM","qty":2,"uom":"Nos","rate":50}])
+            po=frappe.get_doc("Purchase Order",result["name"])
+            self.assertEqual(po.docstatus,0); self.assertEqual(po.grand_total,100)
+            self.assertEqual(po.items[0].qty,2); self.assertEqual(po.items[0].rate,50)
+            self.assertEqual(po.custom_oa_purchase_expense,self.name)
+            again=service.create_purchase_order_from_source(self.name,"old","QA Operating China","QA Operating Supplier","CNY","2026-10-08",[])
+            self.assertEqual(again,result)
+            for dt in ("Purchase Receipt","Payment Entry","GL Entry"):
+                self.assertEqual(frappe.db.count(dt),self.before[dt])
+            self.assertEqual(frappe.db.count("Purchase Order"),self.before["Purchase Order"]+1)
+            payload=listing.get_unified_purchase_list(filters={"search":"QA-DT-PUR-1"})
+            self.assertEqual(payload["total_count"],1)
+            self.assertEqual(payload["rows"][0]["row_type"],"purchase_order")
+            self.assertEqual(payload["rows"][0]["cashier_paid_amount"],"0")
+
+    def test_zero_missing_quantities_and_stale_approval_fail_closed(self):
+        for patch_source,items in (({},[{"item_code":"QA-JOINT-PO-ITEM","uom":"Nos","rate":50}]),
+                                  ({"eligible":False},[{"item_code":"QA-JOINT-PO-ITEM","qty":2,"uom":"Nos","rate":50}]),
+                                  ({"version":"changed"},[{"item_code":"QA-JOINT-PO-ITEM","qty":2,"uom":"Nos","rate":50}])):
+            source={**self.source,**patch_source}
+            with patch.object(service,"_fresh_source",return_value=(source,self.evidence)),self.assertRaises(frappe.ValidationError):
+                service.create_purchase_order_from_source(self.name,service._version(self.source,self.evidence),"QA Operating China","QA Operating Supplier","CNY","2026-10-08",items)
+        self.assertEqual(frappe.db.count("Purchase Order"),self.before["Purchase Order"])
+
+    def test_private_json_is_not_native_readable_by_purchase_role(self):
+        user="qa-purchase-source-reader@example.test"
+        if not frappe.db.exists("User",user):
+            frappe.get_doc({"doctype":"User","email":user,"first_name":"QA Purchase source","send_welcome_email":0,"roles":[{"role":"Purchase User"}]}).insert()
+        frappe.set_user(user)
+        from frappe.model import get_permitted_fields
+        fields=set(get_permitted_fields(service.DOCTYPE,permission_type="read"))
+        self.assertNotIn(service.SOURCE_FIELD,fields); self.assertNotIn(service.EVIDENCE_FIELD,fields)
+        self.assertNotIn(service.RECONCILIATION_FIELD,fields)
+
+    def test_source_update_retains_manual_header_and_child_values(self):
+        frappe.db.set_value(service.DOCTYPE,self.name,{"currency":"USD","description":"manual text"})
+        source={**self.source,"requested_amount":"200"}; source["version"]=contract.digest(source)
+        service._cache_source(source,self.evidence,"QA Operating Mexico")
+        doc=frappe.get_doc(service.DOCTYPE,self.name)
+        self.assertEqual(doc.currency,"USD"); self.assertEqual(doc.description,"manual text")
+        self.assertEqual(doc.target_company,"QA Operating China")
+        row=listing.get_unified_purchase_list(filters={"search":"QA-DT-PUR-1"})["rows"][0]
+        self.assertEqual(row["oa_currency"],"CNY")
+        self.assertEqual(row["requested_amount"],"200")
+
+    def test_duplicate_business_numbers_keep_distinct_exact_source_names(self):
+        second,evidence=fixture("QA-PUR-SOURCE-2","QA-DT-PUR-1")
+        name=service._cache_source(second,evidence,"QA Operating China")
+        self.assertNotEqual(name,self.name)
+        doc=frappe.get_doc(service.DOCTYPE,name)
+        self.assertEqual(json.loads(doc.get(service.SOURCE_FIELD))["business_id"],"QA-DT-PUR-1")
+        self.assertEqual(doc.oa_code,doc.name)
+
+
+if __name__=="__main__": unittest.main()

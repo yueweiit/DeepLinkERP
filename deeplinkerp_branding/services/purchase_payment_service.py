@@ -187,6 +187,9 @@ def payment_target(source_doctype, source_name, purchase_invoice=None):
         frappe.throw(LINK_WARNING)
     if source.docstatus != 1 or source.get("is_return"):
         frappe.throw("来源必须为已提交且非退货的采购单据")
+    from .purchase_source_service import payment_guard
+    for order_name in chain["orders"]:
+        payment_guard(source if source_doctype == "Purchase Order" and source.name == order_name else _read("Purchase Order",order_name))
     if purchase_invoice:
         target = _current("Purchase Invoice", purchase_invoice)
         _require_fields("Purchase Invoice", PI_FIELDS)

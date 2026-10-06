@@ -216,6 +216,8 @@
 	}
 
 	function providerActive(controller) { return Boolean(config.provider && (controller.pageSurface || controller.providerScope !== "orders")); }
+	function providerReadonly(controller) { return providerActive(controller) && (controller.pageSurface || typeof config.providerSelectable !== "function"); }
+	function rowSelectable(controller, doc) { return !providerActive(controller) || (!providerReadonly(controller) && config.providerSelectable(doc)); }
 	function displayColumns(controller) { return providerActive(controller) ? config.provider.columns : COLUMNS; }
 	function displayPermissions(controller) { return providerActive(controller) ? controller.providerAllowed : controller.displayAllowed; }
 	function currentRows(controller) { return providerActive(controller) ? controller.providerRows : controller.list.data; }
@@ -259,7 +261,7 @@
 			},
 			activate() {
 				root.document?.body?.classList.toggle(config.routeClass, isListRoute(frappe));
-				root.document?.body?.classList.toggle(`${config.routeClass}-readonly`, isListRoute(frappe) && providerActive(this));
+				root.document?.body?.classList.toggle(`${config.routeClass}-readonly`, isListRoute(frappe) && providerReadonly(this));
 				if (isListRoute(frappe) && providerActive(this)) config.provider.onActivate?.(this);
 			},
 			setProviderScope(scope, refresh = true) {
@@ -273,9 +275,8 @@
 				this.setPage(0); this.savePreferences(); this.activate();
 				this.$providerScope?.val(scope);
 				this.$providerControls?.toggle(providerActive(this));
-				for (const field of config.quickFields || []) if (field !== "company") this.controls[field]?.$wrapper?.toggle(!providerActive(this));
-				list.page?.hide_actions_menu?.();
-				if (providerActive(this)) list.page?.clear_primary_action?.();
+				for (const field of config.quickFields || []) if (field !== "company") this.controls[field]?.$wrapper?.toggle(!providerReadonly(this));
+				if (providerReadonly(this)) { list.page?.hide_actions_menu?.(); list.page?.clear_primary_action?.(); }
 				// Do not leave readonly OA rows onscreen after native actions become available.
 				list.render_list();
 				if (refresh) return this.refresh();
@@ -327,7 +328,10 @@
 		list.get_args = function () {
 			if (providerActive(controller)) {
 				let args;
-				try { args = config.provider.request(controller).args; }
+				try {
+					const nativeArgs = originals.get_args.call(this);
+					args = config.provider.getArgs?.(controller, nativeArgs) || config.provider.request(controller, nativeArgs).args;
+				}
 				catch (error) { if (config.provider.onQueryError?.(controller, error)) return this.get_args(); throw error; }
 				const { start, page_length, ...scope } = args;
 				const signature = JSON.stringify(scope);
@@ -363,7 +367,7 @@
 		};
 		list.get_call_args = function () {
 			const call = originals.get_call_args.call(this);
-			if (providerActive(controller)) { call.method = config.provider.request(controller).method; call.args = this.get_args(); }
+			if (providerActive(controller)) { call.method = config.provider.request(controller, originals.get_args.call(this)).method; call.args = this.get_args(); }
 			const request = { id: null, key: requestKey(call.args) };
 			callRequests.set(call, request);
 			const callback = call.callback;
@@ -392,8 +396,8 @@
 				controller.providerRows = controller.providerPayload.rows || [];
 				controller.total = Number(controller.providerPayload.total_count || 0);
 				this.total_count = controller.total;
-				// Read-only union records never enter native PO selection or document actions.
-				this.data = [];
+				// Only explicitly eligible provider documents enter native selection/actions.
+				this.data = controller.providerRows.filter(doc => rowSelectable(controller, doc));
 				config.provider.onPayload?.(controller);
 				return;
 			}
@@ -413,8 +417,14 @@
 			controller.setPage(0);
 			return originals.on_filter_change?.apply(this, args);
 		};
-		list.get_checked_items = function (...args) { return providerActive(controller) ? [] : originals.get_checked_items?.apply(this, args) || []; };
-		list.set_rows_as_checked = function (...args) { if (!providerActive(controller)) return originals.set_rows_as_checked?.apply(this, args); };
+		list.get_checked_items = function (...args) {
+			if (providerReadonly(controller)) return [];
+			const checked = originals.get_checked_items?.apply(this, args) || [];
+			if (!providerActive(controller)) return checked;
+			const names = new Set(this.data.map(doc => doc.name));
+			return checked.filter(doc => names.has(typeof doc === "string" ? doc : doc.name));
+		};
+		list.set_rows_as_checked = function (...args) { if (!providerReadonly(controller)) return originals.set_rows_as_checked?.apply(this, args); };
 		if (config.keepColumnHeader) list.on_row_checked = function (...args) {
 			const result = originals.on_row_checked?.apply(this, args);
 			// Keep native checks, bulk permissions and actions; only replace its header presentation.
@@ -425,7 +435,7 @@
 			config.onSelectionChange?.(controller);
 			return result;
 		};
-		for (const name of ["before_render", "after_render"]) list[name] = function (...args) { if (!providerActive(controller)) return originals[name]?.apply(this, args); };
+		for (const name of ["before_render", "after_render"]) list[name] = function (...args) { if (!providerReadonly(controller)) return originals[name]?.apply(this, args); };
 		if (config.provider && list.setup_realtime_updates) {
 			const nativeSetupRealtime = list.setup_realtime_updates;
 			list.setup_realtime_updates = function (...args) {
@@ -449,8 +459,9 @@
 			if (providerActive(controller) && !currentRows(controller).length) this.$result?.append('<div class="list-row-container dlp-provider-empty text-muted text-center" role="status">没有符合条件的采购记录</div>');
 		};
 		list.toggle_result_area = function () {
-			if (!providerActive(controller)) originals.toggle_result_area.call(this);
-			else { this.$no_result?.hide(); this.page?.hide_actions_menu?.(); this.page?.clear_primary_action?.(); }
+			if (!providerReadonly(controller)) originals.toggle_result_area.call(this);
+			if (providerActive(controller)) this.$no_result?.hide();
+			if (providerReadonly(controller)) { this.page?.hide_actions_menu?.(); this.page?.clear_primary_action?.(); }
 			this.$result?.parent(".result-container").show();
 			this.$result?.show();
 			this.$paging_area?.hide();
@@ -483,6 +494,11 @@
 		// The constructor already bound the old method; cancel it before replacing that binding.
 		originals.debounced_refresh?.cancel?.();
 		list.debounced_refresh = root.frappe.utils.debounce(list.process_document_refreshes.bind(list), list.is_large_table ? 15000 : 2000);
+		controller.queueRealtimeRefresh = data => {
+			list.pending_document_refreshes ||= [];
+			if (!list.pending_document_refreshes.some(pending => pending.doctype === data.doctype && pending.name === data.name)) list.pending_document_refreshes.push(data);
+			return list.debounced_refresh();
+		};
 	}
 
 	function preserveSavedFilterGroup(controller) {
@@ -536,18 +552,18 @@
 
 	function headerHTML(controller) {
 		const { translate: t, list } = controller;
-		const readonly = providerActive(controller);
+		const provider = providerActive(controller), readonly = providerReadonly(controller);
 		const checkbox = readonly ? "" : `<input class="list-header-checkbox list-check-all" type="checkbox" title="${escapeHTML(t("Select All"))}">`;
 		const columns = layout(controller).map((col) => {
 			const label = t(col.label);
-			return cellHTML(col, escapeHTML(label), label, readonly ? (config.provider.sortFields || []).includes(col.fieldname) : controller.allowed.has(col.fieldname), readonly);
+			return cellHTML(col, escapeHTML(label), label, provider ? (config.provider.sortFields || []).includes(col.fieldname) : controller.allowed.has(col.fieldname), provider);
 		}).join("");
 		return `<div class="list-row-container"><header class="list-row-head dlp-po-grid-header" style="--dlp-po-columns:${template(controller)}"><div class="list-header-subject dlp-po-grid-header-columns">${selectionCell(checkbox, "#")}${columns}</div><div class="checkbox-actions" style="display:none"><span class="select-like">${checkbox}</span><span class="list-header-meta"></span></div></header></div>`;
 	}
 
 	function rowHTML(controller, doc) {
 		const { list, root } = controller;
-		const readonly = providerActive(controller);
+		const provider = providerActive(controller), readonly = !rowSelectable(controller, doc);
 		const formatters = {
 			allowed: controller.allowed,
 			translate: controller.translate,
@@ -556,10 +572,10 @@
 		};
 		const checkbox = readonly ? "" : `<input type="checkbox" class="list-row-checkbox" data-doctype="${DOCTYPE}" data-name="${escapeHTML(doc.name)}">`;
 		const cells = layout(controller).map((col) => {
-			let value = (readonly ? config.provider.renderValue?.(col.fieldname, doc, formatters, escapeHTML) : undefined) ?? renderValue(col.fieldname, doc, formatters);
-			if (col.fieldname === "name") value = config.renderLink?.(controller, doc, value) ?? `<a href="${escapeHTML(readonly ? config.provider.formLink(doc) : list.get_form_link(doc))}" data-name="${escapeHTML(doc.name)}">${value}</a>`;
+			let value = (provider ? config.provider.renderValue?.(col.fieldname, doc, formatters, escapeHTML) : undefined) ?? renderValue(col.fieldname, doc, formatters);
+			if (col.fieldname === "name") value = config.renderLink?.(controller, doc, value) ?? (provider ? config.provider.renderLink?.(controller, doc, value, escapeHTML) : undefined) ?? `<a href="${escapeHTML(provider ? config.provider.formLink(doc) : list.get_form_link(doc))}" data-name="${escapeHTML(doc.name)}">${value}</a>`;
 			if (col.fieldname === "supplier_name" && doc.supplier) value = `<a href="/desk/supplier/${encodeURIComponent(doc.supplier)}">${value}</a>`;
-			if (col.fieldname === "status" && (!readonly || config.provider.useNativeIndicator?.(doc))) value = list.get_indicator_html?.(doc, Boolean(list.workflow_state_fieldname)) || value;
+			if (col.fieldname === "status" && (!provider || config.provider.useNativeIndicator?.(doc))) value = list.get_indicator_html?.(doc, Boolean(list.workflow_state_fieldname)) || value;
 			const raw = doc[col.fieldname];
 			return cellHTML(col, value, controller.allowed.has(col.fieldname) && (raw === null || typeof raw !== 'object') ? raw ?? "—" : "");
 		}).join("");
@@ -754,7 +770,7 @@
 		frappe.router?.on("change", () => {
 			root.document?.body?.classList.toggle(config.routeClass, isListRoute(frappe));
 			const current = frappe.views?.list_view?.[DOCTYPE] || root.cur_list;
-			root.document?.body?.classList.toggle(`${config.routeClass}-readonly`, isListRoute(frappe) && Boolean(current?.[config.controllerKey] && providerActive(current[config.controllerKey])));
+			root.document?.body?.classList.toggle(`${config.routeClass}-readonly`, isListRoute(frappe) && Boolean(current?.[config.controllerKey] && providerReadonly(current[config.controllerKey])));
 			const list = frappe.views?.list_view?.[DOCTYPE] || root.cur_list;
 			config.onRouteChange?.(list?.[config.controllerKey], isListRoute(frappe));
 			if (!isListRoute(frappe)) list?.[config.controllerKey]?.stopInitialOnboarding?.();

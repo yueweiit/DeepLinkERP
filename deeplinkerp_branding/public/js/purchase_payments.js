@@ -11,6 +11,7 @@
  const link=(type,name,label=name)=>name && slug(type)?`<a href="/desk/${slug(type)}/${encodeURIComponent(name)}"${['Purchase Order','Purchase Receipt'].includes(type)?` class="dlp-native-document" data-doctype="${esc(type)}" data-name="${esc(name)}"`:""}>${esc(t(label))}</a>`:'—';
  const money=(value,currency)=>value==null?'—':`${Number(value).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}${currency?` ${esc(currency)}`:''}`;
  const quantity=value=>value==null?'—':Number(value).toLocaleString(undefined,{maximumFractionDigits:2});
+ function formatNumericInput(control){const nativeFormat=control.format_for_input,display=Object.create(control);display.get_precision=()=>2;control.format_for_input=value=>nativeFormat.call(display,value);}
  const call=async(method,args,namespace=API)=>(await frappe.call({method:namespace+method,args,silent:true})).message;
  const state=value=>({Posted:'已记账',Reversed:'已冲销',Cancelled:'已取消',Draft:'草稿',Pending:'待同步'}[value] || value || '—');
  const balanceHTML=chain=>`${chain.shared_payable || (chain.invoices || []).some(invoice=>invoice.shared)?'<p class="text-warning">共享应付整单余额，不是本张入库的已付金额</p>':''}${(chain.balances || []).map(b=>`<span>${esc(t('应付'))} ${money(b.total,b.currency)}　${esc(t('已付 / 核销'))} ${money(b.settled,b.currency)}　<b>${esc(t('未付'))} ${money(b.outstanding,b.currency)}</b></span>`).join('<br>') || '尚未形成应付 / 余额不可见'}`;
@@ -160,7 +161,7 @@
   drawer.controls.push(control);
   if(!drawer.alive()){disposeControls(drawer.controls);throw new Error('抽屉已关闭');}
   if(currency_context)control.get_doc=()=>currency_context;
-  if(numeric){const nativeFormat=control.format_for_input,display=Object.create(control);display.get_precision=()=>2;control.format_for_input=value=>nativeFormat.call(display,value);}
+  if(numeric)formatNumericInput(control);
   await control.set_value(value ?? '');
   if(!drawer.alive()){disposeControls(drawer.controls.includes(control)?drawer.controls:[control]);throw new Error('抽屉已关闭');}
   if(onTouched && numeric){
@@ -417,5 +418,5 @@
   c.$procurementTabs?.remove();
   c.$procurementTabs=c.root.$(`<nav class="dlp-procurement-tabs" aria-label="${esc(t('采购流程'))}">${entries.map(([key,path,label])=>!finance && key.startsWith('purchase-')?`<button type="button" disabled title="${esc(t('财务办理入口；请在订单查看进度'))}">${esc(t(label))}</button>`:`<a class="${key===current?'active':''}" href="/desk/${path}?sidebar=Buying" ${key===current?'aria-current="page"':''}>${esc(t(label))}</a>`).join('')}</nav>`).insertBefore(c.list.$result.parent('.result-container'));
  }
- root.DeepLinkERPPurchasePayments={pay,formRefresh,recordsPage,balanceHTML,documentDrawer,paymentDrawer,voucherDrawer,orderReceiptAction,nativeAction,openNative,vouchersHTML,paymentSummary,editSession,retryToken,operationGate,recordsRequest,recordsExport,receiptDrafts,mountRecordsFilters,disposeControls,mountProcurementTabs,mountAttachments,createDrawer:newDrawer};
+ root.DeepLinkERPPurchasePayments={pay,formRefresh,recordsPage,balanceHTML,documentDrawer,paymentDrawer,voucherDrawer,orderReceiptAction,nativeAction,openNative,vouchersHTML,paymentSummary,editSession,retryToken,operationGate,recordsRequest,recordsExport,receiptDrafts,mountRecordsFilters,disposeControls,mountProcurementTabs,mountAttachments,createDrawer:newDrawer,formatMoney:money,formatQuantity:quantity,formatNumericInput};
 })(typeof globalThis!=='undefined'?globalThis:this);
