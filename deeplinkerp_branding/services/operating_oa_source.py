@@ -232,6 +232,7 @@ def read_page(connection_factory, limit, until, cursor=None, identity=None, *, p
     # Do not SELECT *: raw_payload is large and unnecessary for this projection.
     # Bound the projection first; count only its business numbers across the entire source.
     # A collision outside this page, company, year or template still blocks fallback joins.
+    count_instances = tuple(process_codes) != PROCESS_CODES
     sql = (
         "WITH page AS MATERIALIZED (SELECT corp_id,process_instance_id,business_id,process_code,status,result,"
         "originator_user_id,originator_user_name,create_time,updated_at,deleted_at,"
@@ -240,10 +241,17 @@ def read_page(connection_factory, limit, until, cursor=None, identity=None, *, p
         + " ORDER BY corp_id,process_instance_id LIMIT %s), "
         "counts AS (SELECT business_id,count(*) AS business_count FROM costing_read.approval_instances_v2 "
         "WHERE business_id IN (SELECT business_id FROM page WHERE NULLIF(business_id,'') IS NOT NULL) "
-        "GROUP BY business_id) SELECT page.*,COALESCE(counts.business_count,0) AS business_count "
-        + (", (SELECT count(*) FROM costing_read.approval_instances_v2 duplicate WHERE duplicate.process_instance_id=page.process_instance_id) AS instance_count " if tuple(process_codes) != PROCESS_CODES else "")
-        +
-        "FROM page LEFT JOIN counts USING(business_id) ORDER BY page.corp_id,page.process_instance_id"
+        "GROUP BY business_id) "
+        # Materialize global duplicate counts once, not once per joined page row.
+        # Do not apply the page's year/company/template scope to this check.
+        + (", instance_counts AS MATERIALIZED (SELECT process_instance_id,count(*) AS instance_count "
+           "FROM costing_read.approval_instances_v2 WHERE process_instance_id IN "
+           "(SELECT process_instance_id FROM page) GROUP BY process_instance_id) " if count_instances else "")
+        + "SELECT page.*,COALESCE(counts.business_count,0) AS business_count "
+        + (",COALESCE(instance_counts.instance_count,0) AS instance_count " if count_instances else "")
+        + "FROM page LEFT JOIN counts USING(business_id) "
+        + ("LEFT JOIN instance_counts USING(process_instance_id) " if count_instances else "")
+        + "ORDER BY page.corp_id,page.process_instance_id"
     )
     params.append(limit + 1)
     with connection_factory() as connection:

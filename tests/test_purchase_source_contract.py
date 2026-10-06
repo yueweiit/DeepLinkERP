@@ -153,6 +153,21 @@ class PurchaseSourceContractTest(unittest.TestCase):
         operating_oa_source.read_page(connection, 100, "2026-10-06T00:00:00Z", process_codes=self.module.PROCESS_CODES)
         self.assertEqual(connection.params[0], list(self.module.PROCESS_CODES))
 
+    def test_purchase_identity_count_is_batched_globally_after_bounded_page(self):
+        from tests.test_operating_oa_source import RecordingConnection
+        from deeplinkerp_branding.services import operating_oa_source
+        connection = RecordingConnection([])
+        operating_oa_source.read_page(connection, 500, "2026-10-06T00:00:00Z", process_codes=self.module.PROCESS_CODES)
+        sql = " ".join(connection.sql.split())
+        self.assertIn("instance_counts AS MATERIALIZED (", sql)
+        counts = sql.split("instance_counts AS MATERIALIZED (", 1)[1].split(") SELECT page.*", 1)[0]
+        self.assertEqual(counts, "SELECT process_instance_id,count(*) AS instance_count FROM costing_read.approval_instances_v2 "
+                         "WHERE process_instance_id IN (SELECT process_instance_id FROM page) GROUP BY process_instance_id")
+        self.assertNotIn("duplicate.process_instance_id=page.process_instance_id", sql)
+        self.assertIn("COALESCE(instance_counts.instance_count,0) AS instance_count", sql)
+        self.assertIn("LEFT JOIN instance_counts USING(process_instance_id)", sql)
+        self.assertEqual(connection.params[-1], 501)
+
     def test_existing_detail_parser_can_supply_flattened_real_dingtalk_tables(self):
         row = source(); row["form_component_values"][4]["value"] = [[{"label":"数量Cantidad", "value":"2"}]]
         item = self.module.normalize(row, detail_rows=[{"material_code":"ITEM", "product_name":"A", "quantity":"2", "unit":"个", "goods_value":"100"}])
