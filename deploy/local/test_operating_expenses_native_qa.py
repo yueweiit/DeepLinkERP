@@ -5,6 +5,33 @@ import frappe
 from unittest.mock import patch
 from io import BytesIO
 from zipfile import ZipFile
+from decimal import Decimal
+
+
+WORKFLOW_PATH = "/api/integrations/erp/operating-expenses/workflow"
+
+
+def workflow_fixture(row, *, originator=None, current_tasks=None, can_register_payment=True):
+    """One schema-2 authoritative workflow for the exact original OA identity."""
+    from deeplinkerp_branding.services import operating_oa_source as oa
+    from deeplinkerp_branding.services.operating_expense_contract import digest
+    originator = originator or {"id": "u1", "name": "Alice"}
+    tasks = current_tasks or []
+    evidence = {"source_id": oa.application_id(row), "corp_id": row["corp_id"],
+        "process_instance_id": row["process_instance_id"], "lookup_status": "found",
+        "approval_status": row["status"], "approval_result": row["result"],
+        "originator": originator, "current_tasks": tasks,
+        "source_updated_at": "2026-10-07T01:00:00Z", "last_synced_at": "2026-10-07T01:02:00Z",
+        "original_url": "https://aflow.dingtalk.com/dingtalk/mobile/homepage.htm?procInstId=" + row["process_instance_id"],
+        "events": [{"id": "submit", "stage": "发起申请", "operator": originator["name"],
+                    "time": "2026-01-01T00:00:00Z", "result": "NONE"},
+                   {"id": "business", "stage": "业务审批", "operator": "QA Approver",
+                    "time": "2026-01-01T01:00:00Z", "result": "AGREE"}]}
+    evidence["payment_eligibility"] = {"can_register_payment": can_register_payment,
+        "reason": "business_approved_cashier_executing" if can_register_payment else "business_approval_pending",
+        "notice": "业务审批已完成，出纳执行中" if tasks and can_register_payment else "",
+        "policy_version": "operating-payment-eligibility-v1", "evidence_fingerprint": digest(evidence)}
+    return evidence
 
 
 class OperatingExpenseNativeQA(unittest.TestCase):
@@ -55,6 +82,7 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         responses = {
             "/api/integrations/erp/operating-expenses": {"items": [], "end": True},
             "/api/integrations/erp/resolve-applicant-companies": {"items": [{"user_id": "u1", "employee_name": "Alice", "status": "matched", "assigned_department": "拉丁购"}]},
+            WORKFLOW_PATH: {"schema_version": 2, "items": [workflow_fixture(approval())]},
         }
         with patch.dict(frappe.conf, operating_expense_source_mode="oa_cashier"), patch.object(service, "_oa_connection", return_value=None), patch.object(oa, "read_page", return_value=([approval()], None)), patch.object(service, "_request", side_effect=lambda path, *a, **k: responses[path]):
             result = service._source_page({"limit": 100})
@@ -77,7 +105,8 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         new_cashier_cache["source_id"] = "new-root"
         service._upsert(new_cashier_cache, service._maps(service._settings()))
         responses = {"/api/integrations/erp/operating-expenses": {"items": [cashier], "end": True},
-                     "/api/integrations/erp/resolve-applicant-companies": {"items": [resolution]}}
+                     "/api/integrations/erp/resolve-applicant-companies": {"items": [resolution]},
+                     WORKFLOW_PATH: {"schema_version": 2, "items": [workflow_fixture(row)]}}
         with patch.dict(frappe.conf, operating_expense_source_mode="oa_cashier"), patch.object(service, "_oa_connection", return_value=None), patch.object(oa, "read_page", return_value=([row], None)), patch.object(service, "_request", side_effect=lambda path, *a, **k: responses[path]):
             service.save_mapping("legacy-root", self._mapping(), service._fresh(service._source("legacy-root"))["version"])
             preview = service.preview_voucher("legacy-root")
@@ -113,7 +142,8 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         occupied["source_id"] = "legacy-root"
         service._upsert(occupied, service._maps(service._settings()))
         responses = {"/api/integrations/erp/operating-expenses": {"items": [{"source_id": "legacy-root", "process_instance_id": row["process_instance_id"], "amount": "100", "currency": "CNY"}], "end": True},
-                     "/api/integrations/erp/resolve-applicant-companies": {"items": [resolution]}}
+                     "/api/integrations/erp/resolve-applicant-companies": {"items": [resolution]},
+                     WORKFLOW_PATH: {"schema_version": 2, "items": [workflow_fixture(row)]}}
         with patch.dict(frappe.conf, operating_expense_source_mode="oa_cashier"), patch.object(service, "_oa_connection", return_value=None), patch.object(oa, "read_page", return_value=([row], None)), patch.object(service, "_request", side_effect=lambda path, *a, **k: responses[path]):
             with self.subTest(case="different_cached_identity"):
                 current = service._source_page({"limit": 100})["items"][0]
@@ -165,7 +195,8 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         current_cashier = {**legacy, "corp_id": row["corp_id"], "process_instance_id": row["process_instance_id"],
                            "approval_no": row["business_id"], "approval_identity_status": "explicit"}
         responses = {"/api/integrations/erp/operating-expenses": {"items": [current_cashier], "end": True},
-                     "/api/integrations/erp/resolve-applicant-companies": {"items": [resolution]}}
+                     "/api/integrations/erp/resolve-applicant-companies": {"items": [resolution]},
+                     WORKFLOW_PATH: {"schema_version": 2, "items": [workflow_fixture(row)]}}
         with patch.dict(frappe.conf, operating_expense_source_mode="oa_cashier"), patch.object(service, "_oa_connection", return_value=None), patch.object(oa, "read_page", return_value=([row], None)), patch.object(service, "_request", side_effect=lambda path, *a, **k: responses[path]):
             conflicts = ({"corp_id": "old-corp"}, {"process_instance_id": "old-instance"}, {"approval_no": "old-approval"},
                          {"corp_id": "old-corp", "process_instance_id": "old-instance", "approval_no": "old-approval"},
@@ -207,7 +238,8 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         item["source_id"] = "1001"
         service._upsert(item, service._maps(service._settings()))
         responses = {"/api/integrations/erp/operating-expenses": {"items": [cashier], "end": True},
-                     "/api/integrations/erp/resolve-applicant-companies": {"items": [resolution]}}
+                     "/api/integrations/erp/resolve-applicant-companies": {"items": [resolution]},
+                     WORKFLOW_PATH: {"schema_version": 2, "items": [workflow_fixture(row)]}}
         with patch.dict(frappe.conf, operating_expense_source_mode="oa_cashier"), patch.object(service, "_oa_connection", return_value=None), patch.object(oa, "read_page", return_value=([row], None)), patch.object(service, "_request", side_effect=lambda path, *a, **k: responses[path]):
             service.save_mapping("1001", self._mapping(), service._fresh(service._source("1001"))["version"])
             before = service.preview_voucher("1001")
@@ -227,7 +259,7 @@ class OperatingExpenseNativeQA(unittest.TestCase):
             service.validate_operating_journal(journal)
             self.assertEqual(journal.docstatus, 0)
 
-    def test_blocked_requests_remain_visible_but_do_not_enter_payable_totals(self):
+    def test_blocked_requests_remain_visible_and_keep_known_pending_balance_in_totals(self):
         service = self._sync()
         baseline = service.get_operating_expenses()["currency_totals"]["CNY"]["pending_amount"]
         item = json.loads(frappe.get_doc(service.SOURCE, "1001").source_json)
@@ -236,7 +268,148 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         service._upsert(item, {item["source_company"]: "QA Operating China"})
         result = service.get_operating_expenses()
         self.assertEqual(result["total_count"], 131)
-        self.assertEqual(result["currency_totals"]["CNY"]["pending_amount"], baseline)
+        self.assertEqual(Decimal(result["currency_totals"]["CNY"]["pending_amount"]), Decimal(baseline) + Decimal("500"))
+
+    def test_workflow_batch_uses_exact_identities_and_corrected_originators_before_company_resolution(self):
+        from deeplinkerp_branding.services import operating_expenses as service
+        from deeplinkerp_branding.services import operating_oa_source as oa
+        from tests.test_operating_oa_source import approval
+        first, second = approval(), approval()
+        first.update(status="RUNNING", result="NONE", originator_user_id="stale-manager", originator_user_name="Cached Manager")
+        second.update(process_instance_id="instance-2", business_id="20260101002", status="RUNNING", result="NONE",
+                      originator_user_id="stale-finance", originator_user_name="Cached Finance")
+        workflows = [workflow_fixture(first, current_tasks=[{"id": "cashier-task", "stage": "出纳", "status": "RUNNING",
+                        "activity_id": "CashierActivity", "entered_at": "2026-10-07T01:00:00Z", "assignees": [{"id": "cashier", "name": "QA Cashier"}]}]),
+                     workflow_fixture(second, originator={"id": "u2", "name": "Bob"}, can_register_payment=False,
+                        current_tasks=[{"id": "manager-task", "stage": "主管", "status": "RUNNING",
+                            "activity_id": "ManagerActivity", "entered_at": "2026-10-07T01:00:00Z", "assignees": [{"id": "manager", "name": "QA Manager"}]}])]
+        calls = []
+        def respond(path, *args, **kwargs):
+            calls.append((path, kwargs))
+            if path == "/api/integrations/erp/operating-expenses":
+                return {"items": [], "end": True}
+            if path == WORKFLOW_PATH:
+                self.assertEqual(kwargs["data"]["identities"], [{"corp_id": row["corp_id"], "process_instance_id": row["process_instance_id"], "source_id": oa.application_id(row)} for row in (first, second)])
+                return {"schema_version": 2, "items": workflows}
+            self.assertEqual(path, "/api/integrations/erp/resolve-applicant-companies")
+            self.assertEqual(kwargs["data"]["applicants"], [{"user_id": "u1", "employee_name": "Alice"}, {"user_id": "u2", "employee_name": "Bob"}])
+            return {"items": [{"user_id": "u1", "employee_name": "Alice", "status": "matched", "assigned_department": "QA Operating China"},
+                              {"user_id": "u2", "employee_name": "Bob", "status": "matched", "assigned_department": "QA Operating Mexico"}]}
+        with patch.dict(frappe.conf, operating_expense_source_mode="oa_cashier"), patch.object(service, "_oa_connection", return_value=None), patch.object(oa, "read_page", return_value=([first, second], None)), patch.object(service, "_request", side_effect=respond):
+            result = service._source_page({"limit": 100})
+        self.assertEqual(sum(path == WORKFLOW_PATH for path, _ in calls), 1)
+        self.assertLess([path for path, _ in calls].index(WORKFLOW_PATH), [path for path, _ in calls].index("/api/integrations/erp/resolve-applicant-companies"))
+        for index, (row, applicant, approver, allowed) in enumerate(((first, "Alice", "QA Cashier", True), (second, "Bob", "QA Manager", False))):
+            with self.subTest(instance=row["process_instance_id"]):
+                item = result["items"][index]
+                self.assertEqual(item["source_id"], oa.application_id(row))
+                self.assertEqual(item["applicant"], applicant)
+                self.assertEqual(item["current_approver"], approver)
+                self.assertEqual(item["approvals"]["raw"]["status"], "RUNNING")
+                self.assertEqual(item["approval_state"], "pending")
+                self.assertEqual(item["payment_eligibility"]["can_register_payment"], allowed)
+                self.assertIsNone(item["cashier_source_id"])
+                self.assertIsNone(item["paid_amount"])
+                self.assertIsNone(item["pending_amount"])
+
+    def _exported_rows(self, service, filters, columns):
+        import xml.etree.ElementTree as ET
+        service.export_operating_expenses(filters=filters, order_by="source_id asc", columns=columns)
+        with ZipFile(BytesIO(frappe.response["filecontent"])) as workbook:
+            xml = ET.fromstring(workbook.read("xl/worksheets/sheet1.xml"))
+        ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        result = []
+        for row in xml.findall("m:sheetData/m:row", ns)[1:]:
+            values = [None] * len(columns)
+            for cell in row.findall("m:c", ns):
+                letters = "".join(char for char in cell.attrib["r"] if char.isalpha())
+                index = 0
+                for letter in letters:
+                    index = index * 26 + ord(letter) - ord("A") + 1
+                text = cell.find("m:is/m:t", ns) if cell.attrib.get("t") == "inlineStr" else cell.find("m:v", ns)
+                values[index - 1] = text.text if text is not None else None
+            result.append(values)
+        return result
+
+    def test_virtual_approval_filters_quick_tabs_and_export_share_company_number_and_balances(self):
+        from deeplinkerp_branding.services import operating_oa_source as oa
+        from tests.test_operating_oa_source import approval
+        service = self._sync()
+        marker = "qa-workflow-filter-contract"
+        specs = [("cashier", "RUNNING", "NONE", True, "30", "70", "pending", "QA Operating China"),
+                 ("manager", "RUNNING", "NONE", False, "0", "100", "pending", "QA Operating China"),
+                 ("paid", "COMPLETED", "agree", True, "100", "0", "approved", "QA Operating China"),
+                 ("history-unknown", "COMPLETED", "agree", True, None, None, "approved", "QA Operating China"),
+                 ("rejected", "COMPLETED", "refuse", False, "0", "100", "rejected", "QA Operating China"),
+                 ("terminated", "TERMINATED", "agree", False, "0", "100", "terminated", "QA Operating China"),
+                 ("scope-removed", "COMPLETED", "agree", True, None, None, "unknown", "QA Operating China"),
+                 ("unknown", "UNKNOWN", "NONE", False, "0", "100", "unknown", "QA Operating China"),
+                 ("mexico", "RUNNING", "NONE", True, "40", "60", "pending", "QA Operating Mexico")]
+        expected = {}
+        for key, status, result, allowed, paid, pending, state, company in specs:
+            row = approval()
+            row.update(process_instance_id="qa-workflow-" + key, business_id="QA-ORIGINAL-" + key, status=status, result=result)
+            row["form_component_values"][4]["value"] = marker
+            if company == "QA Operating Mexico":
+                row["form_component_values"][3]["value"] = "比索"
+            tasks = [{"id": key, "stage": "出纳" if allowed else "主管", "status": "RUNNING", "assignees": [{"id": key, "name": "QA Cashier" if allowed else "QA Manager"}]}] if status == "RUNNING" else []
+            current = oa.with_workflow(row, workflow_fixture(row, current_tasks=tasks, can_register_payment=allowed))
+            currency = "MXN" if company == "QA Operating Mexico" else "CNY"
+            cashier = [] if paid is None else [{"source_id": "qa-cashier-" + key, "corp_id": row["corp_id"], "process_instance_id": row["process_instance_id"],
+                "amount": "100", "currency": currency, "paid_amount": paid, "pending_amount": pending,
+                "source_status": "已付款" if pending == "0" else "部分付款" if paid != "0" else "未付款",
+                "payment_evidence_status": "recorded", "payments": [], "attachments": []}]
+            item = oa.merge_application(current, cashier, {"status": "matched", "assigned_department": company})
+            if key == "scope-removed":
+                item = oa.withdrawn_source(item, row)
+            service._upsert(item, service._maps(service._settings()))
+            expected[key] = {"source_id": item["source_id"], "approval_no": row["business_id"], "state": state,
+                "paid": paid, "pending": pending, "company": company}
+        scope = {"keyword": marker, "company": "QA Operating China"}
+        all_rows = service.get_operating_expenses(filters=scope, order_by="source_id asc", page_length=500)
+        projected = {row["source_id"]: row for row in all_rows["rows"]}
+        self.assertEqual(all_rows["total_count"], 8)
+        for key, facts in expected.items():
+            if facts["company"] == "QA Operating China":
+                self.assertEqual(projected[facts["source_id"]]["approval_state"], facts["state"])
+        self.assertEqual(projected[expected["cashier"]["source_id"]]["current_approver"], "QA Cashier")
+        self.assertEqual(projected[expected["manager"]["source_id"]]["current_approver"], "QA Manager")
+        self.assertTrue(projected[expected["cashier"]["source_id"]]["payment_eligibility"]["can_register_payment"])
+        self.assertFalse(projected[expected["manager"]["source_id"]]["payment_eligibility"]["can_register_payment"])
+        self.assertFalse(projected[expected["scope-removed"]["source_id"]]["payment_eligibility"]["can_register_payment"])
+        self.assertEqual(Decimal(all_rows["currency_totals"]["CNY"]["pending_amount"]), Decimal("470"))
+        self.assertTrue(all_rows["currency_totals"]["CNY"]["incomplete"])
+        both_companies = service.get_operating_expenses(filters={"keyword": marker}, page_length=500)
+        self.assertEqual(both_companies["total_count"], 9)
+        self.assertEqual({currency: Decimal(bucket["pending_amount"]) for currency, bucket in both_companies["currency_totals"].items()}, {"CNY": Decimal("470"), "MXN": Decimal("60")})
+        self.assertFalse(both_companies["currency_totals"]["MXN"]["incomplete"])
+        for tab, keys in (("all", [key for key, value in expected.items() if value["company"] == "QA Operating China"]),
+                          ("pending_payment", ["cashier"]), ("approvals_running", ["cashier", "manager"]),
+                          ("paid", ["paid"]), ("reconciliation", ["history-unknown", "scope-removed", "unknown"])):
+            with self.subTest(tab=tab):
+                predicates = {**scope, "quick_tab": tab}
+                result = service.get_operating_expenses(filters=predicates, order_by="source_id asc", page_length=20)
+                self.assertEqual(result["total_count"], len(keys))
+                self.assertEqual({row["source_id"] for row in result["rows"]}, {expected[key]["source_id"] for key in keys})
+                exported = self._exported_rows(service, predicates, ["display_source_id", "approval_state", "current_approver", "pending_amount"])
+                self.assertEqual([row[0] for row in exported], [row["approval_no"] for row in result["rows"]])
+                self.assertEqual([row[1] for row in exported], [row["approval_state"] for row in result["rows"]])
+                self.assertEqual([row[2] or "" for row in exported], [row["current_approver"] for row in result["rows"]])
+                self.assertEqual([Decimal(row[3]) if row[3] is not None else None for row in exported], [Decimal(row["pending_amount"]) if row["pending_amount"] is not None else None for row in result["rows"]])
+                known = sum((Decimal(expected[key]["pending"]) for key in keys if expected[key]["pending"] is not None), Decimal(0))
+                self.assertEqual(Decimal(result["currency_totals"]["CNY"]["pending_amount"]), known)
+        for state in ("pending", "approved", "rejected", "terminated", "withdrawn", "unknown"):
+            with self.subTest(approval_state=state):
+                result = service.get_operating_expenses(filters={**scope, "approval_state": state}, page_length=500)
+                self.assertEqual({row["source_id"] for row in result["rows"]}, {facts["source_id"] for facts in expected.values() if facts["state"] == state and facts["company"] == "QA Operating China"})
+        for legacy, keys in (("eligible", ["cashier", "paid", "history-unknown"]), ("blocked", ["manager", "rejected", "terminated", "scope-removed", "unknown"])):
+            with self.subTest(legacy_approval_filter=legacy):
+                result = service.get_operating_expenses(filters={**scope, "approval_state": legacy}, page_length=500)
+                self.assertEqual({row["source_id"] for row in result["rows"]}, {expected[key]["source_id"] for key in keys})
+        number = expected["cashier"]["approval_no"]
+        numbered = service.get_operating_expenses(filters={"keyword": number, "company": "QA Operating China", "quick_tab": "pending_payment", "approval_state": "pending"})
+        self.assertEqual([row["source_id"] for row in numbered["rows"]], [expected["cashier"]["source_id"]])
+        self.assertEqual(self._exported_rows(service, {"keyword": number, "company": "QA Operating China", "quick_tab": "pending_payment", "approval_state": "pending"}, ["display_source_id"]), [[number]])
 
     def test_cache_and_mapping_cannot_be_faked_through_native_documents(self):
         self.assertTrue(frappe.db.exists("DocType", "Operating Expense Source"), "Source model is missing")
