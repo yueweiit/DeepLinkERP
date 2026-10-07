@@ -129,6 +129,8 @@ test("summary renders every server currency separately and calls out unknown or 
 			currency_totals: {
 				CNY: { amount: "10", paid_amount: "2", pending_amount: "8" },
 				USD: { amount: "3", paid_amount: "0", pending_amount: "3", incomplete: true },
+				EUR: { amount: null, paid_amount: null, pending_amount: null, incomplete: true },
+				JPY: { amount: "100", paid_amount: null, pending_amount: null, known_totals: { paid_amount: "20", pending_amount: "30" }, incomplete: true },
 				"": { amount: "0", incomplete: true },
 			},
 		},
@@ -137,6 +139,11 @@ test("summary renders every server currency separately and calls out unknown or 
 	assert.match(html, /USD.*3\.00/);
 	assert.match(html, /不完整/);
 	assert.match(html, /币种未明确/);
+	const unknown = html.split("<br>").find((row) => row.startsWith("EUR"));
+	assert.match(unknown, /申请金额 — · 累计已付 — · 剩余待付 —/);
+	assert.doesNotMatch(unknown, /0\.00/);
+	assert.match(html, /USD.*累计已付.*0\.00/);
+	assert.match(html, /JPY.*累计已付 —.*已知 20\.00.*剩余待付 —.*已知 30\.00/);
 });
 test("full-filter Excel snapshots filters, sort and ordered supported columns before lazy loading", async () => {
 	let resume, args, method, downloaded;

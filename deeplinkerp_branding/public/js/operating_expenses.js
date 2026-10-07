@@ -122,16 +122,22 @@
 				"待分类"
 		);
 	const approvalLabel = (value) => t(Object.prototype.hasOwnProperty.call(approvalLabels,value)?approvalLabels[value]:"需复核");
+	function aggregateMoney(row, field) {
+		const total = money(row[field]);
+		const known = money(row.known_totals?.[field]);
+		return total + (total === "—" && known !== "—"
+			? ` <small class="text-muted">（${esc(t("已知"))} ${known}）</small>` : "");
+	}
 	function summary(c) {
 		const totals = c.providerPayload?.currency_totals || {};
 		return Object.entries(totals)
 			.map(
 				([currency, row]) =>
-					`${esc(currency || t("币种未明确"))} · ${esc(t("申请金额"))} ${money(
-						row.amount
-					)} · ${esc(t("累计已付"))} ${money(row.paid_amount)} · ${esc(
+					`${esc(currency || t("币种未明确"))} · ${esc(t("申请金额"))} ${aggregateMoney(
+						row, "amount"
+					)} · ${esc(t("累计已付"))} ${aggregateMoney(row, "paid_amount")} · ${esc(
 						t("剩余待付")
-					)} ${money(row.pending_amount)}${
+					)} ${aggregateMoney(row, "pending_amount")}${
 						row.incomplete
 							? ` <span class="text-warning">${esc(t("金额不完整，需复核"))}</span>`
 							: ""

@@ -95,7 +95,7 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         from tests.test_operating_oa_source import approval
         service = self._sync()
         row = approval()
-        cashier = {"source_id": "legacy-root", "process_instance_id": row["process_instance_id"], "amount": "100", "currency": "CNY",
+        cashier = {"source_id": "legacy-root", "corp_id": row["corp_id"], "process_instance_id": row["process_instance_id"], "amount": "100", "currency": "CNY",
                    "paid_amount": "0", "pending_amount": "100", "source_status": "未付款", "payment_evidence_status": "recorded", "payments": [], "attachments": []}
         resolution = {"user_id": "u1", "employee_name": "Alice", "status": "matched", "assigned_department": "QA Operating China"}
         item = oa.merge_application(row, [cashier], resolution)
@@ -141,7 +141,7 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         occupied = oa.merge_application(other, [], resolution)
         occupied["source_id"] = "legacy-root"
         service._upsert(occupied, service._maps(service._settings()))
-        responses = {"/api/integrations/erp/operating-expenses": {"items": [{"source_id": "legacy-root", "process_instance_id": row["process_instance_id"], "amount": "100", "currency": "CNY"}], "end": True},
+        responses = {"/api/integrations/erp/operating-expenses": {"items": [{"source_id": "legacy-root", "corp_id": row["corp_id"], "process_instance_id": row["process_instance_id"], "amount": "100", "currency": "CNY"}], "end": True},
                      "/api/integrations/erp/resolve-applicant-companies": {"items": [resolution]},
                      WORKFLOW_PATH: {"schema_version": 2, "items": [workflow_fixture(row)]}}
         with patch.dict(frappe.conf, operating_expense_source_mode="oa_cashier"), patch.object(service, "_oa_connection", return_value=None), patch.object(oa, "read_page", return_value=([row], None)), patch.object(service, "_request", side_effect=lambda path, *a, **k: responses[path]):
@@ -230,6 +230,7 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         service = self._sync()
         row = approval()
         cashier = json.loads(frappe.get_doc(service.SOURCE, "1001").source_json)
+        cashier["corp_id"] = row["corp_id"]
         cashier["process_instance_id"] = row["process_instance_id"]
         cashier["payment_evidence_status"] = "recorded"
         cashier["approvals"]["raw"]["finance_review"] = "待付款"
@@ -249,6 +250,8 @@ class OperatingExpenseNativeQA(unittest.TestCase):
             cashier["payments"].append(payment)
             cashier.update(paid_amount="60", pending_amount="40")
             current = service._source_page({"limit": 100})["items"][0]
+            self.assertEqual(current["cashier_source_id"], "1001")
+            self.assertEqual((Decimal(current["paid_amount"]), Decimal(current["pending_amount"])), (Decimal("60"), Decimal("40")))
             service._upsert(current, service._maps(service._settings()))
             self.assertNotIn("财务确认后的来源事实已变化", frappe.get_doc(service.SOURCE, "1001").issues)
             self.assertEqual(service.preview_voucher("1001")["fingerprint"], before["fingerprint"])
@@ -261,14 +264,21 @@ class OperatingExpenseNativeQA(unittest.TestCase):
 
     def test_blocked_requests_remain_visible_and_keep_known_pending_balance_in_totals(self):
         service = self._sync()
-        baseline = service.get_operating_expenses()["currency_totals"]["CNY"]["pending_amount"]
+        baseline = service.get_operating_expenses()["currency_totals"]["CNY"]
         item = json.loads(frappe.get_doc(service.SOURCE, "1001").source_json)
         item.update(source_id="blocked-original-test", source_system="dingtalk-oa", amount="500", paid_amount="0", pending_amount="500",
                     approvals={"eligibility": "blocked", "raw": {"status": "RUNNING", "result": "agree"}})
         service._upsert(item, {item["source_company"]: "QA Operating China"})
-        result = service.get_operating_expenses()
+        result = service.get_operating_expenses(page_length=500)
         self.assertEqual(result["total_count"], 131)
-        self.assertEqual(Decimal(result["currency_totals"]["CNY"]["pending_amount"]), Decimal(baseline) + Decimal("500"))
+        bucket = result["currency_totals"]["CNY"]
+        baseline_known = baseline["pending_amount"] if baseline["pending_amount"] is not None else baseline["known_totals"]["pending_amount"]
+        actual_known = bucket["pending_amount"] if bucket["pending_amount"] is not None else bucket["known_totals"]["pending_amount"]
+        self.assertEqual(Decimal(actual_known), Decimal(baseline_known) + Decimal("500"))
+        self.assertEqual(bucket["pending_amount"] is None, baseline["pending_amount"] is None)
+        blocked = next(row for row in result["rows"] if row["source_id"] == "blocked-original-test")
+        self.assertEqual(Decimal(blocked["pending_amount"]), Decimal("500"))
+        self.assertFalse(blocked["payment_eligibility"]["can_register_payment"])
 
     def test_workflow_batch_uses_exact_identities_and_corrected_originators_before_company_resolution(self):
         from deeplinkerp_branding.services import operating_expenses as service
@@ -350,6 +360,7 @@ class OperatingExpenseNativeQA(unittest.TestCase):
             row = approval()
             row.update(process_instance_id="qa-workflow-" + key, business_id="QA-ORIGINAL-" + key, status=status, result=result)
             row["form_component_values"][4]["value"] = marker
+            row["form_component_values"].append({"name": "归属项目", "value": "QA项目-" + key})
             if company == "QA Operating Mexico":
                 row["form_component_values"][3]["value"] = "比索"
             tasks = [{"id": key, "stage": "出纳" if allowed else "主管", "status": "RUNNING", "assignees": [{"id": key, "name": "QA Cashier" if allowed else "QA Manager"}]}] if status == "RUNNING" else []
@@ -377,11 +388,16 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         self.assertTrue(projected[expected["cashier"]["source_id"]]["payment_eligibility"]["can_register_payment"])
         self.assertFalse(projected[expected["manager"]["source_id"]]["payment_eligibility"]["can_register_payment"])
         self.assertFalse(projected[expected["scope-removed"]["source_id"]]["payment_eligibility"]["can_register_payment"])
-        self.assertEqual(Decimal(all_rows["currency_totals"]["CNY"]["pending_amount"]), Decimal("470"))
+        self.assertIsNone(all_rows["currency_totals"]["CNY"]["paid_amount"])
+        self.assertIsNone(all_rows["currency_totals"]["CNY"]["pending_amount"])
+        self.assertEqual(all_rows["currency_totals"]["CNY"]["incomplete_fields"], ["paid_amount", "pending_amount"])
+        self.assertEqual({field: Decimal(value) for field, value in all_rows["currency_totals"]["CNY"]["known_totals"].items()}, {"paid_amount": Decimal("130"), "pending_amount": Decimal("470")})
         self.assertTrue(all_rows["currency_totals"]["CNY"]["incomplete"])
         both_companies = service.get_operating_expenses(filters={"keyword": marker}, page_length=500)
         self.assertEqual(both_companies["total_count"], 9)
-        self.assertEqual({currency: Decimal(bucket["pending_amount"]) for currency, bucket in both_companies["currency_totals"].items()}, {"CNY": Decimal("470"), "MXN": Decimal("60")})
+        self.assertIsNone(both_companies["currency_totals"]["CNY"]["pending_amount"])
+        self.assertEqual(Decimal(both_companies["currency_totals"]["CNY"]["known_totals"]["pending_amount"]), Decimal("470"))
+        self.assertEqual(Decimal(both_companies["currency_totals"]["MXN"]["pending_amount"]), Decimal("60"))
         self.assertFalse(both_companies["currency_totals"]["MXN"]["incomplete"])
         for tab, keys in (("all", [key for key, value in expected.items() if value["company"] == "QA Operating China"]),
                           ("pending_payment", ["cashier"]), ("approvals_running", ["cashier", "manager"]),
@@ -391,13 +407,20 @@ class OperatingExpenseNativeQA(unittest.TestCase):
                 result = service.get_operating_expenses(filters=predicates, order_by="source_id asc", page_length=20)
                 self.assertEqual(result["total_count"], len(keys))
                 self.assertEqual({row["source_id"] for row in result["rows"]}, {expected[key]["source_id"] for key in keys})
-                exported = self._exported_rows(service, predicates, ["display_source_id", "approval_state", "current_approver", "pending_amount"])
+                exported = self._exported_rows(service, predicates, ["display_source_id", "approval_state", "current_approver", "pending_amount", "project", "source_system"])
                 self.assertEqual([row[0] for row in exported], [row["approval_no"] for row in result["rows"]])
                 self.assertEqual([row[1] for row in exported], [row["approval_state"] for row in result["rows"]])
                 self.assertEqual([row[2] or "" for row in exported], [row["current_approver"] for row in result["rows"]])
                 self.assertEqual([Decimal(row[3]) if row[3] is not None else None for row in exported], [Decimal(row["pending_amount"]) if row["pending_amount"] is not None else None for row in result["rows"]])
+                self.assertEqual([row[4] for row in exported], ["QA项目-" + key for row in result["rows"] for key in keys if expected[key]["source_id"] == row["source_id"]])
+                self.assertEqual([row[5] for row in exported], [oa.SOURCE_SYSTEM] * len(keys))
                 known = sum((Decimal(expected[key]["pending"]) for key in keys if expected[key]["pending"] is not None), Decimal(0))
-                self.assertEqual(Decimal(result["currency_totals"]["CNY"]["pending_amount"]), known)
+                bucket = result["currency_totals"]["CNY"]
+                if any(expected[key]["pending"] is None for key in keys):
+                    self.assertIsNone(bucket["pending_amount"])
+                    self.assertEqual(Decimal(bucket["known_totals"]["pending_amount"]), known)
+                else:
+                    self.assertEqual(Decimal(bucket["pending_amount"]), known)
         for state in ("pending", "approved", "rejected", "terminated", "withdrawn", "unknown"):
             with self.subTest(approval_state=state):
                 result = service.get_operating_expenses(filters={**scope, "approval_state": state}, page_length=500)
@@ -410,6 +433,12 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         numbered = service.get_operating_expenses(filters={"keyword": number, "company": "QA Operating China", "quick_tab": "pending_payment", "approval_state": "pending"})
         self.assertEqual([row["source_id"] for row in numbered["rows"]], [expected["cashier"]["source_id"]])
         self.assertEqual(self._exported_rows(service, {"keyword": number, "company": "QA Operating China", "quick_tab": "pending_payment", "approval_state": "pending"}, ["display_source_id"]), [[number]])
+        uncertain = service.get_operating_expenses(filters={"keyword": expected["history-unknown"]["approval_no"], "company": "QA Operating China"})["currency_totals"]["CNY"]
+        self.assertEqual(Decimal(uncertain["amount"]), Decimal("100"))
+        self.assertIsNone(uncertain["paid_amount"])
+        self.assertIsNone(uncertain["pending_amount"])
+        self.assertEqual(uncertain["known_totals"], {})
+        self.assertEqual(uncertain["incomplete_fields"], ["paid_amount", "pending_amount"])
 
     def test_cache_and_mapping_cannot_be_faked_through_native_documents(self):
         self.assertTrue(frappe.db.exists("DocType", "Operating Expense Source"), "Source model is missing")
@@ -429,6 +458,18 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         row = next(row for row in service.get_operating_expenses(page_length=500)["rows"] if row["source_id"] == "1001")
         self.assertEqual(row["approval_no"], "20260101-readable")
         self.assertNotIn("source_json", row)
+        # Exercise the chunk boundary with authorized source handles, without
+        # creating hundreds of otherwise identical native documents.
+        with patch.object(frappe.db, "sql", wraps=frappe.db.sql) as sql:
+            projected = [{"name": "1001", "source_system": item["source_system"]} for _ in range(501)]
+            service._readable_source_numbers(projected)
+        projections = [call for call in sql.call_args_list if isinstance(call.args[0], str) and call.args[0].startswith("SELECT name,JSON_EXTRACT")]
+        self.assertEqual([len(call.args[1]["names"]) for call in projections], [500, 1])
+        self.assertEqual({row["approval_no"] for row in projected}, {"20260101-readable"})
+        for call in projections:
+            self.assertEqual(call.args[0].count("JSON_EXTRACT"), 7)
+            self.assertNotIn("$.payments", call.args[0])
+            self.assertNotIn("$.attachments", call.args[0])
 
     def test_removed_oa_application_stays_auditable_but_not_payable(self):
         from deeplinkerp_branding.services import operating_oa_source as oa
