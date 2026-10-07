@@ -153,7 +153,7 @@
 			return `<span class="${
 				["eligible","approved"].includes(doc[field]) ? "is-approved" : ["pending"].includes(doc[field]) ? "is-pending" : "is-review"
 			} dlp-operating-badge">${esc(approvalLabel(doc[field]))}</span>`;
-		if (field === "source_status") return `<span class="dlp-operating-badge ${doc[field]==="已付款"?"is-approved":doc[field]==="部分付款"?"is-pending":"is-review"}">${esc(doc[field]||"待核对")}</span>`;
+		if (field === "source_status") return `<span class="dlp-operating-badge ${doc[field]==="已付款"?"is-approved":doc[field]==="部分付款"?"is-pending":"is-review"}">${esc(t(doc[field]||"待核对"))}</span>`;
 		if (field === "finance_status") return esc(t(doc[field] || "未确认"));
 		if (field === "actions")
 			return `<div class="dlp-operating-row-actions">${[["payments","付款明细"],["approvals","查看审批"]].map(([tab,label])=>`<button type="button" class="btn btn-link btn-xs dlp-operating-open" data-source="${esc(doc.source_id||doc.name)}" data-tab="${tab}">${esc(t(label))}</button>`).join("")}</div>`;

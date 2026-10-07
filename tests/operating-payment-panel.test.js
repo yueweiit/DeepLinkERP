@@ -41,6 +41,12 @@ test("inactive cached nodes retain history without claiming to be the current ap
  assert.match(html,/historical-finance/);
  assert.doesNotMatch(html,/当前节点|is-current/);
  assert.doesNotMatch(api().timelineHTML({current_tasks:[],events:[{stage:"finance",current:true,active:true}]}),/当前节点|is-current/);
+ for (const [approval_status,label] of [["COMPLETED","审批已结束"],["TERMINATED","审批已终止"]]) {
+  const ended=api().timelineHTML({approval_status,current_tasks:[],events:[{stage:"finance",result:"AGREE"}]});
+  assert.match(ended,new RegExp(label));
+  assert.doesNotMatch(ended,/当前审批节点尚未同步|后续节点尚未同步/);
+  assert.match(ended,/完整记录以钉钉原单为准/);
+ }
 });
 test("payment policy controls registration independently from an unfinished overall approval", () => {
  const source={application_type:"payment",approvals:{eligibility:"blocked"},payment_eligibility:{can_register_payment:true,notice:"出纳正在办理"},oa_identity:{process_instance_id:"OA-1"}};
@@ -117,6 +123,15 @@ function panelHost(detail,apiResponses={}) {
  const helpers={sourceId:"source-1",canFinance:()=>true,reload:async()=>{},uiTask:async (_d,fn)=>fn(),request:async (method,args)=>{requests.push({method,args});return apiResponses[method]||[];},makeControl:async (_d,holder,df,value,change,query)=>{const control={df,value,holder,query,change,set_value:async next=>{control.value=next;},get_value:()=>control.value};controls.set(df.fieldname,control);return control;},action:(_d,holder,label,handler,eligible)=>{const button=new Surface(label);actions.set(label,{holder,handler,eligible,button});return button;}};
  return {root,drawer,helpers,controls,actions,requests,surfaces,errors,detail};
 }
+test("cashier-only approval notice remains distinct from overall completion and payment history", async () => {
+ for (const allowed of [true,false]) {
+  const detail={company:"C",source:{source_id:"source-1",application_type:"payment",oa_identity:{process_instance_id:"OA-1"},payment_eligibility:{can_register_payment:allowed,reason:"required_approvals_passed_cashier_only"}},erp_payments:{managed:false,payments:[],needs_zero_history_confirmation:true}};
+  const h=panelHost(detail);
+  await require(file)(h.root).mount(h.drawer,detail,h.helpers);
+  assert.equal(h.surfaces.some(surface=>surface.value==="必要审批已通过，待出纳办理。"),allowed);
+  assert.equal(h.actions.get("核对历史付款").eligible(),false,"Unknown history is not silently confirmed by the approval notice");
+ }
+});
 test("payment form starts folded and same-currency account sends exact amount with native party defaults", async () => {
  const detail={company:"C",mapping:{party_type:"Supplier",party:"SUP-1"},source:{source_id:"source-1",version:"v1",application_type:"payment",currency:"CNY",payee_name:"京东",payment_eligibility:{can_register_payment:true}},erp_payments:{managed:true,balance:{paid_amount:"300.00",pending_amount:"700.00"},payments:[]}};
  const h=panelHost(detail,{get_payment_accounts:[{name:"bank-CNY",label:"公司人民币账户",currency:"CNY"},{name:"bank-USD",label:"公司美元账户",currency:"USD"}],register_payment:{name:"payment-1"}});

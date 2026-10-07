@@ -22,7 +22,7 @@ from frappe.utils import now_datetime, getdate
 
 from deeplinkerp_branding.services.operating_expense_contract import (
     SOURCE_SYSTEM, SOURCE_URL, MAX_JSON_BYTES, attachment_path, digest, identifier,
-    validate_source, money, expense_facts, event_fingerprint,
+    validate_source, money, expense_facts, event_fingerprint, payment_decision, payment_status, quick_tab_matches, currency_totals,
 )
 from deeplinkerp_branding.services.purchase_payment_service import _require_fields
 from deeplinkerp_branding.services.unified_purchase_service import _require_export_permission
@@ -44,6 +44,10 @@ RAW_SOURCE_PERMISSIONS = {
     "approvals": "approval_state", "payments": "source_status", "attachments": "source_id",
     "cashier_source_id": "source_id", "company_resolution": "source_company", "payment_evidence_status": "source_status",
     "cashier_reported_payment_status": "source_status",
+    "oa_identity": "source_id", "applicant_user_id": "applicant",
+    "workflow_summary": "approval_state", "payment_eligibility": "approval_state",
+    "current_approver": "approval_state", "approval_state": "approval_state",
+    "project": "issues",
 }
 SOURCE_FIELDS = set(RAW_SOURCE_PERMISSIONS.values()) | {"company", "issues", "effective_application_type"}
 
@@ -219,8 +223,9 @@ def _request(path, params=None, download=False, data=None):
         frappe.throw("同步密钥未配置")
     limit = 20 * 1024 * 1024 if download else MAX_JSON_BYTES
     try:
-        transport = requests.post if resolver or payment_write else requests.get
-        kwargs = {"json": data} if resolver or payment_write else {}
+        post = resolver or payment_write or (workflow and data is not None)
+        transport = requests.post if post else requests.get
+        kwargs = {"json": data} if post else {}
         with transport(_base_url() + path, params=params, headers={"Authorization": "Bearer " + secret}, **kwargs,
                           timeout=(5, 20), allow_redirects=False, stream=True) as response:
             if response.status_code != 200:
@@ -235,7 +240,8 @@ def _request(path, params=None, download=False, data=None):
             if download:
                 return bytes(data)
             result = json.loads(data)
-            if result.get("schema_version") != 1 or result.get("source_system") != SOURCE_SYSTEM or not isinstance(result.get("items"), list) or len(result["items"]) > 500:
+            versions = {1, 2} if workflow or payment_write or resolver else {1}
+            if result.get("schema_version") not in versions or result.get("source_system") != SOURCE_SYSTEM or not isinstance(result.get("items"), list) or len(result["items"]) > 500:
                 raise ValueError("invalid source schema")
             if not (resolver or payment_write or workflow) and (not isinstance(result.get("end"), bool) or (not result["end"] and not result.get("next_cursor")) or not result.get("until")):
                 raise ValueError("invalid source pagination")
@@ -323,16 +329,32 @@ def _source_page(params):
                 query.execute("SELECT corp_id,process_instance_id,file_id,file_name,archive_status,sha256,actual_size FROM costing_read.attachment_archives_v1 WHERE corp_id=ANY(%s) AND process_instance_id=ANY(%s)",
                               (list({r["corp_id"] for r in selected}), [r["process_instance_id"] for r in selected]))
                 manifests = [dict(r) for r in query.fetchall()]
-    applicants = [oa.resolution_applicant(r, cashier) for r in selected]
+    if selected:
+        identities = [{"corp_id": r["corp_id"], "process_instance_id": r["process_instance_id"], "source_id": oa.application_id(r)} for r in selected]
+        workflow_items = _request("/api/integrations/erp/operating-expenses/workflow", data={"identities": identities})["items"]
+        workflows = {(e.get("corp_id"), e.get("process_instance_id")): e for e in workflow_items}
+        expected = {(i["corp_id"], i["process_instance_id"]) for i in identities}
+        if len(workflows) != len(workflow_items) or set(workflows) != expected:
+            frappe.throw("审批来源返回身份或数量不符，请核对")
+        try:
+            selected = [oa.with_workflow(r, workflows[(r["corp_id"], r["process_instance_id"])]) for r in selected]
+        except ValueError as error:
+            frappe.throw(str(error))
+    cashier_index = oa.cashier_index(cashier)
+    candidates = [oa.cashier_candidates(r, cashier_index) for r in selected]
+    manifests_by_identity = {}
+    for manifest in manifests:
+        manifests_by_identity.setdefault((manifest["corp_id"], manifest["process_instance_id"]), []).append(manifest)
+    applicants = [{"corp_id": r["corp_id"], **oa.resolution_applicant(r, cashier, candidates=c)} for r, c in zip(selected, candidates)]
     resolutions = _request("/api/integrations/erp/resolve-applicant-companies", data={"applicants": applicants})["items"] if applicants else []
     if len(resolutions) != len(applicants):
         frappe.throw("申请人归属返回数量不符")
     items = []
-    for row, applicant, resolution in zip(selected, applicants, resolutions):
-        if any(resolution.get(k) != applicant[k] for k in ("user_id", "employee_name")):
+    for row, applicant, resolution, candidate in zip(selected, applicants, resolutions, candidates):
+        if any(resolution.get(k) != applicant[k] for k in ("corp_id", "user_id", "employee_name")):
             frappe.throw("申请人归属返回身份不符")
-        item = oa.merge_application(row, cashier, resolution)
-        item["attachments"].extend(oa.archive_attachments(row, manifests))
+        item = oa.merge_application(row, cashier, resolution, candidates=candidate)
+        item["attachments"].extend(oa.archive_attachments(row, manifests_by_identity.get((row["corp_id"], row["process_instance_id"]), ())))
         key = (item["oa_identity"]["corp_id"], item["oa_identity"]["process_instance_id"])
         if identity and item["oa_identity"] != identity:
             frappe.throw("OA 返回身份不符，请管理员核查")
@@ -434,8 +456,9 @@ def _issues(item, mapping=None, include_payment_dates=True):
         validate_source(item)
     except (ValueError, TypeError, AttributeError):
         issues.append("来源数据无效，请核查")
-    if not isinstance(item.get("approvals"), dict) or item["approvals"].get("eligibility") != "eligible":
-        issues.append("审批未通过或已撤回")
+    decision = payment_decision(item)
+    if not decision["can_register_payment"]:
+        issues.append(decision.get("reason") or "审批证据待核对")
     if item.get("source_conflict") or item.get("currency_conflict"):
         issues.append("来源归属或币种冲突")
     if item.get("storage_precision_warning"):
@@ -1008,20 +1031,24 @@ def save_source_company(source_id, company, expected_source_version):
     return {"source_id": updated.name, "company": updated.company}
 
 
-LIST_FIELDS = ["name", "source_id", "company", "application_type", "effective_application_type", "application_type_raw", "applicant", "payee_name", "summary", "request_date", "currency", "amount", "paid_amount", "pending_amount", "source_status", "approval_state", "source_company", "source_sheet", "source_version", "issues"]
+LIST_FIELDS = ["name", "source_id", "source_system", "company", "application_type", "effective_application_type", "application_type_raw", "applicant", "payee_name", "summary", "request_date", "currency", "amount", "paid_amount", "pending_amount", "source_status", "approval_state", "source_company", "source_sheet", "source_version", "issues"]
 EXPORT_COLUMNS = {"company": "法律公司", "source_id": "申请编号", "effective_application_type": "财务申请类型", "application_type_raw": "原始申请类型", "applicant": "申请人", "payee_name": "收款人", "summary": "摘要", "request_date": "申请日期", "currency": "币种", "amount": "申请金额", "paid_amount": "累计已付", "pending_amount": "剩余待付", "source_status": "付款状态", "approval_state": "来源审批状态", "finance_status": "凭证状态", "issues": "待处理问题", "source_company": "来源公司", "source_sheet": "来源归档表"}
 EXPORT_COLUMNS["approval_no"] = "原始审批编号"
+EXPORT_COLUMNS["source_id"] = "ERP来源标识"
 EXPORT_COLUMNS["display_source_id"] = "申请编号"
+EXPORT_COLUMNS["current_approver"] = "当前办理人"
+EXPORT_COLUMNS["source_system"] = "来源"
+EXPORT_COLUMNS["project"] = "项目"
 
 
 def _list_rows(filters=None, order_by="request_date desc"):
     _require_fields(SOURCE, set(LIST_FIELDS))
     filters = frappe.parse_json(filters) if isinstance(filters, str) else filters or {}
-    allowed = {"company", "application_type", "applicant", "source_status", "approval_state", "date_from", "date_to", "keyword"}
+    allowed = {"company", "application_type", "applicant", "source_status", "approval_state", "date_from", "date_to", "keyword", "quick_tab"}
     if not isinstance(filters, dict) or set(filters) - allowed:
         frappe.throw("列表筛选无效")
     native = []
-    for field in ("company", "application_type", "applicant", "approval_state"):
+    for field in ("company", "application_type", "applicant"):
         if filters.get(field):
             if not isinstance(filters[field], str) or len(filters[field]) > 200:
                 frappe.throw("筛选值无效")
@@ -1033,13 +1060,14 @@ def _list_rows(filters=None, order_by="request_date desc"):
     if len(sort) != 2 or sort[0] not in {"request_date", "amount", "applicant", "source_id", "company", "modified"} or sort[1].lower() not in {"asc", "desc"}:
         frappe.throw("排序字段无效")
     or_filters = []
+    keyword = None
     if filters.get("keyword"):
         keyword = filters["keyword"]
         if not isinstance(keyword, str) or len(keyword) > 200:
             frappe.throw("关键词无效")
-        # Escaped wildcard semantics prevents a literal % from exposing unexpected matches.
-        pattern = "%" + keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-        or_filters = [[field, "like", pattern] for field in ("source_id", "summary", "payee_name", "applicant")]
+        # The original OA number is a permission-aliased JSON projection. Match
+        # once after the same native permission query, with literal semantics.
+        keyword = keyword.casefold()
     order_sql = f"{sort[0]} {sort[1]}, name asc"
     if sort[0] == "amount":
         # Build native permissions/filters first, then add only fixed expression
@@ -1057,13 +1085,31 @@ def _list_rows(filters=None, order_by="request_date desc"):
     # Native query permissions + explicit Company query hook apply to this bounded
     # parent-field projection; no full source JSON is hydrated per result row.
     rows = [dict(row) for row in rows]
+    _readable_source_numbers(rows)
     from .operating_payment_service import overlay_rows
     overlay_rows(rows)
+    for row in rows:
+        row["source_status"] = payment_status(row)
     status = filters.get("source_status")
     if status:
         if not isinstance(status, str) or len(status) > 200:
             frappe.throw("付款状态筛选无效")
         rows = [row for row in rows if row["source_status"] == status]
+    state = filters.get("approval_state")
+    if state:
+        if state not in {"pending", "approved", "rejected", "terminated", "withdrawn", "unknown", "eligible", "blocked"}:
+            frappe.throw("审批状态筛选无效")
+        if state in {"eligible", "blocked"}:
+            rows = [r for r in rows if bool(r["payment_eligibility"]["can_register_payment"]) == (state == "eligible")]
+        else:
+            rows = [r for r in rows if r["approval_state"] == state]
+    if keyword:
+        rows = [r for r in rows if any(keyword in str(r.get(field) or "").casefold() for field in ("source_id", "approval_no", "summary", "payee_name", "applicant"))]
+    tab = filters.get("quick_tab") or "all"
+    if tab not in {"all", "pending_payment", "approvals_running", "paid", "reconciliation"}:
+        frappe.throw("快捷筛选无效")
+    if tab != "all":
+        rows = [r for r in rows if quick_tab_matches(r, tab)]
     return rows
 
 
@@ -1073,27 +1119,16 @@ def get_operating_expenses(filters=None, order_by="request_date desc", page_leng
     if page_length not in {20, 100, 500, 2500} or start < 0:
         frappe.throw("分页参数无效")
     rows = _list_rows(filters, order_by)
-    totals = {}
-    for row in rows:
-        currency = row["currency"] or "未知"
-        bucket = totals.setdefault(currency, {"amount": Decimal(0), "paid_amount": Decimal(0), "pending_amount": Decimal(0), "incomplete": False})
-        for field in ("amount", "paid_amount", "pending_amount"):
-            if field == "pending_amount" and row.get("approval_state") != "eligible":
-                continue
-            try:
-                bucket[field] += money(row[field])
-            except ValueError:
-                bucket["incomplete"] = True
+    totals = currency_totals(rows)
     page = rows[start:start + page_length]
     _enrich_page(page)
-    return {"rows": page, "total_count": len(rows), "currency_totals": {currency: {field: str(value) if isinstance(value, Decimal) else value for field, value in bucket.items()} for currency, bucket in totals.items()}}
+    return {"rows": page, "total_count": len(rows), "currency_totals": totals}
 
 
 def _enrich_page(rows):
     if not rows:
         return
     names = [row["name"] for row in rows]
-    _readable_source_numbers(rows)
     _require_fields(MAPPING, {"source", "company"})
     mappings = set(frappe.get_list(MAPPING, filters={"source": ["in", names]}, pluck="source", limit_page_length=0))
     events = frappe.get_all(EVENT, filters={"source": ["in", names]}, fields=["source", "journal_entry", "operation", "payment_source_id", "provenance_json"], limit_page_length=0)
@@ -1128,6 +1163,8 @@ def get_operating_expense_detail(source_id):
     from .operating_payment_service import merge_source, payment_context, payment_detail
     context = payment_context(doc, raw)
     raw = merge_source(doc, raw, context)
+    # Presentation only; original source JSON and reported status stay auditable.
+    raw["source_status"] = payment_status(raw)
     item = {key: raw[key] for key in RAW_SOURCE_PERMISSIONS if key in raw}
     # Malformed evidence remains untouched in server JSON and visible in issues;
     # do not invent payment identities/amounts or an eligible approval in the UI.
@@ -1170,45 +1207,66 @@ def _detail_rows(rows, fields):
 
 
 def _readable_source_numbers(rows):
-    """Project only a permission-aliased number, never the private source JSON."""
-    _require_fields(SOURCE, {"source_id"})
-    raw = {row.name: row.source_json for row in frappe.get_all(SOURCE, filters={"name": ["in", [row["name"] for row in rows]]}, fields=["name", "source_json"], limit_page_length=0)} if rows else {}
+    """One bounded source projection for list, filters and export, never raw JSON."""
+    from .operating_oa_source import approval_state
+    _require_fields(SOURCE, {"source_id", "source_system", "approval_state", "issues"})
+    # Names already passed get_list's native/company permissions. Select only
+    # aliased facts, not payment histories or private attachments, in <=500 chunks.
+    paths = ("approval_no", "approvals", "current_approver", "payment_eligibility", "source_conflict", "currency_conflict", "project")
+    expressions = ",".join("JSON_EXTRACT(CASE WHEN JSON_VALID(source_json) THEN source_json ELSE '{}' END,'$." + field + "') AS `" + field + "`" for field in paths)
+    raw = {}
+    for offset in range(0, len(rows), 500):
+        names = tuple(row["name"] for row in rows[offset:offset + 500])
+        for projected in frappe.db.sql("SELECT name," + expressions + " FROM `tabOperating Expense Source` WHERE name IN %(names)s", {"names": names}, as_dict=True):
+            raw[projected.name] = {field: json.loads(projected[field]) if projected[field] is not None else None for field in paths}
     for row in rows:
-        value = json.loads(raw.get(row["name"]) or "{}").get("approval_no")
+        item = raw.get(row["name"], {})
+        item["source_system"] = row["source_system"]
+        value = item.get("approval_no")
         row["approval_no"] = value if isinstance(value, str) and len(value) <= 140 else None
+        approvals = item.get("approvals")
+        original = approvals.get("raw") if isinstance(approvals, dict) else None
+        original = original if isinstance(original, dict) else {}
+        row["approval_state"] = "unknown" if original.get("scope") == "withdrawn" or original.get("deleted_at") else approval_state(original.get("status"), original.get("result"))
+        row["current_approver"] = item.get("current_approver") or ""
+        row["payment_eligibility"] = payment_decision(item)
+        project = item.get("project")
+        row["project"] = project if isinstance(project, str) else None
+        for field in ("source_conflict", "currency_conflict"):
+            row[field] = bool(item.get(field))
 
 
 @frappe.whitelist()
 def export_operating_expenses(filters=None, order_by="request_date desc", columns=None):
     rows = _list_rows(filters, order_by)
-    _require_export_permission(SOURCE, (_source(row["name"]) for row in rows))
+    # Lazy exact-owner proof; authorized _source reads keep native scope checks.
+    _require_export_permission(SOURCE, ({"owner": _source(row["name"]).get("owner")} for row in rows))
     selected = frappe.parse_json(columns) if isinstance(columns, str) else columns or list(EXPORT_COLUMNS)
     if not isinstance(selected, list) or not selected or len(selected) != len(set(selected)) or set(selected) - set(EXPORT_COLUMNS):
         frappe.throw("导出列无效")
     if "finance_status" in selected:
         _enrich_page(rows)
-    elif "approval_no" in selected or "display_source_id" in selected:
-        _readable_source_numbers(rows)
-    if "display_source_id" in selected:
-        for row in rows:
-            row["display_source_id"] = row.get("approval_no") or row["source_id"]
     from xlsxwriter import Workbook
     from io import BytesIO
-    data = [[EXPORT_COLUMNS[field] for field in selected]] + [[row.get(field) for field in selected] for row in rows]
-    for row in data[1:]:
-        for index, field in enumerate(selected):
-            if field in {"amount", "paid_amount", "pending_amount"}:
-                try:
-                    row[index] = money(row[index])
-                except ValueError:
-                    row[index] = None
     content = BytesIO()
     with Workbook(content, {"constant_memory": True, "strings_to_formulas": False, "strings_to_urls": False}) as workbook:
         sheet = workbook.add_worksheet("运营支出")
         numeric = workbook.add_format({"num_format": "0.00"})
-        for row_index, values in enumerate(data):
-            for column_index, value in enumerate(values):
-                sheet.write(row_index, column_index, value, numeric if row_index and selected[column_index] in {"amount", "paid_amount", "pending_amount"} else None)
+        date_format = workbook.add_format({"num_format": "yyyy-mm-dd"})
+        money_fields = {"amount", "paid_amount", "pending_amount"}
+        for column_index, field in enumerate(selected):
+            sheet.write(0, column_index, EXPORT_COLUMNS[field])
+        for row_index, row in enumerate(rows, 1):
+            for column_index, field in enumerate(selected):
+                value = row.get("approval_no") or row["source_id"] if field == "display_source_id" else row.get(field)
+                monetary = field in money_fields
+                if monetary:
+                    try:
+                        value = money(value)
+                    except ValueError:
+                        value = None
+                cell_format = numeric if monetary else date_format if field == "request_date" else None
+                sheet.write(row_index, column_index, value, cell_format)
     frappe.response["filename"] = "运营支出.xlsx"
     frappe.response["filecontent"] = content.getvalue()
     frappe.response["type"] = "binary"

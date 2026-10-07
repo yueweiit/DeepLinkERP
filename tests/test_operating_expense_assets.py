@@ -34,7 +34,7 @@ class OperatingExpenseAssetsTest(unittest.TestCase):
 		self.assertIn(provider, files)
 		self.assertLess(files.index(shell), files.index(drawer))
 		self.assertLess(files.index(drawer), files.index(provider))
-		self.assertIn(drawer + "?v=0.0.13", hooks.app_include_js)
+		self.assertIn(drawer + "?v=0.0.14", hooks.app_include_js)
 		panel = "/assets/deeplinkerp_branding/js/operating_payment_panel.js"
 		self.assertEqual(files.count(panel), 1)
 		self.assertLess(files.index(panel), files.index(drawer))
@@ -47,6 +47,8 @@ class OperatingExpenseAssetsTest(unittest.TestCase):
 		specific = ROOT / "deeplinkerp_branding/public/css/operating_expenses.css"
 		self.assertTrue(specific.exists(), "Scoped operating-expenses styles missing")
 		self.assertIn("--dlp-operating-result-max-height", specific.read_text())
+		self.assertIn(".dlp-operating-payment-form textarea", specific.read_text())
+		self.assertIn("height: 56px !important", specific.read_text())
 		self.assertIn(
 			"tests.test_operating_expense_contract", (ROOT / ".github/workflows/ci.yml").read_text()
 		)
@@ -57,6 +59,15 @@ class OperatingExpenseAssetsTest(unittest.TestCase):
 	def test_new_business_labels_have_spanish_translations(self):
 		translations = (ROOT / "deeplinkerp_branding/translations/es.csv").read_text()
 		for label in (
+			"审批已结束",
+			"审批已终止",
+			"付款明细",
+			"查看审批",
+			"当前审批人",
+			"跨币种与会计设置",
+			"银行流水号（可选）",
+			"备注（可选）",
+			"保存后累计已付",
 			"运营费用",
 			"法律公司",
 			"来源审批通过",

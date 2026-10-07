@@ -72,9 +72,10 @@
   // is rendered once, then its escaped markup is reused: O(C + E).
   const nodes=events.map(node),list=items=>`<ol class="dlp-operating-timeline">${items.join("")}</ol>`;
   const activeTasks=tasks.filter(task=>["RUNNING","PENDING","WAITING","TODO","PROCESSING"].includes(String(task.status||"").toUpperCase()));
-  const current=activeTasks.length?`<div class="dlp-operating-current-tasks">${activeTasks.map(task=>`<p><strong>${esc(t("当前"))}：${esc(task.stage||t("审批节点"))}</strong> · ${esc((Array.isArray(task.assignees)?task.assignees:[]).map(person=>person.name||person.id||"—").join("、")||"—")} · ${esc(t("审批中"))}<small>${esc(task.entered_at||"—")}</small></p>`).join("")}</div>`:`<p class="text-muted">${esc(t("当前审批节点尚未同步，请查看钉钉原单"))}</p>`;
+  const endedStatus=String(row.approval_status||"").toUpperCase(), ended=!activeTasks.length && ["COMPLETED","TERMINATED"].includes(endedStatus);
+  const current=activeTasks.length?`<div class="dlp-operating-current-tasks">${activeTasks.map(task=>`<p><strong>${esc(t("当前"))}：${esc(task.stage||t("审批节点"))}</strong> · ${esc((Array.isArray(task.assignees)?task.assignees:[]).map(person=>person.name||person.id||"—").join("、")||"—")} · ${esc(t("审批中"))}<small>${esc(task.entered_at||"—")}</small></p>`).join("")}</div>`:`<p class="text-muted">${esc(t(ended?(endedStatus==="COMPLETED"?"审批已结束":"审批已终止"):"当前审批节点尚未同步，请查看钉钉原单"))}</p>`;
   const originator=typeof row.originator==="object"?row.originator?.name||row.originator?.id:row.originator;
-  return `${current}${originator?`<p class="text-muted">${esc(t("发起人"))} · ${esc(originator)}</p>`:""}${nodes.length?list(nodes.length>5?[nodes[0],...nodes.slice(-2)]:nodes):`<p class="text-muted">${esc(t("暂无可核对的审批节点，请查看钉钉原单"))}</p>`}${nodes.length>5?`<details><summary>${esc(t("展开全部审批节点"))} (${nodes.length})</summary>${list(nodes)}</details>`:""}<p class="dlp-operating-future text-muted">${esc(t("后续节点尚未同步，请在钉钉查看完整流程。"))}</p><p class="dlp-operating-sync-stamp text-muted">${esc(t("来源更新时间"))} · ${esc(row.source_updated_at||"—")} · ${esc(t("最后同步"))} · ${esc(row.last_synced_at||"—")}</p>`;
+  return `${current}${originator?`<p class="text-muted">${esc(t("发起人"))} · ${esc(originator)}</p>`:""}${nodes.length?list(nodes.length>5?[nodes[0],...nodes.slice(-2)]:nodes):`<p class="text-muted">${esc(t("暂无可核对的审批节点，请查看钉钉原单"))}</p>`}${nodes.length>5?`<details><summary>${esc(t("展开全部审批节点"))} (${nodes.length})</summary>${list(nodes)}</details>`:""}<p class="dlp-operating-future text-muted">${esc(t(ended?"以上为已取得的审批历史；完整记录以钉钉原单为准。":"后续节点尚未同步，请在钉钉查看完整流程。"))}</p><p class="dlp-operating-sync-stamp text-muted">${esc(t("来源更新时间"))} · ${esc(row.source_updated_at||"—")} · ${esc(t("最后同步"))} · ${esc(row.last_synced_at||"—")}</p>`;
  }
  const confirm = message => new Promise(resolve => root.frappe.confirm(message,()=>resolve(true),()=>resolve(false)));
  async function mount(drawer, detail, helpers) {
@@ -99,6 +100,9 @@
   }
   tabsHolder.on("click.dlpDrawer","button",event=>selectTab(event.currentTarget.dataset.operatingTab));
   const holder=body.find(".dlp-operating-register"), actions=root.$('<div class="dlp-operating-actions"></div>').appendTo(holder);
+  const policy=source.payment_eligibility??detail.payment_eligibility;
+  if(policy?.can_register_payment===true&&policy.reason==="required_approvals_passed_cashier_only")
+   root.$('<p class="text-success" role="status"></p>').text(t("必要审批已通过，待出纳办理。")).insertAfter(body.find(".dlp-operating-payment-heading"));
   if (!detail.erp_payments?.managed) {
    let zeroConfirmed=false,needsZeroConfirmation=needsHistoryConfirmation(detail),confirmationControl=null;
    const issue=takeoverIssue(detail,canFinance());

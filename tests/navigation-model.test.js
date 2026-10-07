@@ -87,6 +87,10 @@ class FakeElement {
 		return this.attributes.get(name) ?? null;
 	}
 
+	removeAttribute(name) {
+		this.attributes.delete(name);
+	}
+
 	querySelectorAll(selector) {
 		const matchesDisclosure = (element) => {
 			if (!element.classList.contains("dlp-mes-navigation__group")) return false;
@@ -494,6 +498,31 @@ test("classifies only same-origin Desk links as internal navigation", () => {
 	assert.equal(isInternalDeskLink("not a valid url", "not an origin"), false);
 });
 
+test("classic and DL sidebar clicks stay in the current tab without overriding external links", () => {
+	const bind = productionFunction("bindInternalSidebarNavigation");
+	const handlers = [];
+	const document = { addEventListener: (...args) => handlers.push(args) };
+	bind(document, "https://erp.test");
+	assert.equal(handlers.length, 1);
+	assert.equal(handlers[0][0], "click");
+	assert.equal(handlers[0][2], true, "normalize before native bubbling router handlers");
+	const click = handlers[0][1];
+	for (const href of ["/desk/account/view/tree?sidebar=China%20Finance", "/desk/chart-of-accounts"]) {
+		const link = new FakeElement();
+		link.setAttribute("href", href);
+		link.setAttribute("target", "_blank");
+		click({ target: { closest: () => link } });
+		assert.equal(link.getAttribute("target"), null);
+		assert.equal(link.getAttribute("href"), href, "preserve native route and sidebar context");
+	}
+	const external = new FakeElement();
+	external.setAttribute("href", "https://aflow.dingtalk.com/source");
+	external.setAttribute("target", "_blank");
+	click({ target: { closest: () => external } });
+	assert.equal(external.getAttribute("target"), "_blank");
+	click({ target: { closest: () => null } });
+});
+
 test("resolves query, exact route, and native sidebar active states in authority order", () => {
 	const buildNavigationModel = productionFunction("buildNavigationModel");
 	const desktopIcons = [
@@ -843,9 +872,9 @@ test("keeps the Desk assets separate from website CSS and loads the model before
 	);
 	assert.ok(hooks.indexOf(modelAsset) < hooks.indexOf(interfaceModeAsset));
 	assert.ok(hooks.indexOf(interfaceModeAsset) < hooks.indexOf(lifecycleAsset));
-	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.19/);
+	assert.match(hooks, /deeplinkerp_navigation\.js\?v=0\.0\.20/);
 	assert.match(hooks, /deeplinkerp_interface_mode\.js\?v=0\.0\.3/);
-	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.27/);
+	assert.match(hooks, /deeplinkerp_branding\.js\?v=0\.0\.28/);
 	assert.match(hooks, /web_include_css\s*=\s*"\/assets\/deeplinkerp_branding\/css\/deeplinkerp_branding\.css"/);
 });
 
@@ -1208,6 +1237,7 @@ test("integrates the executable lifecycle helpers through the existing single ro
 	assert.match(lifecycle, /function normalizeRenderedSidebarTarget\(link\)/);
 	assert.match(lifecycle, /DeepLinkERPNavigation\.isInternalDeskLink\(/);
 	assert.match(lifecycle, /link\.removeAttribute\("target"\)/);
+	assert.match(lifecycle, /function bindDeskEvents\(\)[\s\S]*bindInternalSidebarNavigation\(document, window\.location\.origin\)/);
 	assert.match(
 		lifecycle,
 		/function bindRenderedSidebarLinks\(container\)[\s\S]*normalizeRenderedSidebarTarget\(link\)/

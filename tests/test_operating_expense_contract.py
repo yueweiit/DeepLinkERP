@@ -21,6 +21,14 @@ class OperatingExpenseContractTest(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(contract, "operating expense contract is missing")
 
+    def test_payment_status_never_labels_unknown_balances_as_unpaid(self):
+        for value in (None, "", "invalid", "-1"):
+            for field in ("paid_amount", "pending_amount"):
+                row = {"paid_amount":"0", "pending_amount":"100", "source_status":"未付款", field:value}
+                self.assertEqual(contract.payment_status(row), "付款待核对")
+        self.assertEqual(contract.payment_status({"paid_amount":"0", "pending_amount":"100", "source_status":"未付款"}), "未付款")
+        self.assertEqual(contract.payment_status({"paid_amount":"100", "pending_amount":"0", "source_status":"已付款"}), "已付款")
+
     def test_technical_copy_and_new_payment_do_not_change_expense_identity(self):
         before = source()
         after = copy.deepcopy(before)
@@ -30,6 +38,50 @@ class OperatingExpenseContractTest(unittest.TestCase):
         self.assertEqual(contract.expense_facts(before), contract.expense_facts(after))
         after["amount"] = "101"
         self.assertNotEqual(contract.expense_facts(before), contract.expense_facts(after))
+
+    def test_payment_intent_survives_cashier_completion_but_not_changed_financial_facts(self):
+        before = source(); before.update(source_system="dingtalk-oa", oa_identity={"corp_id":"corp", "process_instance_id":"instance"})
+        before["approvals"] = {"eligibility":"blocked", "raw":{"status":"RUNNING", "result":"NONE"}}
+        after = copy.deepcopy(before)
+        after["approvals"] = {"eligibility":"eligible", "raw":{"status":"COMPLETED", "result":"agree"}}
+        self.assertEqual(contract.payment_intent_facts(before), contract.payment_intent_facts(after))
+        self.assertNotEqual(contract.expense_facts(before), contract.expense_facts(after), "voucher approval binding stays strict")
+        for change in ({"amount":"101"}, {"source_company":"other"}, {"payee_name":"other"}, {"oa_identity":{"corp_id":"other", "process_instance_id":"instance"}}):
+            self.assertNotEqual(contract.payment_intent_facts(before), contract.payment_intent_facts({**after, **change}))
+
+    def test_payment_decision_rejects_non_boolean_oa_authorization(self):
+        item = {**source(), "source_system": "dingtalk-oa"}
+        for value in (1, 0, "true", None):
+            with self.subTest(value=value):
+                decision = contract.payment_decision({**item, "payment_eligibility": {"can_register_payment": value}})
+                self.assertFalse(decision["can_register_payment"])
+        self.assertTrue(contract.payment_decision({**item, "payment_eligibility": {"can_register_payment": True}})["can_register_payment"])
+        removed = {**item, "approvals":{"eligibility":"blocked", "raw":{"scope":"withdrawn"}}, "payment_eligibility":{"can_register_payment":True}}
+        self.assertFalse(contract.payment_decision(removed)["can_register_payment"])
+
+    def test_quick_tabs_separate_approval_payment_and_unknown_history(self):
+        row = {"company":"Legal", "approval_state":"pending", "pending_amount":"500", "paid_amount":"300",
+               "payment_eligibility":{"can_register_payment":True}}
+        self.assertTrue(contract.quick_tab_matches(row, "pending_payment"))
+        self.assertTrue(contract.quick_tab_matches(row, "approvals_running"))
+        self.assertFalse(contract.quick_tab_matches(row, "paid"))
+        self.assertFalse(contract.quick_tab_matches(row, "reconciliation"))
+        self.assertTrue(contract.quick_tab_matches({**row,"paid_amount":None,"pending_amount":None}, "reconciliation"))
+        self.assertFalse(contract.quick_tab_matches({**row,"paid_amount":None,"pending_amount":None}, "paid"))
+        self.assertTrue(contract.quick_tab_matches({**row,"pending_amount":"0"}, "paid"))
+        self.assertFalse(contract.quick_tab_matches({**row,"payment_eligibility":{"can_register_payment":False}}, "pending_payment"))
+
+    def test_currency_totals_never_turn_unknown_history_into_zero(self):
+        rows = [{"currency":"CNY","amount":"100","paid_amount":None,"pending_amount":None},
+                {"currency":"MXN","amount":"60","paid_amount":"10","pending_amount":"50"}]
+        totals = contract.currency_totals(rows)
+        self.assertIsNone(totals["CNY"]["paid_amount"])
+        self.assertIsNone(totals["CNY"]["pending_amount"])
+        self.assertEqual(totals["CNY"]["amount"], "100")
+        self.assertEqual(totals["MXN"]["paid_amount"], "10")
+        mixed = contract.currency_totals(rows + [{"currency":"CNY","amount":"200","paid_amount":"30","pending_amount":"170"}])
+        self.assertIsNone(mixed["CNY"]["paid_amount"])
+        self.assertEqual(mixed["CNY"]["known_totals"]["paid_amount"], "30")
 
     def test_payment_copy_identity_excludes_timestamps_but_retains_evidence(self):
         payment = source()["payments"][0]

@@ -71,6 +71,8 @@ body.dlp-operating-expense-grid-active .dlp-po-grid-header { min-height: 36px; c
 .dlp-operating-payment-heading .dlp-operating-actions { margin: 0; }
 .dlp-operating-payment-form { padding: 14px; margin: 12px 0; border: 1px solid #dce7f4; border-radius: 7px; background: #fbfdff; }
 .dlp-operating-payment-form .dlp-operating-actions { justify-content: flex-end; }
+/* Native Small Text has inline 150px height; override only this payment form. */
+.dlp-operating-payment-form textarea { height: 56px !important; min-height: 56px; resize: vertical; }
 .dlp-operating-payment-form > .dlp-operating-advanced { margin: 8px 0; padding: 10px; border: 1px solid #e1e8f0; border-radius: 6px; background: #fff; }
 .dlp-operating-cross-currency { padding-top: 12px; }
 .dlp-operating-exchange-rates { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px 14px; grid-column: 1 / -1; }

@@ -493,3 +493,37 @@ Excel 共享文本索引不符合预期。,El índice de texto compartido de Exc
 张可见入库草稿。请明确选择继续编辑，避免重复建单。,borradores de recepción visibles. Elige uno para continuar y evitar duplicados.
 继续,Continuar
 单据日期,Fecha del documento
+审批已结束,El proceso de aprobación ha finalizado
+审批已终止,El proceso de aprobación se ha cancelado
+付款明细,Detalle de pagos
+查看审批,Ver aprobaciones
+当前审批人,Aprobador actual
+跨币种与会计设置,Moneda extranjera y configuración contable
+银行流水号（可选）,Referencia bancaria (opcional)
+备注（可选）,Observaciones (opcional)
+保存后累计已付,Pagado acumulado al guardar
+以上为已取得的审批历史；完整记录以钉钉原单为准。,Este es el historial recibido. Consulta el registro completo en DingTalk.
+全部申请,Todas las solicitudes
+待付款,Pendiente de pago
+审批中,En aprobación
+已付清,Pagado
+待核对,Por verificar
+累计已付,Pagado acumulado
+剩余待付,Saldo pendiente
+已知,Importe conocido
+付款进度,Avance de pagos
+新增付款,Registrar un pago
+保存付款记录,Guardar registro de pago
+审批状态,Estado de aprobación
+已通过,Aprobado
+已拒绝,Rechazado
+已终止,Cancelado
+已撤回,Retirado
+当前,Actual
+审批节点,Paso de aprobación
+发起人,Solicitante
+来源更新时间,Actualización del origen
+最后同步,Última sincronización
+当前审批节点尚未同步，请查看钉钉原单,El paso actual aún no está sincronizado. Consulta la solicitud en DingTalk.
+后续节点尚未同步，请在钉钉查看完整流程。,Los pasos siguientes aún no están sincronizados. Consulta el flujo completo en DingTalk.
+必要审批已通过，待出纳办理。,Aprobaciones requeridas completadas; pendiente de gestión de caja.

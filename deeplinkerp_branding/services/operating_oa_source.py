@@ -9,6 +9,7 @@ import base64
 import copy
 import json
 import re
+from collections import defaultdict
 from urllib.parse import urlencode
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -40,7 +41,7 @@ TYPES = {"付款申请solicitud de pago": "payment", "付款申请 solicitud de 
 CURRENCIES = {"人民币": "CNY", "人民币cny": "CNY", "人民币rmb": "CNY", "cny": "CNY", "美元": "USD", "usd": "USD", "美元usd": "USD", "美元dólar": "USD",
               "比索": "MXN", "mxn": "MXN", "peso": "MXN", "pesos": "MXN"}
 _FORM_ALIASES = {"申请类型": "type", "执行地区": "region", "金额": "amount", "币种": "currency",
-                 "事项说明": "summary", "收款人": "payee", "付款日期": "needed_date"}
+                 "事项说明": "summary", "收款人": "payee", "付款日期": "needed_date", "归属项目": "project", "项目": "project"}
 # Contains matching conservatively retains names with Unicode prefix whitespace;
 # fields() remains authoritative. Keep every occurrence, JSON type and order.
 _OPERATING_FORM_VALUES = (
@@ -99,7 +100,11 @@ def application_id(row):
     return "oa:" + digest([str(row["corp_id"]), str(row["process_instance_id"])])
 
 
-def matches(row, cashier):
+def matches(row, cashier, *, require_corp=False):
+    # Procurement still uses this legacy compatibility helper. Operating
+    # money/attachments require independently proven corporation identity.
+    if require_corp and cashier.get("corp_id") != row.get("corp_id"):
+        return False
     if cashier.get("identity_conflict") or cashier.get("approval_identity_status") == "conflict":
         return False
     if cashier.get("corp_id") and cashier["corp_id"] != row["corp_id"]:
@@ -111,6 +116,54 @@ def matches(row, cashier):
             and cashier.get("approval_no") == row["business_id"])
 
 
+def cashier_index(items):
+    """Index supplemental evidence once per bounded source batch, O(C)."""
+    by_instance, by_number = defaultdict(list), defaultdict(list)
+    for item in items:
+        corp = item.get("corp_id")
+        if not corp:
+            continue
+        if item.get("process_instance_id"):
+            by_instance[(corp, item["process_instance_id"])].append(item)
+        elif item.get("approval_no"):
+            by_number[(corp, item["approval_no"])].append(item)
+    return by_instance, by_number
+
+
+def cashier_candidates(row, index):
+    by_instance, by_number = index
+    return [item for item in (*by_instance.get((row["corp_id"], row["process_instance_id"]), ()),
+                             *by_number.get((row["corp_id"], row.get("business_id")), ())) if matches(row, item, require_corp=True)]
+
+
+def approval_state(status, result):
+    status, result = str(status or "").upper(), str(result or "").lower()
+    if status == "RUNNING":
+        return "pending"
+    if status == "COMPLETED":
+        return "approved" if result == "agree" else "rejected" if result == "refuse" else "unknown"
+    return "terminated" if status == "TERMINATED" else "unknown"
+
+
+def with_workflow(row, evidence):
+    """Validate exact identity before using the authoritative originator/tasks."""
+    if not isinstance(evidence, dict) or any(evidence.get(key) != row.get(key) for key in ("corp_id", "process_instance_id")):
+        raise ValueError("审批来源企业或实例身份不符，请核对")
+    if evidence.get("source_id") != application_id(row):
+        raise ValueError("审批来源唯一标识不符，请核对")
+    result = dict(row)
+    originator = evidence.get("originator")
+    verified = evidence.get("lookup_status") == "found" and isinstance(originator, dict) and isinstance(originator.get("id"), str) and bool(originator["id"].strip())
+    # The PG creator field is not proof of the applicant. Missing workflow
+    # evidence must not silently retain it for company resolution.
+    result["originator_user_id"] = originator["id"] if verified else None
+    result["originator_user_name"] = originator.get("name") or None if verified else None
+    result["workflow_summary"] = {key: copy.deepcopy(evidence.get(key)) for key in (
+        "lookup_status", "approval_status", "approval_result", "originator", "current_tasks",
+        "source_updated_at", "last_synced_at", "original_url", "payment_eligibility")}
+    return result
+
+
 def exact_amount(value):
     try:
         return str(money(value))
@@ -118,8 +171,8 @@ def exact_amount(value):
         return None
 
 
-def resolution_applicant(row, cashier_items):
-    candidates = [item for item in cashier_items if matches(row, item)]
+def resolution_applicant(row, cashier_items, *, candidates=None):
+    candidates = [item for item in cashier_items if matches(row, item, require_corp=True)] if candidates is None else candidates
     identity = candidates[0].get("applicant_identity") or {} if len(candidates) == 1 else {}
     if identity.get("status") == "ambiguous":
         return {"user_id": "", "employee_name": ""}
@@ -136,9 +189,9 @@ def withdrawn_source(raw, row=None):
     return item
 
 
-def merge_application(row, cashier_items, company_resolution):
+def merge_application(row, cashier_items, company_resolution, *, candidates=None):
     form = fields(row)
-    candidates = [item for item in cashier_items if matches(row, item)]
+    candidates = [item for item in cashier_items if matches(row, item, require_corp=True)] if candidates is None else candidates
     cashier = candidates[0] if len(candidates) == 1 else None
     conflict = len(candidates) > 1
     amount, currency = exact_amount(form.get("amount")), CURRENCIES.get(normalized(form.get("currency")))
@@ -159,7 +212,16 @@ def merge_application(row, cashier_items, company_resolution):
     resolution = ({"status": "ambiguous", "ambiguity_reason": identity.get("ambiguity_reason")} if identity.get("status") == "ambiguous" else company_resolution) or {}
     verified = bool(cashier and not conflict and cashier.get("payment_evidence_status") == "recorded")
     paid = exact_amount(cashier.get("paid_amount")) if verified else None
-    pending = exact_amount(cashier.get("pending_amount")) if verified and approval["eligibility"] == "eligible" else None
+    # Actual payment facts do not disappear merely because OA is still running.
+    pending = exact_amount(cashier.get("pending_amount")) if verified else None
+    workflow = row.get("workflow_summary") or {}
+    decision = workflow.get("payment_eligibility") if workflow.get("lookup_status") == "found" else None
+    decision = copy.deepcopy(decision) if isinstance(decision, dict) else {
+        "can_register_payment": False, "reason": "审批证据待同步，请查看钉钉原单", "notice": ""}
+    if conflict or row.get("deleted_at") or not in_scope(row):
+        decision.update(can_register_payment=False, reason="申请来源冲突或已撤回，请核对")
+    names = dict.fromkeys(str(person.get("name") or person.get("id") or "")
+        for task in workflow.get("current_tasks") or [] for person in task.get("assignees") or [] if isinstance(person, dict))
     item = {"source_system": SOURCE_SYSTEM, "source_id": application_id(row),
             "oa_identity": {"corp_id": row["corp_id"], "process_instance_id": row["process_instance_id"]},
             "approval_no": row.get("business_id"), "dingding_id": row["process_instance_id"],
@@ -167,15 +229,20 @@ def merge_application(row, cashier_items, company_resolution):
             "source_company": resolution.get("assigned_department") if resolution.get("status") == "matched" else None,
             "company_resolution": copy.deepcopy(resolution), "source_sheet": resolution.get("assigned_department"),
             "application_type": TYPES.get(normalized(form.get("type")), "unclassified"), "application_type_raw": form.get("type"),
-            "applicant": identity.get("employee_name") if identity.get("manual_applicant_override") else row.get("originator_user_name") or row.get("originator_user_id"),
+            "applicant": identity.get("employee_name") if identity.get("manual_applicant_override") else row.get("originator_user_name") or "待核对",
+            "applicant_user_id": row.get("originator_user_id"),
             "payee_name": form.get("payee"), "summary": form.get("summary"),
+            "project": form.get("project") if isinstance(form.get("project"), str) else None,
             "request_date": timestamp(row["create_time"]).astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat(),
             "needed_payment_date": form.get("needed_date"), "amount": amount, "currency": currency,
             "original_source_amount": amount, "original_source_currency": currency,
-            "paid_amount": paid, "pending_amount": pending, "source_status": cashier.get("source_status") if verified else "付款待核对",
+            "paid_amount": paid, "pending_amount": pending, "source_status": cashier.get("source_status") if paid is not None and pending is not None else "付款待核对",
             "cashier_reported_payment_status": cashier.get("source_status") if cashier else None,
             "source_conflict": bool(conflict), "payment_evidence_status": "recorded" if verified else "unknown",
-            "approvals": approval, "payments": copy.deepcopy(cashier.get("payments", [])) if cashier and not conflict else [],
+            "approvals": approval, "approval_state": approval_state(row.get("status"), row.get("result")),
+            "current_approver": "、".join(name for name in names if name), "workflow_summary": copy.deepcopy(workflow),
+            "payment_eligibility": decision,
+            "payments": copy.deepcopy(cashier.get("payments", [])) if cashier and not conflict else [],
             "attachments": copy.deepcopy(cashier.get("attachments", [])) if cashier and not conflict else [],
             "updated_at": timestamp(row.get("updated_at") or row["create_time"]).isoformat(),
             "original_url": "https://aflow.dingtalk.com/dingtalk/mobile/homepage.htm?" + urlencode({"procInstId": row["process_instance_id"]})}

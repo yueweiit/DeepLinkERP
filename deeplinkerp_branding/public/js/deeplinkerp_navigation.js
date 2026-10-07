@@ -289,6 +289,18 @@
 		}
 	}
 
+	function bindInternalSidebarNavigation(document, origin) {
+		// Frappe renders URL items with target=_blank, even for its own Desk.
+		// Capture works for late-rendered classic and DL sidebars. Keep native
+		// routing (including modifier-clicks) and all genuinely external links.
+		document.addEventListener("click", (event) => {
+			const link = event.target?.closest?.(".body-sidebar-container a.item-anchor");
+			if (link && isInternalDeskLink(link.getAttribute("href"), origin)) {
+				link.removeAttribute("target");
+			}
+		}, true);
+	}
+
 	function routesMatch(candidate, current) {
 		if (!candidate) return false;
 		return normalizeRoute(candidate).path === normalizeRoute(current).path;
@@ -611,6 +623,7 @@
 		bindNavigationBranchToggle,
 		bindNavigationRowInteractions,
 		bindNativeSidebarClose,
+		bindInternalSidebarNavigation,
 		buildNavigationModel,
 		buildNavigationTree,
 		claimNativeSidebarItems,

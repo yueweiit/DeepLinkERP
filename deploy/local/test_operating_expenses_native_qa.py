@@ -81,7 +81,7 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         self.assertTrue(hasattr(service, "_source_page"), "Unified source-page dispatcher missing")
         responses = {
             "/api/integrations/erp/operating-expenses": {"items": [], "end": True},
-            "/api/integrations/erp/resolve-applicant-companies": {"items": [{"user_id": "u1", "employee_name": "Alice", "status": "matched", "assigned_department": "拉丁购"}]},
+            "/api/integrations/erp/resolve-applicant-companies": {"items": [{"corp_id":"corp", "user_id": "u1", "employee_name": "Alice", "status": "matched", "assigned_department": "拉丁购"}]},
             WORKFLOW_PATH: {"schema_version": 2, "items": [workflow_fixture(approval())]},
         }
         with patch.dict(frappe.conf, operating_expense_source_mode="oa_cashier"), patch.object(service, "_oa_connection", return_value=None), patch.object(oa, "read_page", return_value=([approval()], None)), patch.object(service, "_request", side_effect=lambda path, *a, **k: responses[path]):
@@ -97,7 +97,7 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         row = approval()
         cashier = {"source_id": "legacy-root", "corp_id": row["corp_id"], "process_instance_id": row["process_instance_id"], "amount": "100", "currency": "CNY",
                    "paid_amount": "0", "pending_amount": "100", "source_status": "未付款", "payment_evidence_status": "recorded", "payments": [], "attachments": []}
-        resolution = {"user_id": "u1", "employee_name": "Alice", "status": "matched", "assigned_department": "QA Operating China"}
+        resolution = {"corp_id":row["corp_id"], "user_id": "u1", "employee_name": "Alice", "status": "matched", "assigned_department": "QA Operating China"}
         item = oa.merge_application(row, [cashier], resolution)
         item["source_id"] = cashier["source_id"]
         service._upsert(item, service._maps(service._settings()))
@@ -137,7 +137,7 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         service = self._sync()
         row = approval()
         other = approval(); other["process_instance_id"] = "other-instance"
-        resolution = {"user_id": "u1", "employee_name": "Alice", "status": "matched", "assigned_department": "QA Operating China"}
+        resolution = {"corp_id":row["corp_id"], "user_id": "u1", "employee_name": "Alice", "status": "matched", "assigned_department": "QA Operating China"}
         occupied = oa.merge_application(other, [], resolution)
         occupied["source_id"] = "legacy-root"
         service._upsert(occupied, service._maps(service._settings()))
@@ -191,7 +191,7 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         mapping_before = frappe.get_doc(service.MAPPING, "legacy-root").as_dict()
         event_before = frappe.get_doc(service.EVENT, preview["event_key"]).as_dict()
         journal_before = frappe.get_doc("Journal Entry", draft["journal_entry"]).as_dict()
-        resolution = {"user_id": "u1", "employee_name": "Alice", "status": "matched", "assigned_department": "QA Operating China"}
+        resolution = {"corp_id":row["corp_id"], "user_id": "u1", "employee_name": "Alice", "status": "matched", "assigned_department": "QA Operating China"}
         current_cashier = {**legacy, "corp_id": row["corp_id"], "process_instance_id": row["process_instance_id"],
                            "approval_no": row["business_id"], "approval_identity_status": "explicit"}
         responses = {"/api/integrations/erp/operating-expenses": {"items": [current_cashier], "end": True},
@@ -234,7 +234,7 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         cashier["process_instance_id"] = row["process_instance_id"]
         cashier["payment_evidence_status"] = "recorded"
         cashier["approvals"]["raw"]["finance_review"] = "待付款"
-        resolution = {"user_id": "u1", "employee_name": "Alice", "status": "matched", "assigned_department": "QA Operating China"}
+        resolution = {"corp_id":row["corp_id"], "user_id": "u1", "employee_name": "Alice", "status": "matched", "assigned_department": "QA Operating China"}
         item = oa.merge_application(row, [cashier], resolution)
         item["source_id"] = "1001"
         service._upsert(item, service._maps(service._settings()))
@@ -302,9 +302,9 @@ class OperatingExpenseNativeQA(unittest.TestCase):
                 self.assertEqual(kwargs["data"]["identities"], [{"corp_id": row["corp_id"], "process_instance_id": row["process_instance_id"], "source_id": oa.application_id(row)} for row in (first, second)])
                 return {"schema_version": 2, "items": workflows}
             self.assertEqual(path, "/api/integrations/erp/resolve-applicant-companies")
-            self.assertEqual(kwargs["data"]["applicants"], [{"user_id": "u1", "employee_name": "Alice"}, {"user_id": "u2", "employee_name": "Bob"}])
-            return {"items": [{"user_id": "u1", "employee_name": "Alice", "status": "matched", "assigned_department": "QA Operating China"},
-                              {"user_id": "u2", "employee_name": "Bob", "status": "matched", "assigned_department": "QA Operating Mexico"}]}
+            self.assertEqual(kwargs["data"]["applicants"], [{"corp_id": first["corp_id"], "user_id": "u1", "employee_name": "Alice"}, {"corp_id": second["corp_id"], "user_id": "u2", "employee_name": "Bob"}])
+            return {"schema_version": 2, "items": [{"corp_id": first["corp_id"], "user_id": "u1", "employee_name": "Alice", "status": "matched", "assigned_department": "QA Operating China"},
+                              {"corp_id": second["corp_id"], "user_id": "u2", "employee_name": "Bob", "status": "matched", "assigned_department": "QA Operating Mexico"}]}
         with patch.dict(frappe.conf, operating_expense_source_mode="oa_cashier"), patch.object(service, "_oa_connection", return_value=None), patch.object(oa, "read_page", return_value=([first, second], None)), patch.object(service, "_request", side_effect=respond):
             result = service._source_page({"limit": 100})
         self.assertEqual(sum(path == WORKFLOW_PATH for path, _ in calls), 1)
@@ -321,6 +321,18 @@ class OperatingExpenseNativeQA(unittest.TestCase):
                 self.assertIsNone(item["cashier_source_id"])
                 self.assertIsNone(item["paid_amount"])
                 self.assertIsNone(item["pending_amount"])
+
+        # Same corp-local user IDs must never consume another corporation's
+        # globally resolved company, nor a legacy response without corp evidence.
+        for untrusted_corp in (None, "different-corp"):
+            def mismatch(path, *args, **kwargs):
+                response = respond(path, *args, **kwargs)
+                if path == "/api/integrations/erp/resolve-applicant-companies":
+                    response["items"][0]["corp_id"] = untrusted_corp
+                return response
+            with self.subTest(untrusted_corp=untrusted_corp), patch.dict(frappe.conf, operating_expense_source_mode="oa_cashier"), patch.object(service, "_oa_connection", return_value=None), patch.object(oa, "read_page", return_value=([first, second], None)), patch.object(service, "_request", side_effect=mismatch):
+                with self.assertRaisesRegex(frappe.ValidationError, "申请人归属返回身份不符"):
+                    service._source_page({"limit": 100})
 
     def _exported_rows(self, service, filters, columns):
         import xml.etree.ElementTree as ET
@@ -390,6 +402,7 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         self.assertFalse(projected[expected["scope-removed"]["source_id"]]["payment_eligibility"]["can_register_payment"])
         self.assertIsNone(all_rows["currency_totals"]["CNY"]["paid_amount"])
         self.assertIsNone(all_rows["currency_totals"]["CNY"]["pending_amount"])
+        self.assertEqual(next(row for row in all_rows["rows"] if row["name"] == expected["history-unknown"]["source_id"])["source_status"], "付款待核对")
         self.assertEqual(all_rows["currency_totals"]["CNY"]["incomplete_fields"], ["paid_amount", "pending_amount"])
         self.assertEqual({field: Decimal(value) for field, value in all_rows["currency_totals"]["CNY"]["known_totals"].items()}, {"paid_amount": Decimal("130"), "pending_amount": Decimal("470")})
         self.assertTrue(all_rows["currency_totals"]["CNY"]["incomplete"])
@@ -708,7 +721,7 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         service = self._sync()
         item = json.loads(frappe.get_doc("Operating Expense Source", "1001").source_json)
         service._upsert({**item, "summary": "=SUM(A1:A2)"}, service._maps(service._settings()))
-        columns = ["source_id", "summary", "amount", "paid_amount", "pending_amount", "currency"]
+        columns = ["source_id", "summary", "amount", "paid_amount", "pending_amount", "currency", "request_date"]
         authorized_rows = service._list_rows()
         written_row = -1
         original_write, case = Worksheet.write, self
@@ -739,6 +752,8 @@ class OperatingExpenseNativeQA(unittest.TestCase):
             self.assertEqual(xml.count("<row "), 131)
             self.assertIn('<c r="C2" s="1"><v>', xml)
             self.assertIn('formatCode="0.00"', workbook.read("xl/styles.xml").decode())
+            self.assertIn('formatCode="yyyy-mm-dd"', workbook.read("xl/styles.xml").decode())
+            self.assertIn('<c r="G2" s="2"><v>', xml)
         with patch.object(service, "_source", side_effect=AssertionError("Native full export authority must keep its lazy shortcut")):
             service.export_operating_expenses(columns=columns)
         frappe.db.set_value(service.SOURCE, "1001", "owner", "qa-export-nonowner@example.invalid", update_modified=False)

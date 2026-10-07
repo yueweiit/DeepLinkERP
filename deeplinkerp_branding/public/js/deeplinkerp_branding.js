@@ -652,6 +652,7 @@
 	function bindDeskEvents() {
 		if (eventsBound) return;
 		eventsBound = true;
+		DeepLinkERPNavigation.bindInternalSidebarNavigation(document, window.location.origin);
 
 		if (window.frappe?.router?.on) {
 			frappe.router.on("change", refreshDeskEnhancements);

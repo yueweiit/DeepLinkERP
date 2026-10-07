@@ -107,6 +107,91 @@ def payment_facts(payment):
     return facts
 
 
+def payment_intent_facts(item):
+    """Freeze monetary intent, while rechecking live approval on every write.
+
+    Voucher fingerprints remain unchanged/strict. For OA takeovers alone,
+    cashier completion must not invalidate already registered partial payments.
+    """
+    facts = expense_facts(item)
+    if item.get("source_system") == "dingtalk-oa":
+        facts.pop("approvals", None)
+        facts["oa_identity"] = item.get("oa_identity")
+        facts["applicant_user_id"] = item.get("applicant_user_id")
+    return facts
+
+
+def payment_status(item):
+    """Unknown actual balances cannot prove an unpaid or settled application."""
+    try:
+        if money(item.get("paid_amount")) < 0 or money(item.get("pending_amount")) < 0:
+            return "付款待核对"
+    except ValueError:
+        return "付款待核对"
+    return item.get("source_status") or "付款待核对"
+
+
+def payment_decision(item):
+    if item.get("source_conflict") or item.get("currency_conflict"):
+        return {"can_register_payment": False, "reason": "来源归属或币种冲突，请核对"}
+    if item.get("source_system") == "dingtalk-oa":
+        approvals = item.get("approvals")
+        original = approvals.get("raw") if isinstance(approvals, dict) else None
+        if isinstance(original, dict) and (original.get("scope") == "withdrawn" or original.get("deleted_at")):
+            return {"can_register_payment": False, "reason": "申请来源已移除或范围变化，请核对钉钉原单"}
+        value = item.get("payment_eligibility")
+        if not isinstance(value, dict) or type(value.get("can_register_payment")) is not bool:
+            return {"can_register_payment": False, "reason": "审批证据待同步，请查看钉钉原单"}
+        return value
+    approvals = item.get("approvals")
+    allowed = isinstance(approvals, dict) and approvals.get("eligibility") == "eligible"
+    return {"can_register_payment": allowed, "reason": "" if allowed else "审批尚未通过，请核对"}
+
+
+def quick_tab_matches(row, tab):
+    """Do not substitute approval status for actual monetary history."""
+    if tab == "all":
+        return True
+    if tab == "approvals_running":
+        return row.get("approval_state") == "pending"
+    try:
+        pending = money(row.get("pending_amount"))
+        paid = money(row.get("paid_amount"))
+        known = pending >= 0 and paid >= 0
+    except ValueError:
+        pending, known = None, False
+    if tab == "paid":
+        return known and pending == 0
+    if tab == "pending_payment":
+        decision = row.get("payment_eligibility") or {}
+        return known and pending > 0 and decision.get("can_register_payment") is True
+    if tab == "reconciliation":
+        return not known or not row.get("company") or row.get("approval_state") == "unknown" or bool(row.get("source_conflict") or row.get("currency_conflict"))
+    raise ValueError("快捷筛选无效")
+
+
+def currency_totals(rows):
+    fields = ("amount", "paid_amount", "pending_amount")
+    buckets = {}
+    for row in rows:
+        bucket = buckets.setdefault(row.get("currency") or "未知", {
+            "sums": {field: Decimal(0) for field in fields},
+            "known": {field: 0 for field in fields}, "incomplete_fields": set()})
+        for field in fields:
+            try:
+                bucket["sums"][field] += money(row.get(field))
+                bucket["known"][field] += 1
+            except ValueError:
+                bucket["incomplete_fields"].add(field)
+    result = {}
+    for currency, bucket in buckets.items():
+        unknown = bucket["incomplete_fields"]
+        result[currency] = {field: None if field in unknown else str(bucket["sums"][field]) for field in fields}
+        result[currency].update(incomplete=bool(unknown), incomplete_fields=sorted(unknown),
+            known_totals={field: str(bucket["sums"][field]) for field in unknown if bucket["known"][field]})
+    return result
+
+
 def event_fingerprint(item, mapping, payment_id=None):
     facts = {"expense": expense_facts(item), "mapping": {k: v for k, v in mapping.items() if k not in {"payments", "approved_by", "approved_at", "source_version", "expense_fingerprint"}}}
     if payment_id:
