@@ -52,3 +52,32 @@ test("private proof uploader uses the authorized service without granting editab
  assert.equal(options.allow_google_drive,false);
  assert.equal(options.disable_file_browser,true);
 });
+test("takeover requires a unique cashier root and disables mismatched or unapproved source facts", () => {
+ const panel=api(), detail={company:"C",source:{application_type:"payment",approvals:{eligibility:"eligible"},cashier_source_id:"root-1"}};
+ assert.equal(panel.canTakeover(detail,true),true);
+ assert.equal(panel.canTakeover(detail,false),false);
+ assert.equal(panel.canTakeover(null,true),false);
+ for(const source of [
+  {...detail.source,cashier_source_id:null},
+  {...detail.source,approvals:{eligibility:"blocked"}},
+  {...detail.source,source_conflict:true},
+  {...detail.source,currency_conflict:true},
+  {...detail.source,effective_application_type:"unclassified"},
+ ]) assert.equal(panel.canTakeover({...detail,source},true),false);
+ assert.equal(panel.canTakeover({...detail,company:null},true),false);
+ assert.match(panel.takeoverIssue({...detail,source:{...detail.source,cashier_source_id:null}},true),/唯一出纳申请/);
+ assert.equal(panel.canTakeover({...detail,source:{...detail.source,cashier_source_id:null,source_system:"cashier-payment-archive",source_id:"1001"}},true),true);
+ const registered={...detail,erp_payments:{managed:true,balance:{pending_amount:"5.00"}}};
+ assert.equal(panel.canRegister({...registered,source:{...detail.source,source_conflict:true}},true),false);
+});
+test("real uppercase DingTalk approval results are readable without inventing approval for NONE", () => {
+ const html=api().timelineHTML({events:[{stage:"submit",result:"NONE"},{stage:"finance",result:"AGREE"},{stage:"reject",result:"REFUSE"}]});
+ assert.match(html,/已同意/);
+ assert.match(html,/已拒绝/);
+ assert.doesNotMatch(html,/NONE|AGREE|REFUSE/);
+ const unknown=api().timelineHTML({events:[{stage:"other",result:"constructor"},{stage:"unknown",result:"<unknown>"},{stage:"trimmed",result:" AgReE "}]});
+ assert.match(unknown,/constructor/);
+ assert.match(unknown,/&lt;unknown&gt;/);
+ assert.match(unknown,/已同意/);
+ assert.doesNotMatch(unknown,/<unknown>|function Object/);
+});

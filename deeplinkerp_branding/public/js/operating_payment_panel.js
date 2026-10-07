@@ -23,17 +23,40 @@
   if (amount <= 0n || amount > pending) throw new Error(t("本次抵扣金额须大于零且不超过待付金额"));
   return {amount:decimal(amount),paid_amount:decimal(paid+amount),pending_amount:decimal(pending-amount)};
  }
+ function paymentEligibilityIssue(detail, finance) {
+  const source=detail?.source||{};
+  if(!finance) return t("当前权限不能办理付款登记。");
+  if(!detail?.company) return t("法律公司未确认，请先核对财务映射。");
+  if(!classified(source)) return t("请先在财务映射中明确付款申请或费用报销，不能默认按供应商付款。");
+  if(source.approvals?.eligibility!=="eligible") return t("审批尚未通过，暂不能启用付款登记。");
+  if(source.source_conflict||source.currency_conflict) return t("来源或币种存在冲突，请先核对原单。");
+  return "";
+ }
+ function takeoverIssue(detail, finance) {
+  const issue=paymentEligibilityIssue(detail,finance);
+  if(issue) return issue;
+  const source=detail.source, identity=source.cashier_source_id||(source.source_system==="cashier-payment-archive"?source.source_id:null);
+  return typeof identity==="string"&&identity.trim()&&identity.length<=140?"":t("尚未匹配到唯一出纳申请，请先同步并核对历史付款。");
+ }
+ const canTakeover=(detail,finance)=>!takeoverIssue(detail,finance);
  function canRegister(detail, finance) {
-  try { return Boolean(finance && detail.company && classified(detail.source) && detail.source.approvals?.eligibility === "eligible" && detail.erp_payments?.managed && cents(detail.erp_payments.balance?.pending_amount)>0n); }
+  try { return Boolean(!paymentEligibilityIssue(detail,finance) && detail.erp_payments?.managed && cents(detail.erp_payments.balance?.pending_amount)>0n); }
   catch (_) { return false; }
  }
  function timelineHTML(row) {
   if (row.lookup_status === "conflict") return `<p class="text-warning">${esc(t("审批身份冲突，请在钉钉原单核对"))}</p>`;
   if (!Array.isArray(row.events) || !row.events.length) return `<p class="text-muted">${esc(t("暂无可核对的审批节点，请查看钉钉原单"))}</p>`;
-  const events=row.events.map((event,index)=>({...event,current:Boolean(event.current&&event.active!==false),index})).sort((a,b)=>String(a.time||"9999").localeCompare(String(b.time||"9999"))||a.index-b.index);
-  const results={agree:"已同意",approved:"已同意",refuse:"已拒绝",rejected:"已拒绝",pending:"待处理"};
-  const node=event=>`<li class="${event.current?"is-current":""}"><strong>${esc(event.stage||"—")}</strong> <span>${esc(event.operator||"—")}</span><small>${esc(event.time||"—")} · ${esc(t(results[event.result]||event.result||"—"))}${event.current?" · "+esc(t("当前节点")):""}</small>${event.comment?`<p>${esc(event.comment)}</p>`:""}${[ ["attachments","节点附件"],["images","节点图片"] ].map(([key,label])=>Array.isArray(event[key])&&event[key].length?`<span class="text-muted">${esc(t(label))} · ${event[key].length} · ${esc(t("请查看钉钉原单"))}</span>`:"").join(" ")}</li>`;
-  const list=items=>`<ol class="dlp-operating-timeline">${items.map(node).join("")}</ol>`;
+  const events=row.events.map((event,index)=>({...event,current:Boolean(event.current&&event.active!==false),index,sortTime:String(event.time||"9999")})).sort((a,b)=>a.sortTime.localeCompare(b.sortTime)||a.index-b.index);
+  const results={agree:"已同意",approved:"已同意",refuse:"已拒绝",rejected:"已拒绝",pending:"待处理",none:"—"};
+  const node=event=>{
+   const result=String(event.result??"").trim(), key=result.toLowerCase();
+   const label=Object.prototype.hasOwnProperty.call(results,key)?results[key]:result||"—";
+   return `<li class="${event.current?"is-current":""}"><strong>${esc(event.stage||"—")}</strong> <span>${esc(event.operator||"—")}</span><small>${esc(event.time||"—")} · ${esc(t(label))}${event.current?" · "+esc(t("当前节点")):""}</small>${event.comment?`<p>${esc(event.comment)}</p>`:""}${[ ["attachments","节点附件"],["images","节点图片"] ].map(([key,attachmentLabel])=>Array.isArray(event[key])&&event[key].length?`<span class="text-muted">${esc(t(attachmentLabel))} · ${event[key].length} · ${esc(t("请查看钉钉原单"))}</span>`:"").join(" ")}</li>`;
+  };
+  // Reuse the same escaped markup in the summary and expanded history.
+  const nodes=new Array(events.length);
+  for(const event of events) nodes[event.index]=node(event);
+  const list=items=>`<ol class="dlp-operating-timeline">${items.map(event=>nodes[event.index]).join("")}</ol>`;
   const summary=events.length>5?events.filter((event,index)=>index===0||index>=events.length-2||event.current):events;
   return `<p class="text-muted">${esc(t("缓存同步时间"))} · ${esc(row.last_synced_at||"—")}</p>${list(summary)}${events.length>5?`<details><summary>${esc(t("展开全部审批节点"))} (${events.length})</summary>${list(events)}</details>`:""}`;
  }
@@ -60,12 +83,12 @@
   tabsHolder.on("click.dlpDrawer","button",event=>selectTab(event.currentTarget.dataset.operatingTab));
   body.find(".dlp-operating-start-payment").on("click.dlpDrawer",()=>selectTab("payments"));
   const holder=body.find(".dlp-operating-register"), actions=root.$('<div class="dlp-operating-actions"></div>').appendTo(holder);
-  if(!classified(source)) holder.prepend(`<p class="text-warning">${esc(t("请先在财务映射中明确付款申请或费用报销，不能默认按供应商付款。"))}</p>`);
   if (!detail.erp_payments?.managed) {
    let zeroConfirmed=false;
-   const needsZeroConfirmation=Array.isArray(source.payments)&&source.payments.length===0;
+   const issue=takeoverIssue(detail,canFinance());
+   const needsZeroConfirmation=!issue&&Array.isArray(source.payments)&&source.payments.length===0;
    if(needsZeroConfirmation) await makeControl(drawer,root.$('<div></div>').insertBefore(actions),{fieldname:"zero_history_confirmed",fieldtype:"Check",label:t("已核对完整历史，确认这笔申请此前没有实际付款")},0,value=>{zeroConfirmed=Boolean(value);drawer.refreshEligibility();});
-   holder.prepend(`<p class="text-muted">${esc(t("核对并接管对应申请的历史付款后，新付款只在 ERP 登记；不会停用请款网站其他申请。"))}</p>`);
+   holder.prepend(`<p class="${issue?"text-warning":"text-muted"}">${esc(issue||t("核对并接管对应申请的历史付款后，新付款只在 ERP 登记；不会停用请款网站其他申请。"))}</p>`);
    action(drawer,actions,"核对历史并启用 ERP 付款",async()=>{
     const preview=await uiTask(drawer,()=>request("preview_takeover",{source_id:sourceId,zero_history_confirmed:zeroConfirmed}));
     if (!drawer.alive() || !preview) return;
@@ -73,7 +96,7 @@
     if (!drawer.alive()) return;
     if (!preview.existing) await uiTask(drawer,()=>request("claim_takeover",{source_id:sourceId,expected_source_version:preview.source_version,expected_history_version:preview.history_version,request_id:root.crypto.randomUUID(),zero_history_confirmed:zeroConfirmed}));
     if (drawer.alive()) await reload();
-   },()=>Boolean(canFinance() && detail.company && classified(source) && source.approvals?.eligibility==="eligible" && (!needsZeroConfirmation||zeroConfirmed)));
+   },()=>Boolean(canTakeover(detail,canFinance()) && (!needsZeroConfirmation||zeroConfirmed)));
   } else if (canRegister(detail,canFinance())) {
    const values={payment_date:root.frappe.datetime.get_today(),amount:"",bank_amount:"",bank_account:"",party_type:detail.mapping?.party_type||((source.effective_application_type||source.application_type)==="reimbursement"?"Employee":"Supplier"),party:detail.mapping?.party||"",bank_reference:"",remark:""};
    const requestId=root.crypto.randomUUID(), fields=root.$('<div class="dlp-operating-fields"></div>').insertBefore(actions), preview=root.$('<p class="dlp-operating-payment-preview" role="status"></p>').insertBefore(actions);
@@ -93,7 +116,7 @@
     if (drawer.alive()) await reload();
    },ready,true);
    holder.prepend(`<p class="text-muted">${esc(t("支持部分付款。付款记录与凭证分开；登记后可补传回单，再预览凭证草稿。"))}</p>`);
-  } else holder.prepend(`<p class="text-muted">${esc(detail.erp_payments?.notice||t("已付清或当前审批／权限待核对，不能登记新付款。"))}</p>`);
+  } else holder.prepend(`<p class="text-muted">${esc(paymentEligibilityIssue(detail,canFinance())||detail.erp_payments?.notice||t("已付清或当前审批／权限待核对，不能登记新付款。"))}</p>`);
   const local=body.find(".dlp-operating-local-payments");
   for (const payment of detail.erp_payments?.payments||[]) {
    const section=root.$(`<article class="dlp-operating-payment-card"><strong>${esc(payment.payment_date)} · ${esc(t("抵扣"))} ${esc(payment.amount)} ${esc(payment.currency)}</strong><p>${esc(t("银行实际支付"))} ${esc(payment.bank_amount)} ${esc(payment.bank_currency)} · ${esc(payment.bank_account)} · ${esc(payment.bank_reference||"—")}</p><p>${esc(payment.remark||"")}</p><small>${esc(t(payment.status==="Reversed"?"已撤销":"ERP 登记"))} · ${esc(payment.registered_by)} ${esc(payment.reversal_reason||"")}</small><div class="dlp-operating-actions"></div></article>`).appendTo(local);
@@ -130,5 +153,5 @@
   }
   await selectTab(drawer.activeOperatingTab||"request");
  }
- return {tabs,paymentPreview,timelineHTML,canRegister,proofUploaderOptions,mount};
+ return {tabs,paymentPreview,timelineHTML,canRegister,canTakeover,takeoverIssue,proofUploaderOptions,mount};
 });
