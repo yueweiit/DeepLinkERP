@@ -498,7 +498,10 @@
 			original = dingTalkOriginalLink(s.original_url);
 		const fact = (label, value) =>
 			`<div><span class="text-muted">${esc(t(label))}</span> ${display(value)}</div>`;
-		const hero = `<header class="dlp-operating-hero"><div><h3>${display(s.approval_no || s.source_id)}</h3><p>${display(s.summary)}</p></div><div class="dlp-operating-hero-actions">${original ? `<a class="btn btn-default" href="${esc(original.desktop_url)}" title="${esc(t("需安装并登录钉钉，原单权限由钉钉校验。"))}">${esc(t("钉钉原单"))}</a>` : `<span class="text-muted">${esc(t("原单链接待核对"))}</span>`}<button type="button" class="btn btn-primary dlp-operating-start-payment">${esc(t("办理付款"))}</button></div><div class="dlp-operating-money-strip">${[["申请金额",s.amount],["累计已付",s.paid_amount],["剩余待付",s.pending_amount]].map(([label,value])=>`<div><small>${esc(t(label))}</small><strong>${money(value)} ${display(s.currency)}</strong></div>`).join("")}</div></header>`;
+		const balance = detail.erp_payments?.managed ? detail.erp_payments.balance || {} : s;
+		const progress = root.DeepLinkERPOperatingPaymentPanel?.balanceProgress({amount:s.amount,paid_amount:balance.paid_amount});
+		const approvalState=s.approval_state||s.approvals?.state||s.approvals?.eligibility;
+		const hero = `<header class="dlp-operating-hero"><div><h3>${display(s.summary || root.DeepLinkERPOperatingExpenses.typeLabel?.(s.effective_application_type||s.application_type)||t("运营支出详情"))}</h3><p>${esc(t("申请编号"))}：${display(s.approval_no || s.source_id)}</p><div class="dlp-operating-hero-badges"><span class="dlp-operating-badge ${["approved","eligible"].includes(approvalState)?"is-approved":approvalState==="pending"?"is-pending":"is-review"}">${esc(root.DeepLinkERPOperatingExpenses.approvalLabel(approvalState))}</span><span class="dlp-operating-badge ${s.source_status==="已付款"?"is-approved":"is-pending"}">${display(s.source_status||t("付款待核对"))}</span></div></div><div class="dlp-operating-hero-actions">${original ? `<a class="btn btn-default" href="${esc(original.desktop_url)}" title="${esc(t("需安装并登录钉钉，原单权限由钉钉校验。"))}">${esc(t("钉钉原单"))}</a>` : `<span class="text-muted">${esc(t("原单链接待核对"))}</span>`}</div><div class="dlp-operating-money-strip">${[["申请金额",s.amount],["累计已付",balance.paid_amount],["剩余待付",balance.pending_amount]].map(([label,value])=>`<div><small>${esc(t(label))}</small><strong>${money(value)} <small>${display(s.currency)}</small></strong></div>`).join("")}</div><div class="dlp-operating-progress"><span>${esc(t("付款进度"))}</span>${progress?`<div role="progressbar" aria-label="${esc(t("付款进度"))}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress.percent}"><i style="width:${progress.percent}%"></i></div><span>${progress.label}</span>`:`<span class="text-muted">${esc(t("金额待核对"))}</span>`}</div></header>`;
 		return `${hero}<section class="dlp-operating-section" data-operating-pane="request"><div class="dlp-operating-facts">${fact("法律公司",detail.company)}${fact("收款人",s.payee_name)}${fact("申请日期",s.request_date)}${fact("申请人",s.applicant)}</div><details class="dlp-operating-advanced"><summary>${esc(t("原始来源信息"))}</summary><div class="dlp-operating-facts">${fact(
 			"申请编号",
 			s.source_id
@@ -533,9 +536,7 @@
 		<section class="dlp-operating-section" data-operating-pane="request"><strong>${esc(
 			t("来源附件")
 		)}</strong>${(s.attachments || []).map((file) => `<p class="dlp-operating-proof"><button type="button" class="btn btn-link dlp-operating-download" data-attachment="${esc(file.source_id)}">${display(file.filename)}</button> · ${esc(t(file.payment_source_id ? "实际付款附件" : "申请附件"))} ${display(file.payment_source_id)} · ${esc(t("版本"))} ${display(file.version)}</p>`).join("") || `<p>${esc(t("暂无附件"))}</p>`}</section>
-		<section class="dlp-operating-section" data-operating-pane="payments"><div class="dlp-operating-register"></div><div class="dlp-operating-local-payments"></div><strong>${esc(
-			t("实际付款证据（来自出纳）")
-		)}</strong>${(s.payments || []).filter(p=>p.source_type!=="erp").map((p) => `<p>${display(p.source_id)} · ${display(p.payment_date)} · ${money(p.amount)} ${display(p.currency)} · ${display(p.payer)} · ${display(p.evidence_status)}<br>${display(p.remark)} · ${display(p.bank_reference)}</p>`).join("") || `<p>${esc(t("尚无历史付款证据"))}</p>`}</section>
+		<section class="dlp-operating-section" data-operating-pane="payments"><div class="dlp-operating-payment-heading"><strong>${esc(t("付款明细"))}</strong><div class="dlp-operating-register"></div></div><div class="dlp-operating-local-payments"></div><div class="dlp-operating-history-payments">${(s.payments || []).filter(p=>p.source_type!=="erp").map((p,index) => `<article class="dlp-operating-payment-card"><strong>${esc(t("第"))} ${index+1} ${esc(t("笔"))} · ${money(p.amount)} ${display(p.currency)}</strong><p>${display(p.payment_date)} · ${display(p.payer)}</p><p>${esc(t("来源：历史付款"))} · ${display(p.evidence_status)}</p><details class="dlp-operating-advanced"><summary>${esc(t("实际付款证据"))}</summary><p>${display(p.source_id)} · ${display(p.bank_reference)}</p><p>${display(p.remark)}</p></details></article>`).join("") || `<p class="text-muted">${esc(t("尚无历史付款证据"))}</p>`}</div></section>
 		<section class="dlp-operating-section" data-operating-pane="vouchers"><strong>${esc(
 			t("原生凭证关联与历史")
 		)}</strong>${(detail.events || []).map((event) => `<p>${event.journal_entry ? nativeLink(event.journal_entry) : display(event.issue)} · ${esc(t(event.operation === "payment" ? "出纳付款结算" : "费用确认"))} ${display(event.payment_source_id)} · ${event.journal_entry ? esc(journalState(event.docstatus)) : ""} ${stateDisplay(event.settlement_state)} · ${esc(t("来源版本"))} ${display(event.source_version)}</p>`).join("") || `<p>${esc(t("尚无关联原生凭证"))}</p>`}</section>`;
@@ -825,11 +826,12 @@
 		link.remove();
 		root.setTimeout(() => root.URL.revokeObjectURL(downloadURL), 1000);
 	}
-	async function open(sourceId, onRefresh = () => {}) {
+	async function open(sourceId, onRefresh = () => {}, initialTab = "payments") {
 		const shared = root.DeepLinkERPPurchasePayments,
-			drawer = shared.createDrawer(t("运营支出办理"), true);
+			drawer = shared.createDrawer(t("运营支出详情"), true);
 		if (!drawer) return;
 		configureDrawer(drawer);
+		drawer.activeOperatingTab=["payments","approvals","request","vouchers"].includes(initialTab)?initialTab:"payments";
 		let w,
 			existingJE = "",
 			lastResult = null;
@@ -895,7 +897,7 @@
 				!detail.company && isManager()
 					? '<section class="dlp-operating-section"><div class="dlp-operating-company"></div><div class="dlp-operating-company-actions dlp-operating-actions"></div></section>'
 					: ""
-			}<section class="dlp-operating-section" data-operating-pane="vouchers"><strong>${esc(t("财务确认"))}</strong>${
+			}<details class="dlp-operating-section dlp-operating-advanced" data-operating-pane="vouchers"><summary>${esc(t("会计与高级设置"))}</summary>${
 				!eligible()
 					? `<p class="text-warning">${esc(
 							t("当前需复核或缺少财务权限，来源仍可查看。")
@@ -917,13 +919,13 @@
 				.map((label) => `<th>${esc(t(label))}</th>`)
 				.join(
 					""
-				)}</tr></thead><tbody class="dlp-operating-lines"></tbody></table></div><div class="dlp-operating-line-actions dlp-operating-actions"></div><div class="dlp-operating-expense-actions dlp-operating-actions"></div><div class="dlp-operating-existing"></div><div class="dlp-operating-existing-actions dlp-operating-actions"></div><div class="dlp-operating-expense-preview"></div></section><section class="dlp-operating-section" data-operating-pane="vouchers"><strong>${esc(
+				)}</tr></thead><tbody class="dlp-operating-lines"></tbody></table></div><div class="dlp-operating-line-actions dlp-operating-actions"></div><div class="dlp-operating-expense-actions dlp-operating-actions"></div><div class="dlp-operating-existing"></div><div class="dlp-operating-existing-actions dlp-operating-actions"></div><div class="dlp-operating-expense-preview"></div></details><details class="dlp-operating-section dlp-operating-advanced" data-operating-pane="vouchers"><summary>${esc(
 				t("按实际付款生成结算草稿")
-			)}</strong><p class="text-muted">${esc(
+			)}</summary><p class="text-muted">${esc(
 				t(
 					"先保存费用映射并生成或关联费用确认凭证，再逐笔维护银行科目与汇率。此处不登记或执行付款。"
 				)
-			)}</p><div class="dlp-operating-payments"></div></section><div class="dlp-operating-result" role="status"></div><div class="dlp-error text-danger" role="alert"></div>`;
+			)}</p><div class="dlp-operating-payments"></div></details><div class="dlp-operating-result" role="status"></div><div class="dlp-error text-danger" role="alert"></div>`;
 			drawer.panel.find(".dlp-payment-body").html(content);
 			drawer.panel.find("footer .dlp-operating-footer").remove();
 			const footer = root

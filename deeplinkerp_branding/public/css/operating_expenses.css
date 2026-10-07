@@ -1,6 +1,15 @@
 /* Opt-in Page/drawer styles; the shared compact list owns rows and scrollbars. */
+body.dlp-operating-expense-grid-active .dlp-po-grid {
+	--dlp-po-border: #dce7f4;
+	--dlp-po-header-bg: #edf5ff;
+	--dlp-po-row-bg: #fff;
+	--dlp-po-row-alt: #f8fbff;
+	--dlp-po-hover: #edf5ff;
+}
 body.dlp-operating-expense-grid-active .dlp-po-grid .result-container {
 	max-height: var(--dlp-operating-result-max-height, calc(100dvh - 320px));
+	overflow: scroll;
+	scrollbar-gutter: stable;
 }
 body.dlp-operating-expense-grid-active .dlp-po-filter[data-fieldname="keyword"] {
 	width: 235px;
@@ -26,24 +35,52 @@ body.dlp-operating-expense-grid-active:not(.dlp-mes-navigation-enabled) .dlp-int
 body.dlp-operating-expense-grid-active .dlp-po-grid-row :is([data-fieldname="amount"], [data-fieldname="paid_amount"], [data-fieldname="pending_amount"]) {
 	gap: 4px;
 }
-.dlp-operating-list-tabs { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin: 6px 0 10px; }
-.dlp-operating-list-tabs > div { display: flex; flex-wrap: wrap; gap: 6px; }
-.dlp-operating-list-tabs .active { color: #1675cc; background: #eaf3ff; }
+.dlp-operating-list-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 10px; border-bottom: 1px solid #dce7f4; }
+.dlp-operating-list-tabs .btn { background: transparent; border: 0; border-radius: 0; padding: 8px 14px; }
+.dlp-operating-list-tabs .active { color: #1675cc; border-bottom: 2px solid #1675cc; font-weight: 600; }
 body.dlp-operating-expense-grid-active .dlp-po-grid-row { min-height: 42px; }
+body.dlp-operating-expense-grid-active .dlp-po-grid-header { min-height: 36px; color: #294f76; }
+.dlp-operating-row-actions { display: flex; flex-wrap: nowrap; gap: 3px; }
+.dlp-operating-row-actions .btn { padding: 4px 2px; color: #1675cc; white-space: nowrap; }
+.dlp-operating-badge { display: inline-block; max-width: 100%; padding: 3px 8px; border-radius: 5px; font-size: 12px; white-space: nowrap; }
+.dlp-operating-badge.is-approved { background: #e4f8ee; color: #138759; }
+.dlp-operating-badge.is-pending { background: #eaf3ff; color: #1675cc; }
+.dlp-operating-badge.is-review { background: #f0f3f7; color: #62738a; }
 .dlp-operating-drawer [data-operating-pane][hidden] { display: none !important; }
+.dlp-operating-drawer [hidden] { display: none !important; }
 .dlp-operating-hero { display: flex; flex-wrap: wrap; align-items: start; gap: 12px; padding: 8px 0 14px; }
 .dlp-operating-hero > div:first-child { flex: 1; min-width: 150px; }
 .dlp-operating-hero h3 { margin: 0 0 6px; font-size: 17px; }
 .dlp-operating-hero p { margin: 0; color: var(--text-muted); }
 .dlp-operating-hero-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.dlp-operating-money-strip { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); width: 100%; gap: 8px; padding: 12px; background: #f2f7ff; border-radius: 6px; }
+.dlp-operating-hero-badges { display: flex; gap: 8px; margin-top: 8px; }
+.dlp-operating-money-strip { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); width: 100%; gap: 10px; }
+.dlp-operating-money-strip > div { padding: 12px; border: 1px solid #e1e8f0; background: #f8fbff; border-radius: 6px; }
 .dlp-operating-money-strip small, .dlp-operating-money-strip strong { display: block; }
 .dlp-operating-money-strip strong { margin-top: 4px; font-size: 16px; }
+.dlp-operating-money-strip strong small { display: inline; font-size: 12px; font-weight: 400; }
+.dlp-operating-progress { display: flex; align-items: center; gap: 12px; width: 100%; font-size: 12px; color: #62738a; }
+.dlp-operating-progress [role="progressbar"] { flex: 1; height: 9px; border-radius: 5px; background: #e8eef6; overflow: hidden; }
+.dlp-operating-progress i { display: block; height: 100%; background: #1675cc; border-radius: inherit; }
 .dlp-operating-tabs { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 0; border-bottom: 1px solid #e1e8f0; }
 .dlp-operating-tabs button { border: 0; background: transparent; padding: 7px 12px; color: var(--text-muted); border-radius: 5px; }
 .dlp-operating-tabs button.active { background: #eaf3ff; color: #1675cc; font-weight: 600; }
 .dlp-operating-advanced { padding: 8px 0; }
 .dlp-operating-advanced summary { cursor: pointer; color: var(--text-muted); margin-bottom: 8px; }
+.dlp-operating-payment-heading { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }
+.dlp-operating-payment-heading .dlp-operating-actions { margin: 0; }
+.dlp-operating-payment-form { padding: 14px; margin: 12px 0; border: 1px solid #dce7f4; border-radius: 7px; background: #fbfdff; }
+.dlp-operating-payment-form .dlp-operating-actions { justify-content: flex-end; }
+.dlp-operating-payment-form > .dlp-operating-advanced { margin: 8px 0; padding: 10px; border: 1px solid #e1e8f0; border-radius: 6px; background: #fff; }
+.dlp-operating-cross-currency { padding-top: 12px; }
+.dlp-operating-exchange-rates { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px 14px; grid-column: 1 / -1; }
+.dlp-operating-currency-notice { grid-column: 1 / -1; margin: 0; }
+.dlp-operating-history-review { margin: 10px 0; padding: 10px; border: 1px solid #f1dfbf; border-radius: 6px; background: #fffbf3; }
+.dlp-operating-current-tasks { padding: 12px; margin: 12px 0; border: 1px solid #f1dfbf; border-radius: 6px; background: #fffbf3; color: #9a5b08; }
+.dlp-operating-current-tasks p { margin: 0; }
+.dlp-operating-current-tasks small { display: block; margin-top: 5px; }
+.dlp-operating-cc summary { cursor: pointer; color: #62738a; }
+.dlp-operating-sync-stamp { padding-top: 12px; border-top: 1px solid #e1e8f0; font-size: 12px; }
 .dlp-operating-timeline { list-style: none; margin: 0; padding: 4px 0 4px 14px; }
 .dlp-operating-timeline li { position: relative; padding: 0 0 18px 20px; border-left: 2px solid #dbe7f2; }
 .dlp-operating-timeline li::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: #9aafc2; position: absolute; left: -5px; top: 4px; }
@@ -107,11 +144,14 @@ body.dlp-operating-expense-grid-active .dlp-po-grid-row { min-height: 42px; }
 	margin-bottom: 4px;
 }
 @media (max-width: 767.98px) {
-	.dlp-operating-money-strip { grid-template-columns: 1fr; }
+	.dlp-operating-money-strip { gap: 5px; }
+	.dlp-operating-money-strip > div { padding: 8px; }
+	.dlp-operating-money-strip strong { font-size: 14px; overflow-wrap: anywhere; }
 	body.dlp-operating-expense-grid-active .page-form {
 		flex-wrap: wrap;
 	}
 	.dlp-operating-drawer .dlp-operating-fields,
+	.dlp-operating-exchange-rates,
 	.dlp-operating-drawer .dlp-operating-facts {
 		grid-template-columns: minmax(0, 1fr);
 	}

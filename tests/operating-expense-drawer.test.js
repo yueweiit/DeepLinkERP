@@ -63,6 +63,18 @@ test("drawer presents four concise sections and preserves raw source facts in a 
  for(const tab of ["request","approvals","payments","vouchers"]) assert.match(html,new RegExp(`data-operating-pane="${tab}"`));
  assert.match(html,/dlp-operating-hero/); assert.match(html,/<details/); assert.match(html,/累计已付/);
 });
+test("drawer business title and one money strip show real progress with readonly historical payment cards", () => {
+ const a=create({DeepLinkERPOperatingExpenses:require("../deeplinkerp_branding/public/js/operating_expenses.js")({}),DeepLinkERPOperatingPaymentPanel:require("../deeplinkerp_branding/public/js/operating_payment_panel.js")({})});
+ const d=detail();
+ Object.assign(d.source,{summary:"办公室服务费报销",approval_no:"AP-1",approval_state:"pending",source_status:"部分付款",amount:"1000.00",paid_amount:"300.00",pending_amount:"700.00",current_approver:"王出纳"});
+ const html=a.sourceHTML(d);
+ assert.match(html,/<h3>办公室服务费报销<\/h3>/);
+ assert.equal((html.match(/class="dlp-operating-money-strip"/g)||[]).length,1);
+ assert.match(html,/aria-valuenow="30"/);
+ assert.match(html,/审批中/);
+ assert.match(html,/dlp-operating-payment-card[^]*来源：历史付款/);
+ assert.doesNotMatch(html,/办理付款|data-payment-delete/);
+});
 test("cashier approval decisions and reported payment state remain separately labelled", () => {
 	const d = detail();
 	d.source.source_status = "付款待核对";

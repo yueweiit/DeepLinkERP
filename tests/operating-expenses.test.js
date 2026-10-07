@@ -7,8 +7,25 @@ const create = fs.existsSync(require("node:path").join(__dirname, listPath))
 	: () => ({});
 const api = create({});
 test("recommended finance columns put approval and amounts before optional technical fields", () => {
- assert.deepEqual(api.defaultColumns,["request_date","source_id","effective_application_type","payee_name","company","approval_state","amount","paid_amount","pending_amount","finance_status","actions"]);
+ assert.deepEqual(api.defaultColumns,["request_date","source_id","effective_application_type","applicant","payee_name","approval_state","current_approver","amount","paid_amount","pending_amount","source_status","actions"]);
  assert.match(api.renderValue("source_id",{source_id:"x",approval_no:"100",summary:"rent"}),/rent/);
+});
+test("business approval states and quick tabs retain the same backend predicate for list and export", async () => {
+ for(const state of ["pending","approved","rejected","terminated","withdrawn","unknown","eligible","blocked"]) assert.equal(api.filters({approval_state:state}).approval_state,state);
+ assert.equal(api.approvalLabel("pending"),"审批中");
+ assert.equal(api.approvalLabel("approved"),"已通过");
+ assert.equal(api.approvalLabel("withdrawn"),"已撤回");
+ assert.equal(api.approvalLabel("unknown"),"待核对");
+ assert.throws(()=>api.filters({quick_tab:"injected"}));
+ let exported;
+ const root={DeepLinkERPPurchaseOrderExport:{downloadWorkbook(){},fetchNativeWorkbook:async (_r,args)=>{exported=args;return {};}}};
+ const c={quick:{quick_tab:"approvals_running",company:"C"},providerOrderBy:"request_date desc",page:0,pageSize:100,preferences:{columns:["current_approver","source_status"]}};
+ await create(root).exportCurrent(c);
+ assert.deepEqual(JSON.parse(api.request(c).args.filters),JSON.parse(exported.filters));
+ assert.deepEqual(api.quickTabs.map(row=>row[0]),["all","pending_payment","approvals_running","paid","reconciliation"]);
+ assert.match(api.renderValue("actions",{source_id:"safe"}),/data-tab="payments"[^>]*>付款明细/);
+ assert.match(api.renderValue("actions",{source_id:"safe"}),/data-tab="approvals"[^>]*>查看审批/);
+ assert.match(api.renderValue("current_approver",{current_approver:"<manager>"}),/&lt;manager&gt;/);
 });
 test("combined application identity has one full-width two-line wrapper inside the shared flex cell", () => {
  const html=api.renderValue("source_id",{source_id:"1001",summary:"rent"});
@@ -304,5 +321,5 @@ test("shared column settings opens for a provider whose primary identifier is so
 	assert.match(dialogHTML, /凭证状态/);
 	assert.match(dialogHTML, /操作/);
 	assert.doesNotMatch(dialogHTML, /data-field="name"/);
-	assert.deepEqual(c.preferences.columns, ["source_id", "finance_status", "actions"]);
+	assert.deepEqual(c.preferences.columns, ["source_id", "actions"]);
 });

@@ -16,20 +16,25 @@
 		["request_date", "申请日期", 110],
 		["source_id", "申请编号 / 摘要", 240],
 		["effective_application_type", "申请类型", 115],
-		["payee_name", "收款人", 170],
 		["applicant", "申请人", 110],
+		["payee_name", "收款人", 160],
+		["approval_state", "审批状态", 100],
+		["current_approver", "当前审批人", 145],
+		["amount", "申请金额", 145],
+		["paid_amount", "累计已付", 145],
+		["pending_amount", "剩余待付", 145],
+		["source_status", "付款状态", 110],
+		["actions", "操作", 180],
 		["company", "法律公司", 170],
+		["project", "项目", 150],
+		["source_system", "来源", 140],
 		["summary", "摘要", 250],
 		["currency", "币种", 75],
-		["amount", "申请金额", 125],
-		["paid_amount", "累计已付", 125],
-		["pending_amount", "剩余待付", 125],
-		["source_status", "付款状态", 120],
-		["approval_state", "来源审批", 125],
 		["finance_status", "凭证状态", 135],
-		["actions", "操作", 85],
 	].map(([fieldname, label, width]) => ({ fieldname, label, width }));
-	const defaultColumns = ["request_date","source_id","effective_application_type","payee_name","company","approval_state","amount","paid_amount","pending_amount","finance_status","actions"];
+	const defaultColumns = ["request_date","source_id","effective_application_type","applicant","payee_name","approval_state","current_approver","amount","paid_amount","pending_amount","source_status","actions"];
+	const quickTabs = [["all","全部申请"],["pending_payment","待付款"],["approvals_running","审批中"],["paid","已付清"],["reconciliation","待核对"]];
+	const approvalLabels = {pending:"审批中",approved:"已通过",rejected:"已拒绝",terminated:"已终止",withdrawn:"已撤回",unknown:"待核对",eligible:"来源审批通过",blocked:"需复核"};
 	const sortFields = ["request_date", "amount", "applicant", "source_id", "company", "modified"];
 	const filterFields = [
 		"keyword",
@@ -40,6 +45,7 @@
 		"approval_state",
 		"date_from",
 		"date_to",
+		"quick_tab",
 	];
 	const exportFields = new Set([
 		"company",
@@ -57,6 +63,9 @@
 		"pending_amount",
 		"source_status",
 		"approval_state",
+		"current_approver",
+		"project",
+		"source_system",
 		"finance_status",
 		"issues",
 		"source_company",
@@ -70,7 +79,8 @@
 		for (const [field, allowed, label] of [
 			["application_type", ["payment", "reimbursement", "unclassified"], "申请类型"],
 			["source_status", ["未付款", "部分付款", "已付款", "付款待核对"], "来源付款状态"],
-			["approval_state", ["eligible", "blocked"], "来源审批状态"],
+			["approval_state", Object.keys(approvalLabels), "审批状态"],
+			["quick_tab", quickTabs.map(row=>row[0]), "快捷筛选"],
 		]) {
 			if (result[field] && !allowed.includes(result[field]))
 				throw new Error(t(`${label}无效`));
@@ -111,7 +121,7 @@
 			{ payment: "付款申请", reimbursement: "费用报销", unclassified: "待分类" }[value] ||
 				"待分类"
 		);
-	const approvalLabel = (value) => t(value === "eligible" ? "来源审批通过" : "需复核");
+	const approvalLabel = (value) => t(Object.prototype.hasOwnProperty.call(approvalLabels,value)?approvalLabels[value]:"需复核");
 	function summary(c) {
 		const totals = c.providerPayload?.currency_totals || {};
 		return Object.entries(totals)
@@ -135,13 +145,12 @@
 		if (field === "effective_application_type") return esc(typeLabel(doc[field]));
 		if (field === "approval_state")
 			return `<span class="${
-				doc[field] === "eligible" ? "text-success" : "text-warning"
-			}">${esc(approvalLabel(doc[field]))}</span>`;
+				["eligible","approved"].includes(doc[field]) ? "is-approved" : ["pending"].includes(doc[field]) ? "is-pending" : "is-review"
+			} dlp-operating-badge">${esc(approvalLabel(doc[field]))}</span>`;
+		if (field === "source_status") return `<span class="dlp-operating-badge ${doc[field]==="已付款"?"is-approved":doc[field]==="部分付款"?"is-pending":"is-review"}">${esc(doc[field]||"待核对")}</span>`;
 		if (field === "finance_status") return esc(t(doc[field] || "未确认"));
 		if (field === "actions")
-			return `<button type="button" class="btn btn-default btn-xs dlp-operating-open" data-source="${esc(
-				doc.source_id || doc.name
-			)}">${esc(t(doc.finance_status === "关联已记账" ? "查看" : "办理"))}</button>`;
+			return `<div class="dlp-operating-row-actions">${[["payments","付款明细"],["approvals","查看审批"]].map(([tab,label])=>`<button type="button" class="btn btn-link btn-xs dlp-operating-open" data-source="${esc(doc.source_id||doc.name)}" data-tab="${tab}">${esc(t(label))}</button>`).join("")}</div>`;
 		return `<span class="dlp-operating-ellipsis" title="${esc(
 			doc[field] ?? ""
 		)}">${esc(doc[field] ?? "—")}</span>`;
@@ -187,15 +196,10 @@
 		});
 	}
 	function mountControls(c) {
-		const tabs=root.$('<div class="dlp-operating-list-tabs"></div>').insertBefore(c.$toolbar);
-		for(const [field,choices] of [["application_type",[["","全部申请"],["payment","付款申请"],["reimbursement","费用报销"]]],["source_status",[["","全部付款状态"],["未付款","未付款"],["部分付款","部分付款"],["已付款","已付款"],["付款待核对","待核对"]]]]) {
-			if(!c.controls[field])continue;
-			const group=root.$('<div role="group"></div>').appendTo(tabs);
-			const mark=()=>group.find("button").each((_i,node)=>root.$(node).toggleClass("active",node.dataset.value===(c.controls[field].get_value()||"")));
-			for(const [value,label] of choices) root.$(`<button type="button" class="btn btn-default btn-sm" data-value="${esc(value)}">${esc(t(label))}</button>`).appendTo(group).on("click.dlpOperating",async()=>{c.resetting=true;try{c.quick[field]=value;await c.controls[field].set_value(value);}finally{c.resetting=false;}mark();c.setPage(0);await c.refresh();});
-			c.controls[field].$input?.on("change.dlpOperating",mark);
-			mark();
-		}
+		c.$operatingTabs=root.$(`<nav class="dlp-operating-list-tabs" aria-label="${esc(t("运营支出筛选"))}">${quickTabs.map(([value,label])=>`<button type="button" class="btn btn-default btn-sm" data-quick-tab="${value}">${esc(t(label))}</button>`).join("")}</nav>`).insertBefore(c.$toolbar);
+		c.updateOperatingTabs=()=>{for(const [value] of quickTabs)c.$operatingTabs.find(`[data-quick-tab="${value}"]`).toggleClass("active",value===(c.quick.quick_tab||"all")).attr("aria-pressed",String(value===(c.quick.quick_tab||"all")));};
+		c.$operatingTabs.on("click.dlpOperating","[data-quick-tab]",async event=>{c.quick.quick_tab=event.currentTarget.dataset.quickTab;c.setPage(0);c.updateOperatingTabs();await c.refresh();});
+		c.updateOperatingTabs();
 		root.$(`<button type="button" class="btn btn-default btn-sm">${esc(t("恢复推荐列"))}</button>`).appendTo(c.$toolbar).on("click.dlpOperating",()=>c.setColumns(defaultColumns));
 		root.$(
 			`<button type="button" class="btn btn-default btn-sm">${esc(t("清空筛选"))}</button>`
@@ -217,7 +221,8 @@
 			.on("click.dlpOperating", ".dlp-operating-open", (event) =>
 				root.DeepLinkERPOperatingExpenseDrawer.open(
 					event.currentTarget.dataset.source,
-					() => c.refresh()
+					() => c.refresh(),
+					event.currentTarget.dataset.tab
 				)
 			)
 			.on("click.dlpOperating", "[data-provider-sort]", (event) => {
@@ -232,7 +237,7 @@
 			});
 		c.$operatingNotice = root
 			.$('<p class="text-muted dlp-operating-notice"></p>')
-			.text(t("历史付款 + ERP 登记汇总；审批、付款、凭证状态分别展示。登记不转账，凭证仅保存草稿。"))
+			.text(t("仅登记已发生的付款，不向银行转账；凭证另行保存草稿。"))
 			.insertAfter(c.$filters);
 	}
 	function grid() {
@@ -246,6 +251,8 @@
 			date_from: "request_date",
 			date_to: "request_date",
 			application_type: "effective_application_type",
+			current_approver: "approval_state",
+			project: "issues",
 		});
 		const controls = [
 			["keyword", "Data", null, "申请编号 / 摘要 / 收款人"],
@@ -253,7 +260,7 @@
 			["application_type", "Select", "\npayment\nreimbursement\nunclassified", "申请类型"],
 			["applicant", "Data", null, "申请人"],
 			["source_status", "Select", "\n未付款\n部分付款\n已付款\n付款待核对", "来源付款状态"],
-			["approval_state", "Select", "\neligible\nblocked", "来源审批"],
+			["approval_state", "Select", "\npending\napproved\nrejected\nterminated\nwithdrawn\nunknown\neligible\nblocked", "审批状态"],
 			["date_from", "Date", null, "申请开始日期"],
 			["date_to", "Date", null, "申请结束日期"],
 		].map(([fieldname, fieldtype, options, label]) => ({
@@ -281,7 +288,7 @@
 					reimbursement: "费用报销",
 					unclassified: "待分类",
 				},
-				approval_state: { eligible: "来源审批通过", blocked: "需复核" },
+				approval_state: approvalLabels,
 			},
 			provider: {
 				columns,
@@ -293,7 +300,7 @@
 				summary,
 				exportCurrent,
 				mountControls,
-				onPayload: (c) => fit(c),
+				onPayload: (c) => {c.updateOperatingTabs?.();fit(c);},
 			},
 			afterRender: (c) => fit(c),
 			emptyLabel: "没有符合条件的运营支出来源",
@@ -304,6 +311,7 @@
 		route,
 		columns,
 		defaultColumns,
+		quickTabs,
 		sortFields,
 		filters,
 		orderBy,
