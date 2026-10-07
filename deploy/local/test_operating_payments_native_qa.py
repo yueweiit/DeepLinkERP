@@ -59,6 +59,208 @@ class OperatingPaymentNativeQA(unittest.TestCase):
                 "bank_account": self.bank, "party_type": "Supplier", "party": "QA Operating Supplier",
                 "bank_reference": "synthetic-no-transfer", "remark": "QA only, rolled back"}
 
+    def oa_source(self, *, cashier_root=None):
+        from deeplinkerp_branding.services.operating_expense_contract import digest
+        identity = {"corp_id": "qa-corp", "process_instance_id": "qa-instance"}
+        self.raw.update(source_system="dingtalk-oa", source_id="oa:" + digest(list(identity.values())),
+                        oa_identity=identity, applicant_user_id="qa-originator", cashier_source_id=cashier_root,
+                        paid_amount=None, pending_amount=None, payments=[], payment_evidence_status="unknown",
+                        approvals={"eligibility": "blocked", "raw": {"status": "RUNNING", "result": "NONE"}},
+                        payment_eligibility={"can_register_payment": True, "reason": "", "notice": "QA verified cashier execution",
+                                             "policy_version": "qa-policy-1", "evidence_fingerprint": digest([identity, "cashier"])})
+        self.raw.update(identity)
+        self.source = frappe.get_doc({**self.source.as_dict(), "name": self.raw["source_id"],
+                                     "source_system": "dingtalk-oa", "source_id": self.raw["source_id"],
+                                     "source_version": self.raw["version"], "source_json": json.dumps(self.raw)})
+        with self.expenses.managed_write():
+            self.source.insert(ignore_permissions=True)
+        history = copy.deepcopy(self.raw)
+        history.update(version="qa-history-version", source_request_id=cashier_root, paid_amount="0.00", pending_amount="100.00",
+                       payment_evidence_status="recorded", source_status="未付款",
+                       zero_history_attestation={"method": "explicit_erp_finance_confirmation", "confirmed_by": "Administrator", "verified_zero": True},
+                       takeover={"owner": "deeplinkerp", "claim_token": "qa-oa-token", "history_fingerprint": digest(identity)})
+        return history
+
+    def claim_oa(self, service, history):
+        with patch.object(self.expenses, "_request", return_value={"schema_version": 2, "source_system": "cashier-payment-archive", "items": [history]}):
+            return service.claim_takeover(self.source.name, self.raw["version"], history["version"], "qa-oa-claim",
+                                          zero_history_confirmed=True,
+                                          expected_eligibility_fingerprint=self.raw["payment_eligibility"]["evidence_fingerprint"])
+
+    def test_oa_only_requires_explicit_zero_history_confirmation(self):
+        self.oa_source()
+        service = self.service()
+        detail = service.payment_detail(self.source)
+        self.assertTrue(detail["needs_zero_history_confirmation"])
+        with patch.object(self.expenses, "_request") as request, self.assertRaises(frappe.ValidationError):
+            service.preview_takeover(self.source.name)
+        request.assert_not_called()
+        self.raw["payments"] = [{"source_id": "history-1", "amount": "30", "currency": "CNY", "payment_date": "2026-10-02", "evidence_status": "recorded"}]
+        self.source.source_json = json.dumps(self.raw)
+        self.assertFalse(service.payment_detail(self.source)["needs_zero_history_confirmation"])
+
+    def test_oa_only_claim_partial_payments_survive_cashier_workflow_completion(self):
+        from deeplinkerp_branding.services.operating_expense_contract import digest, payment_intent_facts
+        history = self.oa_source()
+        service = self.service()
+        response = {"schema_version": 2, "source_system": "cashier-payment-archive", "items": [history]}
+        with patch.object(self.expenses, "_request", return_value=response) as request:
+            preview = service.preview_takeover(self.source.name, zero_history_confirmed=True)
+            self.assertEqual(preview["payment_eligibility"], self.raw["payment_eligibility"])
+            self.assertEqual(preview["eligibility_fingerprint"], self.raw["payment_eligibility"]["evidence_fingerprint"])
+            payload = request.call_args.kwargs["data"]
+            self.assertEqual(payload["source_id"], self.raw["source_id"])
+            self.assertEqual(payload["corp_id"], "qa-corp")
+            self.assertEqual(payload["process_instance_id"], "qa-instance")
+            self.assertEqual(payload["confirmed_by"], "Administrator")
+        self.claim_oa(service, history)
+        self.assertEqual(frappe.db.get_value(service.TAKEOVER, self.source.name, "expense_fingerprint"), digest(payment_intent_facts(self.raw)))
+        first = service.register_payment(self.source.name, self.values(), self.raw["version"], "qa-oa-first")
+        displayed = self.raw["version"]
+        self.raw.update(version="qa-workflow-completed", approvals={"eligibility": "eligible", "raw": {"status": "COMPLETED", "result": "agree"}})
+        self.raw["payment_eligibility"]["evidence_fingerprint"] = digest(["completed"])
+        second = service.register_payment(self.source.name, self.values("25"), displayed, "qa-oa-second")
+        self.assertNotEqual(first["payment_id"], second["payment_id"])
+        self.assertEqual(second["balance"]["paid_amount"], "45.00")
+        self.assertEqual(second["balance"]["pending_amount"], "55.00")
+        self.assertEqual(frappe.db.count("GL Entry"), self.before_gl)
+        self.assertEqual(frappe.db.count("Payment Entry"), self.before_pe)
+
+    def test_oa_history_retains_numeric_cashier_root_with_exact_oa_identity(self):
+        history = self.oa_source(cashier_root="1001")
+        history.update(payments=[{"source_id": "history-1", "amount": "30.00", "currency": "CNY", "payment_date": "2026-10-02", "evidence_status": "recorded"}],
+                       paid_amount="30.00", pending_amount="70.00", source_status="部分付款")
+        history.pop("zero_history_attestation")
+        with patch.object(self.expenses, "_request", return_value={"schema_version": 2, "source_system": "cashier-payment-archive", "items": [history]}) as request:
+            self.service().preview_takeover(self.source.name)
+        self.assertEqual(request.call_args.kwargs["data"]["source_id"], "1001")
+        self.assertEqual(request.call_args.kwargs["data"]["corp_id"], "qa-corp")
+
+    def test_oa_preview_rejects_cross_instance_schema_or_cashier_history_binding(self):
+        history = self.oa_source(cashier_root="1001")
+        for field, value in (("source_id", "oa:" + "0" * 64), ("oa_identity", {"corp_id": "other-corp", "process_instance_id": "qa-instance"}), ("source_request_id", "1002")):
+            wrong = {**history, field: value}
+            with self.subTest(field=field), patch.object(self.expenses, "_request", return_value={"schema_version": 2, "source_system": "cashier-payment-archive", "items": [wrong]}), self.assertRaises(frappe.ValidationError):
+                self.service().preview_takeover(self.source.name, zero_history_confirmed=True)
+        with patch.object(self.expenses, "_request", return_value={"schema_version": 1, "source_system": "cashier-payment-archive", "items": [history]}), self.assertRaises(frappe.ValidationError):
+            self.service().preview_takeover(self.source.name, zero_history_confirmed=True)
+
+    def test_oa_claim_rejects_missing_stale_or_invalid_eligibility_fingerprint_before_request(self):
+        history = self.oa_source()
+        service = self.service()
+        for fingerprint in (None, "wrong", "0" * 64):
+            with self.subTest(fingerprint=fingerprint), patch.object(self.expenses, "_request") as request, self.assertRaises(frappe.ValidationError):
+                service.claim_takeover(self.source.name, self.raw["version"], history["version"], "qa-stale-policy",
+                                       zero_history_confirmed=True, expected_eligibility_fingerprint=fingerprint)
+            request.assert_not_called()
+        self.assertFalse(frappe.db.exists(service.TAKEOVER, self.source.name))
+        with patch.object(self.expenses, "_request") as request, self.assertRaises(frappe.ValidationError):
+            service.claim_takeover(self.source.name, "stale-source-version", history["version"], "qa-stale-source",
+                                   zero_history_confirmed=True,
+                                   expected_eligibility_fingerprint=self.raw["payment_eligibility"]["evidence_fingerprint"])
+        request.assert_not_called()
+
+    def test_oa_rejected_unknown_policy_or_changed_identity_blocks_new_payment(self):
+        history = self.oa_source()
+        service = self.service()
+        self.claim_oa(service, history)
+        allowed = copy.deepcopy(self.raw["payment_eligibility"])
+        for decision in (None, {**allowed, "can_register_payment": False, "reason": "QA rejected"}):
+            self.raw["payment_eligibility"] = decision
+            with self.subTest(decision=decision), self.assertRaises(frappe.ValidationError):
+                service.register_payment(self.source.name, self.values(), self.raw["version"], "qa-rejected")
+        self.raw["payment_eligibility"] = allowed
+        self.raw["oa_identity"]["process_instance_id"] = "qa-other-instance"
+        with self.assertRaises(frappe.ValidationError):
+            service.register_payment(self.source.name, self.values(), self.raw["version"], "qa-wrong-identity")
+        self.assertEqual(frappe.db.count(service.PAYMENT, {"source": self.source.name}), 0)
+
+    def test_oa_changed_financial_facts_and_old_strict_claims_are_not_rebound(self):
+        history = self.oa_source()
+        service = self.service()
+        self.claim_oa(service, history)
+        service.register_payment(self.source.name, self.values(), self.raw["version"], "qa-oa-existing")
+        self.raw["payee_name"] = "Different payee"
+        with self.assertRaises(frappe.ValidationError):
+            service.register_payment(self.source.name, self.values(), self.raw["version"], "qa-changed-payee")
+        self.assertEqual(len(service.payment_detail(self.source)["payments"]), 1)
+        from deeplinkerp_branding.services.operating_expense_contract import digest, expense_facts
+        original = json.loads(self.source.source_json)
+        frappe.db.set_value(service.TAKEOVER, self.source.name, "expense_fingerprint", digest(expense_facts(original)))
+        self.raw.clear(); self.raw.update(original)
+        self.raw["approvals"] = {"eligibility": "eligible", "raw": {"status": "COMPLETED", "result": "agree"}}
+        with self.assertRaises(frappe.ValidationError):
+            service.register_payment(self.source.name, self.values(), self.raw["version"], "qa-old-claim-changed")
+
+    def test_oa_workflow_without_cashier_root_preserves_event_order_and_current_tasks(self):
+        self.oa_source()
+        row = {"source_id": self.raw["source_id"], **self.raw["oa_identity"], "oa_identity": self.raw["oa_identity"],
+               "lookup_status": "found", "approval_status": "RUNNING", "approval_result": "NONE", "originator": {"id": "qa-originator", "name": "QA Applicant"},
+               "events": [{"id": "second", "stage": "会计", "time": "2026-10-02", "private_raw": "omit"}, {"id": "first", "stage": "主管", "time": "2026-10-01"}],
+               "current_tasks": [{"id": "qa-task", "activity_id": "qa-node", "stage": "出纳", "entered_at": "2026-10-03", "status": "RUNNING", "assignees": [{"id": "qa-cashier", "name": "QA Cashier"}]}],
+               "source_updated_at": "2026-10-03", "last_synced_at": "2026-10-04", "original_url": "https://aflow.dingtalk.com/qa",
+               "payment_eligibility": self.raw["payment_eligibility"], "private_payload": "omit"}
+        with patch.object(self.expenses, "_request", return_value={"schema_version": 2, "source_system": "cashier-payment-archive", "items": [row]}) as request:
+            timeline = self.service().get_approval_timeline(self.source.name)
+        self.assertEqual(request.call_args.kwargs["params"], {"source_id": self.raw["source_id"], **self.raw["oa_identity"]})
+        self.assertEqual([event["id"] for event in timeline["events"]], ["second", "first"])
+        self.assertEqual(timeline["current_tasks"], row["current_tasks"])
+        self.assertEqual(timeline["originator"], row["originator"])
+        self.assertEqual(timeline["payment_eligibility"], row["payment_eligibility"])
+        self.assertNotIn("private_payload", timeline)
+        self.assertNotIn("private_raw", timeline["events"][0])
+        row["corp_id"] = "qa-other-corp"
+        with patch.object(self.expenses, "_request", return_value={"schema_version": 2, "source_system": "cashier-payment-archive", "items": [row]}), self.assertRaises(frappe.ValidationError):
+            self.service().get_approval_timeline(self.source.name)
+
+    def test_persisted_oa_alias_can_read_workflow_when_cashier_root_is_missing_but_cannot_claim_zero(self):
+        history = self.oa_source()
+        canonical = self.raw["source_id"]
+        self.raw["source_id"] = "qa-stable-oa-alias"
+        self.source = frappe.get_doc({**self.source.as_dict(), "name": self.raw["source_id"], "source_id": self.raw["source_id"], "source_json": json.dumps(self.raw)})
+        with self.expenses.managed_write():
+            self.source.insert(ignore_permissions=True)
+        row = {"source_id": canonical, **self.raw["oa_identity"], "oa_identity": self.raw["oa_identity"],
+               "lookup_status": "found", "events": [], "current_tasks": []}
+        service = self.service()
+        with patch.object(self.expenses, "_request", return_value={"schema_version": 2, "source_system": "cashier-payment-archive", "items": [row]}) as request:
+            timeline = service.get_approval_timeline(self.source.name)
+        self.assertEqual(timeline["lookup_status"], "found")
+        self.assertEqual(request.call_args.kwargs["params"]["source_id"], canonical)
+        self.assertEqual(service._fresh_base(self.source)["oa_identity"], self.raw["oa_identity"])
+        with patch.object(self.expenses, "_request") as request, self.assertRaises(frappe.ValidationError):
+            service.preview_takeover(self.source.name, zero_history_confirmed=True)
+        request.assert_not_called()
+        with self.assertRaises(frappe.ValidationError):
+            service._oa_identity({**history, "source_id": "qa-unpersisted-alias"}, self.source)
+
+    def test_payment_account_choices_use_one_permission_scoped_query_without_per_account_reads(self):
+        service = self.service()
+        with patch.object(self.expenses, "_account", side_effect=AssertionError("Account choices must not issue per-account reads")):
+            choices = service.get_payment_accounts(self.source.name)
+        self.assertTrue(choices)
+        self.assertIn(self.bank, {choice["name"] for choice in choices})
+
+    def test_payment_account_choices_are_company_native_readable_and_friendly(self):
+        service = self.service()
+        choices = service.get_payment_accounts(self.source.name)
+        self.assertTrue(choices)
+        for choice in choices:
+            account = frappe.get_doc("Account", choice["name"])
+            self.assertEqual(set(choice), {"name", "label", "currency"})
+            self.assertEqual(account.company, self.source.company)
+            self.assertEqual(choice["label"], account.account_name)
+            self.assertIn(account.account_type, {"Bank", "Cash"})
+            self.assertFalse(account.is_group or account.disabled)
+        other = frappe.get_doc({**self.source.as_dict(), "name": "qa-native-mexico", "source_id": "qa-native-mexico", "company": "QA Operating Mexico"})
+        with self.expenses.managed_write():
+            other.insert(ignore_permissions=True)
+        frappe.set_user("operating-browser-china@example.invalid")
+        self.assertTrue(service.get_payment_accounts(self.source.name))
+        self.assertNotEqual(other.company, self.source.company)
+        with self.assertRaises(frappe.PermissionError):
+            service.get_payment_accounts(other.name)
+
     def test_metadata_and_service_exist(self):
         service = self.service()
         self.assertTrue(frappe.db.exists("DocType", service.PAYMENT))
