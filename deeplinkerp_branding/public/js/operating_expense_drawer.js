@@ -81,7 +81,7 @@
 				Boolean(f.model.can_read("Journal Entry")))
 		);
 	}
-	function safeOriginalURL(value) {
+	function parseOriginalURL(value) {
 		try {
 			const url = new URL(value);
 			return url.protocol === "https:" &&
@@ -94,11 +94,30 @@
 				!url.username &&
 				!url.password &&
 				!url.port
-				? url.href
+				? url
 				: null;
 		} catch (_) {
 			return null;
 		}
+	}
+	const safeOriginalURL = (value) => parseOriginalURL(value)?.href || null;
+	function dingTalkOriginalLink(value) {
+		const url = parseOriginalURL(value);
+		if (!url) return null;
+		const ids = url.searchParams.getAll("procInstId"),
+			queryStart = url.hash.indexOf("?");
+		if (queryStart >= 0) {
+			ids.push(...new URLSearchParams(url.hash.slice(queryStart + 1)).getAll("procInstId"));
+		}
+		if (ids.length !== 1 || !/^[A-Za-z0-9_-]{1,200}$/.test(ids[0])) return null;
+		// Same client route as overseas_costing.utils.dingtalk; never use an
+		// approval business number or an arbitrary supplied protocol URL.
+		const mobile = `https://aflow.dingtalk.com/dingtalk/mobile/homepage.htm?showmenu=false&dd_progress=false#/approval?procInstId=${encodeURIComponent(ids[0])}`;
+		return {
+			official_url: url.href,
+			mobile_url: mobile,
+			desktop_url: `dingtalk://dingtalkclient/page/link?url=${encodeURIComponent(mobile)}&pc_slide=true`,
+		};
 	}
 	function editSession(detail, onChange = () => {}) {
 		let values, savedRevision;
@@ -476,14 +495,14 @@
 		t(value === 0 ? "草稿 · 未记账" : value === 1 ? "关联已记账" : "已取消 · 需复核");
 	function sourceHTML(detail) {
 		const s = detail.source,
-			original = safeOriginalURL(s.original_url);
+			original = dingTalkOriginalLink(s.original_url);
 		const fact = (label, value) =>
 			`<div><span class="text-muted">${esc(t(label))}</span> ${display(value)}</div>`;
-		const hero = `<header class="dlp-operating-hero"><div><h3>${display(s.approval_no || s.source_id)}</h3><p>${display(s.summary)}</p></div><div class="dlp-operating-hero-actions">${original ? `<a class="btn btn-default" href="${esc(original)}" target="_blank" rel="noopener noreferrer">${esc(t("钉钉原单"))}</a>` : `<span class="text-muted">${esc(t("原单链接待核对"))}</span>`}<button type="button" class="btn btn-primary dlp-operating-start-payment">${esc(t("办理付款"))}</button></div><div class="dlp-operating-money-strip">${[["申请金额",s.amount],["累计已付",s.paid_amount],["剩余待付",s.pending_amount]].map(([label,value])=>`<div><small>${esc(t(label))}</small><strong>${money(value)} ${display(s.currency)}</strong></div>`).join("")}</div></header>`;
+		const hero = `<header class="dlp-operating-hero"><div><h3>${display(s.approval_no || s.source_id)}</h3><p>${display(s.summary)}</p></div><div class="dlp-operating-hero-actions">${original ? `<a class="btn btn-default" href="${esc(original.desktop_url)}" title="${esc(t("需安装并登录钉钉，原单权限由钉钉校验。"))}">${esc(t("钉钉原单"))}</a>` : `<span class="text-muted">${esc(t("原单链接待核对"))}</span>`}<button type="button" class="btn btn-primary dlp-operating-start-payment">${esc(t("办理付款"))}</button></div><div class="dlp-operating-money-strip">${[["申请金额",s.amount],["累计已付",s.paid_amount],["剩余待付",s.pending_amount]].map(([label,value])=>`<div><small>${esc(t(label))}</small><strong>${money(value)} ${display(s.currency)}</strong></div>`).join("")}</div></header>`;
 		return `${hero}<section class="dlp-operating-section" data-operating-pane="request"><div class="dlp-operating-facts">${fact("法律公司",detail.company)}${fact("收款人",s.payee_name)}${fact("申请日期",s.request_date)}${fact("申请人",s.applicant)}</div><details class="dlp-operating-advanced"><summary>${esc(t("原始来源信息"))}</summary><div class="dlp-operating-facts">${fact(
 			"申请编号",
 			s.source_id
-		)}${fact("原始审批编号", s.approval_no)}${fact("原始钉钉实例编号", s.dingding_id)}${fact("原始来源请求编号", s.source_request_id)}${fact("原始申请类型", s.application_type_raw)}${fact("来源版本", s.version)}${fact("来源公司", s.source_company)}${fact("来源归档表", s.source_sheet)}${fact("当前来源金额", `${money(s.amount)} ${s.currency || t("币种未明确")}`)}${fact("原始批准金额", s.original_source_amount == null ? "—" : `${money(s.original_source_amount)} ${s.original_source_currency || t("币种未明确")}`)}${fact("出纳已付", `${money(s.paid_amount)} ${s.currency || ""}`)}${fact("出纳待付", `${money(s.pending_amount)} ${s.currency || ""}`)}${fact("付款状态", s.source_status)}${fact("出纳原付款状态", s.cashier_reported_payment_status)}</div><p><a href="https://payment.yueweiportal.com/" target="_blank" rel="noopener noreferrer">${esc(t("请款网站"))}</a></p></details></section>
+		)}${fact("原始审批编号", s.approval_no)}${fact("原始钉钉实例编号", s.dingding_id)}${fact("原始来源请求编号", s.source_request_id)}${fact("原始申请类型", s.application_type_raw)}${fact("来源版本", s.version)}${fact("来源公司", s.source_company)}${fact("来源归档表", s.source_sheet)}${fact("当前来源金额", `${money(s.amount)} ${s.currency || t("币种未明确")}`)}${fact("原始批准金额", s.original_source_amount == null ? "—" : `${money(s.original_source_amount)} ${s.original_source_currency || t("币种未明确")}`)}${fact("出纳已付", `${money(s.paid_amount)} ${s.currency || ""}`)}${fact("出纳待付", `${money(s.pending_amount)} ${s.currency || ""}`)}${fact("付款状态", s.source_status)}${fact("出纳原付款状态", s.cashier_reported_payment_status)}</div><p>${original ? `<a href="${esc(original.mobile_url)}" target="_blank" rel="noopener noreferrer">${esc(t("网页原单链接"))}</a> · ` : ""}<a href="https://payment.yueweiportal.com/" target="_blank" rel="noopener noreferrer">${esc(t("请款网站"))}</a></p></details></section>
 		<section class="dlp-operating-section" data-operating-pane="approvals"><div class="dlp-operating-timeline-holder"></div><details class="dlp-operating-advanced"><summary>${esc(
 			t("来源审批与待处理问题")
 		)}</summary><p class="${s.approvals?.eligibility === "eligible" ? "text-success" : "text-warning"}">${esc(root.DeepLinkERPOperatingExpenses.approvalLabel(s.approvals?.eligibility))}</p><div class="dlp-operating-facts">${Object.entries(
@@ -1743,6 +1762,7 @@
 		API,
 		editSession,
 		safeOriginalURL,
+		dingTalkOriginalLink,
 		canFinance,
 		isManager,
 		workflow,

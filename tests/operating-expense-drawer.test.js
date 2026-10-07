@@ -174,6 +174,30 @@ test("safe original evidence links accept canonical DingTalk HTTPS only", () => 
 	])
 		assert.equal(api.safeOriginalURL(url), null);
 });
+test("original approval links use the established DingTalk client route and one verified instance", () => {
+	const instance = "approval_ID-123";
+	const official = `https://aflow.dingtalk.com/dingtalk/mobile/homepage.htm?procInstId=${instance}`;
+	assert.equal(typeof api.dingTalkOriginalLink, "function");
+	const link = api.dingTalkOriginalLink(official);
+	assert.equal(link.official_url, official);
+	assert.equal(link.mobile_url, `https://aflow.dingtalk.com/dingtalk/mobile/homepage.htm?showmenu=false&dd_progress=false#/approval?procInstId=${instance}`);
+	assert.equal(link.desktop_url, `dingtalk://dingtalkclient/page/link?url=${encodeURIComponent(link.mobile_url)}&pc_slide=true`);
+	assert.equal(api.dingTalkOriginalLink(link.mobile_url).desktop_url, link.desktop_url);
+	for (const value of [
+		"javascript:alert(1)",
+		"https://evil.test/?procInstId=x",
+		`${official}&procInstId=other`,
+		`${official}#/approval?procInstId=other`,
+		"https://aflow.dingtalk.com/?procInstId=%3Cscript%3E",
+		"https://aflow.dingtalk.com/?id=1",
+	]) assert.equal(api.dingTalkOriginalLink(value), null);
+	const d = detail();
+	d.source.original_url = official;
+	const html = create({DeepLinkERPOperatingExpenses: {money: String, approvalLabel: () => "审批通过"}}).sourceHTML(d);
+	assert.match(html, /href="dingtalk:\/\/dingtalkclient\/page\/link\?/);
+	assert.match(html, /需安装并登录钉钉/);
+	assert.match(html, /网页原单链接/);
+});
 test("finance eligibility combines finance role and native Journal Entry create/read permission", () => {
 	assert.equal(typeof api.canFinance, "function");
 	assert.equal(create(host()).canFinance(), true);
