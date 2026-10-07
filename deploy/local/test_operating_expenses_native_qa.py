@@ -704,10 +704,34 @@ class OperatingExpenseNativeQA(unittest.TestCase):
                         service.preview_voucher("1001")
 
     def test_export_all_filtered_records_numeric_cells_literal_formulas(self):
+        from xlsxwriter.worksheet import Worksheet
         service = self._sync()
         item = json.loads(frappe.get_doc("Operating Expense Source", "1001").source_json)
         service._upsert({**item, "summary": "=SUM(A1:A2)"}, service._maps(service._settings()))
-        service.export_operating_expenses(columns=["source_id", "summary", "amount", "paid_amount", "pending_amount", "currency"])
+        columns = ["source_id", "summary", "amount", "paid_amount", "pending_amount", "currency"]
+        authorized_rows = service._list_rows()
+        written_row = -1
+        original_write, case = Worksheet.write, self
+        class StreamingRow(dict):
+            def __init__(self, row, index):
+                super().__init__(row)
+                self.index = index
+            def get(self, key, default=None):
+                if key in columns:
+                    case.assertLessEqual(self.index, written_row + 1, "Write rows directly; do not prepare a second full export table")
+                return super().get(key, default)
+        def tracked_write(sheet, row, column, *args, **kwargs):
+            nonlocal written_row
+            self.assertGreaterEqual(row, written_row)
+            result = original_write(sheet, row, column, *args, **kwargs)
+            written_row = row
+            return result
+        rows = [StreamingRow(row, index) for index, row in enumerate(authorized_rows, 1)]
+        with patch.object(service, "_list_rows", return_value=rows), patch.object(Worksheet, "write", new=tracked_write), \
+             patch.object(frappe.permissions, "can_export", side_effect=lambda doctype, **kwargs: kwargs.get("is_owner", False)), \
+             patch.object(service, "_source", wraps=service._source) as source:
+            service.export_operating_expenses(columns=columns)
+        self.assertEqual([call.args[0] for call in source.call_args_list], [row["name"] for row in authorized_rows])
         with ZipFile(BytesIO(frappe.response["filecontent"])) as workbook:
             xml = workbook.read("xl/worksheets/sheet1.xml").decode()
             self.assertNotIn("<f>", xml)
@@ -715,6 +739,13 @@ class OperatingExpenseNativeQA(unittest.TestCase):
             self.assertEqual(xml.count("<row "), 131)
             self.assertIn('<c r="C2" s="1"><v>', xml)
             self.assertIn('formatCode="0.00"', workbook.read("xl/styles.xml").decode())
+        with patch.object(service, "_source", side_effect=AssertionError("Native full export authority must keep its lazy shortcut")):
+            service.export_operating_expenses(columns=columns)
+        frappe.db.set_value(service.SOURCE, "1001", "owner", "qa-export-nonowner@example.invalid", update_modified=False)
+        with patch.object(frappe.permissions, "can_export", side_effect=lambda doctype, **kwargs: kwargs.get("is_owner", False)), \
+             patch.object(Worksheet, "write") as write, self.assertRaises(frappe.PermissionError):
+            service.export_operating_expenses(columns=columns)
+        write.assert_not_called()
 
     def test_company_permissions_lists_details_exports_and_unmapped_are_restricted(self):
         service = self._sync()
