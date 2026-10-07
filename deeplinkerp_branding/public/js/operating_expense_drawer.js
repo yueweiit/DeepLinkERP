@@ -250,10 +250,10 @@
 		session.reset();
 		return session;
 	}
-	async function call(method, args = {}) {
+	async function call(method, args = {}, base = API) {
 		try {
 			const response = await root.frappe.call({
-				method: API + method,
+				method: base + method,
 				args,
 				type: "POST",
 				silent: true,
@@ -479,13 +479,14 @@
 			original = safeOriginalURL(s.original_url);
 		const fact = (label, value) =>
 			`<div><span class="text-muted">${esc(t(label))}</span> ${display(value)}</div>`;
-		return `<section class="dlp-operating-section"><div class="dlp-operating-facts">${fact(
+		const hero = `<header class="dlp-operating-hero"><div><h3>${display(s.approval_no || s.source_id)}</h3><p>${display(s.summary)}</p></div><div class="dlp-operating-hero-actions">${original ? `<a class="btn btn-default" href="${esc(original)}" target="_blank" rel="noopener noreferrer">${esc(t("钉钉原单"))}</a>` : `<span class="text-muted">${esc(t("原单链接待核对"))}</span>`}<button type="button" class="btn btn-primary dlp-operating-start-payment">${esc(t("办理付款"))}</button></div><div class="dlp-operating-money-strip">${[["申请金额",s.amount],["累计已付",s.paid_amount],["剩余待付",s.pending_amount]].map(([label,value])=>`<div><small>${esc(t(label))}</small><strong>${money(value)} ${display(s.currency)}</strong></div>`).join("")}</div></header>`;
+		return `${hero}<section class="dlp-operating-section" data-operating-pane="request"><div class="dlp-operating-facts">${fact("法律公司",detail.company)}${fact("收款人",s.payee_name)}${fact("申请日期",s.request_date)}${fact("申请人",s.applicant)}</div><details class="dlp-operating-advanced"><summary>${esc(t("原始来源信息"))}</summary><div class="dlp-operating-facts">${fact(
 			"申请编号",
 			s.source_id
-		)}${fact("原始审批编号", s.approval_no)}${fact("原始钉钉实例编号", s.dingding_id)}${fact("原始来源请求编号", s.source_request_id)}${fact("原始申请类型", s.application_type_raw)}${fact("来源版本", s.version)}${fact("法律公司", detail.company)}${fact("来源公司", s.source_company)}${fact("来源归档表", s.source_sheet)}${fact("申请日期", s.request_date)}${fact("收款人", s.payee_name)}${fact("申请人", s.applicant)}${fact("当前来源金额", `${money(s.amount)} ${s.currency || t("币种未明确")}`)}${fact("原始批准金额", s.original_source_amount == null ? "—" : `${money(s.original_source_amount)} ${s.original_source_currency || t("币种未明确")}`)}${fact("出纳已付", `${money(s.paid_amount)} ${s.currency || ""}`)}${fact("出纳待付", `${money(s.pending_amount)} ${s.currency || ""}`)}${fact("付款状态", s.source_status)}${fact("出纳原付款状态", s.cashier_reported_payment_status)}</div><p>${display(s.summary)}</p><p><a href="https://payment.yueweiportal.com/" target="_blank" rel="noopener noreferrer">${esc(t("请款网站"))}</a>${original ? ` · <a href="${esc(original)}" target="_blank" rel="noopener noreferrer">${esc(t("钉钉审批来源"))}</a>` : ""}</p></section>
-		<section class="dlp-operating-section"><strong>${esc(
+		)}${fact("原始审批编号", s.approval_no)}${fact("原始钉钉实例编号", s.dingding_id)}${fact("原始来源请求编号", s.source_request_id)}${fact("原始申请类型", s.application_type_raw)}${fact("来源版本", s.version)}${fact("来源公司", s.source_company)}${fact("来源归档表", s.source_sheet)}${fact("当前来源金额", `${money(s.amount)} ${s.currency || t("币种未明确")}`)}${fact("原始批准金额", s.original_source_amount == null ? "—" : `${money(s.original_source_amount)} ${s.original_source_currency || t("币种未明确")}`)}${fact("出纳已付", `${money(s.paid_amount)} ${s.currency || ""}`)}${fact("出纳待付", `${money(s.pending_amount)} ${s.currency || ""}`)}${fact("付款状态", s.source_status)}${fact("出纳原付款状态", s.cashier_reported_payment_status)}</div><p><a href="https://payment.yueweiportal.com/" target="_blank" rel="noopener noreferrer">${esc(t("请款网站"))}</a></p></details></section>
+		<section class="dlp-operating-section" data-operating-pane="approvals"><div class="dlp-operating-timeline-holder"></div><details class="dlp-operating-advanced"><summary>${esc(
 			t("来源审批与待处理问题")
-		)}</strong><p class="${s.approvals?.eligibility === "eligible" ? "text-success" : "text-warning"}">${esc(root.DeepLinkERPOperatingExpenses.approvalLabel(s.approvals?.eligibility))}</p><div class="dlp-operating-facts">${Object.entries(
+		)}</summary><p class="${s.approvals?.eligibility === "eligible" ? "text-success" : "text-warning"}">${esc(root.DeepLinkERPOperatingExpenses.approvalLabel(s.approvals?.eligibility))}</p><div class="dlp-operating-facts">${Object.entries(
 			s.approvals?.raw || {}
 		)
 			.map(([key, value]) =>
@@ -509,14 +510,14 @@
 			)
 			.join(
 				""
-			)}</div>${detail.issues ? `<p class="text-warning">${display(detail.issues)}</p>` : ""}${detail.mapping_issue ? `<p class="text-warning">${display(detail.mapping_issue)}</p>` : ""}</section>
-		<section class="dlp-operating-section"><strong>${esc(
+				)}</div></details>${detail.issues ? `<p class="text-warning">${display(detail.issues)}</p>` : ""}${detail.mapping_issue ? `<p class="text-warning">${display(detail.mapping_issue)}</p>` : ""}</section>
+		<section class="dlp-operating-section" data-operating-pane="request"><strong>${esc(
 			t("来源附件")
 		)}</strong>${(s.attachments || []).map((file) => `<p class="dlp-operating-proof"><button type="button" class="btn btn-link dlp-operating-download" data-attachment="${esc(file.source_id)}">${display(file.filename)}</button> · ${esc(t(file.payment_source_id ? "实际付款附件" : "申请附件"))} ${display(file.payment_source_id)} · ${esc(t("版本"))} ${display(file.version)}</p>`).join("") || `<p>${esc(t("暂无附件"))}</p>`}</section>
-		<section class="dlp-operating-section"><strong>${esc(
+		<section class="dlp-operating-section" data-operating-pane="payments"><div class="dlp-operating-register"></div><div class="dlp-operating-local-payments"></div><strong>${esc(
 			t("实际付款证据（来自出纳）")
-		)}</strong>${(s.payments || []).map((p) => `<p>${display(p.source_id)} · ${display(p.payment_date)} · ${money(p.amount)} ${display(p.currency)} · ${display(p.payer)} · ${display(p.evidence_status)}<br>${display(p.remark)} · ${display(p.bank_reference)}</p>`).join("") || `<p>${esc(t("尚无实际付款证据"))}</p>`}</section>
-		<section class="dlp-operating-section"><strong>${esc(
+		)}</strong>${(s.payments || []).filter(p=>p.source_type!=="erp").map((p) => `<p>${display(p.source_id)} · ${display(p.payment_date)} · ${money(p.amount)} ${display(p.currency)} · ${display(p.payer)} · ${display(p.evidence_status)}<br>${display(p.remark)} · ${display(p.bank_reference)}</p>`).join("") || `<p>${esc(t("尚无历史付款证据"))}</p>`}</section>
+		<section class="dlp-operating-section" data-operating-pane="vouchers"><strong>${esc(
 			t("原生凭证关联与历史")
 		)}</strong>${(detail.events || []).map((event) => `<p>${event.journal_entry ? nativeLink(event.journal_entry) : display(event.issue)} · ${esc(t(event.operation === "payment" ? "出纳付款结算" : "费用确认"))} ${display(event.payment_source_id)} · ${event.journal_entry ? esc(journalState(event.docstatus)) : ""} ${stateDisplay(event.settlement_state)} · ${esc(t("来源版本"))} ${display(event.source_version)}</p>`).join("") || `<p>${esc(t("尚无关联原生凭证"))}</p>`}</section>`;
 	}
@@ -875,7 +876,7 @@
 				!detail.company && isManager()
 					? '<section class="dlp-operating-section"><div class="dlp-operating-company"></div><div class="dlp-operating-company-actions dlp-operating-actions"></div></section>'
 					: ""
-			}<section class="dlp-operating-section"><strong>${esc(t("财务确认"))}</strong>${
+			}<section class="dlp-operating-section" data-operating-pane="vouchers"><strong>${esc(t("财务确认"))}</strong>${
 				!eligible()
 					? `<p class="text-warning">${esc(
 							t("当前需复核或缺少财务权限，来源仍可查看。")
@@ -897,8 +898,8 @@
 				.map((label) => `<th>${esc(t(label))}</th>`)
 				.join(
 					""
-				)}</tr></thead><tbody class="dlp-operating-lines"></tbody></table></div><div class="dlp-operating-line-actions dlp-operating-actions"></div><div class="dlp-operating-expense-actions dlp-operating-actions"></div><div class="dlp-operating-existing"></div><div class="dlp-operating-existing-actions dlp-operating-actions"></div><div class="dlp-operating-expense-preview"></div></section><section class="dlp-operating-section"><strong>${esc(
-				t("按实际出纳付款生成结算草稿")
+				)}</tr></thead><tbody class="dlp-operating-lines"></tbody></table></div><div class="dlp-operating-line-actions dlp-operating-actions"></div><div class="dlp-operating-expense-actions dlp-operating-actions"></div><div class="dlp-operating-existing"></div><div class="dlp-operating-existing-actions dlp-operating-actions"></div><div class="dlp-operating-expense-preview"></div></section><section class="dlp-operating-section" data-operating-pane="vouchers"><strong>${esc(
+				t("按实际付款生成结算草稿")
 			)}</strong><p class="text-muted">${esc(
 				t(
 					"先保存费用映射并生成或关联费用确认凭证，再逐笔维护银行科目与汇率。此处不登记或执行付款。"
@@ -1252,6 +1253,7 @@
 				});
 			if (lastResult)
 				drawer.panel.find(".dlp-operating-result").html(resultHTML(lastResult));
+			if(root.DeepLinkERPOperatingPaymentPanel) await root.DeepLinkERPOperatingPaymentPanel.mount(drawer,detail,{makeControl,action,uiTask,canFinance,sourceId,previewHTML,voucherRequest:call,request:(method,args)=>call(method,args,"deeplinkerp_branding.services.operating_payment_service."),reload:async()=>{await w.load();await refresh();}});
 			updateVisibility();
 			drawer.refreshEligibility();
 		}

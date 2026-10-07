@@ -1,6 +1,7 @@
-"""Read-only cashier archive; explicit finance mapping and native JE drafts only.
+"""Read-only cashier history; explicit finance mapping and native JE drafts.
 
-Never registers payments, submits vouchers, creates master data, or writes GL.
+ERP payment registration is isolated in operating_payment_service. Neither
+service transfers money, submits vouchers, creates master data, or writes GL.
 Cache, mapping and event documents can only be changed inside scoped server work.
 """
 from __future__ import annotations
@@ -202,7 +203,9 @@ def _base_url():
 
 def _request(path, params=None, download=False, data=None):
     resolver = path == "/api/integrations/erp/resolve-applicant-companies"
-    if path not in ("/api/integrations/erp/operating-expenses", "/api/integrations/erp/purchase-expenses") and not resolver:
+    payment_write = path in {"/api/integrations/erp/operating-expenses/takeover-preview", "/api/integrations/erp/operating-expenses/takeover-claim"}
+    workflow = path == "/api/integrations/erp/operating-expenses/workflow"
+    if path not in ("/api/integrations/erp/operating-expenses", "/api/integrations/erp/purchase-expenses") and not (resolver or payment_write or workflow):
         if path.startswith("/api/integrations/erp/purchase-expenses/"):
             from .purchase_source_contract import attachment_path as purchase_attachment_path
             purchase_attachment_path(path)
@@ -216,8 +219,8 @@ def _request(path, params=None, download=False, data=None):
         frappe.throw("同步密钥未配置")
     limit = 20 * 1024 * 1024 if download else MAX_JSON_BYTES
     try:
-        transport = requests.post if resolver else requests.get
-        kwargs = {"json": data} if resolver else {}
+        transport = requests.post if resolver or payment_write else requests.get
+        kwargs = {"json": data} if resolver or payment_write else {}
         with transport(_base_url() + path, params=params, headers={"Authorization": "Bearer " + secret}, **kwargs,
                           timeout=(5, 20), allow_redirects=False, stream=True) as response:
             if response.status_code != 200:
@@ -234,7 +237,7 @@ def _request(path, params=None, download=False, data=None):
             result = json.loads(data)
             if result.get("schema_version") != 1 or result.get("source_system") != SOURCE_SYSTEM or not isinstance(result.get("items"), list) or len(result["items"]) > 500:
                 raise ValueError("invalid source schema")
-            if not resolver and (not isinstance(result.get("end"), bool) or (not result["end"] and not result.get("next_cursor")) or not result.get("until")):
+            if not (resolver or payment_write or workflow) and (not isinstance(result.get("end"), bool) or (not result["end"] and not result.get("next_cursor")) or not result.get("until")):
                 raise ValueError("invalid source pagination")
             return result
     except (requests.RequestException, ValueError, TypeError, KeyError, AttributeError):
@@ -591,7 +594,7 @@ def scheduled_sync():
         raise RuntimeError(notice) from None
 
 
-def _fresh(doc):
+def _fresh(doc, include_payments=True):
     if not _settings().enabled:
         frappe.throw("同步未启用，不能确认财务数据")
     result = _source_page({"source_id": doc.source_id, "limit": 1})
@@ -601,7 +604,8 @@ def _fresh(doc):
     validate_source(item)
     if _mapped_company(item, _maps(_settings())) != doc.company:
         frappe.throw("来源法律公司映射已变化，请重新同步并复核")
-    return item
+    from .operating_payment_service import merge_source
+    return merge_source(doc, item) if include_payments else item
 
 
 def _mapping(doc, for_update=False):
@@ -693,8 +697,9 @@ def _confirmed(value):
 
 
 def _expense_lines(item, mapping):
-    if _issues(item, mapping, include_payment_dates=False):
-        frappe.throw("；".join(_issues(item, mapping, include_payment_dates=False)))
+    issues = _issues(item, mapping, include_payment_dates=False)
+    if issues:
+        frappe.throw("；".join(issues))
     coverage = mapping.get("existing_erp_coverage_confirmed") if mapping.get("recognition_mode") == "existing" else mapping.get("no_existing_erp_coverage")
     if not _confirmed(mapping.get("actual_incurred")) or not _confirmed(coverage):
         frappe.throw("必须确认费用实际发生及现有 ERP 覆盖情况")
@@ -752,7 +757,7 @@ def save_mapping(source_id, mapping, expected_source_version):
     if not values.get("posting_date"):
         frappe.throw("必须明确费用记账日期")
     old = json.loads(frappe.db.get_value(MAPPING, doc.name, "mapping_json") or "{}")
-    if frappe.db.exists(EVENT, {"source": doc.name}) and event_fingerprint(item, old) != event_fingerprint(item, values):
+    if frappe.db.exists(EVENT, {"source": doc.name,"operation":"expense"}) and event_fingerprint(item, old) != event_fingerprint(item, values):
         frappe.throw("已有凭证关联，费用确认不可覆盖；请人工复核调整")
     values.update(expense_fingerprint=digest(expense_facts(item)), source_version=item["version"], approved_by=frappe.session.user, approved_at=str(now_datetime()))
     target = frappe.get_doc(MAPPING, doc.name) if frappe.db.exists(MAPPING, doc.name) else frappe.new_doc(MAPPING)
@@ -839,6 +844,9 @@ def _payment_lines(doc, item, mapping, payment_id):
 
 
 def _preview(doc, item, mapping, payment_id=None):
+    if mapping.get("advance"):
+        from .operating_payment_service import advance_preview
+        return advance_preview(doc, item, payment_id)
     if _issues(item, mapping, include_payment_dates=False):
         frappe.throw("；".join(_issues(item, mapping, include_payment_dates=False)))
     if mapping.get("expense_fingerprint") != digest(expense_facts(item)):
@@ -855,13 +863,15 @@ def preview_voucher(source_id, payment_source_id=None):
     _finance()
     doc = _source(source_id)
     item = _fresh(doc)
-    return _preview(doc, item, _mapping(doc), payment_source_id)
+    from .operating_payment_service import voucher_mapping
+    return _preview(doc, item, voucher_mapping(doc, payment_source_id), payment_source_id)
 
 
 def _create_voucher_draft(source_id, expected_fingerprint, payment_source_id=None):
     _finance()
     doc = _source(source_id, write=True)
-    item, mapping = _fresh(doc), _mapping(doc, for_update=True)
+    from .operating_payment_service import voucher_mapping
+    item, mapping = _fresh(doc), voucher_mapping(doc, payment_source_id, for_update=True)
     if not payment_source_id and mapping.get("recognition_mode") == "existing":
         frappe.throw("已确认现有 ERP 覆盖，请关联现有凭证，不得再生成费用")
     preview = _preview(doc, item, mapping, payment_source_id)
@@ -947,7 +957,8 @@ def validate_operating_journal(doc, method=None):
     elif event.operation != "expense" or json.loads(event.provenance_json or "{}").get("operation") != "link_existing":
         frappe.throw("运营费用凭证事件关联不可移除或修改")
     source = _source(event.source)
-    item, mapping = _fresh(source), _mapping(source)
+    from .operating_payment_service import voucher_mapping
+    item, mapping = _fresh(source), voucher_mapping(source, event.payment_source_id if event.operation == "payment" else None)
     preview = _preview(source, item, mapping, event.payment_source_id if event.operation == "payment" else None)
     if preview["fingerprint"] != event.fingerprint or doc.company != source.company:
         frappe.throw("来源财务事实已变化，需要复核")
@@ -957,7 +968,7 @@ def validate_operating_journal(doc, method=None):
         frappe.throw("费用确认凭证关联不可修改")
     if event.operation == "payment" and doc.docstatus == 0 and any(row.reference_name or row.reference_type for row in doc.accounts):
         frappe.throw("付款草稿尚未核销，不能设置原生已核销引用")
-    if event.operation == "payment" and doc.docstatus == 1:
+    if event.operation == "payment" and doc.docstatus == 1 and not mapping.get("advance"):
         recognition = _recognition(source, mapping, item)
         if recognition.docstatus != 1:
             frappe.throw("费用确认凭证尚未提交，本付款凭证尚未核销")
@@ -998,8 +1009,9 @@ def save_source_company(source_id, company, expected_source_version):
 
 
 LIST_FIELDS = ["name", "source_id", "company", "application_type", "effective_application_type", "application_type_raw", "applicant", "payee_name", "summary", "request_date", "currency", "amount", "paid_amount", "pending_amount", "source_status", "approval_state", "source_company", "source_sheet", "source_version", "issues"]
-EXPORT_COLUMNS = {"company": "法律公司", "source_id": "来源编号", "effective_application_type": "财务申请类型", "application_type_raw": "原始申请类型", "applicant": "申请人", "payee_name": "收款人", "summary": "摘要", "request_date": "申请日期", "currency": "币种", "amount": "申请金额", "paid_amount": "出纳已付款", "pending_amount": "出纳待付款", "source_status": "来源付款状态", "approval_state": "来源审批状态", "issues": "待处理问题", "source_company": "来源公司", "source_sheet": "来源归档表"}
+EXPORT_COLUMNS = {"company": "法律公司", "source_id": "申请编号", "effective_application_type": "财务申请类型", "application_type_raw": "原始申请类型", "applicant": "申请人", "payee_name": "收款人", "summary": "摘要", "request_date": "申请日期", "currency": "币种", "amount": "申请金额", "paid_amount": "累计已付", "pending_amount": "剩余待付", "source_status": "付款状态", "approval_state": "来源审批状态", "finance_status": "凭证状态", "issues": "待处理问题", "source_company": "来源公司", "source_sheet": "来源归档表"}
 EXPORT_COLUMNS["approval_no"] = "原始审批编号"
+EXPORT_COLUMNS["display_source_id"] = "申请编号"
 
 
 def _list_rows(filters=None, order_by="request_date desc"):
@@ -1009,7 +1021,7 @@ def _list_rows(filters=None, order_by="request_date desc"):
     if not isinstance(filters, dict) or set(filters) - allowed:
         frappe.throw("列表筛选无效")
     native = []
-    for field in ("company", "application_type", "applicant", "source_status", "approval_state"):
+    for field in ("company", "application_type", "applicant", "approval_state"):
         if filters.get(field):
             if not isinstance(filters[field], str) or len(filters[field]) > 200:
                 frappe.throw("筛选值无效")
@@ -1044,7 +1056,15 @@ def _list_rows(filters=None, order_by="request_date desc"):
         rows = frappe.get_list(SOURCE, fields=LIST_FIELDS, filters=native, or_filters=or_filters, order_by=order_sql, limit_page_length=0)
     # Native query permissions + explicit Company query hook apply to this bounded
     # parent-field projection; no full source JSON is hydrated per result row.
-    return [dict(row) for row in rows]
+    rows = [dict(row) for row in rows]
+    from .operating_payment_service import overlay_rows
+    overlay_rows(rows)
+    status = filters.get("source_status")
+    if status:
+        if not isinstance(status, str) or len(status) > 200:
+            frappe.throw("付款状态筛选无效")
+        rows = [row for row in rows if row["source_status"] == status]
+    return rows
 
 
 @frappe.whitelist()
@@ -1076,7 +1096,8 @@ def _enrich_page(rows):
     _readable_source_numbers(rows)
     _require_fields(MAPPING, {"source", "company"})
     mappings = set(frappe.get_list(MAPPING, filters={"source": ["in", names]}, pluck="source", limit_page_length=0))
-    events = frappe.get_all(EVENT, filters={"source": ["in", names]}, fields=["source", "journal_entry", "operation", "payment_source_id"], limit_page_length=0)
+    events = frappe.get_all(EVENT, filters={"source": ["in", names]}, fields=["source", "journal_entry", "operation", "payment_source_id", "provenance_json"], limit_page_length=0)
+    events = [event for event in events if not json.loads(event.provenance_json or "{}").get("voided_draft")]
     journals = {}
     if events and frappe.has_permission("Journal Entry", "read"):
         try:
@@ -1104,6 +1125,9 @@ def _enrich_page(rows):
 def get_operating_expense_detail(source_id):
     doc = _source(source_id)
     raw = json.loads(doc.source_json)
+    from .operating_payment_service import merge_source, payment_context, payment_detail
+    context = payment_context(doc, raw)
+    raw = merge_source(doc, raw, context)
     item = {key: raw[key] for key in RAW_SOURCE_PERMISSIONS if key in raw}
     # Malformed evidence remains untouched in server JSON and visible in issues;
     # do not invent payment identities/amounts or an eligible approval in the UI.
@@ -1115,13 +1139,17 @@ def get_operating_expense_detail(source_id):
     approval_fields += tuple("cashier_" + field for field in approval_fields)
     item["approvals"] = {"eligibility": approvals.get("eligibility") if valid_approvals else None, "raw": {key: approval_raw.get(key) for key in approval_fields} if valid_approvals else {}}
     events = []
-    for event in frappe.get_all(EVENT, filters={"source": doc.name}, fields=["name", "journal_entry", "operation", "payment_source_id", "fingerprint", "source_version"], limit_page_length=0):
+    for event in frappe.get_all(EVENT, filters={"source": doc.name}, fields=["name", "journal_entry", "operation", "payment_source_id", "fingerprint", "source_version", "provenance_json"], limit_page_length=0):
+        provenance = json.loads(event.provenance_json or "{}")
+        if provenance.get("voided_draft"):
+            events.append({"operation": event.operation, "payment_source_id": event.payment_source_id, "settlement_state": "草稿已弃用；付款已撤销", "voided": True})
+            continue
         try:
             _journal_association_scope()
             journal = _read("Journal Entry", event.journal_entry, {"company", "docstatus"})
             if journal.company != doc.company:
                 raise frappe.PermissionError
-            events.append({**dict(event), "docstatus": journal.docstatus, "settlement_state": "尚未核销" if event.operation == "payment" and journal.docstatus == 0 else None})
+            events.append({**{key: value for key,value in dict(event).items() if key!="provenance_json"}, "docstatus": journal.docstatus, "settlement_state": "尚未核销" if event.operation == "payment" and journal.docstatus == 0 else None})
         except (frappe.PermissionError, frappe.DoesNotExistError):
             events.append({"operation": event.operation, "payment_source_id": event.payment_source_id, "issue": "关联凭证缺失或无权读取"})
     mapping, mapping_issue = None, None
@@ -1133,7 +1161,8 @@ def get_operating_expense_detail(source_id):
     # Client gets stable attachment identifiers; authenticated upstream paths remain server-side.
     item["attachments"] = _detail_rows(raw.get("attachments"), ("source_id", "filename", "version", "payment_source_id"))
     item.pop("provenance", None)
-    return {"source": item, "company": doc.company or None, "issues": doc.issues, "mapping": mapping, "mapping_issue": mapping_issue, "events": events}
+    item["effective_application_type"] = doc.effective_application_type
+    return {"source": item, "company": doc.company or None, "issues": doc.issues, "mapping": mapping, "mapping_issue": mapping_issue, "events": events, "erp_payments": payment_detail(doc, context)}
 
 
 def _detail_rows(rows, fields):
@@ -1156,8 +1185,13 @@ def export_operating_expenses(filters=None, order_by="request_date desc", column
     selected = frappe.parse_json(columns) if isinstance(columns, str) else columns or list(EXPORT_COLUMNS)
     if not isinstance(selected, list) or not selected or len(selected) != len(set(selected)) or set(selected) - set(EXPORT_COLUMNS):
         frappe.throw("导出列无效")
-    if "approval_no" in selected:
+    if "finance_status" in selected:
+        _enrich_page(rows)
+    elif "approval_no" in selected or "display_source_id" in selected:
         _readable_source_numbers(rows)
+    if "display_source_id" in selected:
+        for row in rows:
+            row["display_source_id"] = row.get("approval_no") or row["source_id"]
     from xlsxwriter import Workbook
     from io import BytesIO
     data = [[EXPORT_COLUMNS[field] for field in selected]] + [[row.get(field) for field in selected] for row in rows]

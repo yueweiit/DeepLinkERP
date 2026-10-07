@@ -6,6 +6,24 @@ const create = fs.existsSync(require("node:path").join(__dirname, listPath))
 	? require(listPath)
 	: () => ({});
 const api = create({});
+test("recommended finance columns put approval and amounts before optional technical fields", () => {
+ assert.deepEqual(api.defaultColumns,["request_date","source_id","effective_application_type","payee_name","company","approval_state","amount","paid_amount","pending_amount","finance_status","actions"]);
+ assert.match(api.renderValue("source_id",{source_id:"x",approval_no:"100",summary:"rent"}),/rent/);
+});
+test("combined application identity has one full-width two-line wrapper inside the shared flex cell", () => {
+ const html=api.renderValue("source_id",{source_id:"1001",summary:"rent"});
+ assert.match(html,/^<div class="dlp-operating-identity"><span/);
+ assert.match(html,/<small[^>]*>rent<\/small><\/div>$/);
+ const css=fs.readFileSync(require("node:path").join(__dirname,"../deeplinkerp_branding/public/css/operating_expenses.css"),"utf8");
+ assert.match(css,/\.dlp-operating-identity\s*\{[^}]*width:\s*100%[^}]*min-width:\s*0/s);
+ assert.match(css,/\[data-fieldname="amount"\][^{]*\{[^}]*gap:\s*4px/s);
+});
+test("displayed application identity exports readable number and summary in place, retaining audit ID", async () => {
+ let args;
+ const root={DeepLinkERPPurchaseOrderExport:{downloadWorkbook(){},fetchNativeWorkbook:async (_root,input)=>{args=input;return {};}}};
+ await create(root).exportCurrent({quick:{},providerOrderBy:"request_date desc",preferences:{columns:["request_date","source_id","amount"]}});
+ assert.deepEqual(JSON.parse(args.columns),["request_date","display_source_id","summary","amount","currency","approval_no","source_id"]);
+});
 
 test("original application number is readable and payment uncertainty is filterable", () => {
 	assert.equal(api.filters({source_status: "付款待核对"}).source_status, "付款待核对");
@@ -98,7 +116,7 @@ test("summary renders every server currency separately and calls out unknown or 
 			},
 		},
 	});
-	assert.match(html, /CNY.*10\.00.*出纳已付.*2\.00.*出纳待付.*8\.00/);
+	assert.match(html, /CNY.*10\.00.*累计已付.*2\.00.*剩余待付.*8\.00/);
 	assert.match(html, /USD.*3\.00/);
 	assert.match(html, /不完整/);
 	assert.match(html, /币种未明确/);
@@ -131,7 +149,7 @@ test("full-filter Excel snapshots filters, sort and ordered supported columns be
 	await pending;
 	assert.deepEqual(JSON.parse(args.filters), { company: "C", keyword: "old" });
 	assert.equal(args.order_by, "source_id asc");
-	assert.deepEqual(JSON.parse(args.columns), ["summary", "amount", "currency", "approval_no", "source_id"]);
+	assert.deepEqual(JSON.parse(args.columns), ["summary", "finance_status", "amount", "currency", "approval_no", "source_id"]);
 	assert.equal(args.start, undefined);
 	assert.equal(args.page_length, undefined);
 	assert.equal(
@@ -149,6 +167,7 @@ test("list opens source drawer directly and preserves raw backend finance status
 		/草稿已生成/
 	);
 	assert.equal(api.renderValue("amount", { amount: "0" }), "0.00");
+	assert.match(api.renderValue("amount", { amount: "1", currency: "MXN" }), /1\.00.*MXN/);
 });
 test("operating Page reuses the shared readonly engine with scalar permission aliases and fixed source filters", () => {
 	let config;
@@ -282,7 +301,7 @@ test("shared column settings opens for a provider whose primary identifier is so
 	assert.doesNotThrow(() => handlers.get(".dlp-po-columns:click.dlpPO")());
 	assert.equal(shown, 1);
 	assert.match(dialogHTML, /申请编号/);
-	assert.match(dialogHTML, /财务状态/);
+	assert.match(dialogHTML, /凭证状态/);
 	assert.match(dialogHTML, /操作/);
 	assert.doesNotMatch(dialogHTML, /data-field="name"/);
 	assert.deepEqual(c.preferences.columns, ["source_id", "finance_status", "actions"]);

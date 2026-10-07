@@ -1,0 +1,107 @@
+{
+ "doctype": "DocType",
+ "name": "Operating Expense Takeover",
+ "module": "Deeplinkerp Branding",
+ "custom": 0,
+ "engine": "InnoDB",
+ "issingle": 0,
+ "istable": 0,
+ "allow_rename": 0,
+ "track_changes": 1,
+ "autoname": "field:source",
+ "field_order": [
+  "source",
+  "company",
+  "cashier_root",
+  "claimed_by",
+  "claimed_at",
+  "history_json",
+  "claim_token",
+  "history_fingerprint",
+  "expense_fingerprint"
+ ],
+ "fields": [
+  {
+   "fieldname": "source",
+   "label": "source",
+   "fieldtype": "Link",
+   "read_only": 1,
+   "options": "Operating Expense Source",
+   "reqd": 1
+  },
+  {
+   "fieldname": "company",
+   "label": "company",
+   "fieldtype": "Link",
+   "read_only": 1,
+   "options": "Company"
+  },
+  {
+   "fieldname": "cashier_root",
+   "label": "cashier root",
+   "fieldtype": "Data",
+   "read_only": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "claimed_by",
+   "label": "claimed by",
+   "fieldtype": "Link",
+   "read_only": 1,
+   "options": "User"
+  },
+  {
+   "fieldname": "claimed_at",
+   "label": "claimed at",
+   "fieldtype": "Datetime",
+   "read_only": 1
+  },
+  {
+   "fieldname": "history_json",
+   "label": "history json",
+   "fieldtype": "Long Text",
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "claim_token",
+   "label": "claim token",
+   "fieldtype": "Data",
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "history_fingerprint",
+   "label": "history fingerprint",
+   "fieldtype": "Data",
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "expense_fingerprint",
+   "label": "expense fingerprint",
+   "fieldtype": "Data",
+   "read_only": 1,
+   "permlevel": 1
+  }
+ ],
+ "permissions": [
+  {
+   "role": "Accounts Manager",
+   "read": 1,
+   "export": 1
+  },
+  {
+   "role": "System Manager",
+   "read": 1,
+   "export": 1
+  },
+  {
+   "role": "Accounts User",
+   "read": 1,
+   "export": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC"
+}

@@ -106,6 +106,11 @@ class OperatingExpenseContractTest(unittest.TestCase):
         formatted = {"party": "Supplier", "expense_lines": [{"amount": "100.00", "source_amount": "100.0", "exchange_rate": "1.0"}]}
         self.assertEqual(contract.event_fingerprint(before, mapping), contract.event_fingerprint(after, formatted))
 
+    def test_malformed_cached_attachments_fail_closed_with_a_validation_error(self):
+        for attachments in (None,"bad",["bad"]):
+            with self.subTest(attachments=attachments),self.assertRaises(ValueError):
+                contract.expense_facts({**source(),"attachments":attachments})
+
 
 if __name__ == "__main__":
     unittest.main()

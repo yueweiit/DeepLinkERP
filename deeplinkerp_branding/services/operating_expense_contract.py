@@ -88,13 +88,16 @@ def attachment_facts(rows):
 
 
 def expense_facts(item):
+    attachments=item.get("attachments",[])
+    if not isinstance(attachments,list) or any(not isinstance(row,dict) for row in attachments):
+        raise ValueError("来源附件事实格式无效，请核对原单")
     facts = {key: item.get(key) for key in ("source_system", "source_id", "source_company", "application_type", "application_type_raw", "applicant", "payee_name", "summary", "request_date", "currency", "original_source_amount", "original_source_currency", "storage_precision_warning", "source_conflict", "currency_conflict", "approvals")}
     if item.get("source_system") == "dingtalk-oa" and isinstance(facts["approvals"], dict):
         approvals = facts["approvals"]
         if isinstance(approvals.get("raw"), dict):
             facts["approvals"] = {**approvals, "raw": {key: value for key, value in approvals["raw"].items() if not key.startswith("cashier_")}}
     facts["amount"] = format(money(item["amount"]).normalize(), "f")
-    facts["attachments"] = attachment_facts([row for row in item.get("attachments", []) if not row.get("payment_source_id")])
+    facts["attachments"] = attachment_facts([row for row in attachments if not row.get("payment_source_id")])
     return facts
 
 

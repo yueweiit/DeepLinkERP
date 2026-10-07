@@ -14,7 +14,7 @@
 		);
 	const columns = [
 		["request_date", "申请日期", 110],
-		["source_id", "申请编号", 195],
+		["source_id", "申请编号 / 摘要", 240],
 		["effective_application_type", "申请类型", 115],
 		["payee_name", "收款人", 170],
 		["applicant", "申请人", 110],
@@ -22,13 +22,14 @@
 		["summary", "摘要", 250],
 		["currency", "币种", 75],
 		["amount", "申请金额", 125],
-		["paid_amount", "出纳已付", 125],
-		["pending_amount", "出纳待付", 125],
+		["paid_amount", "累计已付", 125],
+		["pending_amount", "剩余待付", 125],
 		["source_status", "付款状态", 120],
 		["approval_state", "来源审批", 125],
-		["finance_status", "财务状态", 135],
+		["finance_status", "凭证状态", 135],
 		["actions", "操作", 85],
 	].map(([fieldname, label, width]) => ({ fieldname, label, width }));
+	const defaultColumns = ["request_date","source_id","effective_application_type","payee_name","company","approval_state","amount","paid_amount","pending_amount","finance_status","actions"];
 	const sortFields = ["request_date", "amount", "applicant", "source_id", "company", "modified"];
 	const filterFields = [
 		"keyword",
@@ -56,6 +57,7 @@
 		"pending_amount",
 		"source_status",
 		"approval_state",
+		"finance_status",
 		"issues",
 		"source_company",
 		"source_sheet",
@@ -117,8 +119,8 @@
 				([currency, row]) =>
 					`${esc(currency || t("币种未明确"))} · ${esc(t("申请金额"))} ${money(
 						row.amount
-					)} · ${esc(t("出纳已付"))} ${money(row.paid_amount)} · ${esc(
-						t("出纳待付")
+					)} · ${esc(t("累计已付"))} ${money(row.paid_amount)} · ${esc(
+						t("剩余待付")
 					)} ${money(row.pending_amount)}${
 						row.incomplete
 							? ` <span class="text-warning">${esc(t("金额不完整，需复核"))}</span>`
@@ -128,8 +130,8 @@
 			.join("<br>");
 	}
 	function renderValue(field, doc) {
-		if (field === "source_id") return `<span title="${esc(doc.source_id)}">${esc(doc.approval_no || doc.source_id || "—")}</span>`;
-		if (["amount", "paid_amount", "pending_amount"].includes(field)) return money(doc[field]);
+		if (field === "source_id") return `<div class="dlp-operating-identity"><span class="dlp-operating-ellipsis" title="${esc(doc.source_id)}">${esc(doc.approval_no || doc.source_id || "—")}</span><small class="dlp-operating-ellipsis text-muted" title="${esc(doc.summary||"")}">${esc(doc.summary||"—")}</small></div>`;
+		if (["amount", "paid_amount", "pending_amount"].includes(field)) return money(doc[field])+(doc.currency?` <small class="text-muted">${esc(doc.currency)}</small>`:"");
 		if (field === "effective_application_type") return esc(typeLabel(doc[field]));
 		if (field === "approval_state")
 			return `<span class="${
@@ -150,7 +152,7 @@
 			order_by: orderBy(c.providerOrderBy),
 			columns: JSON.stringify([
 				...new Set([
-					...c.preferences.columns.filter((field) => exportFields.has(field)),
+					...c.preferences.columns.flatMap(field=>field==="source_id"?["display_source_id","summary"]:exportFields.has(field)?[field]:[]),
 					"currency",
 					"approval_no",
 					"source_id",
@@ -185,6 +187,16 @@
 		});
 	}
 	function mountControls(c) {
+		const tabs=root.$('<div class="dlp-operating-list-tabs"></div>').insertBefore(c.$toolbar);
+		for(const [field,choices] of [["application_type",[["","全部申请"],["payment","付款申请"],["reimbursement","费用报销"]]],["source_status",[["","全部付款状态"],["未付款","未付款"],["部分付款","部分付款"],["已付款","已付款"],["付款待核对","待核对"]]]]) {
+			if(!c.controls[field])continue;
+			const group=root.$('<div role="group"></div>').appendTo(tabs);
+			const mark=()=>group.find("button").each((_i,node)=>root.$(node).toggleClass("active",node.dataset.value===(c.controls[field].get_value()||"")));
+			for(const [value,label] of choices) root.$(`<button type="button" class="btn btn-default btn-sm" data-value="${esc(value)}">${esc(t(label))}</button>`).appendTo(group).on("click.dlpOperating",async()=>{c.resetting=true;try{c.quick[field]=value;await c.controls[field].set_value(value);}finally{c.resetting=false;}mark();c.setPage(0);await c.refresh();});
+			c.controls[field].$input?.on("change.dlpOperating",mark);
+			mark();
+		}
+		root.$(`<button type="button" class="btn btn-default btn-sm">${esc(t("恢复推荐列"))}</button>`).appendTo(c.$toolbar).on("click.dlpOperating",()=>c.setColumns(defaultColumns));
 		root.$(
 			`<button type="button" class="btn btn-default btn-sm">${esc(t("清空筛选"))}</button>`
 		)
@@ -220,7 +232,7 @@
 			});
 		c.$operatingNotice = root
 			.$('<p class="text-muted dlp-operating-notice"></p>')
-			.text(t("出纳已付 / 待付来自请款网站；ERP 财务状态单独显示。凭证在此仅保存草稿。"))
+			.text(t("历史付款 + ERP 登记汇总；审批、付款、凭证状态分别展示。登记不转账，凭证仅保存草稿。"))
 			.insertAfter(c.$filters);
 	}
 	function grid() {
@@ -256,7 +268,7 @@
 			pageRoute: route,
 			routeClass: "dlp-operating-expense-grid-active",
 			columns,
-			defaultColumns: columns.map((col) => col.fieldname),
+			defaultColumns,
 			defaultSort: "request_date desc",
 			pageFieldMap,
 			controls,
@@ -273,7 +285,7 @@
 			},
 			provider: {
 				columns,
-				defaultColumns: columns.map((col) => col.fieldname),
+				defaultColumns,
 				freezeUntil: "source_id",
 				sortFields,
 				request,
@@ -291,6 +303,7 @@
 		API,
 		route,
 		columns,
+		defaultColumns,
 		sortFields,
 		filters,
 		orderBy,

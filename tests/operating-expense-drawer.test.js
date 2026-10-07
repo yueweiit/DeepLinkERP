@@ -57,6 +57,12 @@ const recognizedDetail = (docstatus = 0) => {
 	return d;
 };
 const api = create({});
+test("drawer presents four concise sections and preserves raw source facts in a foldout", () => {
+ const a=create({DeepLinkERPOperatingExpenses:{money:String,approvalLabel:()=>"审批通过",typeLabel:()=>"付款申请"}});
+ const html=a.sourceHTML(detail());
+ for(const tab of ["request","approvals","payments","vouchers"]) assert.match(html,new RegExp(`data-operating-pane="${tab}"`));
+ assert.match(html,/dlp-operating-hero/); assert.match(html,/<details/); assert.match(html,/累计已付/);
+});
 test("cashier approval decisions and reported payment state remain separately labelled", () => {
 	const d = detail();
 	d.source.source_status = "付款待核对";

@@ -21,6 +21,16 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         frappe.set_user("Administrator")
 
     def setUp(self):
+        # Preserve the committed browser takeover/payments, but isolate this
+        # pre-takeover regression suite inside its rolled-back transaction.
+        for dt in ("Operating Expense Payment","Operating Expense Takeover"):
+            if frappe.db.exists("DocType",dt):
+                rows=frappe.get_all(dt,filters={"source":["in",["1001","1002"]]},fields=["name","company"])
+                if any(row.company not in {"QA Operating China","QA Operating Mexico"} for row in rows):
+                    raise RuntimeError("Unexpected QA company; do not isolate")
+                if rows:
+                    frappe.db.delete(dt,{"name":["in",[row.name for row in rows]]})
+        frappe.db.set_single_value("Operating Expense Sync Settings","enabled",0)
         # The browser demo contains draft fixtures. Remove only their associations
         # inside each rolled-back test transaction, so every case has a clean start.
         events = frappe.get_all("Operating Expense Event", fields=["name", "source", "journal_entry"], limit_page_length=0)

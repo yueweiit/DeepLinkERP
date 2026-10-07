@@ -544,7 +544,9 @@ class CrossborderUpgradeNativeRehearsal(unittest.TestCase):
 		from audit_unified_purchase import capture_joint_state
 		cls.unseeded = capture_joint_state()
 		assert cls.unseeded["models"][release.FULFILMENT_MODEL]["schema"] is None
-		assert all(model["schema"] is not None for name, model in cls.unseeded["models"].items() if name not in {release.FULFILMENT_MODEL, "Operating Expense Sync Settings"})
+		new_models={release.FULFILMENT_MODEL,"Operating Expense Sync Settings","Operating Expense Takeover","Operating Expense Payment"}
+		assert all(model["schema"] is None for name,model in cls.unseeded["models"].items() if name in new_models)
+		assert all(model["schema"] is not None for name, model in cls.unseeded["models"].items() if name not in new_models)
 		assert set(release.CUSTOM_FIELD_ORDER) <= set(cls.unseeded["je"]["schema"]["columns"])
 		assert set(release.SOURCE_FIELD_ORDER[:5]) <= set(cls.unseeded["oa"]["schema"]["columns"])
 		assert not set(release.SOURCE_FIELD_ORDER[5:]) & set(cls.unseeded["oa"]["schema"]["columns"])
@@ -578,11 +580,11 @@ class CrossborderUpgradeNativeRehearsal(unittest.TestCase):
 			self.restore()
 		self.assert_state_equal(self.capture(), self.original)
 
-	def test_nine_new_ddl_boundaries_keep_old_records_check_defaults_and_reapply_noop(self):
+	def test_eleven_new_ddl_boundaries_keep_old_records_check_defaults_and_reapply_noop(self):
 		with self.assertRaises(AssertionError):
 			release.verify_current_joint_contract()
 		result = release.apply_joint_metadata(CANDIDATE_SHA, self.receipt)
-		self.assertEqual(result["ddl_boundaries"], 9)
+		self.assertEqual(result["ddl_boundaries"], 11)
 		self.assertTrue(result["new_fields_at_native_defaults"])
 		after = self.capture()
 		self.assertEqual(after["oa"]["rows"], self.original["oa"]["rows"])
@@ -610,7 +612,7 @@ class CrossborderUpgradeNativeRehearsal(unittest.TestCase):
 		release.verify_joint_audit_delta(before, fresh, state)
 
 	def test_every_new_column_create_and_composite_index_autocommit_restores_exact_baseline(self):
-		for crash in range(1, 10):
+		for crash in range(1, 12):
 			with self.subTest(crash=crash):
 				self.receipt = self.evidence / (self.run_prefix + "-crash-" + str(crash) + ".json")
 				original_ddl = frappe.db.sql_ddl

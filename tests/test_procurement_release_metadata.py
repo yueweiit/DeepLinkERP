@@ -9,6 +9,8 @@ module = runpy.run_path(str(Path(__file__).parents[1] / "deploy/production/procu
 
 
 class ProcurementReleaseMetadataTests(unittest.TestCase):
+	def test_only_the_two_payment_models_expand_the_reviewed_release_scope(self):
+		self.assertEqual(set(module["JOINT_MODELS"]), {"Operating Expense Company Map","Operating Expense Source","Operating Expense Mapping","Operating Expense Event","Operating Expense Sync Settings","Purchase Fulfilment Link","Operating Expense Takeover","Operating Expense Payment"})
 	def fixture(self):
 		old = {
 			"scope": {"Page": [], "Has Role": []},

@@ -19,6 +19,39 @@ body.dlp-operating-expense-grid-active:not(.dlp-mes-navigation-enabled) .dlp-int
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
+.dlp-operating-identity {
+	width: 100%;
+	min-width: 0;
+}
+body.dlp-operating-expense-grid-active .dlp-po-grid-row :is([data-fieldname="amount"], [data-fieldname="paid_amount"], [data-fieldname="pending_amount"]) {
+	gap: 4px;
+}
+.dlp-operating-list-tabs { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin: 6px 0 10px; }
+.dlp-operating-list-tabs > div { display: flex; flex-wrap: wrap; gap: 6px; }
+.dlp-operating-list-tabs .active { color: #1675cc; background: #eaf3ff; }
+body.dlp-operating-expense-grid-active .dlp-po-grid-row { min-height: 42px; }
+.dlp-operating-drawer [data-operating-pane][hidden] { display: none !important; }
+.dlp-operating-hero { display: flex; flex-wrap: wrap; align-items: start; gap: 12px; padding: 8px 0 14px; }
+.dlp-operating-hero > div:first-child { flex: 1; min-width: 150px; }
+.dlp-operating-hero h3 { margin: 0 0 6px; font-size: 17px; }
+.dlp-operating-hero p { margin: 0; color: var(--text-muted); }
+.dlp-operating-hero-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.dlp-operating-money-strip { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); width: 100%; gap: 8px; padding: 12px; background: #f2f7ff; border-radius: 6px; }
+.dlp-operating-money-strip small, .dlp-operating-money-strip strong { display: block; }
+.dlp-operating-money-strip strong { margin-top: 4px; font-size: 16px; }
+.dlp-operating-tabs { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 0; border-bottom: 1px solid #e1e8f0; }
+.dlp-operating-tabs button { border: 0; background: transparent; padding: 7px 12px; color: var(--text-muted); border-radius: 5px; }
+.dlp-operating-tabs button.active { background: #eaf3ff; color: #1675cc; font-weight: 600; }
+.dlp-operating-advanced { padding: 8px 0; }
+.dlp-operating-advanced summary { cursor: pointer; color: var(--text-muted); margin-bottom: 8px; }
+.dlp-operating-timeline { list-style: none; margin: 0; padding: 4px 0 4px 14px; }
+.dlp-operating-timeline li { position: relative; padding: 0 0 18px 20px; border-left: 2px solid #dbe7f2; }
+.dlp-operating-timeline li::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: #9aafc2; position: absolute; left: -5px; top: 4px; }
+.dlp-operating-timeline li.is-current::before { background: #1675cc; }
+.dlp-operating-timeline small { display: block; color: var(--text-muted); margin: 5px 0; }
+.dlp-operating-timeline p { white-space: pre-wrap; }
+.dlp-operating-payment-card { border: 1px solid #e1e8f0; border-radius: 6px; padding: 12px; margin: 10px 0; }
+.dlp-operating-payment-preview { padding: 10px; background: #f2f7ff; }
 .dlp-operating-notice {
 	margin: 6px 0;
 	font-size: 12px;
@@ -74,6 +107,7 @@ body.dlp-operating-expense-grid-active:not(.dlp-mes-navigation-enabled) .dlp-int
 	margin-bottom: 4px;
 }
 @media (max-width: 767.98px) {
+	.dlp-operating-money-strip { grid-template-columns: 1fr; }
 	body.dlp-operating-expense-grid-active .page-form {
 		flex-wrap: wrap;
 	}

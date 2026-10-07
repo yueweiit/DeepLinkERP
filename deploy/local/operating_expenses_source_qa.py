@@ -30,6 +30,7 @@ def main():
 	os.environ["PAYMENT_ATTACHMENT_STORAGE_DIR"] = str(data / "storage")
 	os.environ["PAYMENT_ERP_EXPORT_TOKEN"] = "operating-source-qa-only"
 	os.environ["PAYMENT_ERP_EXPORT_ALLOWED_SHEETS"] = '["QA运营"]'
+	os.environ["PAYMENT_ERP_TAKEOVER_ENABLED"] = "true"
 	from backend.app import db
 	from backend.app.erp_export import router
 	from fastapi import FastAPI
@@ -59,6 +60,9 @@ def main():
 				"record_id": f"qa-operating-{index:03}", "application_date": "2026-10-01",
 				"application_type_raw": type_raw, "source_company_raw": company,
 				"approval_status": "COMPLETED", "approval_result": "refuse" if index == 4 else "agree"}
+			if index in (1,8):
+				external.update(process_instance_id=f"qa-operating-process-{index}", corp_id="qa-corp",
+					workflow_url=f"https://aflow.dingtalk.com/dingtalk/mobile/homepage.htm?procInstId=qa-operating-process-{index}")
 			if index == 3:
 				external.pop("application_type_raw")
 			if index == 5:
@@ -88,6 +92,10 @@ def main():
 		# The production application maintains these states through this same
 		# native helper. Run it only while constructing disposable QA records.
 		db.refresh_payment_summaries(conn, bump_version=False)
+		for request_id in (1001,1008):
+			for index,(stage,operator,comment) in enumerate((("提交申请","QA员工","合成申请"),("部门审批","QA经理","合成审批同意"),("财务审批","QA财务","金额与收款方已核对"))):
+				conn.execute("""INSERT INTO dingtalk_workflow_events(request_id,event_key,process_instance_id,stage_name,operator_name,event_time,result,comment,is_current,sequence_index,synced_at,created_at,updated_at)
+					VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",(request_id,f"qa-node-{index}",f"qa-operating-process-{request_id-1000}",stage,operator,f"2026-10-01T0{index+1}:00:00Z","agree",comment,0,index,stamp,stamp,stamp))
 	app = FastAPI()
 	app.include_router(router)
 	print(json.dumps({"qa_source": "http://127.0.0.1:64244", "requests": 130, "payments": 3}))

@@ -17,7 +17,7 @@ from pathlib import Path
 PAGE = "purchase-payables"
 NAVIGATION = (("Workspace", "Buying"), ("Workspace Sidebar", "Buying"))
 FULFILMENT_MODEL = "Purchase Fulfilment Link"
-JOINT_MODELS = ("Operating Expense Company Map", "Operating Expense Source", "Operating Expense Mapping", "Operating Expense Event", "Operating Expense Sync Settings", FULFILMENT_MODEL)
+JOINT_MODELS = ("Operating Expense Company Map", "Operating Expense Source", "Operating Expense Mapping", "Operating Expense Event", "Operating Expense Sync Settings", FULFILMENT_MODEL,"Operating Expense Takeover","Operating Expense Payment")
 JOINT_PAGES = (PAGE, "operating-expenses")
 JOINT_NAVIGATION = tuple((dt, name) for name in ("Buying", "Accounting", "China Finance") for dt in ("Workspace", "Workspace Sidebar"))
 OPERATING_METHOD = "deeplinkerp_branding.services.operating_expenses.scheduled_sync"
