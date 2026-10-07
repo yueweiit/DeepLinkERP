@@ -48,6 +48,22 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         frappe.set_user("Administrator")
 
     def setUp(self):
+        # The new OA browser scenarios share this disposable site. Exclude only
+        # these exact, unattached synthetic identities inside the test transaction;
+        # tearDown restores them, so the original 130-row suite stays unchanged.
+        from deeplinkerp_branding.services.operating_expense_contract import digest
+        for case in ("completed", "cashier", "supervisor", "no-history"):
+            identity = {"corp_id": "qa-corp", "process_instance_id": "qa-oa-" + case}
+            name = "oa:" + digest(list(identity.values()))
+            if not frappe.db.exists("Operating Expense Source", name):
+                continue
+            raw = json.loads(frappe.db.get_value("Operating Expense Source", name, "source_json"))
+            if raw.get("oa_identity") != identity or not str(raw.get("summary", "")).startswith("QA OA "):
+                raise RuntimeError("Unexpected OA browser fixture; do not isolate")
+            for doctype in ("Operating Expense Takeover", "Operating Expense Payment", "Operating Expense Mapping", "Operating Expense Event"):
+                if frappe.db.exists("DocType", doctype) and frappe.db.exists(doctype, {"source": name}):
+                    raise RuntimeError("OA browser fixture has financial activity; do not isolate")
+            frappe.db.delete("Operating Expense Source", {"name": name})
         # Preserve the committed browser takeover/payments, but isolate this
         # pre-takeover regression suite inside its rolled-back transaction.
         for dt in ("Operating Expense Payment","Operating Expense Takeover"):
