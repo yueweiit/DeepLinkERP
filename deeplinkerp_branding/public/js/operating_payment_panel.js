@@ -114,7 +114,7 @@
     if(preview.needs_zero_history_confirmation===true){needsZeroConfirmation=true;await requireHistoryConfirmation();if(!zeroConfirmed){drawer.refreshEligibility();return;}}
     if (!preview.existing && !(await confirm(`${esc(t("已核对历史"))} ${esc(preview.history_count??"—")} ${esc(t("笔，待付"))} ${esc(preview.balance?.pending_amount??"—")} ${esc(preview.currency||"—")}。${esc(t("启用后，对应申请在请款网站不能再登记付款。确认接管？"))}`))) return;
     if (!mounted()) return;
-    if (!preview.existing) await uiTask(drawer,()=>request("claim_takeover",{source_id:sourceId,expected_source_version:preview.source_version,expected_history_version:preview.history_version,request_id:root.crypto.randomUUID(),zero_history_confirmed:zeroConfirmed}));
+    if (!preview.existing) await uiTask(drawer,()=>request("claim_takeover",{source_id:sourceId,expected_source_version:preview.source_version,expected_history_version:preview.history_version,...(preview.eligibility_fingerprint?{expected_eligibility_fingerprint:preview.eligibility_fingerprint}:{}),request_id:root.crypto.randomUUID(),zero_history_confirmed:zeroConfirmed}));
     if (drawer.alive()) await reload();
    },()=>Boolean(canTakeover(detail,canFinance()) && (!needsZeroConfirmation||zeroConfirmed)));
   } else if (canRegister(detail,canFinance())) {

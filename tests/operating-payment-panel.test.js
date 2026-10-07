@@ -176,7 +176,8 @@ test("proof upload is optional after persisted payment and never passed as saved
 });
 test("unknown OA-only history requires deliberate confirmation before authoritative takeover preview", async () => {
  const detail={company:"C",source:{version:"v1",application_type:"payment",currency:"CNY",oa_identity:{corp_id:"corp",process_instance_id:"OA-1"},payment_eligibility:{can_register_payment:true},payments:[]},erp_payments:{managed:false,needs_zero_history_confirmation:true}};
- const h=panelHost(detail,{preview_takeover:{history_count:0,needs_zero_history_confirmation:true,source_version:"v1",history_version:"h1",balance:{pending_amount:"100.00"},currency:"CNY"},claim_takeover:{}});
+ const fingerprint="a".repeat(64);
+ const h=panelHost(detail,{preview_takeover:{history_count:0,needs_zero_history_confirmation:true,source_version:"v1",history_version:"h1",eligibility_fingerprint:fingerprint,balance:{pending_amount:"100.00"},currency:"CNY"},claim_takeover:{}});
  await require(file)(h.root).mount(h.drawer,detail,h.helpers);
  const takeover=h.actions.get("核对历史付款");assert.ok(takeover);
  assert.equal(takeover.eligible(),false);assert.equal(h.requests.length,0);
@@ -186,4 +187,5 @@ test("unknown OA-only history requires deliberate confirmation before authoritat
  assert.deepEqual(h.requests.map(row=>row.method),["preview_takeover","claim_takeover"]);
  assert.equal(h.requests[0].args.zero_history_confirmed,true);
  assert.equal(h.requests[1].args.expected_history_version,"h1");
+ assert.equal(h.requests[1].args.expected_eligibility_fingerprint,fingerprint);
 });
