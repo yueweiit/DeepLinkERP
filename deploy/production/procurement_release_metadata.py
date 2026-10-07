@@ -413,12 +413,18 @@ def _definition_matches(scope, name, definition):
 		return False
 	actual_parents = [semantic_row(row) for row in parents]
 	if parent_dt == "Scheduled Job Type":
-		# Native execution state is not a schedule definition. Compare only this
-		# verified runtime field against the static contract; expected scope keeps
-		# the complete original raw row, including its timestamp, byte-for-byte.
+		# Keep execution timestamps and an existing dedicated runner's logging
+		# flag in the raw scope byte-for-byte. Only a native default (not an
+		# explicit source policy) may accept the runner's evidenced 0/1 flag.
+		# Method, frequency, cron, stopped and server_script remain exact.
+		wanted_parent = definition["native"][parent_dt][0]
 		for row in actual_parents:
 			if "last_execution" in row:
-				row["last_execution"] = definition["native"][parent_dt][0].get("last_execution")
+				row["last_execution"] = wanted_parent.get("last_execution")
+			if "create_log" in row:
+				assert type(row["create_log"]) is int and row["create_log"] in (0, 1), "Invalid scheduled logging flag: " + name
+				if "create_log" not in source and wanted_parent.get("create_log") == 0:
+					row["create_log"] = 0
 	if parent_dt == "Page" and "page_name" not in source:
 		# Bounded legacy compatibility: NULL or exactly the approved source route.
 		# Keep the complete original raw Page row; this comparison never rewrites it.

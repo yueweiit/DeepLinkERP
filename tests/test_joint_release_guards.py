@@ -776,6 +776,38 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 			with self.subTest(flag=flag), self.assertRaises(AssertionError):
 				module._definition_matches({"Scheduled Job Type": [dict(row, **{flag: "unapproved"})]}, module.OPERATING_METHOD, definition)
 
+	def test_existing_dedicated_source_logging_flags_are_preserved_without_rewriting_jobs(self):
+		module = self.metadata_module()
+		for method in module.SCHEDULED_METHODS:
+			for logging in (0, 1):
+				with self.subTest(method=method, create_log=logging):
+					row = {"name": "original-job-id", "method": method, "frequency": "Cron", "cron_format": "*/15 * * * *", "stopped": 0, "server_script": None, "create_log": logging, "last_execution": "2026-10-07 08:45:03.082272", "creation": "original", "modified": "original"}
+					definition = {"source": {"doctype": "Scheduled Job Type", "method": method}, "native": {"Scheduled Job Type": [self.module().semantic_row(dict(row, create_log=0, last_execution=None))]}}
+					scope = {"Scheduled Job Type": [row]}
+					original = copy.deepcopy(scope)
+					self.assertTrue(module._definition_matches(scope, method, definition))
+					self.assertEqual(scope, original)
+					for flag in ("stopped", "server_script", "frequency", "cron_format"):
+						with self.subTest(flag=flag), self.assertRaises(AssertionError):
+							module._definition_matches({"Scheduled Job Type": [dict(row, **{flag: "unapproved"})]}, method, definition)
+
+	def test_scheduled_logging_compatibility_rejects_invalid_flags_and_explicit_policy_changes(self):
+		module = self.metadata_module()
+		for method in module.SCHEDULED_METHODS:
+			row = {"name": "original-job-id", "method": method, "frequency": "Cron", "cron_format": "*/15 * * * *", "create_log": 0}
+			definition = {"source": {"doctype": "Scheduled Job Type", "method": method}, "native": {"Scheduled Job Type": [self.module().semantic_row(row)]}}
+			for invalid in (None, -1, 2, "1", True, False, 0.0, 1.0):
+				with self.subTest(method=method, create_log=invalid), self.assertRaises(AssertionError):
+					module._definition_matches({"Scheduled Job Type": [dict(row, create_log=invalid)]}, method, definition)
+			for required in (0, 1):
+				with self.subTest(method=method, explicit=required):
+					policy = copy.deepcopy(definition)
+					policy["source"]["create_log"] = required
+					policy["native"]["Scheduled Job Type"][0]["create_log"] = required
+					self.assertTrue(module._definition_matches({"Scheduled Job Type": [dict(row, create_log=required)]}, method, policy))
+					with self.assertRaises(AssertionError):
+						module._definition_matches({"Scheduled Job Type": [dict(row, create_log=1-required)]}, method, policy)
+
 	def test_oa_ddl_guard_allows_exact_role_native_types_defaults_and_full_unique_identity(self):
 		module = self.metadata_module()
 		self.assertTrue(hasattr(module, "_validate_oa_ddl"))

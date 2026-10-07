@@ -662,17 +662,42 @@ class CrossborderUpgradeNativeRehearsal(unittest.TestCase):
 
 	def test_enabled_sync_keeps_flag_with_locked_quiescence_and_rejects_no_proof(self):
 		original = self.original
+		jobs = original["metadata"]["scope"]["Scheduled Job Type"]
+		self.assertEqual({row["method"] for row in jobs}, set(release.SCHEDULED_METHODS))
+		self.assertEqual(len(jobs), 2)
+		stamp = "2026-10-07 08:45:03.082272"
+		# Reuse this enabled-sync rehearsal with the real dedicated runner's
+		# logging state. Preserve every raw job byte through apply/noop/rollback.
+		for job in jobs:
+			frappe.db.sql("update `tabScheduled Job Type` set create_log=1, last_execution=%s where name=%s and method=%s", (stamp, job["name"], job["method"]))
+		frappe.db.commit()
+		logged = self.capture()
 		try:
 			with patch.dict(frappe.conf, {"purchase_source_sync_enabled": True}):
 				self.original = self.capture()
-				with patch.dict(os.environ, {"DEEPLINKERP_RELEASE_QUIESCENT": "0"}), self.assertRaisesRegex(AssertionError, "quiescence"):
-					release.apply_joint_metadata(CANDIDATE_SHA, self.receipt)
-				self.assertFalse(self.receipt.exists())
-				self.assertTrue(release.apply_joint_metadata(CANDIDATE_SHA, self.receipt)["source_sync_enabled"])
-				self.verify_final_gate(self.capture())
-				self.restore()
+				try:
+					with patch.dict(os.environ, {"DEEPLINKERP_RELEASE_QUIESCENT": "0"}), self.assertRaisesRegex(AssertionError, "quiescence"):
+						release.apply_joint_metadata(CANDIDATE_SHA, self.receipt)
+					self.assertFalse(self.receipt.exists())
+					self.assertTrue(release.apply_joint_metadata(CANDIDATE_SHA, self.receipt)["source_sync_enabled"])
+					after = self.capture()
+					self.assertEqual(after["metadata"]["scope"]["Scheduled Job Type"], self.original["metadata"]["scope"]["Scheduled Job Type"])
+					with patch.object(frappe.db, "commit", side_effect=AssertionError("Current/noop verification attempted commit")):
+						self.assertTrue(release.apply_joint_metadata(CANDIDATE_SHA, self.receipt)["unchanged"])
+						self.assertTrue(release.verify_current_joint_contract()["source_sync_enabled"])
+					self.verify_final_gate(after)
+					self.restore()
+				finally:
+					if self.receipt.exists() and json.loads(self.receipt.read_bytes())["status"] != "restored":
+						self.restore()
 		finally:
+			# Never erase a retained failure or newer metadata activity.
+			self.assert_state_equal(self.capture(), logged)
+			for job in jobs:
+				frappe.db.sql("update `tabScheduled Job Type` set create_log=%s, last_execution=%s where name=%s and method=%s and create_log=1 and last_execution=%s", (job["create_log"], job["last_execution"], job["name"], job["method"], stamp))
+			frappe.db.commit()
 			self.original = original
+			self.assert_state_equal(self.capture(), original)
 
 
 if __name__ == "__main__":
