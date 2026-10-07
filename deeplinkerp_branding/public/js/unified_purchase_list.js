@@ -161,7 +161,7 @@
 	}
 	function renderLink(controller, doc, value, escape = String) {
 		const oa = doc.row_type === "oa_request", references = doc.oa_references || [];
-		const identity = oa ? `<button type="button" class="btn btn-link btn-xs" data-purchase-source="${escape(doc.oa_name || doc.name)}">${value}</button>` : `<a href="${escape(formLink(doc))}" data-name="${escape(doc.name)}">${value}</a>`;
+		const identity = oa ? `<button type="button" class="btn btn-link btn-xs" data-purchase-source="${escape(doc.oa_name || doc.name)}" title="${escape(doc.oa_number || doc.name)}">${value}</button>` : `<a href="${escape(formLink(doc))}" data-name="${escape(doc.name)}">${value}</a>`;
 		const status = oa ? escape(doc.status || "来源待完善") : controller.list.get_indicator_html?.(doc, Boolean(controller.list.workflow_state_fieldname)) || escape(controller.translate(doc.status || "—"));
 		const date = controller.root.frappe.datetime?.str_to_user?.(doc.transaction_date) || doc.transaction_date || "—";
 		return group([identity, line(date, escape, "text-muted"), `<span class="dlp-po-group-line dlp-po-status">${status}</span>`, ...references.map(ref => `<a class="dlp-po-group-line" href="/desk/oa-purchase-request/${encodeURIComponent(ref.name)}">${escape(ref.number || ref.name)}${ref.approval_status ? ` · ${escape(ref.approval_status)}` : ""}</a>`), references.length ? "" : line([doc.source === "OA" ? "钉钉" : doc.source === "未关联 OA" ? "其他来源" : "来源待确认", doc.approval_status].filter(Boolean).join(" · "), escape, "text-muted")]);

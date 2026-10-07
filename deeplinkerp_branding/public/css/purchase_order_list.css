@@ -531,6 +531,10 @@ body.dlp-purchase-order-grid-active .dlp-po-grid-row .dlp-po-grid-cell:has(.dlp-
 body.dlp-purchase-order-grid-active .dlp-po-group { display: flex; flex-direction: column; gap: 1px; width: 100%; white-space: normal; line-height: 18px; overflow-wrap: anywhere; }
 body.dlp-purchase-order-grid-active .dlp-po-group-line { display: block; white-space: normal; }
 body.dlp-purchase-order-grid-active .dlp-po-group > a { display: block; white-space: normal; }
+body.dlp-purchase-order-grid-active .dlp-po-group > button[data-purchase-source] {
+	display: block; max-width: 100%; min-width: 0; height: auto; padding: 0; line-height: inherit;
+	white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; flex-shrink: 0;
+}
 body.dlp-purchase-order-grid-active .dlp-po-row-actions { align-items: flex-start; gap: 4px; }
 body.dlp-purchase-order-grid-active .dlp-po-row-actions .dlp-order-actions { display: flex; flex-wrap: wrap; gap: 4px; }
 body.dlp-purchase-order-grid-active .dlp-po-grid-row [data-fieldname="_sequence"] { padding: 4px 2px; gap: 1px; justify-content: flex-start; }

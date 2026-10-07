@@ -211,6 +211,14 @@ test("source row labels and actions use OA identity without pretending it is an 
 	assert.match(adapter.renderValue("receipt_action", doc, {}, escape), /完善\/关联/);
 	assert.match(adapter.renderValue("receipt_action", doc, {}, escape), /data-purchase-source="OA\/1"/);
 	assert.doesNotMatch(adapter.renderValue("receipt_action", doc, {}, escape), /确认订单|入库|付款/);
+	const controller = { list: {}, root: { frappe: {} }, translate: value => value };
+	for (const number of ['202607201643000193490', '202607201643000193490"标识']) {
+		const longSource = { ...doc, oa_number: number };
+		const identity = adapter.configure([]).renderLink(controller, longSource, adapter.renderValue("name", longSource, {}, escape), escape);
+		assert.ok(identity.includes(`title="${escape(number)}"`), "Truncated source identities must retain the complete escaped approval number on hover");
+		assert.match(identity, /data-purchase-source="OA\/1"/);
+		assert.doesNotMatch(identity, /href="\/desk\/purchase-order/);
+	}
 	for (const source of ["non_oa", "未关联 OA"]) assert.equal(adapter.renderValue("source", { source }), "其他来源");
 });
 
