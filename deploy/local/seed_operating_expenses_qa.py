@@ -4,6 +4,8 @@ import argparse
 import hashlib
 import json
 import runpy
+from pathlib import Path
+from unittest.mock import patch
 
 import frappe
 
@@ -105,6 +107,65 @@ def seed_restricted_browser_user():
 		"payment_entries": frappe.db.count("Payment Entry")}
 
 
+def seed_oa_browser_data(check_only=False):
+	"""Append four QA cache rows from real source HTTP decisions; no financial writes.
+
+	Only this seed process supplies fake PG. Existing ERP web processes are not
+	patched, so a live takeover/fresh financial check still requires real PG.
+	"""
+	if (frappe.local.site != QA_SITE or frappe.conf.db_host != "db"
+			or frappe.conf.get("operating_expense_qa_url") != "http://host.docker.internal:64244"):
+		raise RuntimeError("OA browser fixtures require the dedicated QA site and source port")
+	if frappe.db.count("GL Entry") or frappe.db.count("Payment Entry"):
+		raise RuntimeError("Expected an unposted, dedicated QA site")
+	if not frappe.db.exists("Company", "QA Operating China"):
+		raise RuntimeError("Reuse the existing QA company; this seed does not create masters")
+	frappe.set_user("Administrator")
+	from deeplinkerp_branding.services import operating_expenses as service
+	from deeplinkerp_branding.services import operating_oa_source as oa
+	fixture = runpy.run_path(str(Path(__file__).with_name("operating_expenses_source_qa.py")))
+	originals = fixture["oa_manifest"]()["instances"]
+	names = {oa.application_id(row) for row in originals}
+	if any(frappe.db.exists(service.SOURCE, name) for name in names):
+		raise RuntimeError("OA QA cache already exists; refusing to overwrite committed fixtures")
+
+	def protected():
+		result = {}
+		for doctype in ("Journal Entry", "Journal Entry Account", "Operating Expense Event", "Operating Expense Mapping",
+			"Operating Expense Takeover", "Operating Expense Payment", "GL Entry", "Payment Entry", "User Permission"):
+			if frappe.db.exists("DocType", doctype):
+				rows = frappe.db.sql(f"SELECT * FROM `tab{doctype}` ORDER BY name", as_dict=True)
+				result[doctype] = hashlib.sha256(json.dumps(rows, sort_keys=True, default=str).encode()).hexdigest()
+		rows = frappe.db.sql("SELECT * FROM `tabOperating Expense Source` ORDER BY name", as_dict=True)
+		result[service.SOURCE] = hashlib.sha256(json.dumps([row for row in rows if row.name not in names], sort_keys=True, default=str).encode()).hexdigest()
+		return result
+
+	before = protected()
+	with patch.dict(frappe.conf, operating_expense_source_mode="oa_cashier"), patch.object(service, "_oa_connection", return_value=fixture["SyntheticPG"]()):
+		items = service._source_page({"limit": 500})["items"]
+	if {item["source_id"] for item in items} != names:
+		raise RuntimeError("Synthetic OA source identities do not match the four approved cases")
+	for item in items:
+		case = item["oa_identity"]["process_instance_id"].removeprefix("qa-oa-")
+		if (item["oa_identity"]["corp_id"] != fixture["OA_CORP"] or item["applicant"] != "QA合成申请人"
+				or item["payment_eligibility"]["can_register_payment"] is not (case != "supervisor")):
+			raise RuntimeError("Real source adapter did not verify the intended QA applicant/approval decision")
+		if case == "no-history" and (item["cashier_source_id"] is not None or item["paid_amount"] is not None or item["pending_amount"] is not None or item["payments"]):
+			raise RuntimeError("OA-only history must remain unknown, never guessed zero")
+		if case != "no-history" and (item["paid_amount"] != "10" or item["pending_amount"] is None):
+			raise RuntimeError("Known synthetic cashier history was not preserved")
+		if not check_only:
+			service._upsert(item, {fixture["OA_SHEET"]: "QA Operating China"})
+	if before != protected():
+		raise RuntimeError("OA cache seed changed protected existing finance/source/permission rows")
+	if not check_only:
+		frappe.db.commit()
+	return {"site": QA_SITE, "check_only": check_only, "rows": [{"source_id": item["source_id"],
+		"summary": item["summary"], "approval_state": item["approval_state"], "can_register_payment": item["payment_eligibility"]["can_register_payment"],
+		"paid_amount": item["paid_amount"], "pending_amount": item["pending_amount"]} for item in items],
+		"protected_unchanged": True, "gl_entries": 0, "payment_entries": 0, "web_fresh_pg_patched": False}
+
+
 def seed_joint_purchase_draft():
 	"""One identifiable order to verify merged shared drawers, without posting."""
 	if frappe.local.site != QA_SITE or frappe.conf.db_host != "db":
@@ -151,13 +212,18 @@ def seed_joint_purchase_draft():
 
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser()
-	parser.add_argument("--restricted-browser-user", action="store_true")
-	parser.add_argument("--joint-purchase-draft", action="store_true")
+	operation = parser.add_mutually_exclusive_group()
+	operation.add_argument("--restricted-browser-user", action="store_true")
+	operation.add_argument("--joint-purchase-draft", action="store_true")
+	operation.add_argument("--oa-scenarios", action="store_true")
+	parser.add_argument("--check-only", action="store_true", help="Read OA adapter results without appending QA cache")
 	args = parser.parse_args()
+	if args.check_only and not args.oa_scenarios:
+		parser.error("--check-only requires --oa-scenarios")
 	frappe.init(site=QA_SITE, sites_path=".")
 	frappe.connect()
 	try:
-		operation = (seed_joint_purchase_draft if args.joint_purchase_draft else
+		operation = (lambda: seed_oa_browser_data(args.check_only)) if args.oa_scenarios else (seed_joint_purchase_draft if args.joint_purchase_draft else
 			seed_restricted_browser_user if args.restricted_browser_user else bootstrap)
 		print(json.dumps(operation()))
 	finally:
