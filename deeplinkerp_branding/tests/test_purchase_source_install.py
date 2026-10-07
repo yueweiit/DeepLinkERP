@@ -22,5 +22,26 @@ class PurchaseSourceInstallTests(unittest.TestCase):
             install.after_migrate()
         create.assert_not_called()
 
+    def test_role_fields_are_minimal_read_only_links_and_server_confirmation_audit(self):
+        meta=Mock(); meta.has_field.return_value=False
+        with patch.object(frappe,"db",Mock()),patch.object(frappe,"get_meta",return_value=meta),patch("frappe.custom.doctype.custom_field.custom_field.create_custom_fields") as create:
+            install.after_migrate()
+        definitions={field["fieldname"]:field for call in create.call_args_list
+                     for field in call.args[0].get("OA Purchase Request",[])}
+        expected={"custom_purchase_beneficiary_company":("Link","Company"),
+                  "custom_purchase_company_proposal":("Link","Company"),
+                  "custom_purchase_project":("Link","Project"),
+                  "custom_purchase_company_confirmed":("Check",None),
+                  "custom_purchase_company_confirmed_by":("Link","User"),
+                  "custom_purchase_company_confirmed_on":("Datetime",None)}
+        for name,(fieldtype,options) in expected.items():
+            with self.subTest(field=name):
+                self.assertIn(name,definitions)
+                self.assertEqual(definitions[name]["fieldtype"],fieldtype)
+                self.assertEqual(definitions[name].get("options"),options)
+                self.assertEqual(definitions[name].get("read_only"),1)
+                self.assertEqual(definitions[name].get("no_copy"),1)
+                self.assertNotIn("permlevel",definitions[name])
+
 
 if __name__=="__main__": unittest.main()

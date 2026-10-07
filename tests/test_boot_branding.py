@@ -3,6 +3,7 @@ import importlib
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 
 class FakeDB:
@@ -38,7 +39,6 @@ FAKE_FRAPPE.ValidationError = type("ValidationError", (Exception,), {})
 previous_frappe = sys.modules.get("frappe")
 sys.modules["frappe"] = FAKE_FRAPPE
 try:
-	sys.modules.pop("deeplinkerp_branding.deeplinkerp_branding.interface_mode", None)
 	branding = importlib.import_module("deeplinkerp_branding.deeplinkerp_branding.branding")
 finally:
 	if previous_frappe is None:
@@ -49,6 +49,13 @@ finally:
 
 class BootBrandingTest(unittest.TestCase):
 	def setUp(self):
+		dependency = patch.object(branding, "frappe", FAKE_FRAPPE)
+		dependency.start()
+		self.addCleanup(dependency.stop)
+		# Patch the actual imported function, including when branding was cached.
+		navigation = patch.dict(branding.apply_interface_mode_bootinfo.__globals__, {"frappe": FAKE_FRAPPE})
+		navigation.start()
+		self.addCleanup(navigation.stop)
 		FAKE_FRAPPE.db = FakeDB()
 		FAKE_FRAPPE.defaults = FakeDefaults()
 		self.configure_user("employee@example.com", roles=["Employee"])

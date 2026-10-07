@@ -521,3 +521,28 @@ body.dlp-purchase-order-grid-active-readonly .page-actions .primary-action {
 .dlp-po-grid-cell:is([data-fieldname="oa_amount"],[data-fieldname="requested_amount"],[data-fieldname="cashier_paid_amount"]) { text-align: right; font-variant-numeric: tabular-nums; }
 .dlp-provider-empty { padding: 32px 16px; }
 [data-dlp-oa-compatibility="true"] { display: none !important; }
+
+/* Seven purchase groups grow with their facts; the shared scalar lists keep their density. */
+body.dlp-purchase-order-grid-active .dlp-po-grid { --dlp-po-row-height: 60px; }
+body.dlp-purchase-order-grid-active .dlp-po-grid.dlp-po-standard { --dlp-po-row-height: 72px; }
+body.dlp-purchase-order-grid-active .dlp-po-grid-header { height: 32px; min-height: 32px; }
+body.dlp-purchase-order-grid-active .dlp-po-grid-header-columns { height: 32px; }
+body.dlp-purchase-order-grid-active .dlp-po-grid-row .dlp-po-grid-cell:has(.dlp-po-group) { align-items: flex-start; white-space: normal; overflow: visible; }
+body.dlp-purchase-order-grid-active .dlp-po-group { display: flex; flex-direction: column; gap: 1px; width: 100%; white-space: normal; line-height: 18px; overflow-wrap: anywhere; }
+body.dlp-purchase-order-grid-active .dlp-po-group-line { display: block; white-space: normal; }
+body.dlp-purchase-order-grid-active .dlp-po-group > a { display: block; white-space: normal; }
+body.dlp-purchase-order-grid-active .dlp-po-row-actions { align-items: flex-start; gap: 4px; }
+body.dlp-purchase-order-grid-active .dlp-po-row-actions .dlp-order-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+body.dlp-purchase-order-grid-active .dlp-po-grid-row [data-fieldname="_sequence"] { padding: 4px 2px; gap: 1px; justify-content: flex-start; }
+body.dlp-purchase-order-grid-active .dlp-purchase-expand { flex: 0 0 12px; width: 12px; padding: 0; }
+body.dlp-purchase-order-grid-active .dlp-purchase-sequence { font-size: 11px; }
+body.dlp-purchase-order-grid-active .dlp-po-filters { padding: 6px 8px; gap: 8px; }
+body.dlp-purchase-order-grid-active .dlp-po-filter[data-fieldname="beneficiary_company"] { width: 150px; }
+body.dlp-purchase-order-grid-active .dlp-po-filter[data-fieldname="progress_phase"] { width: 145px; }
+body.dlp-purchase-order-grid-active .dlp-po-filter[data-fieldname="review_only"] { width: auto; padding: 0 8px; }
+body.dlp-purchase-order-grid-active .dlp-po-provider-controls { padding: 6px 8px; }
+body.dlp-purchase-order-grid-active .dlp-po-source-advanced { display: flex; gap: 8px; }
+body.dlp-purchase-order-grid-active .dlp-po-source-advanced[open] { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+@media (max-width: 768px) {
+	body.dlp-purchase-order-grid-active .dlp-po-frozen { position: static; box-shadow: none; }
+}

@@ -73,3 +73,11 @@ body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active) .dlp-
 .dlp-source-items [data-source-field] { min-width: 130px; }
 .dlp-source-items .control-label { display: none; }
 .dlp-source-reconciliation { padding: 12px; margin-top: 12px; border: 1px solid var(--border-color,#e1e8f0); border-radius: 4px; }
+.dlp-cross-tabs { display: flex; gap: 8px; flex-wrap: wrap; padding-bottom: 12px; margin-bottom: 12px; border-bottom: 1px solid var(--border-color,#e1e8f0); }
+.dlp-cross-tabs .active, .dlp-cross-links .active { color: var(--primary,#1677ff); border-color: var(--primary,#1677ff); background: var(--control-bg,#f4f7fb); }
+.dlp-cross-links { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.dlp-cross-links .btn { white-space: normal; overflow-wrap: anywhere; }
+.dlp-cross-proof { padding: 8px 12px; margin-bottom: 8px; border: 1px solid var(--border-color,#e1e8f0); border-radius: 4px; }
+.dlp-cross-proof p { margin: 4px 0; }
+.dlp-cross-logistics h4 { margin-top: 16px; font-size: 14px; }
+.dlp-cross-native-price, .dlp-cross-disable { padding: 10px 12px; margin-top: 12px; background: var(--control-bg,#f4f7fb); border-radius: 4px; }

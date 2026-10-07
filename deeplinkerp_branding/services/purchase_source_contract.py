@@ -11,16 +11,22 @@ from . import operating_oa_source as oa
 from .operating_expense_contract import digest
 
 PROCESS_CODES = ("PROC-BFDF6F09-4551-43B3-8C55-537AA74A241B", "PROC-6E11B527-2F82-439C-817D-C868DE086C97")
+EXECUTION_REGIONS = frozenset({"中国", "中国china", "中国 china", "china", "墨西哥", "墨西哥mexico",
+                              "墨西哥méxico", "墨西哥 mexico", "墨西哥 méxico", "mexico", "méxico"})
 ALIASES = {
     "region": ("执行地区",), "currency": ("币种",), "payee": ("收款人",),
     "requested_amount": ("金额importe", "金额"), "items": ("需求明细",),
     "processors": ("加工商明细",), "detail_total": ("明细汇总金额",),
     "description": ("规格明细需求说明", "其他采购说明"),
     "schedule_date": ("交付日期",), "department": ("申请部门/组织", "申请部门", "所属BU"),
-    "project": ("项目归属", "项目Proyecto"), "order_no": ("订单Pedido",),
+    "beneficiary_company": ("归属子公司", "所属子公司", "子公司", "受益公司", "最终用户公司", "业务主体",
+                            "Empresa beneficiaria", "Empresa filial", "Subsidiaria", "Entidad comercial"),
+    "project": ("项目归属", "归属项目", "项目Proyecto", "项目", "Proyecto", "Project"), "order_no": ("订单Pedido",),
     "payments": ("付款信息",), "payment_date": ("付款日期",),
     "payment_terms": ("付款条件",), "attachments": ("关键凭证",),
 }
+_FIELD_ALIASES = tuple((key, tuple(re.sub(r"\s+", "", alias).casefold() for alias in aliases))
+                       for key, aliases in ALIASES.items())
 ITEM_ALIASES = {
     "item_code": ("item_code", "material_code", "物品编码", "物料编码", "编码"),
     "item_name": ("item_name", "product_name", "物品名称", "物料名称", "名称"),
@@ -44,9 +50,9 @@ def _field_occurrences(row):
     for component in components if isinstance(components, list) else []:
         if not isinstance(component, dict):
             continue
-        name = re.sub(r"\s+", "", str(component.get("name") or component.get("label") or ""))
-        for key, aliases in ALIASES.items():
-            if any(name.casefold().startswith(alias.casefold()) for alias in aliases):
+        name = re.sub(r"\s+", "", str(component.get("name") or component.get("label") or "")).casefold()
+        for key, aliases in _FIELD_ALIASES:
+            if any(name.startswith(alias) for alias in aliases):
                 result.setdefault(key, []).append(component.get("value"))
                 break
     return result
@@ -58,9 +64,9 @@ def _populated(values):
     return [value for value in values if value is not None and not (isinstance(value, str) and not value.strip())]
 
 
-def fields(row):
+def fields(row, *, occurrences=None):
     result = {}
-    for key, values in _field_occurrences(row).items():
+    for key, values in (_field_occurrences(row) if occurrences is None else occurrences).items():
         if len(values) == 1:
             result[key] = values[0]
         elif key == "region":
@@ -75,16 +81,16 @@ def fields(row):
     return result
 
 
-def _currency(row):
-    values = _populated(_field_occurrences(row).get("currency", []))
+def _currency(row, *, occurrences=None):
+    values = _populated((_field_occurrences(row) if occurrences is None else occurrences).get("currency", []))
     currencies = [oa.CURRENCIES.get(oa.normalized(item)) for item in values]
     return currencies[0] if currencies and all(item and item == currencies[0] for item in currencies) else None
 
 
-def in_scope(row):
+def in_scope(row, *, occurrences=None):
     try:
         return (row.get("process_code") in PROCESS_CODES and oa.START <= oa.timestamp(row.get("create_time")) < oa.END
-                and oa.normalized(fields(row).get("region")) in {"中国", "中国china", "中国 china", "china"})
+                and oa.normalized(fields(row, occurrences=occurrences).get("region")) in EXECUTION_REGIONS)
     except (ValueError, TypeError):
         return False
 
@@ -113,8 +119,20 @@ def item_rows(value, parser=None):
     return rows
 
 
-def normalize(row, parser=None, *, detail_rows=None):
-    form = fields(row)
+def _role_value(occurrences, key):
+    values = _populated(occurrences.get(key, []))
+    if not values:
+        return None, "missing"
+    if len(values) != 1 or not isinstance(values[0], str):
+        return None, "ambiguous"
+    return values[0].strip(), "unique"
+
+
+def normalize(row, parser=None, *, detail_rows=None, occurrences=None):
+    occurrences = _field_occurrences(row) if occurrences is None else occurrences
+    form = fields(row, occurrences=occurrences)
+    beneficiary, beneficiary_status = _role_value(occurrences, "beneficiary_company")
+    project, project_status = _role_value(occurrences, "project")
     items = item_rows(form.get("items") if detail_rows is None else detail_rows, parser)
     total = (str(sum((Decimal(item["amount"]) for item in items), Decimal(0)))
              if items and all(item["amount"] is not None for item in items) else oa.exact_amount(form.get("detail_total")))
@@ -134,17 +152,18 @@ def normalize(row, parser=None, *, detail_rows=None):
         "process_instance_id": row.get("process_instance_id"),
         "apply_date": oa.timestamp(row["create_time"]).astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat(),
         "originator_user_id": row.get("originator_user_id"), "originator_user_name": row.get("originator_user_name"),
-        "eligible": bool(in_scope(row) and row.get("status") == "COMPLETED" and row.get("result") == "agree" and not row.get("deleted_at")),
+        "eligible": bool(in_scope(row, occurrences=occurrences) and row.get("status") == "COMPLETED" and row.get("result") == "agree" and not row.get("deleted_at")),
         "status": row.get("status"), "result": row.get("result"), "deleted_at": str(row.get("deleted_at") or ""),
-        "currency": _currency(row), "region": form.get("region"),
+        "currency": _currency(row, occurrences=occurrences), "region": form.get("region"),
         "payee": form.get("payee"), "requested_amount": requested, "detail_total_amount": total,
         "items": items, "processors": form.get("processors"), "description": form.get("description"),
         "schedule_date": form.get("schedule_date"), "department": form.get("department"),
-        "project": form.get("project"), "order_no": form.get("order_no"),
+        "beneficiary_company": beneficiary, "beneficiary_company_status": beneficiary_status,
+        "project": project, "project_status": project_status, "order_no": form.get("order_no"),
         "attachments": form.get("attachments"), "issues": issues,
         "updated_at": str(row.get("updated_at") or row["create_time"]),
         "original_fields": copy.deepcopy({key: values[0] if len(values) == 1 else values
-                                          for key, values in _field_occurrences(row).items()})}
+                                          for key, values in occurrences.items()})}
     # Approval evidence can change independently of product facts.
     result["version"] = digest(result)
     return result

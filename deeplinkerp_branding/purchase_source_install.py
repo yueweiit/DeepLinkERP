@@ -12,6 +12,12 @@ def after_migrate():
         {"fieldname":"custom_cashier_payment_evidence","label":"出纳历史付款证据","fieldtype":"Long Text","hidden":1,"read_only":1,"no_copy":1,"permlevel":9},
         {"fieldname":"custom_purchase_bound_version","label":"已核对采购来源版本","fieldtype":"Data","hidden":1,"read_only":1,"no_copy":1},
         {"fieldname":"custom_purchase_payment_reconciliation","label":"已核对历史付款","fieldtype":"Long Text","hidden":1,"read_only":1,"no_copy":1,"permlevel":9},
+        {"fieldname":"custom_purchase_beneficiary_company","label":"最终使用/销售公司","fieldtype":"Link","options":"Company","read_only":1,"no_copy":1},
+        {"fieldname":"custom_purchase_company_proposal","label":"建议采购公司","fieldtype":"Link","options":"Company","read_only":1,"no_copy":1},
+        {"fieldname":"custom_purchase_project","label":"已确认采购项目","fieldtype":"Link","options":"Project","read_only":1,"no_copy":1},
+        {"fieldname":"custom_purchase_company_confirmed","label":"采购公司已确认","fieldtype":"Check","hidden":1,"read_only":1,"no_copy":1},
+        {"fieldname":"custom_purchase_company_confirmed_by","label":"采购公司确认人","fieldtype":"Link","options":"User","hidden":1,"read_only":1,"no_copy":1},
+        {"fieldname":"custom_purchase_company_confirmed_on","label":"采购公司确认时间","fieldtype":"Datetime","hidden":1,"read_only":1,"no_copy":1},
     ]}
     # The installed OA integration already uses a Data field on Purchase Order.
     # Preserve that field, its values and effective native behavior verbatim.

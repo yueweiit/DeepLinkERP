@@ -2,6 +2,7 @@ import importlib
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 
 class FakePermissionError(Exception):
@@ -79,6 +80,11 @@ finally:
 class InterfaceModeTest(unittest.TestCase):
 	def setUp(self):
 		self.assertIsNotNone(interface_mode, "interface_mode production module must exist")
+		# Collection may reuse the module imported with another test's Frappe stub.
+		# Bind and restore this test's dependency, rather than evicting shared modules.
+		dependency = patch.object(interface_mode, "frappe", FAKE_FRAPPE)
+		dependency.start()
+		self.addCleanup(dependency.stop)
 		FAKE_FRAPPE.session.user = "employee@example.com"
 		FAKE_FRAPPE.defaults = FakeDefaults()
 		FAKE_FRAPPE.db = FakeDB()

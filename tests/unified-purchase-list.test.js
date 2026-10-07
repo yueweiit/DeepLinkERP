@@ -225,6 +225,8 @@ test("cashier paid evidence is a separate amount with its own currency and unkno
 test("hidden company is not presented as a pending company assignment", () => {
 	assert.equal(adapter.renderValue("company", { company: null, company_visibility: "hidden" }), "公司不可见");
 	assert.equal(adapter.renderValue("company", { company: null, company_visibility: "pending" }), "公司待确认");
+	const grouped = adapter.renderValue("supplier_name", { row_type: "oa_request", supplier_name: "Supplier", company: null, company_visibility: "hidden", role_context: { company_confirmed: false } });
+	assert.match(grouped, /公司不可见/); assert.doesNotMatch(grouped, /公司待确认/);
 });
 
 test("OA amount renders its own currency and basis without rounding the source", () => {
@@ -257,16 +259,17 @@ test("conflicting OA references keep individual source links and readable origin
 	assert.ok(value.includes("/desk/oa-purchase-request/OA%2F1"));
 	assert.ok(value.includes("/desk/oa-purchase-request/OA-2"));
 	assert.ok(value.includes("审批&lt;1>"));
-	assert.ok(value.includes("15.12345 CNY"));
+	assert.ok(value.includes("15.12 CNY"));
+	assert.equal(doc.oa_references[0].amount, 15.12345, "two-decimal presentation does not change source evidence");
 	assert.ok(value.includes("付款申请金额"));
 	assert.equal(adapter.renderValue("approval_status", doc, {}, escape), "通过；撤销");
 });
 
 test("unified exports always retain selected amount currencies and provenance", () => {
 	assert.deepEqual(adapter.exportColumns(["name", "oa_amount", "advance_paid"]),
-		["name", "oa_amount", "oa_currency", "oa_amount_basis", "advance_paid", "party_account_currency", "oa_warning", "oa_references"]);
+		["order_context", "oa_amount", "oa_currency", "oa_amount_basis", "advance_paid", "party_account_currency", "oa_warning", "oa_references"]);
 	assert.deepEqual(adapter.exportColumns(["name", "grand_total"]),
-		["name", "grand_total", "currency", "oa_warning", "oa_references"]);
+		["order_context", "grand_total", "currency", "oa_warning", "oa_references"]);
 });
 
 test("Excel transport reuses same-origin CSRF download for the unified endpoint", async () => {
@@ -363,4 +366,111 @@ test("export captures clicked native filters and columns before lazy library loa
 	assert.ok(JSON.parse(captured.columns).includes("cashier_currency"));
 	assert.equal(captured.order_by, "modified desc");
 	assert.equal(captured.start, undefined); assert.equal(captured.page_length, undefined);
+});
+
+const groupedDefaults = ["name", "supplier_name", "project_context", "external_payment", "internal_settlement", "receipt_logistics", "receipt_action"];
+const nativePOColumns = require("../deeplinkerp_branding/public/js/purchase_order_list.js").COLUMNS;
+
+test("seven purchase groups migrate only known default orders while retaining density and custom order", () => {
+	const provider = adapter.configure(nativePOColumns);
+	assert.deepEqual(provider.defaultColumns, groupedDefaults);
+	const old8 = ["name", "supplier_name", "grand_total", "order_settled", "order_unpaid", "per_received", "status", "receipt_action"];
+	const old10 = [...old8.slice(0, 3), "requested_amount", "cashier_paid_amount", ...old8.slice(3)];
+	const old16 = nativePOColumns.map(c => c.fieldname).filter(field => field !== "receipt_action");
+	const allowed = new Set([...provider.columns.map(c => c.fieldname), ...provider.virtualFields]);
+	const grid = engine.create({ doctype: "Purchase Order", columns: nativePOColumns, provider });
+	for (const columns of [old8, old10, old16, nativePOColumns.map(c => c.fieldname)]) {
+		const input = { density: "standard", columns }, before = JSON.stringify(input);
+		const prefs = grid.normalizePreferences(input, allowed, provider.columns);
+		assert.deepEqual(prefs.columns, groupedDefaults); assert.equal(prefs.density, "standard"); assert.equal(prefs.version, 2);
+		assert.equal(JSON.stringify(input), before);
+	}
+	for (const columns of [["supplier_name", "name", "grand_total"], [...old8].reverse(), ["name", "status"]]) {
+		assert.deepEqual(grid.normalizePreferences({ density: "standard", columns }, allowed, provider.columns).columns, columns);
+	}
+	assert.ok(provider.columns.some(c => c.fieldname === "advance_paid"));
+	assert.ok(provider.columns.some(c => c.fieldname === "requested_amount"));
+	assert.deepEqual(grid.normalizePreferences({ density: "standard", version: 2, columns: old8 }, allowed, provider.columns).columns, old8, "a current-version user choice is not an old default");
+});
+
+test("provider migration never infers old defaults from a custom column definition or an empty selection", () => {
+	const native = [{ fieldname: "name", label: "订单", width: 166 }], provider = adapter.configure(native);
+	const allowed = new Set(provider.columns.map(c => c.fieldname)), grid = engine.create({ doctype: "Purchase Order", columns: native, provider });
+	for (const columns of [["name"], []]) assert.deepEqual(grid.normalizePreferences({ columns }, allowed, provider.columns).columns, ["name"]);
+});
+
+test("crossborder quick predicates join the same native AND OR request before pagination", () => {
+	const native = { filters: [["Purchase Order", "status", "=", "To Receive"]], or_filters: [["Purchase Order", "owner", "=", "buyer"]] };
+	const request = adapter.request({ providerScope: "orders", page: 2, pageSize: 20, quick: { search: "项目或审批", company: "买方", beneficiary_company: "工厂", progress_phase: "internal_unsettled", review_only: true } }, native);
+	assert.deepEqual(JSON.parse(request.args.filters), { scope: "orders", search: "项目或审批", company: "买方", beneficiary_company: "工厂", progress_phase: "internal_unsettled", review_only: true });
+	assert.deepEqual(JSON.parse(request.args.native_filters), native.filters); assert.deepEqual(JSON.parse(request.args.native_or_filters), native.or_filters);
+	assert.equal(request.args.start, 40); assert.equal(request.args.page_length, 20);
+});
+
+test("group exports map identities and actions in current order and retain legacy financial leaves", () => {
+	assert.deepEqual(adapter.exportColumns(["internal_settlement", "supplier_name", "name", "receipt_logistics", "receipt_action", "order_settled", "order_unpaid", "advance_paid"]), ["internal_settlement", "supplier_context", "order_context", "receipt_logistics", "action_context", "external_settled", "external_order_unpaid", "external_currency", "advance_paid", "party_account_currency", "oa_warning", "oa_references"]);
+});
+
+test("role groups separate authoritative PO buyer and confirmed beneficiary from source proposals", () => {
+	const doc = { row_type: "purchase_order", supplier_name: "供应商", company: "原生买方", project: "原生项目", role_context: { purchasing_company: "来源公司", company_confirmed: false, buyer_company_proposal: "建议公司", beneficiary_companies: ["已核对工厂"], beneficiary_company_candidate: "候选工厂", source_beneficiary_company_hint: "原始归属", project_candidate: "候选项目" } };
+	const supplier = adapter.renderValue("supplier_name", doc);
+	assert.match(supplier, /采购付款.*原生买方/); assert.doesNotMatch(supplier, /采购付款.*来源公司/);
+	assert.match(supplier, /来源待核对.*建议公司/);
+	const project = adapter.renderValue("project_context", doc);
+	assert.match(project, /原生项目/); assert.match(project, /最终归属.*已核对工厂/);
+	assert.match(project, /来源待核对.*候选工厂/); assert.match(project, /来源待核对.*候选项目/);
+});
+
+test("supplier payment preserves exact zero, unknown and every OA currency and proof independently", () => {
+	const doc = { row_type: "purchase_order", grand_total: 0, currency: "CNY", order_progress: { external: { state: "exact", settled: 0, order_unpaid: null, currency: "CNY" } }, oa_references: [
+		{ name: "OA-1", number: "完整审批一", requested_amount: 12.345, currency: "CNY", cashier_paid_amount: 0, cashier_currency: "CNY", cashier_reconciliation_verified: false },
+		{ name: "OA-2", number: "完整审批二", requested_amount: 25, currency: "USD", cashier_paid_amount: null, cashier_currency: "USD", cashier_reconciliation_verified: null },
+	] };
+	const snapshot = JSON.stringify(doc), html = adapter.renderValue("external_payment", doc, { number: () => "bad global precision" });
+	assert.match(html, /ERP 已付[^<]*0\.00 CNY/); assert.match(html, /订单未付[^<]*—/);
+	assert.match(html, /完整审批一/); assert.match(html, /完整审批二/); assert.match(html, /12\.35 CNY/); assert.match(html, /25\.00 USD/);
+	assert.match(html, /出纳证据[^<]*0\.00 CNY/); assert.match(html, /未核对 ERP/); assert.match(html, /核对状态未知/);
+	assert.doesNotMatch(html, /37\.35|bad global precision/); assert.equal(JSON.stringify(doc), snapshot);
+});
+
+test("legacy and conflicting OA source amounts keep their individual basis and review evidence", () => {
+	const doc = { row_type: "oa_request", oa_references: [
+		{ name: "OA-CNY", number: "原申请-CNY", amount: 11.456, currency: "CNY", amount_basis: "采购明细合计", warning: "公司关联需核对" },
+		{ name: "OA-USD", number: "原申请-USD", amount: 20, currency: "USD", amount_basis: "付款申请金额", requested_amount: 30, cashier_paid_amount: 5, cashier_currency: "USD" },
+	] };
+	const html = adapter.renderValue("external_payment", doc);
+	assert.match(html, /采购明细合计[^<]*11\.46 CNY/); assert.match(html, /付款申请金额[^<]*20\.00 USD/);
+	assert.match(html, /申请[^<]*30\.00 USD/); assert.match(html, /来源待核对/); assert.match(html, /公司关联需核对/);
+	assert.doesNotMatch(html, /31\.46/);
+});
+
+test("internal groups never treat quote or custody as AP and keep payable orders and currencies separate", () => {
+	for (const state of ["draft_quote", "price_unconfirmed", "price_stale", "awaiting_invoice", "custody"]) {
+		const html = adapter.renderValue("internal_settlement", { row_type: "purchase_order", order_progress: { internal: [{ state, internal_order: "I-1", payable_total: 999, payable_outstanding: 888, currency: "USD" }] } });
+		assert.match(html, /未形成应付|不形成内部应付|待开应付|待确认|重新核对/); assert.doesNotMatch(html, /999\.00|888\.00/);
+	}
+	const html = adapter.renderValue("internal_settlement", { order_progress: { internal: [
+		{ state: "payable", internal_order: "I-CNY", beneficiary_company: "工厂一", payable_total: 10, payable_settled: 0, payable_outstanding: 10, currency: "CNY" },
+		{ state: "payable", internal_order: "I-USD", beneficiary_company: "工厂二", payable_total: 20, payable_settled: 5, payable_outstanding: null, currency: "USD" },
+	] } });
+	assert.match(html, /I-CNY/); assert.match(html, /I-USD/); assert.match(html, /10\.00 CNY/); assert.match(html, /20\.00 USD/); assert.match(html, /应付未付[^<]*—/); assert.doesNotMatch(html, /30\.00/);
+});
+
+test("factory receipt uses confirmed stock quantities and unit with maximum two decimals; report is separate", () => {
+	const doc = { order_progress: { domestic_receipt: { state: "none", quantities: [] }, factory_receipt: { state: "exact", quantities: [{ beneficiary_company: "工厂", received_stock_qty: 0, pending_stock_qty: 1.23456, stock_uom: "kg" }] }, receipt_logistics: [{ state: "reported", beneficiary_company: "工厂", reported_quantities: [{ qty: 99.12345, uom: "箱", destination: "工厂" }], native_receipt: { state: "none" }, manual_nodes: [{node:'reported_arrival',note:'人工报告，不改变库存',erp_received:false}] }] } };
+	const html = adapter.renderValue("receipt_logistics", doc);
+	assert.match(html, /工厂/); assert.match(html, /已入库[^<]*0 kg/); assert.match(html, /待入库[^<]*1\.23 kg/); assert.match(html, /物流报告[^<]*99\.12 箱/);
+	assert.match(html,/人工节点：报告到货（非 ERP 入库）/);assert.doesNotMatch(html,/reported_arrival/);
+	doc.order_progress.factory_receipt.state = "unknown";
+	const unknown = adapter.renderValue("receipt_logistics", doc);
+	assert.match(unknown, /工厂入库待核对/); assert.doesNotMatch(unknown, /待入库[^<]*1\.23|已入库[^<]*0 kg/);
+});
+
+test("restricted financial groups show a generic denial without any related identity or amount", () => {
+	const doc = { order_progress: { state: "restricted", external: { state: "restricted", settled: 987 }, internal: [{ state: "restricted", internal_order: "HIDDEN-ORDER", beneficiary_company: "HIDDEN-COMPANY", payable_total: 123, currency: "USD" }], receipt_logistics: [{ state: "restricted", cost_batch: "HIDDEN-BATCH", reported_quantities: [{ qty: 12, uom: "kg" }] }] } };
+	for (const field of ["external_payment", "internal_settlement", "receipt_logistics"]) {
+		const html = adapter.renderValue(field, doc);
+		assert.match(html, /受限/); assert.doesNotMatch(html, /HIDDEN|987|123|USD|kg/);
+	}
+	assert.match(adapter.renderValue("internal_settlement", { row_type: "oa_request", order_progress: null }), /待完善/);
 });

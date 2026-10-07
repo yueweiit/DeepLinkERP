@@ -2,6 +2,7 @@ import copy
 import importlib
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 
 def source(**values):
@@ -22,14 +23,85 @@ class PurchaseSourceContractTest(unittest.TestCase):
             self.module = None
         self.assertIsNotNone(self.module, "采购来源契约尚未实现")
 
-    def test_scope_requires_purchase_template_china_and_china_year(self):
+    def test_scope_requires_purchase_template_recognized_region_and_china_year(self):
         self.assertTrue(self.module.in_scope(source()))
         for patch in ({"process_code": "operation"}, {"create_time": datetime(2025, 12, 31, 15, 59, tzinfo=timezone.utc)},
                       {"create_time": datetime(2026, 12, 31, 16, tzinfo=timezone.utc)}):
             self.assertFalse(self.module.in_scope(source(**patch)))
-        for region in ("墨西哥Mexico", "", "China待确认"):
+        for region in ("美国USA", "", "China待确认", "Mexico待确认"):
             row = source(); row["form_component_values"][0]["value"] = region
             self.assertFalse(self.module.in_scope(row))
+
+    def test_mexico_internal_molds_use_only_fixed_purchase_templates_and_known_regions(self):
+        for region in ("墨西哥", "墨西哥Mexico", "墨西哥México", "墨西哥 México", "Mexico", "México"):
+            for code in self.module.PROCESS_CODES:
+                with self.subTest(region=region, code=code):
+                    row = source(process_code=code)
+                    row["form_component_values"][0]["value"] = region
+                    self.assertTrue(self.module.in_scope(row))
+                    self.assertTrue(self.module.normalize(row)["eligible"])
+                    row["process_code"] = "PROC-OPERATING-EXPENSE"
+                    self.assertFalse(self.module.in_scope(row))
+
+    def test_explicit_beneficiary_aliases_are_separate_from_applicant_and_payee(self):
+        for alias in ("归属子公司Subsidiaria", "所属子公司Empresa filial", "子公司Subsidiaria", "受益公司Empresa beneficiaria", "Empresa beneficiaria"):
+            with self.subTest(alias=alias):
+                row = source()
+                row["form_component_values"].extend([
+                    {"name": alias, "value": "Mexico Factory"},
+                    {"name": "申请部门/组织", "value": "Domestic Buyer"},
+                ])
+                before = copy.deepcopy(row)
+                item = self.module.normalize(row)
+                self.assertEqual(item.get("beneficiary_company"), "Mexico Factory")
+                self.assertEqual(item.get("beneficiary_company_status"), "unique")
+                self.assertEqual(item["department"], "Domestic Buyer")
+                self.assertEqual(item["payee"], "Vendor")
+                self.assertEqual(item["original_fields"].get("beneficiary_company"), "Mexico Factory")
+                self.assertEqual(row, before)
+
+    def test_beneficiary_and_project_ambiguity_preserves_every_raw_occurrence(self):
+        row = source()
+        row["form_component_values"].extend([
+            {"name": "归属子公司", "value": "Mexico Factory"},
+            {"name": "归属子公司Subsidiaria", "value": "Mexico Seller"},
+            {"name": "项目归属", "value": "Factory molds"},
+            {"name": "Proyecto", "value": "Store launch"},
+        ])
+        item = self.module.normalize(row)
+        self.assertIsNone(item.get("beneficiary_company"))
+        self.assertIsNone(item.get("project"))
+        self.assertEqual(item.get("beneficiary_company_status"), "ambiguous")
+        self.assertEqual(item.get("project_status"), "ambiguous")
+        self.assertEqual(item["original_fields"].get("beneficiary_company"), ["Mexico Factory", "Mexico Seller"])
+        self.assertEqual(item["original_fields"].get("project"), ["Factory molds", "Store launch"])
+
+    def test_role_controls_ignore_empty_branches_but_never_guess_structured_selections(self):
+        for key, alias in (("beneficiary_company", "归属子公司"), ("project", "项目Proyecto")):
+            for value in (["A", "B"], {"name": "A"}):
+                row = source()
+                row["form_component_values"].append({"name": alias, "value": value})
+                item = self.module.normalize(row)
+                self.assertIsNone(item.get(key))
+                self.assertEqual(item.get(key + "_status"), "ambiguous")
+                self.assertEqual(item["original_fields"][key], value)
+            row = source()
+            row["form_component_values"].extend([
+                {"name": alias, "value": None}, {"name": alias, "value": "A"},
+            ])
+            item = self.module.normalize(row)
+            self.assertEqual(item.get(key), "A")
+            self.assertEqual(item.get(key + "_status"), "unique")
+        self.assertEqual(self.module.normalize(source()).get("beneficiary_company_status"), "missing")
+
+    def test_normalization_reads_field_occurrences_only_once(self):
+        row = source()
+        row["form_component_values"] = self.module.json.dumps(row["form_component_values"])
+        with patch.object(self.module, "_field_occurrences", wraps=self.module._field_occurrences) as occurrences:
+            item = self.module.normalize(row)
+        self.assertTrue(item["eligible"])
+        self.assertEqual(item["currency"], "CNY")
+        self.assertEqual(occurrences.call_count, 1)
 
     def test_only_completed_agree_without_deletion_can_convert(self):
         for status, result, expected in [("COMPLETED", "agree", True), ("COMPLETED", "refuse", False),

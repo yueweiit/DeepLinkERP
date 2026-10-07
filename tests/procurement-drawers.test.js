@@ -62,11 +62,19 @@ test('records advanced controls reuse two native FilterGroups with parent permis
  groups[0].on_change();assert.equal(page,0);assert.equal(refresh,1);
  groups[0].filters=[['Payment Entry','company','=','A']];groups[1].filters=[['Payment Entry','name','like','PE%']];c.resetAdvancedFilters();assert.deepEqual(groups.map(g=>g.filters),[[],[]]);
 });
-test('PO form never emits PR-only invoice shortcut even when chain has a draft invoice',async()=>{
+test('PO form invoice actions use the fresh chain and preserve the actual source type',async()=>{
  let html='';const box={find(){return {on(){}};},prependTo(){return this;}};
  const api=payments(async()=>({message:{source_doctype:'Purchase Order',orders:[],invoices:[],payments:[],balances:[],draft_invoices:[{name:'DRAFT-PI'}],can_create_invoice:true}}),{$:value=>{html=value;return box;}});
  await api.formRefresh({doctype:'Purchase Order',doc:{name:'PO'},is_new:()=>false,$wrapper:{find:()=>({remove(){}})},layout:{wrapper:{}}});
- assert.doesNotMatch(html,/dlp-receipt-invoice/);
+  assert.match(html,/dlp-receipt-invoice[^>]+data-source-doctype="Purchase Order"[^>]+data-target="DRAFT-PI"/);
+  assert.match(html,/data-source-doctype="Purchase Order"[^>]*>确认应付/);
+});
+test('submitted PO exposes payable action using native invoice permissions even without receipt or payment eligibility',()=>{
+  const api=payments(undefined,{frappe:{model:{can_read:type=>type==='Purchase Invoice',can_create:type=>type==='Purchase Invoice'}}});
+  assert.match(api.orderReceiptAction({name:'PO',docstatus:1,status:'To Bill',per_received:100,per_billed:20}),/dlp-order-invoice/);
+  for(const doc of [{docstatus:0},{docstatus:2},{docstatus:1,status:'Closed'},{docstatus:1,status:'On Hold'},{docstatus:1,per_billed:100}])assert.doesNotMatch(api.orderReceiptAction({name:'PO',per_received:100,per_billed:20,...doc}),/dlp-order-invoice/);
+  const denied=payments(undefined,{frappe:{model:{can_read:()=>false,can_create:()=>false}}});
+  assert.doesNotMatch(denied.orderReceiptAction({name:'PO',docstatus:1,per_received:100,per_billed:0}),/dlp-order-invoice/);
 });
 test('owned drawer controls release native datepicker and their handlers once',()=>{
  let destroyed=0,unbound=0;const cleanup=functionFrom('disposeControls');const controls=[{datepicker:{destroy:()=>destroyed++},$input:{off:()=>unbound++}}];

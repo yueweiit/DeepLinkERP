@@ -1,10 +1,21 @@
-"""Permission-aware, read-only purchase orders and optional OA requests view."""
+"""Permission-aware, read-only purchase orders and optional OA requests view.
+
+List DTO: row.role_context carries confirmed native roles separately from
+source candidates/proposals and hints labelled 来源待核对. row.order_progress
+is the shared Task2 external/internal/domestic_receipt/receipt_logistics DTO,
+with factory_receipt, progress_phases and review_required; OA-only rows have
+no ERP progress. Historical cashier evidence never counts as ERP settled.
+Permission discovery/role/batch indexes are O(P + E + J) time/space for authorized
+rows, related edges and actual JSON/comment bytes. Existing deterministic
+association/list sorting adds O(P log P); the complete pipeline is not linear.
+"""
 
 from __future__ import annotations
 
 import json
 import re
 from collections import defaultdict
+from functools import wraps
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
 from typing import Any
@@ -36,6 +47,8 @@ OA_QUERY_FIELDS = (
 	"detail_total_amount", "processor_total_amount", "payment_amount", "purchase_order",
 	"approval_status", "sync_status", "process_instance_id", "owner", "order_no",
 	"custom_purchase_source_json", "custom_cashier_payment_evidence", "custom_purchase_source_id",
+	"custom_purchase_beneficiary_company", "custom_purchase_company_proposal", "custom_purchase_project",
+	"custom_purchase_company_confirmed", "backfill_imported", "project",
 )
 AMOUNT_FIELDS = (
 	("detail_total_amount", "采购明细合计"),
@@ -72,12 +85,71 @@ NUMERIC_FIELDS = frozenset({"grand_total", "oa_amount", "advance_paid", "per_rec
 NUMERIC_FIELD_TYPES = frozenset({"Currency", "Float", "Int", "Long Int", "Percent", "Check", "Rating", "Duration"})
 CASHIER_READ_FIELDS = frozenset({"company", "party", "paid_amount", "paid_from", "paid_to",
 	"paid_from_account_currency", "paid_to_account_currency", "reference_no", "reference_date", "remarks"})
+EXPORT_LABELS.update({
+	"oa_source_details": "OA 来源核对明细",
+	"purchasing_company": "采购付款公司", "buyer_company_proposal": "建议采购公司（待确认）",
+	"beneficiary_companies": "最终归属公司（已核对）", "source_beneficiary_hint": "原始归属（来源待核对）",
+	"source_project_hint": "原始项目（来源待核对）", "role_project": "已核对采购项目", "role_warnings": "归属/项目核对提示",
+	"external_state": "供应商付款口径", "external_settled": "供应商已付（ERP）", "external_order_unpaid": "订单未付（不等于应付）",
+	"external_currency": "供应商付款币种", "internal_orders": "内部订单", "internal_states": "内部结算状态",
+	"internal_companies": "内部最终归属公司", "internal_payable_total": "内部应付总额（已提交）",
+	"internal_settled": "内部已付（ERP）", "internal_outstanding": "内部应付未付", "internal_currencies": "内部结算币种",
+	"internal_warnings": "内部结算核对提示", "domestic_receipt_state": "采购公司收货状态",
+	"domestic_receipt_quantities": "采购公司原生收货数量/单位", "factory_receipt_state": "工厂收货核对状态",
+	"factory_received_quantities": "工厂原生收货数量/单位", "factory_pending_quantities": "工厂原生未收数量/单位",
+	"logistics_states": "物流报告状态", "logistics_reported_quantities": "物流报告数量/单位（不等于入库）",
+	"logistics_manual_nodes": "人工物流节点", "logistics_provenance": "物流来源/作者/时间", "logistics_warnings": "物流快照/核对提示",
+	"cashier_reconciliation_verified": "历史付款已核对 ERP", "cashier_reconciliation_warning": "历史付款核对提示",
+	"progress_warnings": "进度核对提示", "review_required": "待核对", "action_notice": "操作提示",
+})
+EXPORT_GROUPS = {
+	"order_context": ("name", "oa_number", "approval_status", "source", "transaction_date", "status", "oa_warning", "oa_source_details"),
+	"supplier_context": ("supplier_name", "supplier", "purchasing_company", "company", "buyer_company_proposal"),
+	"project_context": ("project", "role_project", "beneficiary_companies", "source_beneficiary_hint", "source_project_hint", "role_warnings"),
+	"external_payment": ("external_state", "grand_total", "currency", "external_settled", "external_order_unpaid", "external_currency",
+		"advance_paid", "party_account_currency", "advance_payment_status", "oa_amount", "oa_currency", "oa_amount_basis", "requested_amount", "cashier_paid_amount", "cashier_currency",
+		"cashier_evidence_status", "cashier_reconciliation_verified", "cashier_reconciliation_warning"),
+	"internal_settlement": ("internal_orders", "internal_companies", "internal_states", "internal_payable_total", "internal_settled",
+		"internal_outstanding", "internal_currencies", "internal_warnings"),
+	"receipt_logistics": ("per_received", "domestic_receipt_state", "domestic_receipt_quantities", "factory_receipt_state",
+		"factory_received_quantities", "factory_pending_quantities", "logistics_states", "logistics_reported_quantities",
+		"logistics_manual_nodes", "logistics_provenance", "logistics_warnings"),
+	"action_context": ("action_notice", "review_required", "progress_warnings"),
+}
+EXPORT_MONEY_FIELDS = frozenset({"external_settled", "external_order_unpaid"})
+SOURCE_PAYMENT_LEAVES = {
+	"oa_amount": ("amount", "currency"), "oa_currency": ("currency", None), "oa_amount_basis": ("amount_basis", None),
+	"requested_amount": ("requested_amount", "currency"), "cashier_paid_amount": ("cashier_paid_amount", "cashier_currency"),
+	"cashier_currency": ("cashier_currency", None), "cashier_evidence_status": ("cashier_evidence_status", None),
+	"cashier_reconciliation_verified": ("cashier_reconciliation_verified", None),
+	"cashier_reconciliation_warning": ("cashier_reconciliation_warning", None),
+}
 
 
 def cashier_evidence_readable() -> bool:
 	"""Derived external payment facts obey the native payment financial field scope."""
-	return bool(frappe.has_permission("Payment Entry", "read") and
-		CASHIER_READ_FIELDS <= set(get_permitted_fields("Payment Entry", permission_type="read")))
+	return bool(frappe.has_permission("Payment Entry", "read") and CASHIER_READ_FIELDS <= _permitted_fields("Payment Entry"))
+
+
+def _permitted_fields(doctype, **kwargs):
+	from .purchase_payment_service import _record_reader
+	reader = _record_reader.get()
+	if reader and hasattr(reader.fields, "permitted"):
+		return reader.fields.permitted(doctype, kwargs.get("parenttype"))
+	return set(get_permitted_fields(doctype, permission_type="read", **kwargs))
+
+
+def _request_reader():
+	from .purchase_order_progress import _progress_read_scope
+	return _progress_read_scope(get_permitted_fields)
+
+
+def _read_request(function):
+	@wraps(function)
+	def wrapper(*args, **kwargs):
+		with _request_reader():
+			return function(*args, **kwargs)
+	return wrapper
 
 
 def _whitelist(function):
@@ -113,6 +185,15 @@ def _filters(value: Any) -> dict[str, Any]:
 		raise ValueError("不支持的采购查看范围。")
 	if parsed["source"] not in {"", "oa", "non_oa"}:
 		raise ValueError("不支持的采购来源。")
+	parsed["progress_phase"] = _text(parsed.get("progress_phase"))
+	if parsed["progress_phase"] not in {"", "supplier_unpaid", "internal_unsettled", "factory_pending"}:
+		raise ValueError("不支持的采购进度阶段。")
+	if not isinstance(parsed.get("review_only", False), bool):
+		raise ValueError("待核对筛选必须是布尔值。")
+	parsed["review_only"] = parsed.get("review_only", False)
+	for key in ("company", "beneficiary_company", "status", "advance_payment_status", "approval_status", "search"):
+		parsed[key] = _text(parsed.get(key))
+	parsed["search"] = parsed["search"].casefold()
 	for key in ("from_date", "to_date"):
 		if parsed.get(key) and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", _text(parsed[key])):
 			raise ValueError("采购日期必须使用 YYYY-MM-DD。")
@@ -214,16 +295,18 @@ def _currency(value: Any, currency_codes: set[str]) -> str | None:
 
 
 def _oa_metadata(request: dict, currency_codes: set[str]) -> dict:
+	if "_metadata" in request:
+		return request["_metadata"]
 	amount, basis, amount_warning = _oa_amount(request)
-	managed = json.loads(request.get("custom_purchase_source_json") or "{}")
+	managed = request["_source"]
 	if managed:
 		amount, basis, amount_warning = managed.get("detail_total_amount"), "钉钉采购明细合计", "；".join(managed.get("issues") or [])
-	proof = json.loads(request.get("custom_cashier_payment_evidence") or "{}")
+	proof = request["_proof"]
 	currency = _currency(managed.get("currency") if managed else request.get("currency"), currency_codes)
 	warnings = [amount_warning] if amount_warning else []
 	if not currency:
 		warnings.append("OA 币种未知，未计入合计")
-	return {
+	request["_metadata"] = {
 		"oa_name": request["name"],
 		"oa_number": managed.get("business_id") or request.get("oa_code") or request.get("order_no") or request["name"],
 		"approval_status": request.get("approval_status"),
@@ -231,7 +314,39 @@ def _oa_metadata(request: dict, currency_codes: set[str]) -> dict:
 		"oa_warning": "；".join(warnings) or None,
 		"requested_amount":managed.get("requested_amount"), "cashier_paid_amount":proof.get("paid_amount"), "cashier_currency":proof.get("currency"),
 		"cashier_evidence_status":proof.get("payment_evidence_status"), "source_eligible":managed.get("eligible"), "source_version":managed.get("version"),
+		"cashier_reconciliation_verified": request.get("_reconciliation_verified"),
+		"cashier_reconciliation_warning": request.get("_reconciliation_warning"),
 	}
+	return request["_metadata"]
+
+
+def _prepare_request(record):
+	"""Parse each private blob once; never attach its arbitrary keys to public rows."""
+	request = dict(record)
+	for field, key in (("custom_purchase_source_json", "_source"), ("custom_cashier_payment_evidence", "_proof")):
+		if key not in request:
+			value = request.get(field)
+			request[key] = json.loads(value or "{}") if isinstance(value, str) else dict(value or {})
+	return request
+
+
+def _request_role(request, order=None):
+	role = dict(request.get("_role_context") or {})
+	source = request["_source"]
+	managed = bool(request.get("custom_purchase_source_id") or source)
+	company = request.get("target_company") if not managed or request.get("custom_purchase_company_confirmed") in (True, 1, "1") else None
+	if order:
+		company = order.get("company")
+	if not role:
+		role = {"purchasing_company": company, "company_confirmed": bool(company), "beneficiary_companies": [],
+			"beneficiary_company": None, "source_hint_label": "来源待核对", "role_warnings": []}
+		if managed:
+			role.update(source_beneficiary_company_hint=source.get("beneficiary_company"), source_project_hint=source.get("project"))
+			if not company:
+				role["role_warnings"] = ["采购公司待确认；申请人组织仅为采购公司建议"]
+	if order:
+		role.update(purchasing_company=order.get("company"), company_confirmed=bool(order.get("company")))
+	return role
 
 
 def _combine_warnings(*values) -> str | None:
@@ -242,15 +357,21 @@ def _combine_warnings(*values) -> str | None:
 def _oa_reference(request: dict, currency_codes: set[str], *, order=None, association_warning=None) -> dict:
 	metadata = _oa_metadata(request, currency_codes)
 	company_warning = None
-	if order and _text(order.get("company")) and _text(request.get("target_company")):
+	managed = bool(request.get("custom_purchase_source_id") or request["_source"])
+	confirmed = not managed or request.get("custom_purchase_company_confirmed") in (True, 1, "1")
+	if confirmed and order and _text(order.get("company")) and _text(request.get("target_company")):
 		if _text(order["company"]) != _text(request["target_company"]):
 			company_warning = "OA 公司与订单公司不一致"
 	return {
 		"name": metadata["oa_name"], "number": metadata["oa_number"],
 		"approval_status": metadata["approval_status"], "amount": metadata["oa_amount"],
 		"currency": metadata["oa_currency"], "amount_basis": metadata["oa_amount_basis"],
-		"company": request.get("target_company") or None,
+		"company": request.get("target_company") or None if confirmed else None,
 		"warning": _combine_warnings(metadata["oa_warning"], association_warning, company_warning),
+		**({"cashier_reconciliation_verified": metadata["cashier_reconciliation_verified"],
+			"cashier_reconciliation_warning": metadata["cashier_reconciliation_warning"],
+			"cashier_paid_amount": metadata["cashier_paid_amount"], "cashier_currency": metadata["cashier_currency"],
+			"cashier_evidence_status": metadata["cashier_evidence_status"], "requested_amount": metadata["requested_amount"]} if managed else {}),
 	}
 
 
@@ -264,12 +385,15 @@ def _base_row(record: dict, doctype: str, native_fields=()) -> dict:
 		"source": None, "oa_name": None, "oa_number": None, "approval_status": None,
 		"oa_amount": None, "oa_currency": None, "oa_amount_basis": None, "oa_warning": None,
 		"oa_references": [],
+		"order_progress": record.get("order_progress") if doctype == PURCHASE_ORDER else None,
+		"role_context": dict(record.get("_role_context") or {"purchasing_company": record.get("company") if doctype == PURCHASE_ORDER else None,
+			"company_confirmed": bool(record.get("company")) if doctype == PURCHASE_ORDER else False, "beneficiary_companies": [], "role_warnings": []}),
 	}
 
 
 def _canonical_rows(purchase_orders, oa_requests, currency_codes: set[str], oa_reverse_link_readable: bool, native_fields=()) -> list[dict]:
 	orders = {_text(row.get("name")): dict(row) for row in purchase_orders if _text(row.get("name"))}
-	requests = {_text(row.get("name")): dict(row) for row in oa_requests if _text(row.get("name"))}
+	requests = {_text(row.get("name")): _prepare_request(row) for row in oa_requests if _text(row.get("name"))}
 	associations, targets = defaultdict(set), defaultdict(set)
 	for name, order in orders.items():
 		linked = _text(order.get("custom_oa_purchase_expense"))
@@ -307,6 +431,11 @@ def _canonical_rows(purchase_orders, oa_requests, currency_codes: set[str], oa_r
 				for key in linked_names
 			]
 			row["oa_warning"] = _combine_warnings(*(reference["warning"] for reference in row["oa_references"]))
+			roles = [_request_role(requests[key], order) for key in linked_names]
+			row["role_context"] = {**roles[0], "beneficiary_companies": list(dict.fromkeys(
+				value for role in roles for value in role.get("beneficiary_companies", []))),
+				"role_warnings": list(dict.fromkeys(value for role in roles for value in role.get("role_warnings", [])))}
+			row["_search_values"].extend(value for role in roles for value in (role.get("project"), role.get("project_candidate"), role.get("source_project_hint")))
 		elif "custom_oa_purchase_expense" in order:
 			if order.get("custom_oa_purchase_expense"):
 				row["source"] = "OA"
@@ -319,18 +448,19 @@ def _canonical_rows(purchase_orders, oa_requests, currency_codes: set[str], oa_r
 			continue
 		row = _base_row(request, OA_REQUEST, native_fields)
 		row.update(_oa_metadata(request, currency_codes))
+		role = _request_role(request)
 		status = "已生成订单（无权查看）" if request.get("purchase_order") else "未生成订单"
 		if "purchase_order" not in request:
 			status = "订单关联不可见"
 			row["oa_warning"] = _combine_warnings(row["oa_warning"], status)
 		row.update({
 			"source": "OA", "transaction_date": _date(request.get("apply_date") or request.get("creation")) or None,
-			"company": request.get("target_company") or None, "owner": request.get("owner"),
+			"company": role.get("purchasing_company"), "owner": request.get("owner"), "role_context": role,
 			"_company_readable": "target_company" in request,
 			"status": status,
 			"oa_references": [_oa_reference(request, currency_codes, association_warning="订单关联不可见" if "purchase_order" not in request else None)],
 			"_approval_statuses": [request.get("approval_status")],
-			"_search_values": [request.get("oa_code"), request.get("order_no")],
+			"_search_values": [request.get("oa_code"), request.get("order_no"), role.get("project"), role.get("project_candidate"), role.get("source_project_hint")],
 		})
 		rows.append(row)
 	return rows
@@ -347,7 +477,7 @@ def _matches(row: dict, filters: dict) -> bool:
 	for field in ("status","advance_payment_status"):
 		if filters.get(field) and row.get(field) != filters[field]:
 			return False
-	company = _text(filters.get("company"))
+	company = filters["company"]
 	if company == "__unconfirmed__":
 		if not row.get("_company_readable") or _text(row.get("company")):
 			return False
@@ -358,20 +488,145 @@ def _matches(row: dict, filters: dict) -> bool:
 		return False
 	if filters.get("to_date") and (not date or date > filters["to_date"]):
 		return False
-	approval = _text(filters.get("approval_status"))
+	approval = filters["approval_status"]
 	if approval and approval not in [_text(value) for value in row.get("_approval_statuses", [])]:
 		return False
-	search = _text(filters.get("search")).casefold()
+	search = filters["search"]
 	values = [row.get(field) for field in ("name", "supplier", "supplier_name", "oa_name", "oa_number", "project", "owner")]
 	return not search or any(search in _text(value).casefold() for value in values + row.get("_search_values", []))
 
 
+def _load_order_progress(names):
+	from .purchase_order_progress import _get_order_progress_batch
+	return _get_order_progress_batch(names)
+
+
+def _restricted_order_progress(name):
+	from .purchase_order_progress import _restricted_progress
+	return _restricted_progress(name)
+
+
+def _project_source_roles(rows, sources, fields, orders):
+	from .purchase_source_service import _role_projections
+	return _role_projections(rows, sources, fields, {row["name"]: row for row in orders})
+
+
+def _load_company_scope(names):
+	"""One authority-only batch; never scan payment, receipt or logistics edges."""
+	from .purchase_payment_service import _require_fields, _quiet_link_errors
+	from .purchase_order_progress import _progress_read_scope
+	from .purchase_fulfilment_service import _company
+	names = list(dict.fromkeys(names))
+	if not names:
+		return set()
+	with _progress_read_scope(get_permitted_fields) as reader:
+		cache = getattr(reader, "list_company_scope", {})
+		reader.list_company_scope = cache
+		pending = [name for name in names if name not in cache]
+		with _quiet_link_errors():
+			try:
+				_require_fields("Company", {"name"})
+			except frappe.PermissionError:
+				cache.update((name, False) for name in pending)
+				pending = []
+		reader.preload("Company", pending)
+		for name in pending:
+			with _quiet_link_errors():
+				try:
+					_company(name)
+					cache[name] = True
+				except (frappe.PermissionError, frappe.DoesNotExistError):
+					cache[name] = False
+		return {name for name in names if cache[name]}
+
+
+def _load_order_fields_scope():
+	from .purchase_order_progress import _require_source_order_fields
+	from .purchase_payment_service import _quiet_link_errors
+	with _quiet_link_errors():
+		try:
+			_require_source_order_fields()
+			return True
+		except frappe.PermissionError:
+			return False
+
+
+def _redact_restricted_row(row, native_fields=()):
+	"""The same conservative row is used before filters/totals and at progress IO."""
+	warning = "关联进度受限，请核对公司和字段权限"
+	for field in (*native_fields, "company", "supplier", "supplier_name", "currency", "grand_total", "advance_paid",
+		"party_account_currency", "advance_payment_status", "per_received", "per_billed", "project", "oa_amount", "oa_currency", "oa_amount_basis", "requested_amount",
+		"cashier_paid_amount", "cashier_currency", "cashier_evidence_status", "cashier_reconciliation_verified"):
+		if field not in {"name", "creation", "modified", "status", "docstatus", "transaction_date", "owner"}:
+			row[field] = None
+	row["_company_readable"] = False
+	row["_search_values"] = []
+	row["role_context"] = {"purchasing_company": None, "company_confirmed": False, "beneficiary_companies": [],
+		"role_warnings": [warning]}
+	row["order_progress"] = _restricted_order_progress(row["name"]) if row["row_type"] == "purchase_order" else None
+	row["review_required"] = True
+	row["oa_warning"] = warning if row["oa_references"] else None
+	row["cashier_reconciliation_warning"] = warning if row["oa_references"] else None
+	row["oa_references"] = [{**reference, **{key: None for key in ("amount", "currency", "amount_basis", "company", "requested_amount",
+		"cashier_paid_amount", "cashier_currency", "cashier_evidence_status", "cashier_reconciliation_verified")},
+		"warning": warning, "cashier_reconciliation_warning": warning}
+		for reference in row["oa_references"]]
+
+
+def _authorize_native_rows(rows, company_loader, order_fields_loader, native_fields):
+	if company_loader is None and order_fields_loader is None:
+		return
+	order_fields_readable = order_fields_loader() if order_fields_loader and any(row["row_type"] == "purchase_order" for row in rows) else True
+	readable = company_loader(row["company"] for row in rows if row.get("company")) if company_loader else None
+	for row in rows:
+		if ((readable is not None and row.get("company") and row["company"] not in readable) or
+			(row["row_type"] == "purchase_order" and (not row.get("company") or not order_fields_readable))):
+			_redact_restricted_row(row, native_fields)
+
+
+def _attach_progress(rows, loader=None):
+	orders = [row for row in rows if row["row_type"] == "purchase_order" and (row.get("order_progress") or {}).get("state") != "restricted"]
+	progress = loader([row["name"] for row in orders]) if loader and orders else {}
+	for row in rows:
+		if row["name"] in progress and row["row_type"] == "purchase_order":
+			row["order_progress"] = progress[row["name"]]
+		value = row.get("order_progress")
+		role = row["role_context"]
+		if value and value.get("state") == "restricted":
+			_redact_restricted_row(row)
+			role = row["role_context"]
+		elif value:
+			role["beneficiary_companies"] = list(dict.fromkeys([*role.get("beneficiary_companies", []),
+				*(entry["beneficiary_company"] for entry in [*value.get("internal", []), *value.get("receipt_logistics", [])]
+					if entry.get("beneficiary_company") and entry.get("state") not in ("restricted", "setup_required"))]))
+		row["review_required"] = bool(role.get("role_warnings") or row.get("oa_warning") or
+			(value.get("review_required") if value else True))
+		row["action_notice"] = "打开订单办理；操作时按原生权限重新核对" if row["row_type"] == "purchase_order" else "来源待完善，请核对后关联原生采购订单"
+
+
+def _computed_matches(row, filters):
+	if filters["beneficiary_company"] and filters["beneficiary_company"] not in row["role_context"].get("beneficiary_companies", []):
+		return False
+	if filters["progress_phase"] and filters["progress_phase"] not in (row.get("order_progress") or {}).get("progress_phases", []):
+		return False
+	return not filters["review_only"] or row.get("review_required", True)
+
+
+def _needs_full_progress(filters):
+	return bool(filters["beneficiary_company"] or filters["progress_phase"] or filters["review_only"])
+
+
 def _pipeline(purchase_orders, oa_requests, *, filters=None, order_by="transaction_date desc", currency_codes=(),
-	oa_reverse_link_readable=True, native_fields=None):
+	oa_reverse_link_readable=True, native_fields=None, progress_loader=None, full_progress=False, company_loader=None, order_fields_loader=None):
 	parsed = _filters(filters)
 	native_fields = native_fields or {}
 	field, descending = _sort_spec(order_by, native_fields)
-	rows = [row for row in _canonical_rows(purchase_orders, oa_requests, set(currency_codes), oa_reverse_link_readable, native_fields) if _matches(row, parsed)]
+	rows = _canonical_rows(purchase_orders, oa_requests, set(currency_codes), oa_reverse_link_readable, native_fields)
+	_authorize_native_rows(rows, company_loader, order_fields_loader, native_fields)
+	rows = [row for row in rows if _matches(row, parsed)]
+	if full_progress or _needs_full_progress(parsed):
+		_attach_progress(rows, progress_loader)
+	rows = [row for row in rows if _computed_matches(row, parsed)]
 	rows.sort(key=lambda row: row["row_key"])
 	nonempty, empty = [], []
 	for row in rows:
@@ -402,13 +657,17 @@ def _public_rows(rows: list[dict]) -> list[dict]:
 
 def build_unified_purchase_payload(purchase_orders, oa_requests, *, filters=None, start=0,
 	page_length=DEFAULT_PAGE_LENGTH, order_by="transaction_date desc", currency_codes=(),
-	capabilities=None, warnings=(), oa_reverse_link_readable=True, native_fields=None) -> dict:
+	capabilities=None, warnings=(), oa_reverse_link_readable=True, native_fields=None, progress_loader=None, company_loader=None, order_fields_loader=None) -> dict:
 	start = _integer(start, minimum=0)
 	page_length = _integer(page_length, minimum=1, maximum=MAX_PAGE_LENGTH)
 	rows, totals = _pipeline(purchase_orders, oa_requests, filters=filters, order_by=order_by,
-		currency_codes=currency_codes, oa_reverse_link_readable=oa_reverse_link_readable, native_fields=native_fields)
+		currency_codes=currency_codes, oa_reverse_link_readable=oa_reverse_link_readable, native_fields=native_fields,
+		progress_loader=progress_loader, company_loader=company_loader, order_fields_loader=order_fields_loader)
+	page = rows[start:start + page_length]
+	if not _needs_full_progress(_filters(filters)):
+		_attach_progress(page, progress_loader)
 	return {
-		"rows": _public_rows(rows[start:start + page_length]), "total_count": len(rows),
+		"rows": _public_rows(page), "total_count": len(rows),
 		"start": start, "page_length": page_length, "has_previous": start > 0,
 		"has_next": start + page_length < len(rows), "totals": totals,
 		"capabilities": capabilities or {"purchase_order": True, "oa_request": True}, "warnings": list(warnings),
@@ -420,11 +679,11 @@ def _columns(columns: Any) -> list[str]:
 		columns = json.loads(columns)
 	if columns is None:
 		return list(DEFAULT_EXPORT_COLUMNS)
-	if not isinstance(columns, list) or not columns or any(not isinstance(key, str) or key not in EXPORT_LABELS for key in columns):
+	if not isinstance(columns, list) or not columns or any(not isinstance(key, str) or key not in EXPORT_LABELS.keys() | EXPORT_GROUPS.keys() for key in columns):
 		raise ValueError("不支持的采购导出列。")
 	if len(set(columns)) != len(columns):
 		raise ValueError("采购导出列不能重复。")
-	return columns
+	return list(dict.fromkeys(field for key in columns for field in EXPORT_GROUPS.get(key, (key,))))
 
 
 def _export_value(field: str, row: dict) -> Any:
@@ -436,23 +695,111 @@ def _export_value(field: str, row: dict) -> Any:
 			row.get(field), row.get(field) or "来源待确认")
 	if field == "oa_references":
 		return json.dumps(row.get(field) or [], ensure_ascii=False, default=str)
+	if len(row.get("oa_references", [])) > 1 and field in SOURCE_PAYMENT_LEAVES:
+		if "_export_projection" not in row:
+			row["_export_projection"] = _progress_export_projection(row)
+		return row["_export_projection"].get(field)
+	if field in EXPORT_LABELS and field not in row:
+		if "_export_projection" not in row:
+			row["_export_projection"] = _progress_export_projection(row)
+		return row["_export_projection"].get(field)
 	if field in NUMERIC_FIELDS and _number(row.get(field)) is not None:
 		return float(_number(row[field]))
 	return row.get(field)
 
 
+def _display_number(value, *, quantity=False):
+	number = _number(value)
+	if number is None:
+		return "—"
+	text = f"{number:.2f}"
+	return text.rstrip("0").rstrip(".") if quantity else text
+
+
+def _quantity_text(row, *, key="qty", unit="uom"):
+	return f"{_display_number(row.get(key), quantity=True)} {_text(row.get(unit)) or '单位待核对'}"
+
+
+def _progress_export_projection(row):
+	"""Fixed readable leaves, one projection per row; no JSON progress cell.
+
+    Independent internal orders/currencies and receipt stock UOM remain on
+    separate labelled lines. Formatting never changes native DTO precision.
+    """
+	progress = row.get("order_progress") or {}; role = row.get("role_context") or {}
+	external = progress.get("external") or {}; internal = progress.get("internal") or []
+	domestic = progress.get("domestic_receipt") or {}; factory = progress.get("factory_receipt") or {}
+	logistics = progress.get("receipt_logistics") or []
+	def lines(values):
+		return "\n".join(_text(value) for value in values if value is not None and _text(value)) or None
+	def internal_values(key, monetary=False):
+		return lines(f"{entry.get('internal_order') or '关联待核对'}: " + (
+			_display_number(entry.get(key)) + " " + (_text(entry.get("currency")) or "币种待核对") if monetary else
+			_text(entry.get(key)) or "—") for entry in internal)
+	def native_quantities(entries, key="qty", unit="uom"):
+		return lines(((_text(entry.get("internal_order")) + ": ") if entry.get("internal_order") else "") +
+			_quantity_text(entry, key=key, unit=unit) for entry in entries)
+	source_details = []; source_leaves = {key: [] for key in SOURCE_PAYMENT_LEAVES}
+	for reference in row.get("oa_references", []):
+		identity = " / ".join(_text(reference.get(key)) for key in ("name", "number") if reference.get(key)) or "来源待核对"
+		for field, (key, currency_key) in SOURCE_PAYMENT_LEAVES.items():
+			value = reference.get(key)
+			if currency_key:
+				text = _display_number(value) + " " + (_text(reference.get(currency_key)) or "币种待核对")
+			elif field == "cashier_reconciliation_verified":
+				text = "已核对 ERP" if value is True else "尚未核对 ERP" if value is False else "未知（权限或证据待核对）"
+			else:
+				text = _text(value) or "—"
+			source_leaves[field].append(identity + ": " + text)
+		source_details.append(" · ".join(part for part in (
+			_text(reference.get("name")), _text(reference.get("number")), _text(reference.get("approval_status")),
+			_display_number(reference.get("amount")) + " " + (_text(reference.get("currency")) or "币种待核对"),
+			_text(reference.get("amount_basis")), _text(reference.get("company")), _text(reference.get("warning")),
+			("出纳证据 " + _display_number(reference.get("cashier_paid_amount")) + " " + (_text(reference.get("cashier_currency")) or "币种待核对"))
+				if reference.get("cashier_paid_amount") is not None else "",
+			"已核对 ERP 付款" if reference.get("cashier_reconciliation_verified") else _text(reference.get("cashier_reconciliation_warning"))) if part))
+	return {
+		**{key: lines(values) for key, values in source_leaves.items()}, "oa_source_details": lines(source_details),
+		"purchasing_company": role.get("purchasing_company"), "buyer_company_proposal": role.get("buyer_company_proposal"),
+		"beneficiary_companies": lines(role.get("beneficiary_companies", [])), "role_project": role.get("project"),
+		"source_beneficiary_hint": role.get("source_beneficiary_company_hint"), "source_project_hint": role.get("source_project_hint"),
+		"role_warnings": lines(role.get("role_warnings", [])), "external_state": external.get("state"),
+		"external_settled": float(_number(external["settled"])) if _number(external.get("settled")) is not None else None,
+		"external_order_unpaid": float(_number(external["order_unpaid"])) if _number(external.get("order_unpaid")) is not None else None,
+		"external_currency": external.get("currency"), "internal_orders": lines(entry.get("internal_order") for entry in internal),
+		"internal_states": internal_values("state"), "internal_companies": internal_values("beneficiary_company"),
+		"internal_payable_total": internal_values("payable_total", True), "internal_settled": internal_values("payable_settled", True),
+		"internal_outstanding": internal_values("payable_outstanding", True), "internal_currencies": internal_values("currency"),
+		"internal_warnings": lines(f"{entry.get('internal_order') or '关联待核对'}: {warning}" for entry in internal for warning in entry.get("warnings", [])),
+		"domestic_receipt_state": domestic.get("state"), "domestic_receipt_quantities": native_quantities(domestic.get("quantities", [])),
+		"factory_receipt_state": factory.get("state"),
+		"factory_received_quantities": native_quantities(factory.get("quantities", []), "received_stock_qty", "stock_uom"),
+		"factory_pending_quantities": native_quantities(factory.get("quantities", []), "pending_stock_qty", "stock_uom"),
+		"logistics_states": lines(f"{entry.get('cost_batch') or '来源待关联'}: {entry.get('state') or 'unknown'}" for entry in logistics),
+		"logistics_reported_quantities": lines(f"{entry.get('cost_batch') or '来源待关联'}: {_quantity_text(qty)} {_text(qty.get('destination'))}"
+			for entry in logistics for qty in entry.get("reported_quantities", [])),
+		"logistics_manual_nodes": lines(f"{entry.get('name') or '关联待核对'}: " + " · ".join(_text(node.get(key)) for key in ("node", "note", "by", "on") if node.get(key)) +
+			(" · " + _quantity_text(node) if node.get("qty") is not None else "") for entry in logistics for node in entry.get("manual_nodes", [])),
+		"logistics_provenance": lines(f"{entry.get('cost_batch') or '来源待关联'}: " + " · ".join(_text(proof.get(key)) for key in ("source_id", "author", "time", "remark") if proof.get(key))
+			for entry in logistics for proof in entry.get("provenance", [])),
+		"logistics_warnings": lines(warning for entry in [domestic, factory, *logistics] for warning in entry.get("warnings", [])),
+		"progress_warnings": lines(progress.get("progress_warnings", [])),
+	}
+
+
 def _export_data(rows: list[dict], columns: Any) -> list[list]:
 	fields = _columns(columns)
+	export_rows = [dict(row) for row in rows]
 	return [
 		[EXPORT_LABELS[field] for field in fields],
-		*[[_export_value(field, row) for field in fields] for row in rows],
+		*[[_export_value(field, row) for field in fields] for row in export_rows],
 	]
 
 
 def build_unified_purchase_export(purchase_orders, oa_requests, *, filters=None, columns=None,
 	order_by="transaction_date desc", currency_codes=(), oa_reverse_link_readable=True, native_fields=None) -> list[list]:
 	rows, _ = _pipeline(purchase_orders, oa_requests, filters=filters, order_by=order_by,
-		currency_codes=currency_codes, oa_reverse_link_readable=oa_reverse_link_readable, native_fields=native_fields)
+		currency_codes=currency_codes, oa_reverse_link_readable=oa_reverse_link_readable, native_fields=native_fields, full_progress=True)
 	return _export_data(rows, columns)
 
 
@@ -481,7 +828,7 @@ def _read_records(native_filters=None, native_or_filters=None, order_by="transac
 	native_or_filters = json.loads(native_or_filters or "[]") if isinstance(native_or_filters, str) else native_or_filters
 	if any(value is not None and not isinstance(value, (list, dict)) for value in (native_filters, native_or_filters)):
 		frappe.throw("原生筛选条件必须为列表或对象。")
-	capabilities, warnings, records, native_fields = {}, [], {}, {}
+	capabilities, warnings, records, native_fields, permissions = {}, [], {}, {}, {}
 	oa_reverse_link_readable = False
 	for doctype, key, requested in ((PURCHASE_ORDER, "purchase_order", PO_QUERY_FIELDS), (OA_REQUEST, "oa_request", OA_QUERY_FIELDS)):
 		exists = bool(frappe.db.exists("DocType", doctype))
@@ -494,13 +841,15 @@ def _read_records(native_filters=None, native_or_filters=None, order_by="transac
 			warnings.append(f"{doctype} 未安装。" if not exists else f"无权查看 {doctype}。")
 			records[doctype] = []
 			continue
-		permitted = set(get_permitted_fields(doctype, permission_type="read", ignore_virtual=True))
+		permitted = _permitted_fields(doctype, ignore_virtual=True)
+		permissions[doctype] = permitted
 		if doctype == OA_REQUEST:
 			oa_reverse_link_readable = "purchase_order" in permitted
 		if doctype == PURCHASE_ORDER:
 			native_fields = _native_projection(permitted, order_by)
 			requested = (*requested, *native_fields)
-		fields = [field for field in requested if field in permitted]
+		fields = [field for field in requested if field in permitted and field not in {
+			"custom_purchase_source_json", "custom_cashier_payment_evidence"}]
 		fields = list(dict.fromkeys(fields))
 		if "name" not in fields:
 			frappe.throw(f"没有权限查看 {doctype} 单号。", frappe.PermissionError)
@@ -510,29 +859,48 @@ def _read_records(native_filters=None, native_or_filters=None, order_by="transac
 		result = frappe.get_list(doctype, fields=fields, limit_page_length=0, **query)
 		# Keep projection explicit even if a boundary returns surplus values.
 		records[doctype] = [{field: row.get(field) for field in fields} for row in result]
-		if doctype == OA_REQUEST:
-			# Private evidence is never a readable native JSON field. Expose only
-			# the fixed permitted projection, after the native OA query has scoped names.
-			for row in records[doctype]:
-				if row.get("custom_purchase_source_id"):
-					private=frappe.db.get_value(OA_REQUEST,row["name"],["custom_purchase_source_json","custom_cashier_payment_evidence"],as_dict=True)
-					source=json.loads(private.get("custom_purchase_source_json") or "{}")
-					projected={"version":source.get("version"),"issues":source.get("issues") if {"payment_amount","detail_total_amount","items_json"}<=permitted else []}
-					if "approval_status" in permitted: projected["eligible"]=source.get("eligible")
-					if "oa_code" in permitted: projected["business_id"]=source.get("business_id")
-					for original,key in (("payment_amount","requested_amount"),("detail_total_amount","detail_total_amount"),("currency","currency")):
-						if original in permitted: projected[key]=source.get(key)
-					row["custom_purchase_source_json"]=json.dumps(projected)
-					if cashier_evidence_readable():
-						proof=json.loads(private.get("custom_cashier_payment_evidence") or "{}")
-						row["custom_cashier_payment_evidence"]=json.dumps({k:proof.get(k) for k in ("paid_amount","currency","payment_evidence_status")})
-		if doctype == OA_REQUEST and not cashier_evidence_readable():
-			for row in records[doctype]: row.pop("custom_cashier_payment_evidence",None)
 	if native_filters or native_or_filters:
 		# Advanced PO-only constraints never silently widen to unconverted sources.
 		names={o["name"] for o in records[PURCHASE_ORDER]}
 		linked={o.get("custom_oa_purchase_expense") for o in records[PURCHASE_ORDER]}
 		records[OA_REQUEST]=[r for r in records[OA_REQUEST] if r.get("purchase_order") in names or r["name"] in linked]
+	requests = records[OA_REQUEST]
+	if requests:
+		permitted = permissions[OA_REQUEST]
+		meta = frappe.get_meta(OA_REQUEST)
+		private_fields = ["name", *[field for field in ("custom_purchase_source_json", "custom_cashier_payment_evidence", "custom_purchase_payment_reconciliation") if meta.has_field(field)]]
+		# Authorized OA names, not a denied source-ID field, define this private
+		# read scope. This also preserves unmanaged legacy rows and older schemas.
+		private = {row["name"]: row for row in frappe.db.get_values(OA_REQUEST,
+			{"name": ["in", [row["name"] for row in requests]]}, private_fields, as_dict=True)} if len(private_fields) > 1 else {}
+		readable = cashier_evidence_readable()
+		sources = {}
+		for row in requests:
+			data = private.get(row["name"], {})
+			source = json.loads(data["custom_purchase_source_json"]) if data.get("custom_purchase_source_json") else {}
+			proof = json.loads(data["custom_cashier_payment_evidence"]) if data.get("custom_cashier_payment_evidence") else {}
+			reconciliation = json.loads(data["custom_purchase_payment_reconciliation"]) if data.get("custom_purchase_payment_reconciliation") else {}
+			projected = {"version": source.get("version"), "issues": source.get("issues") if {"payment_amount", "detail_total_amount", "items_json"} <= permitted else []} if source else {}
+			for original, key in (("approval_status", "eligible"), ("oa_code", "business_id"), ("payment_amount", "requested_amount"),
+				("detail_total_amount", "detail_total_amount"), ("currency", "currency"), ("custom_purchase_beneficiary_company", "beneficiary_company"),
+				("custom_purchase_project", "project")):
+				if original in permitted and source:
+					projected[key] = source.get(key)
+					if key in ("beneficiary_company", "project"):
+						projected[key + "_status"] = source.get(key + "_status")
+			row["_source"] = projected
+			row["_proof"] = {key: proof.get(key) for key in ("paid_amount", "currency", "payment_evidence_status")} if readable else {}
+			if source and readable:
+				verified = bool(reconciliation.get("verified") and reconciliation.get("evidence_version") == proof["version"]) if proof.get("version") else None
+				row["_reconciliation_verified"] = verified
+				row["_reconciliation_warning"] = None if verified else (
+					"历史付款尚未核对为 ERP 入账；不会自动补记付款" if verified is False else "历史付款证据缺少可核对版本；ERP 入账状态未知")
+			sources[row["name"]] = projected
+		role_rows = [row for row in requests if row.get("custom_purchase_source_id") or row["_source"]]
+		roles = _project_source_roles(role_rows, sources, permitted, records[PURCHASE_ORDER]) if role_rows else {}
+		for row in requests:
+			if row["name"] in roles:
+				row["_role_context"] = roles[row["name"]]
 	if not any(capabilities.values()):
 		frappe.throw("没有权限查看采购订单或 OA 采购申请。", frappe.PermissionError)
 	codes = {_text(row.get("currency")).upper() for row in records[OA_REQUEST] if _text(row.get("currency"))}
@@ -541,19 +909,24 @@ def _read_records(native_filters=None, native_or_filters=None, order_by="transac
 
 
 @_whitelist
+@_read_request
 def get_unified_purchase_list(filters=None, start=0, page_length=DEFAULT_PAGE_LENGTH,
 	order_by="transaction_date desc", native_filters=None, native_or_filters=None) -> dict:
 	orders, requests, capabilities, warnings, currencies, reverse_readable, native_fields = _read_records(native_filters, native_or_filters, order_by)
 	return build_unified_purchase_payload(orders, requests, filters=filters, start=start, page_length=page_length,
 		order_by=order_by, currency_codes=currencies, capabilities=capabilities, warnings=warnings,
-		oa_reverse_link_readable=reverse_readable, native_fields=native_fields)
+		oa_reverse_link_readable=reverse_readable, native_fields=native_fields, progress_loader=_load_order_progress,
+		company_loader=_load_company_scope, order_fields_loader=_load_order_fields_scope)
 
 
 @_whitelist
+@_read_request
 def export_unified_purchase_list(filters=None, columns=None, order_by="transaction_date desc", native_filters=None, native_or_filters=None) -> None:
+	fields = _columns(columns)
 	orders, requests, capabilities, _, currencies, reverse_readable, native_fields = _read_records(native_filters, native_or_filters, order_by)
 	rows, _ = _pipeline(orders, requests, filters=filters, order_by=order_by,
-		currency_codes=currencies, oa_reverse_link_readable=reverse_readable, native_fields=native_fields)
+		currency_codes=currencies, oa_reverse_link_readable=reverse_readable, native_fields=native_fields,
+		progress_loader=_load_order_progress, full_progress=True, company_loader=_load_company_scope, order_fields_loader=_load_order_fields_scope)
 	records = {PURCHASE_ORDER: {row["name"]: row for row in orders}, OA_REQUEST: {row["name"]: row for row in requests}}
 	used = defaultdict(set)
 	for row in rows:
@@ -576,11 +949,11 @@ def export_unified_purchase_list(filters=None, columns=None, order_by="transacti
 		"default_date_format": "yyyy-mm-dd hh:mm:ss",
 	}) as workbook:
 		# Native Data Export mode also preserves literal HTML-looking source text.
-		make_xlsx(_export_data(rows, columns), "Data Export", wb=workbook)
+		make_xlsx(_export_data(rows, fields), "Data Export", wb=workbook)
 		ws=workbook.get_worksheet_by_name("Data Export")
 		number_format=workbook.add_format({"num_format":"0.00"})
-		for index,key in enumerate(_columns(columns)):
-			if key in NUMERIC_FIELDS - {"docstatus"}: ws.set_column(index,index,None,number_format)
+		for index,key in enumerate(fields):
+			if key in (NUMERIC_FIELDS - {"docstatus"}) | EXPORT_MONEY_FIELDS: ws.set_column(index,index,None,number_format)
 	frappe.response["filename"] = "采购订单.xlsx"
 	frappe.response["filecontent"] = output.getvalue()
 	frappe.response["type"] = "binary"

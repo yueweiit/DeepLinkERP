@@ -76,8 +76,9 @@
   if(doc.docstatus!==1)return '';
   const receipt=frappe.model?.can_create?.('Purchase Receipt')!==false && doc.per_received!=null && Number.isFinite(Number(doc.per_received)) && Number(doc.per_received)<100 && !['Closed','Cancelled','On Hold','Completed'].includes(doc.status);
   const payment=!doc.hide_payment && Boolean(frappe.model?.can_create?.('Payment Entry'));
-  if(!receipt && !payment)return '';
-  return `<span class="dlp-order-actions">${payment?`<button type="button" class="btn btn-xs btn-default dlp-order-pay" data-name="${esc(doc.name)}">${esc(t('付款'))}</button>`:''} ${receipt?`<button type="button" class="btn btn-xs btn-default dlp-order-receipt" data-name="${esc(doc.name)}">${esc(t('入库'))}</button>`:''}</span>`;
+  const invoice=!doc.hide_invoice && Boolean(frappe.model?.can_read?.('Purchase Invoice') && frappe.model?.can_create?.('Purchase Invoice')) && doc.per_billed!=null && Number.isFinite(Number(doc.per_billed)) && Number(doc.per_billed)<100 && !['Closed','Cancelled','On Hold','Completed'].includes(doc.status);
+  if(!receipt && !payment && !invoice)return '';
+  return `<span class="dlp-order-actions">${payment?`<button type="button" class="btn btn-xs btn-default dlp-order-pay" data-name="${esc(doc.name)}">${esc(t('付款'))}</button>`:''} ${receipt?`<button type="button" class="btn btn-xs btn-default dlp-order-receipt" data-name="${esc(doc.name)}">${esc(t('入库'))}</button>`:''} ${invoice?`<button type="button" class="btn btn-xs btn-default dlp-order-invoice" data-name="${esc(doc.name)}">${esc(t('确认应付'))}</button>`:''}</span>`;
  }
  async function receiptDrafts(sourceName){
   const rows=(await frappe.call({method:'frappe.client.get_list',args:{doctype:'Purchase Receipt',fields:['name','modified'],filters:[['Purchase Receipt','docstatus','=',0],['Purchase Receipt Item','purchase_order','=',sourceName]],order_by:'modified desc',limit_page_length:0}})).message || [];
@@ -168,10 +169,10 @@
    // Capture before the native change handler formats input back to two display
    // decimals. Never read that rounded presentation into the write projection.
    const node=control.$input?.get(0);if(!node?.addEventListener)throw new Error('输入控件不可用，请在原生单据核对。');
-   const touched=()=>{if(drawer.alive())onTouched(control.get_value());};
+   const touched=()=>{if(drawer.alive())onTouched(control.get_value(),control.$input.val());};
    for(const event of ['input','change'])node.addEventListener(event,touched,true);
    control.dlpDisposeInput=()=>{for(const event of ['input','change'])node.removeEventListener(event,touched,true);};
-  }else if(onTouched)control.$input?.on('input.dlpDrawer change.dlpDrawer',()=>onTouched(control.get_value()));
+  }else if(onTouched)control.$input?.on('input.dlpDrawer change.dlpDrawer',()=>{if(drawer.alive())onTouched(control.get_value(),control.$input.val());});
   return control;
  }
  function actionButtons(drawer,projection,session,onSave,onReload,onPaymentSubmit=null,confirmLabel='确认付款'){
@@ -209,11 +210,25 @@
   });
  }
  async function documentDrawer(sourceType,sourceName,targetType,targetName=null){
-  const drawer=newDrawer(targetType==='Purchase Receipt'?'采购订单 → 入库':'采购入库 → 确认应付',true);if(!drawer)return;
+  const orderInvoice=sourceType==='Purchase Order' && targetType==='Purchase Invoice';
+  const drawer=newDrawer(targetType==='Purchase Receipt'?'采购订单 → 入库':orderInvoice?'采购订单→确认应付（不更新库存）':'采购入库 → 确认应付',true);if(!drawer)return;
   const token=retryToken(()=>root.crypto.randomUUID());let projection,session,allowAnother=false;
   const context={source_doctype:sourceType,source_name:sourceName,target_doctype:targetType};
   async function load(){
    const generation=++drawer.loadId;
+   if(orderInvoice){
+    const chain=await call('get_purchase_chain',{source_doctype:sourceType,source_name:sourceName});if(!drawer.alive() || generation!==drawer.loadId)return;
+    const drafts=[...new Map((chain.draft_invoices || []).map(row=>[row.name || row,row])).values()];
+    if(targetName && !drafts.some(row=>(row.name || row)===targetName) && !(chain.invoices || []).some(row=>row.name===targetName && row.docstatus===1)){
+     body(drawer,'<p class="text-warning">应付草稿已变化或不可见，请刷新来源并重新选择。</p>');drawer.setBusy(false);return;
+    }
+    if(!targetName && drafts.length===1)targetName=drafts[0].name || drafts[0];
+    if(!targetName && drafts.length>1){
+     body(drawer,`<p>${link(sourceType,sourceName)} · ${drafts.length} 张可见应付草稿。请选择继续编辑。</p><div class="dlp-draft-choices">${drafts.map(row=>`<p><button type="button" class="btn btn-default dlp-draft-choice" data-target="${esc(row.name || row)}">继续 ${esc(row.name || row)}</button> ${link('Purchase Invoice',row.name || row,'原生详情')}</p>`).join('')}</div>`);
+     drawer.panel.find('.dlp-draft-choice').on('click.dlpDrawer',async event=>{if(!drawer.alive() || drawer.busy)return;targetName=event.currentTarget.dataset.target;drawer.setBusy(true);try{await load();}catch(error){if(drawer.alive())drawer.error(error);}finally{if(drawer.alive())drawer.setBusy(false);}});drawer.setBusy(false);return;
+    }
+    if(!targetName && !chain.can_create_invoice){body(drawer,`<p class="text-warning">${esc(chain.invoice_reason || '当前不能确认应付，请核对原生订单。')}</p>${link(sourceType,sourceName,'打开原生来源')}`);drawer.setBusy(false);return;}
+   }
    const result=await call('preview_document',{...context,...(targetName?{target_name:targetName}:{})},ACTIONS);if(!drawer.alive() || generation!==drawer.loadId)return;
    await loadMetadata(targetType);if(!drawer.alive() || generation!==drawer.loadId)return;
    targetName=result.document.name || null;
@@ -243,7 +258,8 @@
   async function save(confirm=0,workflowAction=null){
    if(drawer.busy)return;drawer.setBusy(true);
    try{
-    const args={...context,changes:session.changes(),...(targetName?{target_name:targetName,expected_modified:session.document.modified}:{}),...(allowAnother?{allow_another_draft:1}:{})};
+    if(orderInvoice && !projection.source_modified)throw new Error('来源订单版本不可见，请刷新后核对。');
+    const args={...context,changes:session.changes(),...(targetName?{target_name:targetName,expected_modified:session.document.modified}:{}),...(orderInvoice?{expected_source_modified:projection.source_modified}:{}),...(allowAnother?{allow_another_draft:1}:{})};
     const {source_doctype,target_doctype,...receiptArgs}=args;
     const payload=targetType==='Purchase Receipt'?{...receiptArgs,confirm,...(workflowAction && workflowAction!=='Submit'?{workflow_action:workflowAction}:{})}:args;
     const result=await call(targetType==='Purchase Receipt'?'record_receipt':'save_document_draft',{...payload,request_id:token.forPayload(payload)},ACTIONS);
@@ -254,7 +270,7 @@
    finally{if(drawer.alive())drawer.setBusy(false);}
   }
   try{
-   if(sourceType==='Purchase Order' && !targetName){
+   if(sourceType==='Purchase Order' && targetType==='Purchase Receipt' && !targetName){
     const drafts=await receiptDrafts(sourceName);if(!drawer.alive())return;
     if(drafts.length===1)targetName=drafts[0].name;
     if(drafts.length>1){
@@ -361,9 +377,9 @@
   const current=frm.doc.name,generation=frm.dlpChainGeneration=(frm.dlpChainGeneration || 0)+1;
   try{const chain=await call('get_purchase_chain',{source_doctype:frm.doctype,source_name:current});if(frm.doc.name!==current || frm.dlpChainGeneration!==generation)return;
    const progress=(chain.order_progress || []).map(order=>`<p>${link('Purchase Order',order.name)} · 订单 ${money(order.grand_total,order.currency)} · ${(order.units || []).map(unit=>`已入 ${quantity(unit.received)} / 待入 ${quantity(unit.pending)} ${esc(unit.uom)}`).join('；')} · 待入货品金额 ${money(order.pending_net_amount,order.currency)}（不含税）</p>`).join('');
-   const receiptSource=frm.doctype==='Purchase Receipt' && chain.source_doctype==='Purchase Receipt';
-   const invoiceActions=receiptSource?`${(chain.draft_invoices || []).map(i=>`<button class="btn btn-default btn-sm dlp-receipt-invoice" data-name="${esc(current)}" data-target="${esc(i.name || i)}">继续应付草稿</button>`).join(' ')} ${chain.can_create_invoice?`<button class="btn btn-default btn-sm dlp-receipt-invoice" data-name="${esc(current)}">确认应付</button>`:''}`:'';
-   const box=$(`<section class="dlp-purchase-chain"><strong>采购关联与付款</strong><p>${chain.orders.map(n=>link('Purchase Order',n)).join(' · ')}</p>${progress}<div>${balanceHTML(chain)}</div>${(chain.warnings || []).map(w=>`<p class="text-warning">${esc(w)}</p>`).join('')}<p>${chain.invoices.map(i=>`${link('Purchase Invoice',i.name)} ${i.docstatus===0?'草稿':i.docstatus===2?'已取消':''}`).join(' · ') || esc(chain.reason)}</p><div><button type="button" class="btn btn-default btn-sm dlp-records">采购付款记录</button> ${invoiceActions} ${chain.can_create || chain.can_prepay?`<button class="btn btn-primary btn-sm dlp-pay">${esc(t('付款 / 继续付款'))}</button>`:''} ${frm.doctype==='Purchase Order'?orderReceiptAction({...frm.doc,hide_payment:true}):''}</div>${chain.payments.length?`<details><summary>关联付款与凭证（最多 100 条）</summary>${chain.payments.map(row=>`<p>${link('Payment Entry',row.name)} · ${esc(row.state)} · ${money(row.amount,row.currency)}<br>${referencesHTML(row.references)}<br>${vouchersHTML(row.vouchers)}</p>`).join('')}</details>`:''}</section>`).prependTo(frm.layout.wrapper);
+   const invoiceSource=frm.doctype===chain.source_doctype;
+   const invoiceActions=invoiceSource?`${(chain.draft_invoices || []).map(i=>`<button class="btn btn-default btn-sm dlp-receipt-invoice" data-name="${esc(current)}" data-source-doctype="${esc(frm.doctype)}" data-target="${esc(i.name || i)}">继续应付草稿</button>`).join(' ')} ${chain.can_create_invoice?`<button class="btn btn-default btn-sm dlp-receipt-invoice" data-name="${esc(current)}" data-source-doctype="${esc(frm.doctype)}">确认应付</button>`:''}`:'';
+   const box=$(`<section class="dlp-purchase-chain"><strong>采购关联与付款</strong><p>${chain.orders.map(n=>link('Purchase Order',n)).join(' · ')}</p>${progress}<div>${balanceHTML(chain)}</div>${(chain.warnings || []).map(w=>`<p class="text-warning">${esc(w)}</p>`).join('')}<p>${chain.invoices.map(i=>`${link('Purchase Invoice',i.name)} ${i.docstatus===0?'草稿':i.docstatus===2?'已取消':''}`).join(' · ') || esc(chain.reason)}</p><div><button type="button" class="btn btn-default btn-sm dlp-records">采购付款记录</button> ${invoiceActions} ${chain.can_create || chain.can_prepay?`<button class="btn btn-primary btn-sm dlp-pay">${esc(t('付款 / 继续付款'))}</button>`:''} ${frm.doctype==='Purchase Order'?orderReceiptAction({...frm.doc,hide_payment:true,hide_invoice:true}):''}</div>${chain.payments.length?`<details><summary>关联付款与凭证（最多 100 条）</summary>${chain.payments.map(row=>`<p>${link('Payment Entry',row.name)} · ${esc(row.state)} · ${money(row.amount,row.currency)}<br>${referencesHTML(row.references)}<br>${vouchersHTML(row.vouchers)}</p>`).join('')}</details>`:''}</section>`).prependTo(frm.layout.wrapper);
    box.find('.dlp-pay').on('click.dlpForm',()=>pay(frm.doctype,current));
    box.find('.dlp-records').on('click.dlpForm',()=>recordsRoute(chain));
   }catch(error){/* Native form remains available without finance read permissions. */}
@@ -408,7 +424,7 @@
  // Exactly one delegated click handler per loaded resource; cached pages reuse it.
  if(root.document && !root.__dlpProcurementActionsInstalled){
   root.__dlpProcurementActionsInstalled=true;
-  root.document.addEventListener('click',event=>{const button=event.target.closest?.('.dlp-receipt-pay,.dlp-receipt-invoice,.dlp-order-receipt,.dlp-order-pay,.dlp-payment-preview,.dlp-voucher-preview,.dlp-native-document');if(!button)return;if(button.tagName==='A' && (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button))return;event.preventDefault();event.stopPropagation();const name=button.dataset.name;if(button.classList.contains('dlp-native-document'))openNative(button.dataset.doctype,name);else if(button.classList.contains('dlp-receipt-pay'))pay('Purchase Receipt',name);else if(button.classList.contains('dlp-receipt-invoice'))documentDrawer('Purchase Receipt',name,'Purchase Invoice',button.dataset.target || null);else if(button.classList.contains('dlp-order-pay'))pay('Purchase Order',name);else if(button.classList.contains('dlp-order-receipt'))documentDrawer('Purchase Order',name,'Purchase Receipt');else if(button.classList.contains('dlp-payment-preview'))paymentDrawer(name);else voucherDrawer(name);},true);
+  root.document.addEventListener('click',event=>{const button=event.target.closest?.('.dlp-receipt-pay,.dlp-receipt-invoice,.dlp-order-invoice,.dlp-order-receipt,.dlp-order-pay,.dlp-payment-preview,.dlp-voucher-preview,.dlp-native-document,.dlp-crossborder-open');if(!button)return;if(button.tagName==='A' && (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button))return;event.preventDefault();event.stopPropagation();const name=button.dataset.name;if(button.classList.contains('dlp-crossborder-open'))root.DeepLinkERPCrossborderProcurement?.open(button.dataset.crossborderOrder,button.dataset.crossborderTab,root.cur_list?.dlpPurchaseOrderGrid);else if(button.classList.contains('dlp-native-document'))openNative(button.dataset.doctype,name);else if(button.classList.contains('dlp-receipt-pay'))pay('Purchase Receipt',name);else if(button.classList.contains('dlp-receipt-invoice'))documentDrawer(button.dataset.sourceDoctype || 'Purchase Receipt',name,'Purchase Invoice',button.dataset.target || null);else if(button.classList.contains('dlp-order-invoice'))documentDrawer('Purchase Order',name,'Purchase Invoice');else if(button.classList.contains('dlp-order-pay'))pay('Purchase Order',name);else if(button.classList.contains('dlp-order-receipt'))documentDrawer('Purchase Order',name,'Purchase Receipt');else if(button.classList.contains('dlp-payment-preview'))paymentDrawer(name);else voucherDrawer(name);},true);
   frappe.router?.on('change',()=>{gate.cancel();activeDrawer?.close(true);});
  }
  function mountProcurementTabs(c) {
@@ -418,5 +434,5 @@
   c.$procurementTabs?.remove();
   c.$procurementTabs=c.root.$(`<nav class="dlp-procurement-tabs" aria-label="${esc(t('采购流程'))}">${entries.map(([key,path,label])=>!finance && key.startsWith('purchase-')?`<button type="button" disabled title="${esc(t('财务办理入口；请在订单查看进度'))}">${esc(t(label))}</button>`:`<a class="${key===current?'active':''}" href="/desk/${path}?sidebar=Buying" ${key===current?'aria-current="page"':''}>${esc(t(label))}</a>`).join('')}</nav>`).insertBefore(c.list.$result.parent('.result-container'));
  }
- root.DeepLinkERPPurchasePayments={pay,formRefresh,recordsPage,balanceHTML,documentDrawer,paymentDrawer,voucherDrawer,orderReceiptAction,nativeAction,openNative,vouchersHTML,paymentSummary,editSession,retryToken,operationGate,recordsRequest,recordsExport,receiptDrafts,mountRecordsFilters,disposeControls,mountProcurementTabs,mountAttachments,createDrawer:newDrawer,formatMoney:money,formatQuantity:quantity,formatNumericInput};
+ root.DeepLinkERPPurchasePayments={pay,formRefresh,recordsPage,balanceHTML,documentDrawer,paymentDrawer,voucherDrawer,orderReceiptAction,nativeAction,openNative,vouchersHTML,paymentSummary,editSession,retryToken,operationGate,recordsRequest,recordsExport,receiptDrafts,mountRecordsFilters,disposeControls,mountProcurementTabs,mountAttachments,createDrawer:newDrawer,drawerBody:body,drawerInput:input,loadMetadata,cancelCrossborderForList:c=>root.DeepLinkERPCrossborderProcurement?.cancelForList(c),formatMoney:money,formatQuantity:quantity,formatNumericInput};
 })(typeof globalThis!=='undefined'?globalThis:this);

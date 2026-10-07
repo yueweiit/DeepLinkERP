@@ -68,3 +68,11 @@ test('first manual onboarding launch is preserved and empty initial watching exp
  manual?.({target:{closest:()=>({})}});wrapper={querySelector:()=>({click:()=>clicks++})};callback();assert.equal(clicks,0);assert.equal(disconnected,1);assert.equal(removed,1);
  wrapper=null;const fresh={};grid.dismissAutomaticOnboarding(fresh,root);timer?.();wrapper={querySelector:()=>({click:()=>clicks++})};callback();assert.equal(clicks,0);assert.equal(fresh.stopInitialOnboarding,null);
 });
+
+test('expanded details invalidate using one row index rather than rescanning every row',()=>{
+ const rows=Array.from({length:1000},(_,index)=>({name:`PO-${index}`,modified:'new'}));
+ rows.find=()=>assert.fail('expanded rows must not rescan the full page');
+ const expanded=new Map([['PO-2',{header:{modified:'new'}}],['PO-900',{header:{modified:'old'}}],['removed',{header:{modified:'new'}}]]);
+ engine.invalidateExpandedDetails(expanded,rows);
+ assert.deepEqual([...expanded.keys()],['PO-2']);
+});

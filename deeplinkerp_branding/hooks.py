@@ -27,19 +27,20 @@ add_to_apps_screen = [
 # include js, css files in header of desk.html
 app_include_css = [
 	"/assets/deeplinkerp_branding/css/deeplinkerp_navigation.css?v=0.0.10",
-	"/assets/deeplinkerp_branding/css/purchase_payments.css?v=0.0.7",
-	"/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.17",
+	"/assets/deeplinkerp_branding/css/purchase_payments.css?v=0.0.8",
+	"/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.18",
 	"/assets/deeplinkerp_branding/css/operating_expenses.css?v=0.0.1",
 	"/assets/deeplinkerp_branding/css/sales_order_list.css?v=0.0.8",
 	"/assets/deeplinkerp_branding/css/inventory_detail.bundle.css?v=0.0.3",
 ]
 app_include_js = [
-	"/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.18",
-	"/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.18",
+	"/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.19",
+	"/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.19",
+	"/assets/deeplinkerp_branding/js/crossborder_procurement.js?v=0.0.5",
 	"/assets/deeplinkerp_branding/js/purchase_source.js?v=0.0.1",
 	"/assets/deeplinkerp_branding/js/operating_expense_drawer.js?v=0.0.11",
 	"/assets/deeplinkerp_branding/js/operating_expenses.js?v=0.0.3",
-	"/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.6",
+	"/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.8",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_navigation.js?v=0.0.19",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_interface_mode.js?v=0.0.3",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_branding.js?v=0.0.27",
@@ -149,6 +150,7 @@ after_migrate = [
 	"deeplinkerp_branding.procurement_navigation.ensure_procurement_navigation",
 	"deeplinkerp_branding.operating_expense_install.after_migrate",
 	"deeplinkerp_branding.purchase_source_install.after_migrate",
+	"deeplinkerp_branding.purchase_fulfilment_install.after_migrate",
 	"deeplinkerp_branding.operating_navigation.ensure_operating_navigation",
 ]
 
@@ -162,6 +164,8 @@ has_permission = {
 }
 permission_query_conditions["OA Purchase Request"] = "deeplinkerp_branding.services.purchase_source_service.permission_query_conditions"
 has_permission["OA Purchase Request"] = "deeplinkerp_branding.services.purchase_source_service.has_permission"
+permission_query_conditions["Purchase Fulfilment Link"] = "deeplinkerp_branding.services.purchase_fulfilment_service.permission_query_conditions"
+has_permission["Purchase Fulfilment Link"] = "deeplinkerp_branding.services.purchase_fulfilment_service.has_permission"
 doc_events = {"Journal Entry": {"validate": "deeplinkerp_branding.services.operating_expenses.validate_operating_journal"}}
 doc_events["OA Purchase Request"] = {"validate":"deeplinkerp_branding.services.purchase_source_service.validate_managed_source","before_rename":"deeplinkerp_branding.services.purchase_source_service.protect_managed_source_identity","on_trash":"deeplinkerp_branding.services.purchase_source_service.protect_managed_source_identity"}
 doc_events["Purchase Order"] = {"validate":"deeplinkerp_branding.services.purchase_source_service.validate_managed_order","before_submit":"deeplinkerp_branding.services.purchase_source_service.validate_source_before_submit"}

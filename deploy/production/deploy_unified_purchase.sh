@@ -48,6 +48,49 @@ release_is_current() {
   image_id=$(docker inspect frappe_docker-backend-1 --format '{{.Image}}') || return 1
   verify_running_release "$image_id" "$branding_sha" "$crm_sha" "$finance_sha"
 }
+retarget_existing_source_sync() {
+  # Never enable a timer that was absent or stopped before this release.
+  (( source_sync_timer_active )) || return 0
+  local image_id=$1 runner_sha
+  runner_sha=$(sha256sum "$build_dir/deeplinkerp_branding/services/dedicated_source_sync.py")
+  runner_sha=${runner_sha%% *}
+  python3 "$build_dir/deploy/production/dedicated_source_sync.py" install \
+    --revision "$branding_sha" --image-id "$image_id" --runner-sha256 "$runner_sha" --start-timer
+  systemctl --user is-enabled --quiet deeplinkerp-source-sync.timer
+  systemctl --user is-active --quiet deeplinkerp-source-sync.timer
+}
+capture_pinned_sources() {
+  docker run --rm --read-only --network none --entrypoint /home/frappe/frappe-bench/env/bin/python "$1" -c '
+import hashlib,json
+from pathlib import Path
+result={}
+for app in ("deeplinkerp_branding","china_finance","crm_integration"):
+ root=Path("/home/frappe/frappe-bench/apps")/app/app
+ assert root.is_dir(), "Missing pinned app source: "+app
+ result[app]={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in root.rglob("*") if p.is_file() and "__pycache__" not in p.parts and p.suffix not in {".pyc",".pyo"}}
+print(json.dumps(result))
+' > "$2"
+}
+capture_release_audit() {
+  # Private backups keep the release umask; only copied source tools are readable.
+  chmod 644 "$build_dir/deploy/production/audit_unified_purchase.py" || return 1
+  chmod 644 "$build_dir/deploy/production/procurement_release_metadata.py" || return 1
+  chmod 644 "$build_dir/deploy/production/joint_release_guards.py" || return 1
+  chmod 644 "$build_dir/deeplinkerp_branding/deeplinkerp_branding/page/purchase_payment_records/purchase_payment_records.json" || return 1
+  docker cp "$build_dir/deploy/production/audit_unified_purchase.py" frappe_docker-backend-1:/tmp/audit_unified_purchase.py || return 1
+  docker cp "$build_dir/deploy/production/procurement_release_metadata.py" frappe_docker-backend-1:/tmp/procurement_release_metadata.py || return 1
+  docker cp "$build_dir/deploy/production/joint_release_guards.py" frappe_docker-backend-1:/tmp/joint_release_guards.py || return 1
+  docker cp "$build_dir/deeplinkerp_branding/deeplinkerp_branding/page/purchase_payment_records/purchase_payment_records.json" frappe_docker-backend-1:/tmp/purchase-payment-records.json || return 1
+  if [[ -f "$build_dir/release-source-manifest.json" ]]; then
+    chmod 644 "$build_dir/release-source-manifest.json" || return 1
+    docker cp "$build_dir/release-source-manifest.json" frappe_docker-backend-1:/tmp/release-source-manifest.json || return 1
+  fi
+  local receipt_args=()
+  local quiescent=1
+  if [[ "$1" == current ]]; then quiescent=0; fi
+  if [[ "$1" == after ]]; then receipt_args=(--joint-receipt "$native_receipt"); fi
+  "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 -e "DEEPLINKERP_RELEASE_QUIESCENT=$quiescent" backend /home/frappe/frappe-bench/env/bin/python /tmp/audit_unified_purchase.py "${audit_args[@]}" "${receipt_args[@]}" --phase "$1" > "$2"
+}
 quiesce_release_workers() {
   "${dc[@]}" stop queue-long queue-short scheduler || return 1
   local service
@@ -168,6 +211,20 @@ dc=(docker compose -p frappe_docker -f compose.custom.yaml)
 services=(backend frontend queue-long queue-short scheduler websocket)
 build_dir=$(mktemp -d /tmp/unified-purchase-build.XXXXXX)
 prepare_sources
+source_sync_timer_active=0
+source_sync_status=0
+source_sync_state=$(systemctl --user is-active deeplinkerp-source-sync.timer) || source_sync_status=$?
+case "$source_sync_state:$source_sync_status" in
+  active:0)
+    test -s /home/yuewei/.local/state/deeplinkerp-source-sync/config.json
+    source_sync_timer_active=1
+    ;;
+  inactive:3) ;;
+  unknown:4)
+    test ! -e /home/yuewei/.local/state/deeplinkerp-source-sync/config.json
+    ;;
+  *) echo 'Existing source timer state is unconfirmed; cutover refused.' >&2; exit 1;;
+esac
 current_revision=$(revision_label frappe_docker-backend-1 branding)
 current_crm=$(revision_label frappe_docker-backend-1 crm)
 current_finance=$(revision_label frappe_docker-backend-1 finance)
@@ -175,6 +232,20 @@ if [[ -z "$crm_archive" ]]; then crm_sha=$current_crm; fi
 if [[ -z "$finance_archive" ]]; then finance_sha=$current_finance; fi
 if release_is_current; then
   curl -fsS --max-time 10 https://deeplinkerp.com/api/method/ping
+  current_image_id=$(docker inspect frappe_docker-backend-1 --format '{{.Image}}')
+  audit_args=(--purchase-payment-page-source /tmp/purchase-payment-records.json --joint-metadata --release-manifest /tmp/release-source-manifest.json)
+  capture_release_audit current "$build_dir/current-contract.json"
+  capture_pinned_sources "$current_image_id" "$build_dir/current-image-sources.json"
+  python3 - "$build_dir/current-contract.json" "$build_dir/current-image-sources.json" <<'PY'
+import json, sys
+current = json.load(open(sys.argv[1]))
+assert current['current_contract_verified'] is True
+assert current['release_sources_all'] == json.load(open(sys.argv[2])), 'Running app source differs from current immutable image'
+PY
+  # The same revision may need its timer pins repaired after an interrupted handoff.
+  flock -u 9
+  retarget_existing_source_sync "$current_image_id"
+  release_is_current
   echo 'Target revision already running; no repeated cutover.'
   exit 0
 fi
@@ -198,11 +269,7 @@ if [[ -f "$build_dir/release-source-manifest.json" ]]; then
   audit_args+=(--release-manifest /tmp/release-source-manifest.json)
 fi
 # The private release umask is right for backups, not for a script copied as root to a non-root container.
-chmod 644 "$build_dir/deploy/production/audit_unified_purchase.py"
-chmod 644 "$build_dir/deploy/production/procurement_release_metadata.py"
-chmod 644 "$build_dir/deploy/production/joint_release_guards.py"
 chmod 644 "$build_dir/deeplinkerp_branding/deeplinkerp_branding/page/purchase_payables/purchase_payables.json"
-chmod 644 "$build_dir/deeplinkerp_branding/deeplinkerp_branding/page/purchase_payment_records/purchase_payment_records.json"
 new_image="deeplinkerp-custom:unified-purchase-$release_key"
 frozen_base="deeplinkerp-custom:unified-base-$release_key"
 docker image tag "$old_image_id" "$frozen_base"
@@ -221,18 +288,6 @@ assert source.count(sys.argv[1]) == 7, 'Unexpected Compose baseline'
 Path(sys.argv[3], 'compose.after.yaml').write_text(source.replace(sys.argv[1], sys.argv[2]))
 Path(sys.argv[3], 'compose.rollback.yaml').write_text(source.replace(sys.argv[1], sys.argv[4]))
 PY
-capture_release_audit() {
-  docker cp "$build_dir/deploy/production/audit_unified_purchase.py" frappe_docker-backend-1:/tmp/audit-unified-purchase.py || return 1
-  docker cp "$build_dir/deploy/production/procurement_release_metadata.py" frappe_docker-backend-1:/tmp/procurement_release_metadata.py || return 1
-  docker cp "$build_dir/deploy/production/joint_release_guards.py" frappe_docker-backend-1:/tmp/joint_release_guards.py || return 1
-  docker cp "$build_dir/deeplinkerp_branding/deeplinkerp_branding/page/purchase_payment_records/purchase_payment_records.json" frappe_docker-backend-1:/tmp/purchase-payment-records.json || return 1
-  if [[ -f "$build_dir/release-source-manifest.json" ]]; then
-    docker cp "$build_dir/release-source-manifest.json" frappe_docker-backend-1:/tmp/release-source-manifest.json || return 1
-  fi
-  local receipt_args=()
-  if [[ "$1" == after ]]; then receipt_args=(--joint-receipt "$native_receipt"); fi
-  "${dc[@]}" exec -T -e FRAPPE_STREAM_LOGGING=1 backend /home/frappe/frappe-bench/env/bin/python /tmp/audit-unified-purchase.py "${audit_args[@]}" "${receipt_args[@]}" --phase "$1" > "$2"
-}
 maintenance=0
 switched=0
 baseline_captured=0
@@ -333,16 +388,7 @@ capture_release_audit before "$release_dir/before.json"
 baseline_captured=1
 # Compare complete running source sets against the pinned immutable image, then
 # freeze the complete candidate Branding package and unchanged CRM/Finance sets.
-docker run --rm --read-only --network none --entrypoint /home/frappe/frappe-bench/env/bin/python "$old_image_id" -c '
-import hashlib,json
-from pathlib import Path
-result={}
-for app in ("deeplinkerp_branding","china_finance","crm_integration"):
- root=Path("/home/frappe/frappe-bench/apps")/app/app
- assert root.is_dir(), "Missing pinned app source: "+app
- result[app]={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob("*")) if p.is_file() and "__pycache__" not in p.parts and p.suffix not in {".pyc",".pyo"}}
-print(json.dumps(result,sort_keys=True))
-' > "$release_dir/pinned-base-sources.json"
+capture_pinned_sources "$old_image_id" "$release_dir/pinned-base-sources.json"
 python3 - "$release_dir" "$build_dir" <<'PY'
 import hashlib,json,sys
 from pathlib import Path
@@ -353,7 +399,7 @@ before=json.loads((evidence/'before.json').read_text())
 assert before['release_sources_all']==json.loads((evidence/'pinned-base-sources.json').read_text()), 'Running app source differs from pinned base image'
 candidate=build/'deeplinkerp_branding'
 after=dict(before['release_sources_all'])
-candidate_files={str(p.relative_to(candidate)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(candidate.rglob('*')) if p.is_file() and '__pycache__' not in p.parts and p.suffix not in {'.pyc','.pyo'}}
+candidate_files={str(p.relative_to(candidate)):hashlib.sha256(p.read_bytes()).hexdigest() for p in candidate.rglob('*') if p.is_file() and '__pycache__' not in p.parts and p.suffix not in {'.pyc','.pyo'}}
 after['deeplinkerp_branding']=merge_frozen_branding_sources(before['release_sources_all']['deeplinkerp_branding'],candidate_files)
 before['approved_sources_after']=after
 (evidence/'before.json').write_text(json.dumps(before,sort_keys=True,ensure_ascii=False))
@@ -400,5 +446,12 @@ for attempt in $(seq 1 90); do
   if (( attempt == 90 )); then exit 1; fi
   sleep 1
 done
+# Cutover is verified; the timer installer acquires the same mutex itself.
+# Once unlocked, a source job may write. Never run the pre-cutover rollback trap
+# after this boundary; report an unconfirmed handoff without reverting live data.
+trap - EXIT
+flock -u 9
+retarget_existing_source_sync "$new_image_id"
+release_is_current
 docker inspect frappe_docker-backend-1 --format '{{.Config.Image}} {{.Image}}'
 printf '\nApp cutover verified; logged-in UI acceptance still required.\n'

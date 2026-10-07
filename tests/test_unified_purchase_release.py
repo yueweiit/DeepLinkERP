@@ -1,5 +1,6 @@
 """Test isolated recovery and native CLI parsing; never invoke a release."""
 
+import contextlib
 import hashlib
 import io
 import json
@@ -55,7 +56,41 @@ class ReleaseRecoveryTests(unittest.TestCase):
 		self.assertIn(name + "() {", source)
 		return name + "() {" + source.split(name + "() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
 
+	def test_existing_source_timer_retargets_only_after_release_unlock_with_new_pins(self):
+		source = self.release_source()
+		self.assertIn("retarget_existing_source_sync() {", source)
+		tail = source.split("# Cutover is verified;", 1)[1]
+		self.assertLess(tail.index("trap - EXIT"), tail.index("flock -u 9"))
+		self.assertLess(tail.index("flock -u 9"), tail.index('retarget_existing_source_sync "$new_image_id"'))
+		function = self.shell_function("retarget_existing_source_sync")
+		for active in (0, 1):
+			with self.subTest(active=active):
+				script = function + '''
+set -euo pipefail
+source_sync_timer_active=ACTIVE
+build_dir=/verified-build
+branding_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+sha256sum() { printf '%s  %s\\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb "$1"; }
+python3() { printf 'INSTALL %s\\n' "$*"; }
+systemctl() { printf 'TIMER %s\\n' "$*"; }
+retarget_existing_source_sync sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+'''.replace("ACTIVE", str(active))
+				result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+				self.assertEqual(result.returncode, 0, result.stderr)
+				if active:
+					self.assertIn("dedicated_source_sync.py install --revision " + "a" * 40, result.stdout)
+					self.assertIn("--image-id sha256:" + "c" * 64, result.stdout)
+					self.assertIn("--runner-sha256 " + "b" * 64 + " --start-timer", result.stdout)
+					self.assertIn("TIMER --user is-active --quiet deeplinkerp-source-sync.timer", result.stdout)
+				else:
+					self.assertEqual(result.stdout, "")
+
 	def audit_module(self, fake_frappe):
+		metadata = types.ModuleType("procurement_release_metadata")
+		metadata.__dict__.update(runpy.run_path(str(Path(__file__).parents[1] / "deploy/production/procurement_release_metadata.py")))
+		binding = patch.dict(sys.modules, {"procurement_release_metadata": metadata})
+		binding.start()
+		self.addCleanup(binding.stop)
 		with patch.dict(sys.modules, {"frappe": fake_frappe}):
 			return runpy.run_path(
 				str(Path(__file__).parents[1] / "deploy/production/audit_unified_purchase.py")
@@ -188,7 +223,7 @@ class ReleaseRecoveryTests(unittest.TestCase):
 		)
 		page_path = "deeplinkerp_branding/deeplinkerp_branding/page/purchase_payment_records/purchase_payment_records.json"
 		self.assertIn(f'chmod 644 "$build_dir/{page_path}"', source)
-		args = source.split("audit_args=", 1)[1].split("\n# The private release umask", 1)[0]
+		args = source.rsplit("audit_args=", 1)[1].split("\n# The private release umask", 1)[0]
 		mock = (
 			self.shell_function("capture_release_audit")
 			+ f"""
@@ -196,6 +231,7 @@ build_dir="$1"
 native_receipt=/private/joint-receipt.json
 dc=(docker compose)
 audit_args={args}
+chmod() {{ return 0; }}
 docker() {{ printf '%s\\n' "$*"; }}
 capture_release_audit before "$build_dir/before.json"
 capture_release_audit after "$build_dir/after.json"
@@ -367,6 +403,72 @@ release_is_current
 				result = subprocess.run(["bash", "-c", mock], capture_output=True, text=True)
 				self.assertEqual(result.returncode, expected, result.stderr)
 
+	def test_already_current_checks_live_native_contract_before_unlocking_or_retargeting_sync(self):
+		source = self.release_source()
+		branch = source.split("if release_is_current; then", 1)[1].split("\nfi", 1)[0]
+		self.assertIn('capture_release_audit current "$build_dir/current-contract.json"', branch)
+		self.assertLess(branch.index("capture_release_audit current"), branch.index("flock -u 9"))
+		self.assertLess(branch.index("current_contract_verified"), branch.index("retarget_existing_source_sync"))
+		self.assertLess(source.index("capture_release_audit() {"), source.index("if release_is_current; then"))
+
+	def test_current_audit_checks_frozen_sources_before_read_only_native_contract_without_historical_rows(self):
+		events = []
+		fake = types.SimpleNamespace(init=lambda **kw: events.append("init"), connect=lambda: events.append("connect"), destroy=lambda: events.append("destroy"), db=types.SimpleNamespace(rollback=lambda: events.append("rollback")))
+		audit = self.audit_module(fake)
+		metadata = sys.modules["procurement_release_metadata"]
+		with tempfile.TemporaryDirectory() as directory:
+			manifest = Path(directory) / "manifest.json"
+			manifest.write_text('{"apps": {}}')
+			with patch.dict(audit["main"].__globals__, {"verify_sources": lambda frozen, phase: events.append(("source", phase)), "capture_audit": lambda **kw: self.fail("Current verification must not compare historical business rows")}), patch.object(metadata, "verify_current_joint_contract", lambda: events.append("native") or {"current_contract_verified": True}, create=True), patch.object(sys, "argv", ["audit", "--phase", "current", "--release-manifest", str(manifest)]), contextlib.redirect_stdout(io.StringIO()):
+				audit["main"]()
+		self.assertEqual(events, ["init", "connect", ("source", "after"), "native", "rollback", "destroy"])
+
+	def test_capture_stages_the_same_importable_audit_filename_used_by_current_native_verification(self):
+		capture = self.shell_function("capture_release_audit")
+		self.assertIn("frappe_docker-backend-1:/tmp/audit_unified_purchase.py", capture)
+		self.assertIn("/env/bin/python /tmp/audit_unified_purchase.py", capture)
+		self.assertNotIn("/tmp/audit-unified-purchase.py", capture)
+
+	def test_current_branch_rejects_complete_source_drift_before_timer_handoff(self):
+		branch = self.release_source().split("if release_is_current; then", 1)[1].split("\nfi", 1)[0]
+		self.assertIn("capture_pinned_sources", branch)
+		for drift in (False, True):
+			with self.subTest(drift=drift), tempfile.TemporaryDirectory() as directory:
+				current = {"current_contract_verified": True, "release_sources_all": {"deeplinkerp_branding": {"unchanged.py": "changed" if drift else "pinned"}}}
+				pinned = {"deeplinkerp_branding": {"unchanged.py": "pinned"}}
+				mock = f"""set -e
+build_dir="$1"
+dc=(docker compose)
+curl() {{ return 0; }}
+docker() {{ printf 'image-current'; }}
+capture_release_audit() {{ printf '%s' '{json.dumps(current)}' > "$2"; }}
+capture_pinned_sources() {{ printf '%s' '{json.dumps(pinned)}' > "$2"; }}
+flock() {{ printf 'UNLOCK\\n'; }}
+retarget_existing_source_sync() {{ printf 'RETARGET\\n'; }}
+release_is_current() {{ return 0; }}
+{branch}
+"""
+				result = subprocess.run(["bash", "-c", mock, "current-contract-test", directory], capture_output=True, text=True)
+				self.assertEqual(result.returncode, 1 if drift else 0, result.stderr)
+				self.assertEqual("UNLOCK" in result.stdout, not drift)
+				self.assertEqual("RETARGET" in result.stdout, not drift)
+
+	def test_current_audit_does_not_claim_cutover_quiescence(self):
+		mock = self.shell_function("capture_release_audit") + """
+build_dir="$1"
+dc=(docker compose)
+audit_args=()
+chmod() { return 0; }
+docker() { printf '%s\\n' "$*"; }
+capture_release_audit current "$build_dir/current.json"
+"""
+		with tempfile.TemporaryDirectory() as directory:
+			result = subprocess.run(["bash", "-c", mock, "current-audit-proof", directory], capture_output=True, text=True)
+			self.assertEqual(result.returncode, 0, result.stderr)
+			output = (Path(directory) / "current.json").read_text()
+			self.assertIn("DEEPLINKERP_RELEASE_QUIESCENT=0", output)
+			self.assertNotIn("DEEPLINKERP_RELEASE_QUIESCENT=1", output)
+
 	def test_failed_label_inspection_is_not_an_empty_legacy_revision(self):
 		functions = self.shell_function("revision_label") + self.shell_function("verify_running_release")
 		mock = (
@@ -511,7 +613,10 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 				queried.append(query)
 				if "information_schema.COLUMNS" in query:
 					rows = [{"name": "name", "position": 1, "type": "varchar(140)", "nullable": "NO", "default_value": None, "charset": "utf8mb4", "collation": "utf8mb4_unicode_ci", "extra": "", "expression": None}]
-					if new_oa["present"] and values == ("tabOA Purchase Request",): rows.append(dict(rows[0], name="custom_purchase_source_json", position=2, type="longtext", nullable="YES", default_value="NULL"))
+					if new_oa["present"] and values == ("tabOA Purchase Request",):
+						field = new_oa.get("field", "custom_purchase_source_json")
+						check = field == "custom_purchase_company_confirmed"
+						rows.append(dict(rows[0], name=field, position=2, type="tinyint(4)" if check else "longtext", nullable="NO" if check else "YES", default_value="0" if check else "NULL", charset=None if check else "utf8mb4", collation=None if check else "utf8mb4_unicode_ci"))
 					return rows
 				if "information_schema.STATISTICS" in query:
 					return [{"name": "PRIMARY", "sequence": 1, "column": "name", "unique": 1, "prefix": None, "collation": "A", "type": "BTREE", "nullable": ""}]
@@ -545,6 +650,17 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 			self.assertEqual(capture(oa_columns=["name"])["oa_new_columns"], {"custom_purchase_source_json": 0})
 			new_oa["nonnull"] = 1
 			self.assertEqual(capture(oa_columns=["name"])["oa_new_columns"], {"custom_purchase_source_json": 1})
+			new_oa.update(field="custom_purchase_company_confirmed", nonnull=0)
+			self.assertEqual(capture(oa_columns=["name"])["oa_new_columns"], {"custom_purchase_company_confirmed": 0})
+			self.assertIn("select count(*) from `tabOA Purchase Request` where `custom_purchase_company_confirmed` is null or `custom_purchase_company_confirmed` <> 0", queried)
+			new_oa["nonnull"] = 1
+			self.assertEqual(capture(oa_columns=["name"])["oa_new_columns"], {"custom_purchase_company_confirmed": 1})
+			fake.conf = {"purchase_source_sync_enabled": True}
+			with patch.dict(__import__("os").environ, {"DEEPLINKERP_RELEASE_QUIESCENT": "1"}):
+				self.assertTrue(capture()["release_quiescent"])
+			with patch.dict(__import__("os").environ, {"DEEPLINKERP_RELEASE_QUIESCENT": "0"}):
+				self.assertFalse(capture()["release_quiescent"])
+			fake.conf = {}
 			new_oa["present"] = False
 			self.assertEqual(
 				before["tables"]["Has Role"],
@@ -763,6 +879,7 @@ native_receipt=/private/absent-joint-receipt.json
 maintenance_calls=0
 workers_running=0
 cp() {{ printf 'COPY %s\\n' "$*"; }}
+chmod() {{ return 0; }}
 sleep() {{ :; }}
 docker() {{
   case "$*" in
@@ -776,7 +893,7 @@ docker() {{
     'compose up '*) case "$*" in *--no-start*) workers_running=0; printf 'STAGE STOPPED\\n';; *) case "$*" in *queue-long*) workers_running=1;; esac; printf 'UP\\n';; esac; return {up_status} ;;
     *'backend test -s '*) return 1 ;;
     cp*) printf 'DOCKER %s\\n' "$*"; return {copy_status} ;;
-    *'/env/bin/python /tmp/audit-unified-purchase.py'*)
+    *'/env/bin/python /tmp/audit_unified_purchase.py'*)
       printf 'AUDIT %s\\n' "$*" >&2
       if (( {audit_status} )); then return {audit_status}; fi
       command cat "$release_dir/rollback-fixture.json" ;;
@@ -806,7 +923,7 @@ recover
 		result = self.run_recovery()
 		self.assertEqual(result.returncode, 1)
 		self.assertIn("--phase before", result.stderr)
-		self.assertIn("/tmp/audit-unified-purchase.py", result.stdout)
+		self.assertIn("/tmp/audit_unified_purchase.py", result.stdout)
 		self.assertIn("/tmp/release-source-manifest.json", result.stdout)
 		self.assertIn("Restored full audit matches original baseline", result.stdout)
 		self.assertLess(

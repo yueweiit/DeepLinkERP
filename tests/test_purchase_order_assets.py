@@ -43,15 +43,28 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 
 	def test_unified_adapter_loads_after_cache_busted_shared_engine(self):
 		scripts = hooks.app_include_js
-		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.18"
-		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.6"
+		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.19"
+		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.8"
 		self.assertIn(engine, scripts)
+		self.assertIn(adapter, scripts)
 		self.assertLess(scripts.index(engine), scripts.index(adapter))
 		payments = next(path for path in scripts if path.startswith("/assets/deeplinkerp_branding/js/purchase_payments.js?v="))
 		self.assertLess(scripts.index(engine), scripts.index(payments))
 		source = "/assets/deeplinkerp_branding/js/purchase_source.js?v=0.0.1"
 		self.assertLess(scripts.index(payments), scripts.index(source))
 		self.assertLess(scripts.index(source), scripts.index(adapter))
+
+	def test_crossborder_drawer_reuses_the_loaded_payment_shell_once(self):
+		scripts = hooks.app_include_js
+		payments = "/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.19"
+		crossborder = "/assets/deeplinkerp_branding/js/crossborder_procurement.js?v=0.0.5"
+		self.assertIn(payments, scripts)
+		self.assertIn(crossborder, scripts)
+		self.assertEqual(sum("/crossborder_procurement.js" in path for path in scripts), 1)
+		self.assertLess(scripts.index(payments), scripts.index(crossborder))
+		self.assertLess(scripts.index(crossborder), scripts.index("/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.8"))
+		self.assertIn("/assets/deeplinkerp_branding/css/purchase_payments.css?v=0.0.8", hooks.app_include_css)
+		self.assertNotIn("crossborder_procurement", str(getattr(hooks, "web_include_js", None)))
 
 	def test_desk_loads_compact_styles_without_changing_website_assets(self):
 		styles = hooks.app_include_css
@@ -70,7 +83,7 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		self.assertIsNotNone(rule, "Only the classic PO menu should override the global right anchor")
 		self.assertRegex(rule.group(1), r"left:\s*0\s*;")
 		self.assertRegex(rule.group(1), r"right:\s*auto\s*;")
-		self.assertIn("/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.17", hooks.app_include_css)
+		self.assertIn("/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.18", hooks.app_include_css)
 
 	def test_header_and_rows_do_not_distribute_extra_width_between_columns(self):
 		css = (

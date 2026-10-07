@@ -92,7 +92,7 @@ class JointNativeRehearsal(unittest.TestCase):
 
 	def capture(self):
 		from audit_unified_purchase import capture_joint_state
-		return capture_joint_state(original_columns=self.baseline["je"]["original_columns"])
+		return capture_joint_state(original_columns=self.baseline["je"]["original_columns"], original_oa_columns=self.baseline["oa"]["original_columns"] if self.baseline.get("oa") else None)
 
 	def restore(self):
 		result = release.restore_joint_metadata(self.receipt, candidate_sha=CANDIDATE_SHA)
@@ -521,6 +521,158 @@ class JointNativeRehearsal(unittest.TestCase):
 				frappe.db.commit()
 				frappe.clear_cache(doctype="Journal Entry")
 				self.assert_state_equal(self.capture(), self.original)
+
+
+class CrossborderUpgradeNativeRehearsal(unittest.TestCase):
+	"""Upgrade the installed old release; reuse the same raw snapshot and rollback gates."""
+	setUp = JointNativeRehearsal.setUp
+	assert_state_equal = JointNativeRehearsal.assert_state_equal
+	capture = JointNativeRehearsal.capture
+	restore = JointNativeRehearsal.restore
+
+	@classmethod
+	def setUpClass(cls):
+		frappe.init(site=SITE, sites_path="/home/frappe/frappe-bench/sites")
+		frappe.connect()
+		assert frappe.local.site == SITE and frappe.conf.db_host == "db" and frappe.conf.maintenance_mode == 1
+		assert os.environ.get("DEEPLINKERP_RELEASE_QUIESCENT") == "1" and frappe.__version__ == "16.23.0"
+		frappe.set_user("Administrator")
+		assert frappe.db.count("GL Entry") == frappe.db.count("Payment Entry") == frappe.db.count("Purchase Order") == 0
+		assert frappe.db.count("Journal Entry") == 1 and frappe.db.count("Journal Entry Account") == 2
+		assert frappe.db.get_value("Journal Entry", "DLP-OPERATING-RELEASE-QA-SYNTHETIC-JE", "docstatus") == 0
+		cls.contract = release.load_joint_contract()
+		from audit_unified_purchase import capture_joint_state
+		cls.unseeded = capture_joint_state()
+		assert cls.unseeded["models"][release.FULFILMENT_MODEL]["schema"] is None
+		assert all(model["schema"] is not None for name, model in cls.unseeded["models"].items() if name not in {release.FULFILMENT_MODEL, "Operating Expense Sync Settings"})
+		assert set(release.CUSTOM_FIELD_ORDER) <= set(cls.unseeded["je"]["schema"]["columns"])
+		assert set(release.SOURCE_FIELD_ORDER[:5]) <= set(cls.unseeded["oa"]["schema"]["columns"])
+		assert not set(release.SOURCE_FIELD_ORDER[5:]) & set(cls.unseeded["oa"]["schema"]["columns"])
+		assert frappe.db.count(release.OA_DOCTYPE) == 0
+		# Fail once, before seeding, if bootstrap metadata differs from the
+		# production-controlled baseline. Do not repeat a known preflight failure.
+		release._joint_plan(cls.unseeded, cls.contract, when="2000-01-01 00:00:00.000000", seed="qa-baseline-preflight")
+		cls.oa_name = "DLP-CROSSBORDER-RELEASE-QA-OA"
+		frappe.db.sql("insert into `tabOA Purchase Request` (name, creation, modified, owner, modified_by, docstatus, custom_purchase_source_id, custom_purchase_source_json) values (%s, '2000-01-01', '2000-01-01', 'Administrator', 'Administrator', 0, %s, %s)", (cls.oa_name, "DLP-CROSSBORDER-RELEASE-QA-SOURCE", '{"manual":"原始 来源字节"}'))
+		frappe.db.commit()
+		cls.baseline = capture_joint_state()
+		cls.evidence = Path(frappe.get_site_path("private", "release-evidence", "crossborder-native-qa"))
+		cls.evidence.mkdir(parents=True, exist_ok=True)
+		cls.run_prefix = str(os.getpid())
+
+	@classmethod
+	def tearDownClass(cls):
+		frappe.db.rollback()
+		from audit_unified_purchase import capture_joint_state
+		current = capture_joint_state(original_columns=cls.baseline["je"]["original_columns"], original_oa_columns=cls.baseline["oa"]["original_columns"])
+		assert current == cls.baseline, "Retain the fixture and receipt if any upgrade drift remains"
+		frappe.db.sql("delete from `tabOA Purchase Request` where name=%s and custom_purchase_source_id=%s and custom_purchase_source_json=%s", (cls.oa_name, "DLP-CROSSBORDER-RELEASE-QA-SOURCE", '{"manual":"原始 来源字节"}'))
+		frappe.db.commit()
+		assert capture_joint_state() == cls.unseeded, "QA fixture cleanup must restore every original byte"
+		print("crossborder upgrade restored:", json.dumps({"full_state_sha256": hashlib.sha256(json.dumps(cls.unseeded, sort_keys=True).encode()).hexdigest(), "maintenance": frappe.conf.maintenance_mode, "GL": frappe.db.count("GL Entry"), "PE": frappe.db.count("Payment Entry"), "scheduler": frappe.utils.cint(frappe.db.get_single_value("System Settings", "enable_scheduler"))}), flush=True)
+		frappe.destroy()
+
+	def tearDown(self):
+		frappe.db.rollback()
+		if self.receipt.exists() and json.loads(self.receipt.read_bytes())["status"] != "restored":
+			self.restore()
+		self.assert_state_equal(self.capture(), self.original)
+
+	def test_nine_new_ddl_boundaries_keep_old_records_check_defaults_and_reapply_noop(self):
+		with self.assertRaises(AssertionError):
+			release.verify_current_joint_contract()
+		result = release.apply_joint_metadata(CANDIDATE_SHA, self.receipt)
+		self.assertEqual(result["ddl_boundaries"], 9)
+		self.assertTrue(result["new_fields_at_native_defaults"])
+		after = self.capture()
+		self.assertEqual(after["oa"]["rows"], self.original["oa"]["rows"])
+		self.assertEqual(after["audit"]["tables"]["Journal Entry Account"], self.original["audit"]["tables"]["Journal Entry Account"])
+		self.assertEqual(frappe.db.get_value(release.OA_DOCTYPE, self.oa_name, "custom_purchase_company_confirmed"), 0)
+		self.assertEqual(after["models"][release.FULFILMENT_MODEL]["schema"], self.contract["model_schemas"][release.FULFILMENT_MODEL])
+		first = self.receipt.read_bytes()
+		with patch.object(frappe.db, "sql_ddl", side_effect=AssertionError("Repeated apply attempted DDL")), patch.object(release, "_write_scope", side_effect=AssertionError("Repeated apply attempted metadata write")):
+			self.assertTrue(release.apply_joint_metadata(CANDIDATE_SHA, self.receipt)["unchanged"])
+		self.assertEqual(self.receipt.read_bytes(), first)
+		with patch.object(frappe.db, "commit", side_effect=AssertionError("Read-only current verification attempted commit")):
+			self.assertTrue(release.verify_current_joint_contract()["current_contract_verified"])
+		# Current verification does not require pretending normal live sync is
+		# quiescent, unlike a metadata cutover. It never compares old business rows.
+		with patch.dict(frappe.conf, {"maintenance_mode": 0, "purchase_source_sync_enabled": True}), patch.dict(os.environ, {"DEEPLINKERP_RELEASE_QUIESCENT": "0"}):
+			self.assertTrue(release.verify_current_joint_contract()["source_sync_enabled"])
+		self.verify_final_gate(after)
+		self.restore()
+
+	def verify_final_gate(self, after):
+		state = json.loads(self.receipt.read_bytes())
+		before, fresh = copy.deepcopy(self.original["audit"]), copy.deepcopy(after["audit"])
+		before.update(joint_metadata=self.original["metadata"], approved_sources_after=state["contract"]["sources_after"])
+		fresh["joint_metadata"] = after["metadata"]
+		release.verify_joint_audit_delta(before, fresh, state)
+
+	def test_every_new_column_create_and_composite_index_autocommit_restores_exact_baseline(self):
+		for crash in range(1, 10):
+			with self.subTest(crash=crash):
+				self.receipt = self.evidence / (self.run_prefix + "-crash-" + str(crash) + ".json")
+				original_ddl = frappe.db.sql_ddl
+				counter = [0]
+				def failure(query, **kwargs):
+					state = json.loads(self.receipt.read_bytes())
+					self.assertEqual((state["steps"][-1]["status"], state["steps"][-1]["sql"]), ("pending", str(query)))
+					original_ddl(query, **kwargs)
+					counter[0] += 1
+					if counter[0] == crash: raise RuntimeError("Synthetic crash after native autocommit")
+				with patch.object(frappe.db, "sql_ddl", failure), self.assertRaisesRegex(RuntimeError, "autocommit"):
+					release.apply_joint_metadata(CANDIDATE_SHA, self.receipt)
+				self.restore()
+
+	def test_partial_custom_field_metadata_autocommit_is_recovered_from_recorded_rows(self):
+		original_sql, original_commit = frappe.db.sql, frappe.db.commit
+		def failure(query, *args, **kwargs):
+			result = original_sql(query, *args, **kwargs)
+			if str(query).startswith("insert into `tabCustom Field`"):
+				original_commit()
+				raise RuntimeError("Synthetic partial metadata autocommit")
+			return result
+		with patch.object(frappe.db, "sql", failure), self.assertRaisesRegex(RuntimeError, "partial metadata"):
+			release.apply_joint_metadata(CANDIDATE_SHA, self.receipt)
+		self.restore()
+
+	def test_confirmed_flag_or_new_link_activity_refuses_destructive_rollback(self):
+		for activity in ("check", "link"):
+			with self.subTest(activity=activity):
+				self.receipt = self.evidence / (self.run_prefix + "-activity-" + activity + ".json")
+				release.apply_joint_metadata(CANDIDATE_SHA, self.receipt)
+				if activity == "check":
+					frappe.db.sql("update `tabOA Purchase Request` set custom_purchase_company_confirmed=1 where name=%s", (self.oa_name,))
+				else:
+					frappe.db.sql("insert into `tabPurchase Fulfilment Link` (name, external_order, active) values ('DLP-CROSSBORDER-ROLLBACK-REFUSAL', 'DLP-SYNTHETIC-PO', 1)")
+				frappe.db.commit()
+				changed = self.capture()
+				self.assertTrue(release.verify_current_joint_contract()["current_contract_verified"])
+				with patch.object(frappe.db, "sql_ddl", side_effect=AssertionError("Destructive rollback with new activity")) as forbidden, self.assertRaises(AssertionError):
+					release.restore_joint_metadata(self.receipt)
+				forbidden.assert_not_called()
+				self.assert_state_equal(self.capture(), changed)
+				if activity == "check":
+					frappe.db.sql("update `tabOA Purchase Request` set custom_purchase_company_confirmed=0 where name=%s and custom_purchase_company_confirmed=1", (self.oa_name,))
+				else:
+					frappe.db.sql("delete from `tabPurchase Fulfilment Link` where name='DLP-CROSSBORDER-ROLLBACK-REFUSAL' and external_order='DLP-SYNTHETIC-PO' and active=1")
+				frappe.db.commit()
+				self.restore()
+
+	def test_enabled_sync_keeps_flag_with_locked_quiescence_and_rejects_no_proof(self):
+		original = self.original
+		try:
+			with patch.dict(frappe.conf, {"purchase_source_sync_enabled": True}):
+				self.original = self.capture()
+				with patch.dict(os.environ, {"DEEPLINKERP_RELEASE_QUIESCENT": "0"}), self.assertRaisesRegex(AssertionError, "quiescence"):
+					release.apply_joint_metadata(CANDIDATE_SHA, self.receipt)
+				self.assertFalse(self.receipt.exists())
+				self.assertTrue(release.apply_joint_metadata(CANDIDATE_SHA, self.receipt)["source_sync_enabled"])
+				self.verify_final_gate(self.capture())
+				self.restore()
+		finally:
+			self.original = original
 
 
 if __name__ == "__main__":

@@ -30,7 +30,8 @@ class _RecordReader:
         self.checked = set()
 
     def preload(self, doctype, names):
-        names = sorted(set(names) - {name for dt, name in self.docs if dt == doctype})
+        # Identity lookup needs no sorting or scan of unrelated cached documents.
+        names = [name for name in dict.fromkeys(names) if (doctype, name) not in self.docs]
         for offset in range(0, len(names), 500):
             chunk = names[offset:offset + 500]
             # Same internal raw values as get_doc/load_from_db, never returned directly.
@@ -180,6 +181,46 @@ def _advance_account(entry):
         frappe.throw("跨币种预付款请在原生付款单核对")
 
 
+ADVANCE_WARNING = "采购预付款需财务核对本公司独立预付资产账户及权限，请打开原生付款单处理"
+
+
+def _advance_reason(order):
+    """Permission checked, read-only capability using the native account resolver.
+
+    Native precedence is Supplier -> Supplier Group -> Company. Inspect only
+    the layers the resolver may use; never enable flags or manufacture an account.
+    _advance_account still repeats the authoritative native write-time validation.
+    """
+    with _quiet_link_errors():
+        try:
+            company = _read("Company", order.company, {"book_advance_payments_in_separate_party_account", "default_currency"})
+            if not company.book_advance_payments_in_separate_party_account:
+                return ADVANCE_WARNING
+            if order.currency != company.default_currency:
+                return "跨币种预付款请打开原生付款单核对"
+            supplier = _read("Supplier", order.supplier, {"supplier_group", "accounts"})
+            _require_fields("Party Account", {"company", "advance_account"}, "Supplier")
+            own = any(row.company == order.company and row.advance_account for row in supplier.get("accounts", []))
+            if not own:
+                group = _read("Supplier Group", supplier.supplier_group, {"accounts"})
+                _require_fields("Party Account", {"company", "advance_account"}, "Supplier Group")
+                grouped = any(row.company == order.company and row.advance_account for row in group.get("accounts", []))
+                if not grouped:
+                    _require_fields("Company", {"default_advance_paid_account"})
+            from erpnext.accounts.party import get_party_advance_account
+            name = get_party_advance_account("Supplier", order.supplier, order.company)
+            if not name:
+                return ADVANCE_WARNING
+            account = _read("Account", name, {"company", "root_type", "account_currency", "is_group", "disabled"})
+            if account.company != order.company or account.root_type != "Asset" or account.is_group or account.disabled:
+                return ADVANCE_WARNING
+            if account.account_currency != order.currency:
+                return "跨币种预付款请打开原生付款单核对"
+        except (frappe.DoesNotExistError, frappe.PermissionError, frappe.ValidationError):
+            return ADVANCE_WARNING
+    return ""
+
+
 def payment_target(source_doctype, source_name, purchase_invoice=None):
     source = _source(source_doctype, source_name)
     chain = get_purchase_chain(source_doctype, source_name, include_payments=False)
@@ -210,6 +251,9 @@ def payment_target(source_doctype, source_name, purchase_invoice=None):
         frappe.throw("已有已提交采购应付，请按应付余额付款")
     if amount(target.per_billed) >= 100:
         frappe.throw("订单已完成开票，请按应付余额付款")
+    reason = _advance_reason(target)
+    if reason:
+        frappe.throw(reason)
     return source, target, order_payment_balance(target)
 
 
@@ -396,15 +440,25 @@ def _source(doctype, name):
     return _read(doctype, name, SOURCE_FIELDS)
 
 
-def _invoice_names(doctype, name):
+def _invoice_names(doctype, name, warnings=None, source=None):
     field = "purchase_receipt" if doctype == "Purchase Receipt" else "purchase_order"
     _require_fields("Purchase Invoice", {"items"})
     _require_fields("Purchase Invoice Item", {field}, "Purchase Invoice")
     # Discover parent candidates only through the readable source link; callers must
     # resolve each parent with _read/_related before exposing names or balances.
     # Joining to the parent would silently hide orphan children and permit duplicate PI creation.
-    return frappe.get_all("Purchase Invoice Item", filters={field: name},
-                          distinct=True, limit_page_length=0, pluck="parent")
+    names = frappe.get_all("Purchase Invoice Item", filters={field: name},
+                           distinct=True, limit_page_length=0, pluck="parent")
+    if doctype == "Purchase Receipt":
+        source = source or _source(doctype, name)
+        warnings = warnings if warnings is not None else []
+        _require_fields("Purchase Receipt Item", {"purchase_order"}, "Purchase Receipt")
+        _require_fields("Purchase Invoice Item", {"purchase_order"}, "Purchase Invoice")
+        orders = _source_links(source, "Purchase Order", "purchase_order", warnings)
+        if orders:
+            names += frappe.get_all("Purchase Invoice Item", filters={"purchase_order": ["in", orders]},
+                                    distinct=True, limit_page_length=0, pluck="parent")
+    return list(dict.fromkeys(names))
 
 
 def invoice_balance(doc):
@@ -681,7 +735,7 @@ def _payment_records(company, supplier, purchase_order, purchase_receipt, search
         refs = row["references"]
         if purchase_order and not any(purchase_order in ref["orders"] for ref in refs):
             continue
-        if purchase_receipt and not any(purchase_receipt in ref["receipts"] or (ref["doctype"] == "Purchase Order" and receipt_orders.intersection(ref["orders"])) for ref in refs):
+        if purchase_receipt and not any(purchase_receipt in ref["receipts"] or receipt_orders.intersection(ref["orders"]) for ref in refs):
             continue
         rows.append(row)
     page = rows if export_format else rows[start:start + page_length]
@@ -744,7 +798,7 @@ def get_purchase_chain(source_doctype, source_name, include_payments=True):
     invoices = []
     warnings = []
     if frappe.has_permission("Purchase Invoice", "read"):
-        for name in _invoice_names(source_doctype, source_name):
+        for name in _invoice_names(source_doctype, source_name, warnings=warnings, source=doc):
             invoice = _related("Purchase Invoice", name, warnings, PI_FIELDS, doc.company, doc.supplier)
             if not invoice:
                 continue
@@ -770,6 +824,17 @@ def get_purchase_chain(source_doctype, source_name, include_payments=True):
         orders = _source_links(doc, "Purchase Order", "purchase_order", warnings)
     else:
         orders = [doc.name]
+    execution_reason = order_execution_reason(doc) if source_doctype == "Purchase Order" else ""
+    if not execution_reason and source_doctype == "Purchase Receipt":
+        for order_name in orders:
+            order = _related("Purchase Order", order_name, warnings, SOURCE_FIELDS, doc.company, doc.supplier)
+            if order:
+                execution_reason = order_execution_reason(order)
+                if execution_reason:
+                    break
+    if execution_reason:
+        can_create = False
+        reason = execution_reason
     progress = _order_progress(orders, warnings)
     incomplete = LINK_WARNING in warnings
     if incomplete:
@@ -777,23 +842,35 @@ def get_purchase_chain(source_doctype, source_name, include_payments=True):
         for row in invoices:
             row["can_pay"] = False
     drafts = [{"name": row["name"], "docstatus": 0} for row in invoices if row["docstatus"] == 0]
-    can_invoice = bool(not incomplete and source_doctype == "Purchase Receipt" and doc.docstatus == 1
+    can_invoice = bool(not incomplete and doc.docstatus == 1
                        and not doc.get("is_return") and not drafts
                        and frappe.has_permission("Purchase Invoice", "read")
                        and frappe.has_permission("Purchase Invoice", "create"))
+    invoice_reason = (LINK_WARNING if incomplete else "已有应付草稿，请选择继续编辑" if drafts
+                      else "来源未提交、已退货或没有创建应付权限" if not can_invoice else "")
+    if execution_reason:
+        can_invoice = False
+        invoice_reason = execution_reason
     if can_invoice:
-        from deeplinkerp_branding.services.purchase_document_actions import _native
+        from deeplinkerp_branding.services.purchase_document_actions import _invoice_capability
         try:
             with _quiet_link_errors():
-                can_invoice = bool(_native(doc, "Purchase Invoice").items)
+                can_invoice, invoice_reason = _invoice_capability(doc)
         except (frappe.ValidationError, frappe.PermissionError):
             can_invoice = False
+            invoice_reason = "原生开票条件或字段权限不足，请打开原生单据核对"
     advance = None
     advance_reason = ""
     can_prepay = False
     if source_doctype == "Purchase Order" and frappe.has_permission("Payment Entry", "create"):
         advance_reason = order_execution_reason(doc)
-        if not advance_reason and not incomplete and not any(row["docstatus"] == 1 for row in invoices):
+        if not advance_reason and incomplete:
+            advance_reason = LINK_WARNING
+        if not advance_reason and any(row["docstatus"] == 1 for row in invoices):
+            advance_reason = "已有已提交采购应付，请按应付余额付款"
+        if not advance_reason:
+            advance_reason = _advance_reason(doc)
+        if not advance_reason:
             advance = order_payment_balance(doc)
             can_prepay = amount(doc.per_billed) < 100 and amount(advance["outstanding"]) > 0
             if not can_prepay:
@@ -802,6 +879,7 @@ def get_purchase_chain(source_doctype, source_name, include_payments=True):
             "currency": doc.currency, "grand_total": doc.grand_total, "status": doc.status,
             "docstatus": doc.docstatus, "orders": orders, "order_progress": progress, "invoices": invoices, "balances": [] if incomplete else summarize(invoices), "incomplete_links": incomplete,
             "can_create_invoice": can_invoice, "draft_invoices": drafts,
+            "invoice_reason": invoice_reason, "source_modified": doc.get("modified"),
             "draft_orders": [row["name"] for row in progress if row["docstatus"] == 0],
             "payments": payments, "warnings": warnings, "can_create": can_create and bool(eligible) and not incomplete, "reason": reason,
             "can_prepay": can_prepay, "advance_balance": advance, "advance_reason": advance_reason,

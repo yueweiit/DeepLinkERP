@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
 
 import frappe
@@ -10,7 +11,7 @@ import frappe
 SITE = "deeplinkerp.com"
 BENCH = Path("/home/frappe/frappe-bench")
 REQUIRED_SOURCE_APPS = ("deeplinkerp_branding", "china_finance", "crm_integration")
-OPERATING_MODELS = ("Operating Expense Company Map", "Operating Expense Source", "Operating Expense Mapping", "Operating Expense Event", "Operating Expense Sync Settings")
+OPERATING_MODELS = ("Operating Expense Company Map", "Operating Expense Source", "Operating Expense Mapping", "Operating Expense Event", "Operating Expense Sync Settings", "Purchase Fulfilment Link")
 
 
 def source_files(app):
@@ -216,9 +217,10 @@ def capture_audit(*, je_columns=None, oa_columns=None):
 	# behind that projection during the fresh final release audit.
 	result["oa_new_columns"] = {}
 	if oa_columns is not None and result["schemas"].get("OA Purchase Request"):
+		from procurement_release_metadata import _oa_nondefault_condition
 		for field in set(result["schemas"]["OA Purchase Request"]["columns"]) - set(oa_columns):
 			assert field.isidentifier()
-			result["oa_new_columns"][field] = frappe.db.sql("select count(*) from `tabOA Purchase Request` where `" + field + "` is not null")[0][0]
+			result["oa_new_columns"][field] = frappe.db.sql("select count(*) from `tabOA Purchase Request` where " + _oa_nondefault_condition(field))[0][0]
 	# These already-active rows must remain protected by the fresh final audit,
 	# not only the earlier private receipt snapshot. New absent-before models
 	# are allowed solely as exact-contract empty tables by the receipt verifier.
@@ -247,6 +249,8 @@ def capture_audit(*, je_columns=None, oa_columns=None):
 			json.dumps(config, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
 		).hexdigest()
 	result["maintenance_mode"] = maintenance_mode
+	if result["purchase_source_sync_enabled"]:
+		result["release_quiescent"] = maintenance_mode == 1 and os.environ.get("DEEPLINKERP_RELEASE_QUIESCENT") == "1"
 	assets = BENCH / "sites/assets/assets.json"
 	result["assets_manifest_sha256"] = hashlib.sha256(assets.read_bytes()).hexdigest()
 	return result
@@ -281,7 +285,7 @@ def capture_joint_state(*, original_columns=None, original_oa_columns=None):
 def main():
 	parser = argparse.ArgumentParser()
 	parser.add_argument("--release-manifest")
-	parser.add_argument("--phase", choices=["before", "after"])
+	parser.add_argument("--phase", choices=["before", "after", "current"])
 	parser.add_argument("--purchase-payment-page-source")
 	parser.add_argument("--procurement-metadata", action="store_true")
 	parser.add_argument("--joint-metadata", action="store_true")
@@ -292,6 +296,12 @@ def main():
 	try:
 		if args.purchase_payment_page_source:
 			verify_purchase_payment_page(json.loads(Path(args.purchase_payment_page_source).read_text()))
+		if args.phase == "current":
+			assert args.release_manifest and not args.joint_receipt, "Current contract requires the frozen manifest, not a historical receipt"
+			verify_sources(json.loads(Path(args.release_manifest).read_text()), "after")
+			from procurement_release_metadata import verify_current_joint_contract
+			print(json.dumps(verify_current_joint_contract(), sort_keys=True, ensure_ascii=False))
+			return
 		original_columns = original_oa_columns = None
 		if args.joint_receipt:
 			from joint_release_guards import DDLReceipt

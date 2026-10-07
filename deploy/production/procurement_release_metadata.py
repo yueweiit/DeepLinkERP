@@ -16,7 +16,8 @@ from pathlib import Path
 
 PAGE = "purchase-payables"
 NAVIGATION = (("Workspace", "Buying"), ("Workspace Sidebar", "Buying"))
-JOINT_MODELS = ("Operating Expense Company Map", "Operating Expense Source", "Operating Expense Mapping", "Operating Expense Event", "Operating Expense Sync Settings")
+FULFILMENT_MODEL = "Purchase Fulfilment Link"
+JOINT_MODELS = ("Operating Expense Company Map", "Operating Expense Source", "Operating Expense Mapping", "Operating Expense Event", "Operating Expense Sync Settings", FULFILMENT_MODEL)
 JOINT_PAGES = (PAGE, "operating-expenses")
 JOINT_NAVIGATION = tuple((dt, name) for name in ("Buying", "Accounting", "China Finance") for dt in ("Workspace", "Workspace Sidebar"))
 OPERATING_METHOD = "deeplinkerp_branding.services.operating_expenses.scheduled_sync"
@@ -24,7 +25,19 @@ PURCHASE_SOURCE_METHOD = "deeplinkerp_branding.services.purchase_source_service.
 SCHEDULED_METHODS = (OPERATING_METHOD, PURCHASE_SOURCE_METHOD)
 CUSTOM_FIELD_ORDER = ("custom_operating_event_key", "custom_operating_source", "custom_operating_recognition", "custom_operating_fingerprint")
 OA_DOCTYPE = "OA Purchase Request"
-SOURCE_FIELD_ORDER = ("custom_purchase_source_id", "custom_purchase_source_json", "custom_cashier_payment_evidence", "custom_purchase_bound_version", "custom_purchase_payment_reconciliation")
+SOURCE_FIELD_ORDER = ("custom_purchase_source_id", "custom_purchase_source_json", "custom_cashier_payment_evidence", "custom_purchase_bound_version", "custom_purchase_payment_reconciliation", "custom_purchase_beneficiary_company", "custom_purchase_company_proposal", "custom_purchase_project", "custom_purchase_company_confirmed", "custom_purchase_company_confirmed_by", "custom_purchase_company_confirmed_on")
+FULFILMENT_INDEX_COLUMNS = {"fulfilment_external_active": ("external_order", "active"), "fulfilment_internal_active": ("internal_order", "active")}
+
+
+def _assert_release_sync_state(before, after=None):
+	"""Keep the configured flag, but require the shell's locked, stopped-worker audit."""
+	enabled = bool(before.get("purchase_source_sync_enabled"))
+	if after is not None:
+		assert bool(after.get("purchase_source_sync_enabled")) == enabled, "Source sync configuration changed during release"
+	for audit in (before,) if after is None else (before, after):
+		if enabled:
+			assert audit.get("maintenance_mode") == 1 and audit.get("release_quiescent") is True, "Enabled source sync requires recorded maintenance and shell-held lock/worker quiescence"
+	return enabled
 
 
 def _json(value):
@@ -108,7 +121,7 @@ def _custom_fields():
 
 
 def _source_custom_fields():
-	"""Read only the five approved definitions, never execute the app installer."""
+	"""Read the exact eleven approved definitions, never execute the app installer."""
 	import frappe
 	tree = ast.parse(Path(frappe.get_app_path("deeplinkerp_branding", "purchase_source_install.py")).read_text())
 	values = [ast.literal_eval(node.value) for node in ast.walk(tree) if isinstance(node, ast.Assign)
@@ -116,13 +129,22 @@ def _source_custom_fields():
 	assert len(values) == 1 and set(values[0]) == {"Purchase Order", OA_DOCTYPE}, "Source installer definition drift"
 	rows = values[0][OA_DOCTYPE]
 	result = {row["fieldname"]: row for row in rows}
-	assert len(rows) == len(result) == 5 and set(result) == set(SOURCE_FIELD_ORDER)
+	assert len(rows) == len(result) == 11 and tuple(result) == SOURCE_FIELD_ORDER
+	roles = {
+		"custom_purchase_beneficiary_company": ("Link", "Company", 0, "最终使用/销售公司"),
+		"custom_purchase_company_proposal": ("Link", "Company", 0, "建议采购公司"),
+		"custom_purchase_project": ("Link", "Project", 0, "已确认采购项目"),
+		"custom_purchase_company_confirmed": ("Check", None, 1, "采购公司已确认"),
+		"custom_purchase_company_confirmed_by": ("Link", "User", 1, "采购公司确认人"),
+		"custom_purchase_company_confirmed_on": ("Datetime", None, 1, "采购公司确认时间"),
+	}
 	for name, field in result.items():
-		kind = "Data" if name in {"custom_purchase_source_id", "custom_purchase_bound_version"} else "Long Text"
-		assert field["fieldtype"] == kind and field["read_only"] == field["no_copy"] == field["hidden"] == 1
-		assert not field.get("reqd") and not field.get("default") and not field.get("options")
+		kind, options, hidden, label = roles.get(name, ("Data" if name in {"custom_purchase_source_id", "custom_purchase_bound_version"} else "Long Text", None, 1, field["label"]))
+		assert field["fieldtype"] == kind and field["read_only"] == field["no_copy"] == 1 and field.get("hidden", 0) == hidden
+		assert not field.get("reqd") and not field.get("default") and field.get("options") == options and field["label"] == label
 		assert field.get("unique", 0) == int(name == "custom_purchase_source_id")
 		assert field.get("permlevel", 0) == (9 if kind == "Long Text" else 0)
+		assert set(field) <= {"fieldname", "label", "fieldtype", "options", "hidden", "read_only", "no_copy", "unique", "permlevel", "reqd", "default"}, "Unapproved source field behavior"
 	return result
 
 
@@ -245,7 +267,8 @@ def _native_schema_sql(doctype, meta):
 
 def _schema_from_create(query):
 	"""Exact expected information_schema representation of the frozen native CREATE."""
-	assert query.lstrip().lower().startswith("create table `tabOperating Expense ".lower())
+	match = re.match(r"\s*CREATE TABLE `tab([^`]+)`\s*\(", query, re.I)
+	assert match and match[1] in JOINT_MODELS, "Native CREATE escaped the exact model allowlist"
 	body = query.split("(\n", 1)[1].rsplit(")\n", 1)[0]
 	parts = re.split(r",\s*\n", body)
 	result = {"columns": {}, "indexes": {}, "table": {"engine": "InnoDB", "row_format": "Dynamic", "collation": "utf8mb4_unicode_ci", "options": "row_format=DYNAMIC"}}
@@ -278,6 +301,10 @@ def _schema_from_create(query):
 	return result
 
 
+def _fulfilment_indexes(schema):
+	return {name: [{"sequence": i + 1, "column": column, "unique": 0, "prefix": None, "collation": "A", "type": "BTREE", "nullable": "YES" if schema["columns"][column]["nullable"] == "YES" else ""} for i, column in enumerate(columns)] for name, columns in FULFILMENT_INDEX_COLUMNS.items()}
+
+
 def _installer_source_files():
 	root = Path(__file__).parent
 	return {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in ("procurement_release_metadata.py", "audit_unified_purchase.py", "joint_release_guards.py")}
@@ -303,7 +330,7 @@ def _assert_no_joint_customizations():
 		assert not frappe.db.sql(query, values), "Unapproved effective customization targets frozen operating metadata: " + doctype
 
 
-def load_joint_contract():
+def load_joint_contract(*, require_quiescent=True):
 	import frappe
 	from frappe.model.meta import Meta
 	from audit_unified_purchase import table_schema, source_files
@@ -313,6 +340,7 @@ def load_joint_contract():
 	_assert_no_joint_customizations()
 	root = Path(frappe.get_app_path("deeplinkerp_branding"))
 	files, definitions, schemas, ddl = {}, {}, {}, {}
+	base_schemas, index_ddl = {}, {}
 	for name in JOINT_MODELS:
 		basename = frappe.scrub(name)
 		path = root / "deeplinkerp_branding/doctype" / basename / (basename + ".json")
@@ -325,7 +353,7 @@ def load_joint_contract():
 		from frappe.model.base_document import get_controller
 		get_controller("DocType").prepare_for_import(meta_source)
 		meta = Meta(frappe.get_doc(meta_source))
-		if not source["issingle"]:
+		if not source.get("issingle", 0):
 			# Generate CREATE even for matching preexisting tables, in memory only.
 			from frappe.database.mariadb.schema import MariaDBTable
 			with _read_only_native_planning() as captured:
@@ -333,8 +361,13 @@ def load_joint_contract():
 			assert len(captured) == 1
 			ddl[name] = captured[0]
 			schemas[name] = _schema_from_create(captured[0])
+			base_schemas[name] = copy.deepcopy(schemas[name])
+			if name == FULFILMENT_MODEL:
+				schemas[name]["indexes"].update(_fulfilment_indexes(schemas[name]))
+				index_ddl[name] = {index: "ALTER TABLE " + _quote("tab" + name) + " ADD INDEX IF NOT EXISTS " + _quote(index) + "(" + ", ".join(columns) + ")" for index, columns in FULFILMENT_INDEX_COLUMNS.items()}
 		else:
 			schemas[name] = None
+			base_schemas[name] = None
 	for name in JOINT_PAGES:
 		basename = frappe.scrub(name)
 		path = root / "deeplinkerp_branding/page" / basename / (basename + ".json")
@@ -353,13 +386,16 @@ def load_joint_contract():
 	for method in SCHEDULED_METHODS:
 		job = {"doctype": "Scheduled Job Type", "name": method, "method": method, "frequency": "Cron", "cron_format": "*/15 * * * *"}
 		definitions[method] = {"source": job, "native": _definition_rows(job, defaults=True)}
-	for relative in ("operating_expense_install.py", "purchase_source_install.py", "hooks.py", "operating_navigation.py", "procurement_navigation.py"):
+	for relative in ("operating_expense_install.py", "purchase_source_install.py", "purchase_fulfilment_install.py", "hooks.py", "operating_navigation.py", "procurement_navigation.py"):
 		files[relative] = hashlib.sha256((root / relative).read_bytes()).hexdigest()
+	index_calls = [node for node in ast.walk(ast.parse((root / "purchase_fulfilment_install.py").read_text())) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "add_index"]
+	assert [tuple(ast.literal_eval(argument) for argument in call.args) for call in index_calls] == [(FULFILMENT_MODEL, list(columns), index) for index, columns in FULFILMENT_INDEX_COLUMNS.items()], "Fulfilment installer index drift"
 	hooks = ast.parse((root / "hooks.py").read_text())
 	schedules = [ast.literal_eval(node.value) for node in hooks.body if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "scheduler_events" for target in node.targets)]
 	assert len(schedules) == 1 and set(SCHEDULED_METHODS) <= set(schedules[0].get("cron", {}).get("*/15 * * * *", [])), "Frozen cron hook drift"
-	assert not frappe.conf.get("purchase_source_sync_enabled"), "Purchase source sync must remain disabled during release"
-	return {"frappe_version": frappe.__version__, "files": files, "installer_files": _installer_source_files(), "definitions": definitions, "model_schemas": schemas, "model_ddl": ddl, "custom_fields": custom_fields, "source_custom_fields": source_fields, "native_metadata_schemas": {dt: table_schema(dt) for dt in ("DocType", "DocField", "DocPerm", "Custom Field", "Page", "Has Role", "Scheduled Job Type")}, "sources_after": {app: source_files(app) for app in ("deeplinkerp_branding", "china_finance", "crm_integration")}}
+	if require_quiescent:
+		_assert_release_sync_state({"purchase_source_sync_enabled": bool(frappe.conf.get("purchase_source_sync_enabled")), "maintenance_mode": frappe.conf.get("maintenance_mode"), "release_quiescent": os.environ.get("DEEPLINKERP_RELEASE_QUIESCENT") == "1"})
+	return {"frappe_version": frappe.__version__, "files": files, "installer_files": _installer_source_files(), "definitions": definitions, "model_schemas": schemas, "model_base_schemas": base_schemas, "model_ddl": ddl, "model_index_ddl": index_ddl, "custom_fields": custom_fields, "source_custom_fields": source_fields, "native_metadata_schemas": {dt: table_schema(dt) for dt in ("DocType", "DocField", "DocPerm", "Custom Field", "Page", "Has Role", "Scheduled Job Type")}, "sources_after": {app: source_files(app) for app in ("deeplinkerp_branding", "china_finance", "crm_integration")}}
 
 
 def _definition_matches(scope, name, definition):
@@ -460,14 +496,15 @@ def _assert_frozen_fields(meta, contract, present, doctype):
 		assert all(fields[0].get(flag) == value for flag, value in expected.items() if flag in shared), "Conflicting effective native field behavior: " + doctype + "/" + key
 
 
-def _joint_plan(before, contract, *, when, seed):
+def _joint_plan(before, contract, *, when, seed, require_quiescent=True):
 	import frappe
 	from frappe.model.meta import Meta
 	from audit_unified_purchase import table_schema
 	from joint_release_guards import validate_event_index
 
 	_assert_no_joint_customizations()
-	assert not before.get("audit", {}).get("purchase_source_sync_enabled"), "Purchase source sync must remain disabled during release"
+	if require_quiescent:
+		_assert_release_sync_state(before.get("audit", {}))
 	scope = before["metadata"]["scope"]
 	for row in scope["Custom Field"]:
 		fields = CUSTOM_FIELD_ORDER if row.get("dt") == "Journal Entry" else SOURCE_FIELD_ORDER if row.get("dt") == OA_DOCTYPE else ()
@@ -553,12 +590,42 @@ def _joint_plan(before, contract, *, when, seed):
 	return {"scope": expected, "new_definitions": new, "page_title_updates": page_title_updates}
 
 
+def verify_current_joint_contract():
+	"""Verify the live target without replaying an earlier business snapshot.
+
+	An already-current release needs no DDL or quiescent cutover, but its native
+	definitions, SQL schemas, security flags and navigation must be complete.
+	The caller verifies the frozen source manifest before loading this contract.
+	"""
+	with _read_only_native_planning():
+		contract = load_joint_contract(require_quiescent=False)
+		current = _capture_joint_state()
+		plan = _joint_plan(current, contract, when="current-read-only", seed="current", require_quiescent=False)
+	assert not plan["new_definitions"], "Current release has missing native definitions"
+	assert not plan["page_title_updates"], "Current release still needs its approved title update"
+	assert plan["scope"] == current["metadata"]["scope"], "Current release navigation/metadata needs repair"
+	return {"current_contract_verified": True, "source_sync_enabled": bool(current["audit"].get("purchase_source_sync_enabled")),
+		"release_sources_all": current["audit"]["release_sources_all"]}
+
+
 def _je_column(count, *, position=None):
 	return {"position": position or count + 1, "type": "varchar(140)", "nullable": "YES", "default_value": "NULL", "charset": "utf8mb4", "collation": "utf8mb4_unicode_ci", "extra": "", "expression": None}
 
 
 def _source_column(field, count, *, position=None):
-	return dict(_je_column(count, position=position), type="varchar(140)" if field["fieldtype"] == "Data" else "longtext")
+	kind = field["fieldtype"]
+	column = dict(_je_column(count, position=position), type={"Data": "varchar(140)", "Link": "varchar(140)", "Long Text": "longtext", "Check": "tinyint(4)", "Datetime": "datetime(6)"}[kind])
+	if kind in {"Check", "Datetime"}:
+		column.update(charset=None, collation=None)
+	if kind == "Check":
+		assert field["fieldname"] == "custom_purchase_company_confirmed" and not field.get("default"), "Only the approved zero-default Check is allowed"
+		column.update(nullable="NO", default_value="0")
+	return column
+
+
+def _oa_nondefault_condition(fieldname):
+	quoted = _quote(fieldname)
+	return quoted + " is null or " + quoted + " <> 0" if fieldname == "custom_purchase_company_confirmed" else quoted + " is not null"
 
 
 def _source_index():
@@ -577,7 +644,7 @@ def _capture_joint_state(before=None):
 		original_oa_columns=before["oa"]["original_columns"] if before and before.get("oa") else None)
 
 
-def _verify_operating_audit(before, after, contract):
+def _verify_operating_audit(before, after, contract, *, recorded_schemas=None):
 	"""Normalize only exact-contract creation of empty absent-before schemas."""
 	if "operating_models" not in before and "operating_models" not in after:
 		return  # Older receipt/test format; raw state invariants still apply.
@@ -586,7 +653,8 @@ def _verify_operating_audit(before, after, contract):
 		new = after["operating_models"][name]
 		assert old["rows"] == new["rows"], "Fresh operating business audit drift: " + name
 		if old["schema"] is None:
-			assert old["rows"] == digest([]) and new["schema"] in (None, contract["model_schemas"][name]), "Unexpected operating model schema creation"
+			allowed = (recorded_schemas[name],) if recorded_schemas is not None else (None, contract["model_schemas"][name])
+			assert old["rows"] == digest([]) and new["schema"] in allowed, "Unexpected operating model schema creation"
 		else:
 			assert old["schema"] == new["schema"], "Preexisting operating model schema changed"
 		new["schema"] = copy.deepcopy(old["schema"])
@@ -605,7 +673,7 @@ def _verify_new_oa_columns(before, after, original, fields):
 		return  # Legacy audit format; native boundary non-NULL checks still apply.
 	assert before["oa_new_columns"] == {}, "Baseline OA projection is incomplete"
 	new = set(after["schemas"][OA_DOCTYPE]["columns"]) - set(original["schema"]["columns"]) if original else set()
-	assert new <= set(fields) and after["oa_new_columns"] == {key: 0 for key in new}, "Fresh new OA columns contain non-NULL data or escaped the receipt"
+	assert new <= set(fields) and after["oa_new_columns"] == {key: 0 for key in new}, "Fresh new OA columns contain non-NULL data/nondefault values or escaped the receipt"
 	after["oa_new_columns"] = {}
 
 
@@ -621,11 +689,11 @@ def _validate_je_ddl(query, new_columns):
 def _validate_oa_ddl(query, new_columns, fields):
 	assert query.startswith("ALTER TABLE `tabOA Purchase Request` "), "Native plan escaped OA Purchase Request"
 	for clause in query.split("`tabOA Purchase Request` ", 1)[1].split(", "):
-		column = re.fullmatch(r"ADD COLUMN `([\w]+)` (varchar\(140\)|longtext)( UNIQUE)?", clause)
+		column = re.fullmatch(r"ADD COLUMN `([\w]+)` (varchar\(140\)|longtext|datetime\(6\)|tinyint\(4\) NOT NULL DEFAULT 0)( UNIQUE)?", clause)
 		index = re.fullmatch(r"ADD UNIQUE INDEX IF NOT EXISTS custom_purchase_source_id \(`custom_purchase_source_id`\)", clause)
 		if column:
 			assert column[1] in new_columns and column[1] in fields
-			assert column[2] == ("varchar(140)" if fields[column[1]]["fieldtype"] == "Data" else "longtext"), "Wrong native OA source column type"
+			assert column[2] == {"Data": "varchar(140)", "Link": "varchar(140)", "Long Text": "longtext", "Check": "tinyint(4) NOT NULL DEFAULT 0", "Datetime": "datetime(6)"}[fields[column[1]]["fieldtype"]], "Wrong native OA source column type/default"
 			assert not column[3] or (column[1] == "custom_purchase_source_id" and fields[column[1]].get("unique")), "Unexpected inline OA unique constraint"
 		else:
 			assert index and "custom_purchase_source_id" in new_columns, "Unexpected native OA schema change: " + clause
@@ -658,7 +726,7 @@ def _assert_joint_invariants(receipt, current, *, scope=None, source_phase="afte
 	if scope is not None:
 		assert current["metadata"]["scope"] == scope, "Scope differs from exact recorded rows"
 	assert current["je"]["rows"] == before["je"]["rows"], "Original Journal Entry bytes changed"
-	assert not current["audit"].get("purchase_source_sync_enabled") and not before["audit"].get("purchase_source_sync_enabled"), "Purchase source sync must remain disabled during release/rollback"
+	_assert_release_sync_state(before["audit"], current["audit"])
 	assert current["operating_singles"] == before["operating_singles"], "Operating Expense Single bytes changed; rollback refused"
 	assert set(current["models"]) == set(before["models"])
 	assert all(model["rows"] == before["models"][name]["rows"] for name, model in current["models"].items()), "Operating model bytes changed; rollback refused"
@@ -678,18 +746,16 @@ def _assert_joint_invariants(receipt, current, *, scope=None, source_phase="afte
 		oa_additions = _source_schema_additions(before["oa"], contract.get("source_custom_fields", {}))
 		assert_schema_delta(before["oa"]["schema"], current["oa"]["schema"], oa_additions)
 		for key in set(oa_additions["columns"]) & set(current["oa"]["schema"]["columns"]):
-			assert frappe.db.sql("select count(*) from `tabOA Purchase Request` where " + _quote(key) + " is not null")[0][0] == 0, "New OA column contains non-NULL data: " + key
+			assert frappe.db.sql("select count(*) from `tabOA Purchase Request` where " + _oa_nondefault_condition(key))[0][0] == 0, "New OA column contains non-NULL data/nondefault values: " + key
 	else:
 		assert current.get("oa") is None, "OA installation escaped release scope"
-	for name, model in current["models"].items():
-		if model["schema"]:
-			assert model["schema"] == contract["model_schemas"][name], "Model SQL schema drift: " + name
+	_assert_recorded_schemas(receipt, current)
 	old_audit, audit = copy.deepcopy(before["audit"]), copy.deepcopy(current["audit"])
 	for item, native in ((old_audit, before), (audit, current)):
 		_verify_operating_snapshot(item, native)
 	assert audit.pop("release_sources_all") == contract["sources_" + source_phase], "Pinned app source drift"
 	old_audit.pop("release_sources_all")
-	_verify_operating_audit(old_audit, audit, contract)
+	_verify_operating_audit(old_audit, audit, contract, recorded_schemas={name: model["schema"] for name, model in current["models"].items()})
 	_verify_new_oa_columns(old_audit, audit, before.get("oa"), contract.get("source_custom_fields", {}))
 	# Has Role is fully protected by the raw scope and outside permission audit above.
 	for item in (old_audit, audit):
@@ -789,9 +855,10 @@ def apply_joint_metadata(candidate_sha, receipt_path, *, before_audit=None):
 			assert remaining and str(query) == remaining.pop(0), "Native DDL changed after inspection"
 			step_id = phase + ":" + hashlib.sha256(str(query).encode()).hexdigest()[:12]
 			observed = table_schema(name)
+			_assert_schema_intent(name, observed, *_recorded_schema_intents(receipt))
 			expected = copy.deepcopy(observed)
 			if name in JOINT_MODELS:
-				expected = contract["model_schemas"][name]
+				expected = contract.get("model_base_schemas", contract["model_schemas"])[name]
 			elif phase.startswith("journal-column-"):
 				key = phase.removeprefix("journal-column-")
 				assert key not in expected["columns"]
@@ -814,6 +881,23 @@ def apply_joint_metadata(candidate_sha, receipt_path, *, before_audit=None):
 		with patch.object(frappe.db, "sql_ddl", bounded_ddl):
 			frappe.db.updatedb(name, meta)
 		assert not remaining, "Native updatedb omitted inspected DDL"
+	for name, indexes in contract.get("model_index_ddl", {}).items():
+		for index, query in indexes.items():
+			observed = table_schema(name)
+			_assert_schema_intent(name, observed, *_recorded_schema_intents(receipt))
+			wanted = contract["model_schemas"][name]["indexes"][index]
+			if index in observed["indexes"]:
+				assert observed["indexes"][index] == wanted, "Existing fulfilment index drift"
+				continue
+			expected = copy.deepcopy(observed)
+			expected["indexes"][index] = wanted
+			step_id = "model-index-" + index
+			receipt.plan(step_id, observed, expected, kind="ddl", doctype=name, sql=query)
+			frappe.db.sql_ddl(query)
+			actual = table_schema(name)
+			assert actual == expected, "Fulfilment index DDL produced unexpected schema"
+			_assert_joint_invariants(receipt, _capture_joint_state(before), scope=plan["scope"])
+			receipt.complete(step_id, actual)
 	after = _capture_joint_state(before)
 	_assert_joint_invariants(receipt, after, scope=plan["scope"])
 	for key in contract["custom_fields"]:
@@ -825,7 +909,41 @@ def apply_joint_metadata(candidate_sha, receipt_path, *, before_audit=None):
 	assert all(model["schema"] == contract["model_schemas"][name] for name, model in after["models"].items())
 	assert _desired_navigation(plan["scope"], when=str(now_datetime()), seed="second-run") == plan["scope"], "Second navigation reconciliation is not idle"
 	receipt.finish(after)
-	return {"applied": True, "unchanged": not receipt.state["steps"], "identity": identity, "ddl_boundaries": len([step for step in receipt.state["steps"] if step["kind"] == "ddl"]), "protected_tables": len(after["audit"]["tables"]), "original_je_projection": digest(before["je"]["rows"]), "new_fields_all_null": True, "source_sync_enabled": False}
+	return {"applied": True, "unchanged": not receipt.state["steps"], "identity": identity, "ddl_boundaries": len([step for step in receipt.state["steps"] if step["kind"] == "ddl"]), "protected_tables": len(after["audit"]["tables"]), "original_je_projection": digest(before["je"]["rows"]), "new_fields_at_native_defaults": True, "source_sync_enabled": bool(after["audit"].get("purchase_source_sync_enabled"))}
+
+
+def _recorded_schema_intents(receipt):
+	state = receipt.state
+	status = state.get("status", "applying")
+	assert status in {"applying", "applied", "restored"}
+	basis = state["after"] if status == "applied" else state["before"]
+	latest = {}
+	if status != "restored":
+		for step in state.get("steps", []):
+			if status == "applied" and not step["kind"].startswith("rollback-"): continue
+			if step["kind"] in {"ddl", "rollback-ddl"}: latest[step["doctype"]] = step
+			elif step["kind"] in {"metadata", "rollback-metadata"}: latest["metadata"] = step
+	return basis, latest
+
+
+def _assert_schema_intent(name, actual, basis, latest):
+	original = basis["je"]["schema"] if name == "Journal Entry" else basis["oa"]["schema"] if name == OA_DOCTYPE else basis["models"][name]["schema"]
+	step = latest.get(name)
+	allowed = [original] if step is None else [step["expected_after"]]
+	if step is not None and step["status"] == "pending":
+		allowed.append(step["before"])
+	assert actual in allowed, "Native SQL schema differs from exact recorded intent: " + name
+
+
+def _assert_recorded_schemas(receipt, current):
+	"""One durable-intent index for both forward and recovery checks."""
+	basis, latest = _recorded_schema_intents(receipt)
+	_assert_schema_intent("Journal Entry", current["je"]["schema"], basis, latest)
+	for name, model in current["models"].items():
+		_assert_schema_intent(name, model["schema"], basis, latest)
+	if basis.get("oa") is not None:
+		_assert_schema_intent(OA_DOCTYPE, current["oa"]["schema"], basis, latest)
+	return basis, latest
 
 
 def _assert_recorded_rollback_state(receipt, current):
@@ -835,30 +953,7 @@ def _assert_recorded_rollback_state(receipt, current):
 	source normalization. Here every scope row and native schema is exact; only
 	a pending single DDL or per-row metadata autocommit may be on either side.
 	"""
-	state = receipt.state
-	assert state["status"] in {"applying", "applied", "restored"}
-	basis = state["after"] if state["status"] == "applied" else state["before"]
-	if state["status"] == "restored":
-		basis = state["before"]
-	latest = {}
-	if state["status"] != "restored":
-		for step in state["steps"]:
-			if state["status"] == "applied" and not step["kind"].startswith("rollback-"):
-				continue
-			if step["kind"] in {"ddl", "rollback-ddl"}:
-				latest[step["doctype"]] = step
-			elif step["kind"] in {"metadata", "rollback-metadata"}:
-				latest["metadata"] = step
-	schemas = [("Journal Entry", current["je"]["schema"]), *((name, model["schema"]) for name, model in current["models"].items())]
-	if basis.get("oa") is not None:
-		schemas.append((OA_DOCTYPE, current["oa"]["schema"]))
-	for name, actual in schemas:
-		original = basis["je"]["schema"] if name == "Journal Entry" else basis["oa"]["schema"] if name == OA_DOCTYPE else basis["models"][name]["schema"]
-		step = latest.get(name)
-		allowed = [original] if step is None else [step["expected_after"]]
-		if step is not None and step["status"] == "pending":
-			allowed.append(step["before"])
-		assert actual in allowed, "Native schema drift from recorded release/rollback intent: " + name
+	basis, latest = _assert_recorded_schemas(receipt, current)
 	step = latest.get("metadata")
 	actual_scope = current["metadata"]["scope"]
 	if step is None or step["status"] == "complete":
@@ -973,7 +1068,7 @@ def verify_joint_audit_delta(before, after, receipt):
 	assert original["operating_singles"] == current["operating_singles"], "Operating Single bytes changed"
 	assert set(original["models"]) == set(current["models"])
 	assert all(model["rows"] == original["models"][name]["rows"] for name, model in current["models"].items()), "Operating model bytes changed"
-	assert not before.get("purchase_source_sync_enabled") and not after.get("purchase_source_sync_enabled"), "Source sync must remain disabled"
+	_assert_release_sync_state(before, after)
 	for item, native in ((before, original), (after, current)):
 		_verify_operating_snapshot(item, native)
 	_verify_operating_audit(before, after, contract)

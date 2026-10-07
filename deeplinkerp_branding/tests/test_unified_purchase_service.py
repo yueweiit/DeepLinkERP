@@ -321,7 +321,8 @@ class ReadBoundary:
 		self.calls = []
 		self.field_calls = []
 		self.response = {}
-		self.db = SimpleNamespace(exists=self.exists)
+		self.private_reads = []
+		self.db = SimpleNamespace(exists=self.exists, get_values=self.get_values)
 		self.permissions = SimpleNamespace(can_export=self.can_export)
 		self.session = SimpleNamespace(user="buyer@example.test")
 		self.document_reads = []
@@ -332,11 +333,20 @@ class ReadBoundary:
 			return name in self.installed
 		return doctype == "Currency" and name in {"CNY", "MXN", "USD", "XYZ"}
 
+	def get_values(self, doctype, filters, fields, **kwargs):
+		self.private_reads.append((doctype, filters, fields))
+		return [{field: row.get(field) for field in fields} for row in self.records[doctype]
+			if row["name"] in filters["name"][1]]
+
 	def has_permission(self, doctype, permission_type="read"):
 		return doctype in (self.read if permission_type == "read" else self.export)
 
 	def can_export(self, doctype, is_owner=False):
 		return doctype in (self.owner_export if is_owner else self.native_export)
+
+	def get_meta(self, doctype):
+		installed = set().union(*(row.keys() for row in self.records.get(doctype, []))) | self.fields.get(doctype, set())
+		return SimpleNamespace(has_field=lambda field: field in installed)
 
 	def get_doc(self, doctype, name):
 		record = next(row for row in self.records[doctype] if row["name"] == name)
@@ -365,6 +375,16 @@ def connect(monkeypatch, boundary):
 	monkeypatch.setattr(s, "frappe", boundary)
 	monkeypatch.setattr(s, "get_permitted_fields", boundary.permitted_fields)
 	monkeypatch.setattr(s, "get_workflow_name", lambda doctype: "")
+	from contextlib import nullcontext
+	monkeypatch.setattr(s, "_request_reader", nullcontext)
+	monkeypatch.setattr(s, "_permitted_fields", lambda dt, **kwargs: set(boundary.permitted_fields(dt, permission_type="read", **kwargs)))
+	# Native record hydration is exercised in test_crossborder_progress. This
+	# boundary covers unified query/canonical/export behavior without a site.
+	monkeypatch.setattr(s, "_load_order_progress", lambda names: {}, raising=False)
+	monkeypatch.setattr(s, "_restricted_order_progress", lambda name: {"name": name, "state": "restricted", "review_required": True})
+	monkeypatch.setattr(s, "_project_source_roles", lambda rows, sources, fields, orders: {}, raising=False)
+	monkeypatch.setattr(s, "_load_company_scope", lambda names: set(names), raising=False)
+	monkeypatch.setattr(s, "_load_order_fields_scope", lambda: True)
 	return s
 
 
@@ -387,6 +407,7 @@ def connect_native_queries(monkeypatch, boundary, *, workflow_field=None, fieldt
 		return SimpleNamespace(fields=fields, default_fields={"name", "creation", "modified"},
 			get_valid_columns=lambda: metadata[doctype],
 			get_permlevel_access=lambda **kwargs: {0},
+			has_field=lambda field: field in metadata[doctype],
 			get_field=lambda name: next((df for df in fields if df.fieldname == name), None))
 	monkeypatch.setattr(boundary, "get_meta", get_meta, raising=False)
 	monkeypatch.setattr(boundary, "whitelist", lambda **kwargs: lambda fn: fn, raising=False)
@@ -545,7 +566,8 @@ def capture_xlsx(monkeypatch):
 			return values
 
 		def __exit__(self, *_args):
-			self.output.write(repr(self.data).encode())
+			if hasattr(self, "data"):
+				self.output.write(repr(self.data).encode())
 
 	module = SimpleNamespace(make_xlsx=lambda data, sheet_name, wb: setattr(wb, "data", (data, sheet_name)))
 	monkeypatch.setitem(__import__("sys").modules, "frappe.utils.xlsxutils", module)
@@ -853,3 +875,253 @@ def test_source_original_number_is_preserved_independently_of_native_field_auton
 	b=ReadBoundary([], [request],fields={"Purchase Order":{"name"},"OA Purchase Request":set(request)}); b.db.get_value=lambda *args,**kwargs: request
 	row=connect(monkeypatch,b).get_unified_purchase_list()["rows"][0]
 	assert row["oa_number"] == "DT-ORIGINAL"
+
+
+def progress_row(*, unpaid=0, internal=(), pending=(), review=False):
+	phases = (["supplier_unpaid"] if unpaid > 0 else []) + (
+		["internal_unsettled"] if any(row.get("state") == "payable" and row.get("payable_outstanding", 0) > 0 for row in internal) else []) + (
+		["factory_pending"] if any(row.get("pending_stock_qty", 0) > 0 for row in pending) else [])
+	return {"external": {"state": "exact", "settled": 0, "order_unpaid": unpaid, "currency": "USD"},
+		"internal": list(internal), "factory_receipt": {"state": "exact", "quantities": list(pending)},
+		"domestic_receipt": {"state": "none", "quantities": [], "warnings": []},
+		"receipt_logistics": [], "review_required": review, "progress_phases": phases}
+
+
+@pytest.mark.parametrize("phase", ["supplier_unpaid", "internal_unsettled", "factory_pending"])
+def test_computed_phase_and_beneficiary_filter_before_page100_count_and_totals(phase):
+	orders = []
+	for index in range(300):
+		matched = index % 2 == 0
+		progress = progress_row(unpaid=2 if matched else 0,
+			internal=[{"state": "payable" if matched else "draft_quote", "payable_outstanding": 3,
+				"currency": "MXN"}], pending=[{"pending_stock_qty": 4 if matched else 0, "stock_uom": "Nos"}])
+		orders.append(po(f"PO-{index:04}", grand_total=1, order_progress=progress,
+			_role_context={"beneficiary_companies": ["FACTORY"], "company_confirmed": True}))
+	result = backend().build_unified_purchase_payload(orders, [], start=100, page_length=100,
+		filters={"beneficiary_company": "FACTORY", "progress_phase": phase})
+	assert result["total_count"] == 150
+	assert len(result["rows"]) == 50
+	assert result["rows"][0]["name"] == "PO-0200"
+	assert result["totals"]["orders"] == [{"currency": "USD", "amount": 150}]
+
+
+def test_review_only_excludes_exact_rows_and_uses_all_authorized_rows_before_page():
+	orders = [po(f"PO-{index:04}", grand_total=1, order_progress=progress_row(review=index % 2 == 0))
+		for index in range(300)]
+	result = backend().build_unified_purchase_payload(orders, [], start=100, filters={"review_only": True})
+	assert result["total_count"] == 150
+	assert len(result["rows"]) == 50
+	assert result["totals"]["orders"] == [{"currency": "USD", "amount": 150}]
+
+
+@pytest.mark.parametrize("filters", [{"progress_phase": "secret"}, {"review_only": "yes"}, {"review_only": 2}])
+def test_new_computed_filters_reject_unknown_phase_and_non_boolean_review(filters):
+	with pytest.raises(ValueError):
+		backend().build_unified_purchase_payload([], [], filters=filters)
+
+
+def test_managed_unconfirmed_source_hint_is_readable_but_not_buyer_or_confirmed_beneficiary():
+	source = {"business_id": "DT-ORIGINAL", "beneficiary_company": "Raw Factory", "beneficiary_company_status": "ambiguous",
+		"project": "Raw molds", "project_status": "unique", "currency": "CNY", "detail_total_amount": "1"}
+	request = oa(target_company="Old applicant hint", custom_purchase_source_id="source",
+		custom_purchase_source_json=json.dumps(source))
+	s = backend()
+	row = s.build_unified_purchase_payload([po(custom_oa_purchase_expense="OA-1")], [request])["rows"][0]
+	assert row.get("role_context", {}).get("purchasing_company") == "Yuewei"
+	assert "公司不一致" not in (row["oa_warning"] or "")
+	assert s.build_unified_purchase_payload([], [request], filters={"company": "Old applicant hint"})["total_count"] == 0
+	assert s.build_unified_purchase_payload([], [request], filters={"beneficiary_company": "Raw Factory"})["total_count"] == 0
+	assert s.build_unified_purchase_payload([], [request], filters={"search": "Raw molds"})["total_count"] == 1
+
+
+@pytest.mark.parametrize("size", [500, 2500])
+def test_list_progress_uses_one_shared_batch_and_page_or_filter_scope(monkeypatch, size):
+	b = ReadBoundary([po(f"PO-{index:04}", grand_total=1) for index in range(size)], oa_installed=False)
+	s = connect(monkeypatch, b)
+	calls = []
+	def batch(names):
+		calls.append(list(names))
+		return {name: progress_row(unpaid=2) for name in names}
+	monkeypatch.setattr(s, "_load_order_progress", batch, raising=False)
+	result = s.get_unified_purchase_list(start=100)
+	assert len(calls) == 1 and len(calls[0]) == 100
+	assert all(row.get("order_progress", {}).get("external", {}).get("order_unpaid") == 2 for row in result["rows"])
+	calls.clear()
+	result = s.get_unified_purchase_list(start=100, page_length=size, filters={"progress_phase": "supplier_unpaid"})
+	assert len(calls) == 1 and len(calls[0]) == size
+	assert result["total_count"] == size and len(result["rows"]) == size - 100
+	assert result["totals"]["orders"] == [{"currency": "USD", "amount": size}]
+
+
+def test_export_seven_groups_expand_readable_leaves_in_requested_order_without_losing_multi_currency():
+	s = backend()
+	progress = progress_row(unpaid=12.34567, internal=[
+		{"state": "payable", "internal_order": "INT-1", "beneficiary_company": "FACTORY", "currency": "MXN",
+			"payable_total": 120, "settled": 20, "payable_outstanding": 100, "warnings": []},
+		{"state": "payable", "internal_order": "INT-2", "beneficiary_company": "FACTORY2", "currency": "USD",
+			"payable_total": 3, "settled": 1, "payable_outstanding": 2, "warnings": []}],
+		pending=[{"internal_order": "INT-1", "pending_stock_qty": 2.345, "stock_uom": "Nos"}])
+	order = po(grand_total=45.6789, order_progress=progress, party_account_currency="CNY")
+	groups = ["internal_settlement", "order_context", "supplier_context", "project_context", "external_payment",
+		"receipt_logistics", "action_context", "name"]
+	data = s.build_unified_purchase_export([order], [], columns=groups)
+	assert data[0][0] == "内部订单"
+	assert data[0].count(s.EXPORT_LABELS["name"]) == 1
+	assert "预付款币种" in data[0]
+	assert "出纳实付（未代表 ERP 入账）" in data[0]
+	assert "INT-1" in str(data[1]) and "INT-2" in str(data[1])
+	assert "MXN" in str(data[1]) and "USD" in str(data[1]) and "Nos" in str(data[1])
+	assert "{'" not in str(data[1]) and '"external"' not in str(data[1])
+	assert order["grand_total"] == 45.6789 and progress["external"]["order_unpaid"] == 12.34567
+
+
+def test_group_export_is_unbounded_and_shares_computed_filter_batch(monkeypatch, capture_xlsx):
+	b = ReadBoundary([po(f"PO-{index:04}") for index in range(2601)], oa_installed=False)
+	s = connect(monkeypatch, b)
+	calls = []
+	def batch(names):
+		calls.append(list(names))
+		return {name: progress_row(unpaid=1 if int(name[-4:]) % 2 else 0) for name in names}
+	monkeypatch.setattr(s, "_load_order_progress", batch, raising=False)
+	s.export_unified_purchase_list(filters={"progress_phase": "supplier_unpaid"}, columns=["order_context", "external_payment"])
+	assert len(calls) == 1 and len(calls[0]) == 2601
+	assert b"PO-2599" in b.response["filecontent"] and b"PO-2600" not in b.response["filecontent"]
+	assert b.response["filecontent"].count(b"PO-") == 1300
+
+
+def test_managed_private_source_evidence_reconciliation_parse_once_and_finance_acl_once(monkeypatch):
+	s = backend()
+	source = json.dumps({"version": "v1", "business_id": "DT-ORIGINAL", "currency": "CNY", "detail_total_amount": "2"})
+	proof = json.dumps({"version": "proof-v1", "paid_amount": "8", "currency": "CNY", "payment_evidence_status": "recorded", "bank": "PRIVATE"})
+	recon = json.dumps({"verified": True, "evidence_version": "proof-v1", "payment_entries": ["SECRET-PE"]})
+	requests = [oa(f"OA-{index}", purchase_order="PO-1", custom_purchase_source_id="source", custom_purchase_source_json=source,
+		custom_cashier_payment_evidence=proof, custom_purchase_payment_reconciliation=recon) for index in range(20)]
+	b = ReadBoundary([po(custom_oa_purchase_expense="OA-0")], requests,
+		read={"Purchase Order", "OA Purchase Request", "Payment Entry"},
+		fields={"Purchase Order": set(po()), "OA Purchase Request": set(requests[0]), "Payment Entry": s.CASHIER_READ_FIELDS})
+	s = connect(monkeypatch, b)
+	parsed = []
+	original = json.loads
+	def loads(value, *args, **kwargs):
+		parsed.append(value)
+		return original(value, *args, **kwargs)
+	monkeypatch.setattr(s.json, "loads", loads)
+	row = s.get_unified_purchase_list()["rows"][0]
+	assert len(b.private_reads) == 1
+	assert parsed.count(source) == parsed.count(proof) == parsed.count(recon) == 20
+	assert sum(dt == "Payment Entry" for dt, _ in b.field_calls) == 1
+	assert "SECRET-PE" not in str(row) and "PRIVATE" not in str(row)
+	assert all(reference.get("cashier_reconciliation_verified") is True for reference in row["oa_references"])
+
+
+def test_reconciliation_requires_matching_version_and_finance_permission_without_erp_payment_invention(monkeypatch):
+	request = oa(custom_purchase_source_id="source", custom_purchase_source_json='{"version":"v1"}',
+		custom_cashier_payment_evidence='{"version":"proof-v2","paid_amount":"20","currency":"CNY"}',
+		custom_purchase_payment_reconciliation='{"verified":true,"evidence_version":"proof-v1","payment_entries":["SECRET"]}')
+	b = ReadBoundary([], [request], read={"OA Purchase Request", "Payment Entry"},
+		fields={"OA Purchase Request": set(request), "Payment Entry": backend().CASHIER_READ_FIELDS, "Purchase Order": {"name"}})
+	row = connect(monkeypatch, b).get_unified_purchase_list()["rows"][0]
+	assert row.get("cashier_reconciliation_verified") is False
+	assert row.get("order_progress") is None
+	assert row["cashier_paid_amount"] == "20" and "SECRET" not in str(row)
+	b.fields["Payment Entry"] = {"name"}
+	row = connect(monkeypatch, b).get_unified_purchase_list()["rows"][0]
+	assert row["cashier_paid_amount"] is None and row.get("cashier_reconciliation_verified") is None
+
+
+def test_export_group_overlap_deduplicates_leaves_but_duplicate_unknown_input_is_rejected():
+	s = backend()
+	assert s._columns(["external_payment", "currency"]).count("currency") == 1
+	for columns in (["external_payment", "external_payment"], ["order_context", "secret"], ["name", "name"]):
+		with pytest.raises(ValueError):
+			s._columns(columns)
+
+
+def test_group_export_keeps_each_stock_uom_manual_provenance_and_unknown_ap_distinct():
+	s = backend()
+	progress = progress_row(internal=[{"state": "draft_quote", "internal_order": "QUOTE", "currency": "MXN", "warnings": ["报价不是应付"]}],
+		pending=[{"internal_order": "INT-1", "pending_stock_qty": 2.3456, "received_stock_qty": 1, "stock_uom": "Nos"},
+			{"internal_order": "INT-2", "pending_stock_qty": 3, "received_stock_qty": 2, "stock_uom": "Kg"}])
+	progress["receipt_logistics"] = [{"name": "LINK", "cost_batch": "BATCH", "state": "reported", "reported_quantities": [{"qty": 5, "uom": "箱"}],
+		"manual_nodes": [{"node": "reported_arrival", "note": "人工核对", "by": "Operator", "on": "2026-10-07"}],
+		"provenance": [{"source_id": "COMMENT", "author": "Author", "time": "2026-10-07", "remark": "到货"}], "warnings": ["报告不等于入库"]}]
+	data = s.build_unified_purchase_export([po(order_progress=progress)], [], columns=["internal_settlement", "receipt_logistics"])
+	values = dict(zip(data[0], data[1]))
+	assert values["内部应付总额（已提交）"] == "QUOTE: — MXN"
+	assert values["工厂原生未收数量/单位"] == "INT-1: 2.35 Nos\nINT-2: 3 Kg"
+	assert values["工厂原生收货数量/单位"] == "INT-1: 1 Nos\nINT-2: 2 Kg"
+	assert "Author" in values["物流来源/作者/时间"] and "COMMENT" in values["物流来源/作者/时间"]
+	assert "Operator" in values["人工物流节点"] and "5 箱" in values["物流报告数量/单位（不等于入库）"]
+	assert progress["factory_receipt"]["quantities"][0]["pending_stock_qty"] == 2.3456
+
+
+def test_order_group_preserves_multiple_oa_amount_currency_and_source_provenance_readably():
+	data = backend().build_unified_purchase_export([po(custom_oa_purchase_expense="OA-1")],
+		[oa(), oa("OA-2", purchase_order="PO-1", oa_code="DT-2", currency="USD", detail_total_amount=7)], columns=["order_context"])
+	assert "OA 来源核对明细" in data[0]
+	value = data[1][data[0].index("OA 来源核对明细")]
+	assert "10.00 CNY" in value and "7.00 USD" in value and "DT-2" in value and "OA-1" in value
+	assert "[{" not in value
+
+
+@pytest.mark.parametrize("columns", [["external_payment"], ["cashier_paid_amount", "cashier_currency", "cashier_evidence_status",
+	"cashier_reconciliation_verified", "cashier_reconciliation_warning"]])
+def test_multiple_managed_oa_payment_export_keeps_aligned_per_source_evidence_in_each_selected_leaf(monkeypatch, capture_xlsx, columns):
+	s = backend()
+	requests = []
+	for index, amount, currency, verified in ((1, "8", "CNY", True), (2, "3", "USD", False), (3, None, None, None)):
+		proof = {"version": "proof-" + str(index), "paid_amount": amount, "currency": currency, "payment_evidence_status": "recorded"} if amount is not None else {}
+		recon = {"verified": verified, "evidence_version": proof.get("version"), "payment_entries": ["SECRET-PE"]} if verified is not None else {}
+		requests.append(oa("OA-" + str(index), purchase_order="PO-1", oa_code="DT-" + str(index), custom_purchase_source_id="source-" + str(index),
+			custom_purchase_source_json=json.dumps({"version": "v1", "business_id": "DT-" + str(index), "currency": currency,
+				"detail_total_amount": amount, "requested_amount": amount}), custom_cashier_payment_evidence=json.dumps(proof),
+			custom_purchase_payment_reconciliation=json.dumps(recon)))
+	b = ReadBoundary([po(custom_oa_purchase_expense="OA-1")], requests, read={"Purchase Order", "OA Purchase Request", "Payment Entry"},
+		fields={"Purchase Order": set(po()), "OA Purchase Request": set(requests[0]), "Payment Entry": s.CASHIER_READ_FIELDS})
+	s = connect(monkeypatch, b)
+	projected = []
+	original = s._progress_export_projection
+	def projection(row):
+		projected.append(row["name"])
+		return original(row)
+	monkeypatch.setattr(s, "_progress_export_projection", projection)
+	s.export_unified_purchase_list(columns=columns)
+	data, _ = __import__("ast").literal_eval(b.response["filecontent"].decode())
+	values = dict(zip(data[0], data[1]))
+	assert values[s.EXPORT_LABELS["cashier_paid_amount"]] == "OA-1 / DT-1: 8.00 CNY\nOA-2 / DT-2: 3.00 USD\nOA-3 / DT-3: — 币种待核对"
+	assert values[s.EXPORT_LABELS["cashier_currency"]] == "OA-1 / DT-1: CNY\nOA-2 / DT-2: USD\nOA-3 / DT-3: —"
+	assert values[s.EXPORT_LABELS["cashier_evidence_status"]] == "OA-1 / DT-1: recorded\nOA-2 / DT-2: recorded\nOA-3 / DT-3: —"
+	assert values[s.EXPORT_LABELS["cashier_reconciliation_verified"]] == "OA-1 / DT-1: 已核对 ERP\nOA-2 / DT-2: 尚未核对 ERP\nOA-3 / DT-3: 未知（权限或证据待核对）"
+	assert "OA-3 / DT-3:" in values[s.EXPORT_LABELS["cashier_reconciliation_warning"]]
+	assert "SECRET-PE" not in str(data)
+	assert len(b.private_reads) == 1 and projected == ["PO-1"]
+	assert sum(dt == "Payment Entry" for dt, _ in b.field_calls) == 1
+
+
+def test_single_source_cashier_payment_export_keeps_scalar_and_finance_denied_multiple_refs_stay_unknown(monkeypatch):
+	request = oa(custom_purchase_source_id="source", custom_purchase_source_json='{"version":"v1"}',
+		custom_cashier_payment_evidence='{"version":"proof","paid_amount":"8","currency":"CNY","payment_evidence_status":"recorded"}',
+		custom_purchase_payment_reconciliation='{"verified":true,"evidence_version":"proof"}')
+	b = ReadBoundary([po(custom_oa_purchase_expense="OA-1")], [request], read={"Purchase Order", "OA Purchase Request", "Payment Entry"},
+		fields={"Purchase Order": set(po()), "OA Purchase Request": set(request), "Payment Entry": backend().CASHIER_READ_FIELDS})
+	s = connect(monkeypatch, b)
+	data = s._export_data(s.get_unified_purchase_list()["rows"], ["cashier_paid_amount", "cashier_currency", "cashier_reconciliation_verified"])
+	assert data[1] == [8.0, "CNY", True]
+	b.records["OA Purchase Request"].append({**request, "name": "OA-2", "purchase_order": "PO-1", "oa_code": "DT-2"})
+	b.fields["Payment Entry"] = {"name"}
+	data = s._export_data(s.get_unified_purchase_list()["rows"], ["cashier_paid_amount", "cashier_reconciliation_verified"])
+	assert "8.00" not in str(data)
+	assert data[1][1].count("未知（权限或证据待核对）") == 2
+	assert "尚未核对 ERP" not in str(data)
+
+
+def test_private_source_identity_field_denied_does_not_relabel_unconfirmed_managed_source_as_legacy_buyer(monkeypatch):
+	request = oa(target_company="Old proposal", custom_purchase_source_id="SECRET-ID",
+		custom_purchase_source_json='{"version":"v1","project":"Raw project"}', custom_purchase_company_confirmed=0)
+	b = ReadBoundary([], [request], fields={"Purchase Order": {"name"}, "OA Purchase Request": set(request) - {
+		"custom_purchase_source_id", "custom_purchase_source_json", "custom_purchase_company_confirmed"}})
+	s = connect(monkeypatch, b)
+	row = s.get_unified_purchase_list()["rows"][0]
+	assert row["company"] is None and row["role_context"]["company_confirmed"] is False
+	assert s.get_unified_purchase_list(filters={"company": "Old proposal"})["total_count"] == 0
+	assert "SECRET-ID" not in str(row)

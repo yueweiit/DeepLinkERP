@@ -1,7 +1,8 @@
 (function (root, factory) {
  const engine = { create: factory, fitViewport, detailTable, invalidateExpandedDetails };
  function invalidateExpandedDetails(expanded,rows,modified=detail=>detail.header?.modified) {
-  for(const [name,detail] of expanded || []) {const row=rows.find(item=>item.name===name);if(!row || (row.modified && row.modified!==modified(detail)))expanded.delete(name);}
+  const byName=new Map(rows.map(row=>[row.name,row]));
+  for(const [name,detail] of expanded || []) {const row=byName.get(name);if(!row || (row.modified && row.modified!==modified(detail)))expanded.delete(name);}
  }
  function detailTable({columns, items=[], escape, translate=x=>x, format, wrapperClass='', tableClass='', columnClass=()=>''}) {
   return `<div class="${escape(wrapperClass)}"><table class="table ${escape(tableClass)}"><thead><tr>${columns.map(([field,label],i)=>`<th class="${escape(columnClass(field,i))}">${escape(translate(label))}</th>`).join('')}</tr></thead><tbody>${items.map(item=>`<tr>${columns.map(([field],i)=>`<td class="${escape(columnClass(field,i))}">${format?.(field,item) ?? escape(item[field] ?? '—')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
@@ -85,13 +86,15 @@
 	}
 
 	function normalizePreferences(value, allowed, definitions = COLUMNS) {
-		if (definitions === COLUMNS && config.migratePreferences) value = config.migratePreferences(value, allowed);
+		const migrate = definitions === COLUMNS ? config.migratePreferences : config.provider?.migratePreferences;
+		if (migrate) value = migrate(value, allowed);
 		const candidates = definitions.filter((col) => allowed.has(col.fieldname)).map((col) => col.fieldname);
 		const defaults = definitions === COLUMNS ? config.defaultColumns : config.provider?.defaultColumns;
 		const selected = Array.isArray(value?.columns) ? value.columns : (defaults || candidates);
 		const columns = [...new Set(selected.filter((field) => candidates.includes(field)))];
 		if (!columns.includes("name") && candidates.includes("name")) columns.unshift("name");
-		return { density: value?.density === "standard" ? "standard" : "tight", columns, ...(config.preferenceVersion ? { version: config.preferenceVersion } : {}) };
+		const version = definitions === COLUMNS ? config.preferenceVersion : config.provider?.preferenceVersion;
+		return { density: value?.density === "standard" ? "standard" : "tight", columns, ...(version ? { version } : {}) };
 	}
 
 	function selectOptions(control, field, translate) {
@@ -215,7 +218,7 @@
 		return JSON.stringify(args);
 	}
 
-	function providerActive(controller) { return Boolean(config.provider && (controller.pageSurface || controller.providerScope !== "orders")); }
+	function providerActive(controller) { return Boolean(config.provider && (config.provider.alwaysActive || controller.pageSurface || controller.providerScope !== "orders")); }
 	function providerReadonly(controller) { return providerActive(controller) && (controller.pageSurface || typeof config.providerSelectable !== "function"); }
 	function rowSelectable(controller, doc) { return !providerActive(controller) || (!providerReadonly(controller) && config.providerSelectable(doc)); }
 	function displayColumns(controller) { return providerActive(controller) ? config.provider.columns : COLUMNS; }
@@ -246,9 +249,9 @@
 		for (const field of config.provider?.virtualFields || []) providerAllowed.add(field);
 		let providerSaved;
 		try { providerSaved = JSON.parse(root.localStorage?.getItem(`${key}:unified`) || "null"); } catch (_) { /* Local preferences are optional. */ }
-		if (!providerSaved && saved && config.provider) providerSaved = { ...saved, columns: [...(saved.columns || []), ...(config.provider.newColumns || [])] };
+		if (!providerSaved && saved && config.provider) providerSaved = config.provider.inheritPreferences ? saved : { ...saved, columns: [...(saved.columns || []), ...(config.provider.newColumns || [])] };
 		const controller = {
-			list, root, allowed, displayAllowed, originals, quick: {}, controls: {}, resetting: false, preferences: normalizePreferences(saved, displayAllowed),
+			list, root, allowed, displayAllowed, originals, quick: {}, controls: {}, resetting: false, preferences: config.provider?.alwaysActive ? normalizePreferences(providerSaved, providerAllowed, config.provider.columns) : normalizePreferences(saved, displayAllowed),
 			providerAllowed, providerScope: "orders", providerRows: [], providerPayload: null, providerOrderBy: "transaction_date desc",
 			nativePreferences: normalizePreferences(saved, displayAllowed), providerPreferences: config.provider ? normalizePreferences(providerSaved, providerAllowed, config.provider.columns) : null,
 			page: 0, pageSize: 100, requestId: 0, querySignature: null, total: null, summary: [],
