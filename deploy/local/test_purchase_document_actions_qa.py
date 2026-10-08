@@ -1051,54 +1051,79 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
             data = subject.as_dict()
             data["flags"] = {"ignore_permissions": True, "purchase_reversal_internal": True}
             return json.dumps(data, default=str)
+        def reject_action(doc, action, expected_owner):
+            current = frappe.get_doc(doc.doctype, doc.name)
+            current.flags.purchase_reversal_internal = True
+            current.flags.ignore_permissions = True
+            inserted = []
+            def observe_insert(subject, *args, **kwargs):
+                inserted.append((subject.doctype, subject.name))
+                return native_insert(subject, *args, **kwargs)
+            try:
+                with patch.object(Document, "insert", new=observe_insert), patch.object(
+                        operation, "_reserve", wraps=operation._reserve) as reserved:
+                    with self.assertRaises(frappe.PermissionError):
+                        if action == "native-insert-new":
+                            current.insert(set_name="QA-ATOMIC-COPY-" + uuid.uuid4().hex, ignore_permissions=True)
+                        elif action == "rpc-insert-old":
+                            insert(rpc_payload(current))
+                        elif action.endswith(("-zero", "-false")):
+                            value = 0 if action.endswith("-zero") else False
+                            current.set(boundary.POINTER, value)
+                            if action.startswith("rpc-insert"):
+                                created = insert(rpc_payload(current))
+                                identity = (created["doctype"], created["name"])
+                            elif action.startswith("rpc-save"):
+                                save(rpc_payload(current))
+                                identity = (current.doctype, current.name)
+                            elif action.startswith("native-save"):
+                                current.save(ignore_permissions=True)
+                                identity = (current.doctype, current.name)
+                            else:
+                                current.db_set(boundary.POINTER, value)
+                                identity = (current.doctype, current.name)
+                            # RED observes actual persisted values before rollback;
+                            # GREEN rejects before reaching any native write.
+                            print("FALSY_POINTER_WRITE=" + json.dumps({"doctype": identity[0],
+                                "name": identity[1], "action": action, "stored_pointer":
+                                frappe.db.get_value(*identity, boundary.POINTER)}))
+                        elif action in ("rpc-save-local", "native-save-local"):
+                            current.set("__islocal", 1)
+                            if action == "rpc-save-local":
+                                save(rpc_payload(current))
+                            else:
+                                current.save(ignore_permissions=True)
+                        elif action == "rpc-save-no-name":
+                            current.name = None
+                            save(rpc_payload(current))
+                        elif action == "native-copy-owner":
+                            frappe.copy_doc(current).save(ignore_permissions=True)
+                        elif action == "rpc-clear":
+                            current.set(boundary.POINTER, None)
+                            save(rpc_payload(current))
+                        elif action == "native-rewrite":
+                            current.set(boundary.POINTER, "QA-ATOMIC-CLIENT-" + uuid.uuid4().hex)
+                            current.save(ignore_permissions=True)
+                        else:
+                            current.db_set(boundary.POINTER, None)
+                        self.assertEqual(set(frappe.get_all(doc.doctype, filters={boundary.POINTER: owner.name},
+                            pluck="name", limit_page_length=0)), owned[doc.doctype], "Owner copied into a new identity")
+                    self.assertEqual(inserted, [], "Rejected before native insert")
+                    reserved.assert_not_called()  # including _save -> insert, not merely late rejection
+            finally:
+                self.remember_new_names()
+                frappe.db.rollback()
+            self.assertEqual(frappe.db.get_value(doc.doctype, doc.name, boundary.POINTER), expected_owner)
+            self.assertEqual(names, {doctype: set(frappe.get_all(doctype, pluck="name", limit_page_length=0))
+                for doctype in self.types})
+            self.assertEqual({subject.doctype: set(frappe.get_all(subject.doctype,
+                filters={boundary.POINTER: owner.name}, pluck="name", limit_page_length=0)) for subject in docs}, owned)
         for doc in docs:
             for action in ("native-insert-new", "rpc-insert-old", "rpc-save-local", "native-save-local",
-                    "rpc-save-no-name", "native-copy-owner", "rpc-clear", "native-rewrite", "db-set"):
+                    "rpc-save-no-name", "native-copy-owner", "rpc-insert-zero", "rpc-insert-false",
+                    "rpc-clear", "native-rewrite", "db-set"):
                 with self.subTest(doctype=doc.doctype, action=action):
-                    current = frappe.get_doc(doc.doctype, doc.name)
-                    current.flags.purchase_reversal_internal = True
-                    current.flags.ignore_permissions = True
-                    inserted = []
-                    def observe_insert(subject, *args, **kwargs):
-                        inserted.append((subject.doctype, subject.name))
-                        return native_insert(subject, *args, **kwargs)
-                    try:
-                        with patch.object(Document, "insert", new=observe_insert), patch.object(
-                                operation, "_reserve", wraps=operation._reserve) as reserved:
-                            with self.assertRaises(frappe.PermissionError):
-                                if action == "native-insert-new":
-                                    current.insert(set_name="QA-ATOMIC-COPY-" + uuid.uuid4().hex, ignore_permissions=True)
-                                elif action == "rpc-insert-old":
-                                    insert(rpc_payload(current))
-                                elif action in ("rpc-save-local", "native-save-local"):
-                                    current.set("__islocal", 1)
-                                    if action == "rpc-save-local":
-                                        save(rpc_payload(current))
-                                    else:
-                                        current.save(ignore_permissions=True)
-                                elif action == "rpc-save-no-name":
-                                    current.name = None
-                                    save(rpc_payload(current))
-                                elif action == "native-copy-owner":
-                                    frappe.copy_doc(current).save(ignore_permissions=True)
-                                elif action == "rpc-clear":
-                                    current.set(boundary.POINTER, None)
-                                    save(rpc_payload(current))
-                                elif action == "native-rewrite":
-                                    current.set(boundary.POINTER, "QA-ATOMIC-CLIENT-" + uuid.uuid4().hex)
-                                    current.save(ignore_permissions=True)
-                                else:
-                                    current.db_set(boundary.POINTER, None)
-                                self.assertEqual(set(frappe.get_all(doc.doctype, filters={boundary.POINTER: owner.name},
-                                    pluck="name", limit_page_length=0)), owned[doc.doctype], "Owner copied into a new identity")
-                            self.assertEqual(inserted, [], "Rejected before native insert")
-                            reserved.assert_not_called()  # including _save -> insert, not merely late rejection
-                    finally:
-                        self.remember_new_names()
-                        frappe.db.rollback()
-                    self.assertEqual(frappe.db.get_value(doc.doctype, doc.name, boundary.POINTER), owner.name)
-                    self.assertEqual(names, {doctype: set(frappe.get_all(doctype, pluck="name", limit_page_length=0))
-                        for doctype in self.types})
+                    reject_action(doc, action, owner.name)
             # Native copy/amend preparation honors metadata no_copy, independent
             # of whether this particular original is currently frozen.
             safe = frappe.copy_doc(frappe.get_doc(doc.doctype, doc.name), ignore_no_copy=False)
@@ -1106,6 +1131,20 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
             self.assertTrue(safe.get("__islocal"))
             self.assertFalse(safe.name)
             self.assertEqual(frappe.db.get_value(doc.doctype, doc.name, boundary.POINTER), owner.name)
+        # The same ordinary-save rule also protects previously unowned stored
+        # identities. Only this exact synthetic fixture changes its baseline.
+        for doc in docs:
+            frappe.db.set_value(doc.doctype, doc.name, boundary.POINTER, None, update_modified=False)
+        self.commit_fixture()
+        owned = {doc.doctype: set() for doc in docs}
+        for doc in docs:
+            for action in ("rpc-save-zero", "rpc-save-false", "native-save-zero", "native-save-false",
+                    "db-set-zero", "db-set-false"):
+                with self.subTest(doctype=doc.doctype, action=action, previous_owner=None):
+                    reject_action(doc, action, None)
+        for doc in docs:
+            frappe.db.set_value(doc.doctype, doc.name, boundary.POINTER, owner.name, update_modified=False)
+        self.commit_fixture()
         # Existing same-identity RIV saves keep generation ownership; a genuine
         # native no-copy draft gets its own identity without that ownership.
         original = frappe.get_doc(riv.doctype, riv.name)
@@ -1118,7 +1157,10 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         # uses native no-copy/naming/validation; no old identity is rewritten.
         code = self.scope_item()
         amended_source = self.order(items=[{"item_code": code, "qty": 2, "rate": 12,
-            "warehouse": "Stores - QAB", "schedule_date": add_days(nowdate(), 1)}])
+            "warehouse": "Stores - QAB", "schedule_date": add_days(nowdate(), 1)}], submit=False)
+        self.assertEqual(amended_source.meta.get_field("transaction_time").fieldtype, "Time")
+        amended_source.transaction_time = "00:11:22.123456"
+        amended_source.submit()
         amended_source.cancel()
         amended = frappe.copy_doc(amended_source, ignore_no_copy=False)
         amended.amended_from = amended_source.name
@@ -1653,29 +1695,52 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
                     self.assert_effects_unchanged()
 
     def test_native_resource_docstatus_only_cancellation_keeps_finance_atomic(self):
+        from datetime import timedelta
         from frappe.api import v1, v2
         from deeplinkerp_branding.services import purchase_consistency as guard
         frappe.db.set_value("Item", self.item, "is_stock_item", 0)
         frappe.clear_document_cache("Item", self.item)
         po = self.order()
         pr = self.receipt(po)
-        pi = make_purchase_invoice(pr.name).insert()
+        pi = make_purchase_invoice(pr.name)
+        pi.set_posting_time = 1
+        pi.posting_time = "00:11:22.123456"
+        pi.remarks = "0:11:22.123456"
+        pi.insert()
         pi.submit()
         self.commit_fixture()
+        self.assertEqual(pi.meta.get_field("posting_time").fieldtype, "Time")
+        self.assertNotEqual(pi.meta.get_field("remarks").fieldtype, "Time")
+        self.assertEqual(frappe.db.get_value(pi.doctype, pi.name, "posting_time"),
+            timedelta(minutes=11, seconds=22, microseconds=123456))
+        self.remember_effects()
         for api in (v1, v2):
-            with self.subTest(api=api.__name__):
-                if api is v1:
-                    with patch.object(v1, "get_request_form_data", return_value={"docstatus": 2}):
-                        api.update_doc(pi.doctype, pi.name)
-                else:
-                    with patch.object(frappe.local, "form_dict", frappe._dict(docstatus=2)):
-                        api.update_doc(pi.doctype, pi.name)
-                guard.check_registered()
-                self.assertEqual(frappe.db.get_value(pi.doctype, pi.name, "docstatus"), 2)
-                issue = frappe.get_doc("China Voucher Sync Issue", {"issue_key": f"Cancellation|{pi.doctype}|{pi.name}"})
-                self.assertEqual(issue.status, "Resolved")
-                self.assertTrue(issue.cancellation_voucher)
-                frappe.db.rollback()
+            for change, allowed in (({}, True), ({"posting_time": "00:11:22.123456"}, True),
+                    ({"posting_time": "0:11:22.123456"}, True), ({"posting_time": "00:11:22.123457"}, False),
+                    ({"posting_time": "not-a-time"}, False), ({"remarks": "00:11:22.123456"}, False)):
+                with self.subTest(api=api.__name__, change=change):
+                    payload = {"docstatus": 2, **change}
+                    def cancel():
+                        if api is v1:
+                            with patch.object(v1, "get_request_form_data", return_value=payload):
+                                return api.update_doc(pi.doctype, pi.name)
+                        with patch.object(frappe.local, "form_dict", frappe._dict(payload)):
+                            return api.update_doc(pi.doctype, pi.name)
+                    try:
+                        if allowed:
+                            cancel()
+                            guard.check_registered()
+                            self.assertEqual(frappe.db.get_value(pi.doctype, pi.name, "docstatus"), 2)
+                            issue = frappe.get_doc("China Voucher Sync Issue", {"issue_key": f"Cancellation|{pi.doctype}|{pi.name}"})
+                            self.assertEqual(issue.status, "Resolved")
+                            self.assertTrue(issue.cancellation_voucher)
+                        else:
+                            with self.assertRaises(frappe.ValidationError) as caught:
+                                cancel()
+                            self.assertEqual(caught.exception.purchase_error_id, "cancellation_business_facts_changed")
+                            self.assert_effects_unchanged()
+                    finally:
+                        frappe.db.rollback()
 
     def test_zero_movement_native_cancellation_cannot_hide_a_pending_finance_issue(self):
         from frappe.api import v1

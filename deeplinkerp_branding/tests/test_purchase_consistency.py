@@ -53,6 +53,43 @@ class ConsistencyTests(unittest.TestCase):
                 self.guard.equal(self.doc(), "grand_total", "10.001", "10.002", "native amount")
         self.guard.equal(self.doc(), "grand_total", "10.0011", "10.0012", "native amount")
 
+    def test_cancellation_time_facts_use_native_duration_only_for_time_metadata(self):
+        from datetime import timedelta
+        cases = (
+            ("padded", "Time", "00:11:22.123456", timedelta(minutes=11, seconds=22, microseconds=123456), True),
+            ("unpadded", "Time", "0:11:22.123456", timedelta(minutes=11, seconds=22, microseconds=123456), True),
+            ("microseconds", "Time", "00:11:22.123457", timedelta(minutes=11, seconds=22, microseconds=123456), False),
+            ("duration", "Time", "49:02:03.123456", timedelta(days=2, hours=1, minutes=2, seconds=3, microseconds=123456), True),
+            ("different_days", "Time", "25:02:03.123456", timedelta(days=2, hours=1, minutes=2, seconds=3, microseconds=123456), False),
+            ("invalid_same", "Time", "not-a-time", "not-a-time", False),
+            ("invalid_changed", "Time", "not-a-time", timedelta(minutes=11), False),
+            ("empty", "Time", "", None, True),
+            ("text_changed", "Data", "00:11:22.123456", "0:11:22.123456", False),
+            ("text_same", "Data", "00:11:22.123456", "00:11:22.123456", True),
+        )
+        def record(value, fieldtype, *, child=False):
+            doc = self.doc("Purchase Order", marker=value)
+            doc.meta = SimpleNamespace(get=lambda key: [frappe._dict(fieldname="marker", fieldtype=fieldtype)],
+                get_table_fields=lambda: [frappe._dict(fieldname="items")] if child else [])
+            if child:
+                doc.items = [record(value, fieldtype)]
+                doc.meta.get = lambda key: []
+            doc.as_dict = lambda **kwargs: {"doctype": doc.doctype, "name": doc.name, "docstatus": doc.docstatus,
+                **({"items": [row.as_dict(**kwargs) for row in doc.items]} if child else {"marker": doc.marker})}
+            return doc
+        for child in (False, True):
+            for label, fieldtype, incoming, previous, allowed in cases:
+                with self.subTest(location="child" if child else "header", case=label), patch(
+                        "frappe.model.workflow.get_workflow_name", return_value=None), patch.object(
+                        frappe, "throw", side_effect=frappe.ValidationError):
+                    proposed, stored = record(incoming, fieldtype, child=child), record(previous, fieldtype, child=child)
+                    proposed.docstatus = 2
+                    if allowed:
+                        self.guard.check_cancellation_facts(proposed, stored)
+                    else:
+                        with self.assertRaises(frappe.ValidationError):
+                            self.guard.check_cancellation_facts(proposed, stored)
+
     def test_native_old_subcontract_po_supplied_bin_is_bound_without_sle(self):
         order = frappe.get_doc({"doctype": "Purchase Order", "name": "PO", "is_old_subcontracting_flow": 1,
             "items": [], "supplied_items": [{"rm_item_code": "RM", "reserve_warehouse": "Supplier WH"}]})

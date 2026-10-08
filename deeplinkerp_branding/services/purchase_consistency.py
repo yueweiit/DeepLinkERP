@@ -13,7 +13,7 @@ from copy import deepcopy
 from decimal import Decimal
 
 import frappe
-from frappe.utils import flt, getdate
+from frappe.utils import flt, getdate, get_timedelta
 
 from . import purchase_operation as operation
 from . import purchase_payment_service as service
@@ -1144,6 +1144,19 @@ def check_cancellation_facts(doc, old):
         values = source.as_dict(convert_dates_to_str=True, no_private_properties=True)
         for field in ignored | ({workflow_field} if root and workflow_field else set()):
             values.pop(field, None)
+        for field in source.meta.get("fields") or []:
+            if field.fieldtype == "Time" and field.fieldname in values:
+                # Native Time reads are timedeltas; do not compare their
+                # unpadded string representation with a padded client value.
+                # Read raw values to retain durations/days and microseconds.
+                raw = source.get(field.fieldname)
+                if raw is None or raw == "":
+                    values[field.fieldname] = None
+                else:
+                    duration = get_timedelta(raw)
+                    if duration is None:
+                        operation.reject("采购取消包含非法原生时间事实", "cancellation_business_facts_changed")
+                    values[field.fieldname] = duration
         for field in source.meta.get_table_fields():
             values[field.fieldname] = [facts(row) for row in source.get(field.fieldname) or []]
         return values

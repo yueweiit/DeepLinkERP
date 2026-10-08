@@ -360,11 +360,19 @@ def _creates_identity(doc, *, inserting=False):
 
 
 def check_pointer(doc, old, *, creating=False):
-    if creating and doc.doctype in POINTER_TYPES:
-        if doc.get(POINTER):
+    if doc.doctype not in POINTER_TYPES:
+        return
+    def value(source):
+        raw = source.get(POINTER) if source else None
+        # Native Link serialization preserves 0/False as varchar "0". Only
+        # actual null/empty-string values are empty, for new AND stored saves.
+        return None if raw is None or raw == "" else raw
+    incoming, previous = value(doc), value(old)
+    if creating:
+        if incoming is not None:
             frappe.throw("新单据不能继承库存保护指针", frappe.PermissionError)
         return
-    if doc.doctype in POINTER_TYPES and (doc.get(POINTER) or None) != (old.get(POINTER) or None if old else None):
+    if incoming != previous:
         frappe.throw("库存保护指针不能由普通单据写入、清除或替换", frappe.PermissionError)
 
 
