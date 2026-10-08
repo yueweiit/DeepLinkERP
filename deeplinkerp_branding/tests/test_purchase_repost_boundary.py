@@ -42,7 +42,13 @@ class Database:
         for name in ("before_commit", "after_commit", "before_rollback", "after_rollback"):
             setattr(self, name, CallbackManager())
 
-    def sql(self, query, values=(), **kwargs):
+    def sql(self, query, values=(), *, as_dict=0, as_list=0, debug=0, ignore_ddl=0,
+            auto_commit=0, update=None, explain=False, run=True, pluck=False, as_iterator=False):
+        # Match the installed native signature and its early preview returns.
+        if not run:
+            return str(query)
+        if explain:
+            return None
         self.queries.append(query)
         if "CONNECTION_ID" in query:
             return [(self._conn.identity,)]
@@ -185,6 +191,37 @@ class RepostBoundarySessionTests(unittest.TestCase):
         self.db.sql("ROLLBACK TO SAVEPOINT safe"); self.assert_locked()
         self.db.sql("COMMIT")
         self.assertNotIn("a", Database.owners)
+
+    def test_sql_previews_preserve_dormant_authority_and_native_argument_semantics(self):
+        for query in ("COMMIT", "ROLLBACK", "BEGIN", "CREATE TABLE preview_only (name int)"):
+            for option in ({"run": False}, {"explain": True}):
+                for positional in (False, True):
+                    for expected_begin in (False, True):
+                        with self.subTest(query=query, option=option, positional=positional, expected_begin=expected_begin):
+                            db = Database(303)
+                            try:
+                                with self.boundary.execution(db=db), self.lease(db=db): pass
+                                state = db._purchase_session
+                                state.begin_expected = expected_begin
+                                before = (state.epoch, state.begin_expected, dict(state.locks), dict(state.references), db._conn.rollbacks)
+                                result = db.sql(query, (), **option) if positional else db.sql(query=query, values=(), **option)
+                                self.assertEqual(result, query if "run" in option else None)
+                                self.assertEqual((state.epoch, state.begin_expected, state.locks, state.references, db._conn.rollbacks), before)
+                                self.assert_locked(owner=303)
+                                self.assertNotIn(query, db.queries)
+                                with self.assertRaises(frappe.ValidationError):
+                                    with self.boundary.execution(db=self.other), self.lease(db=self.other): pass
+                            finally:
+                                db.rollback()
+                                db.close()
+        with self.boundary.execution(db=self.db), self.lease(): pass
+        state = self.db._purchase_session
+        before = (state.epoch, state.begin_expected, dict(state.locks))
+        for args, kwargs in ((("COMMIT", (), False), {}), (("COMMIT",), {"unknown_sql_option": True})):
+            with self.subTest(args=args, kwargs=kwargs), self.assertRaises(TypeError):
+                self.db.sql(*args, **kwargs)
+            self.assertEqual((state.epoch, state.begin_expected, state.locks), before)
+            self.assert_locked()
 
     def test_raw_implicit_begin_and_session_autocommit_are_refused_while_leased(self):
         with self.boundary.execution(db=self.db), self.lease():

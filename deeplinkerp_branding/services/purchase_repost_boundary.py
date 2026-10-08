@@ -9,6 +9,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 import hashlib
+import inspect
 import json
 import re
 import uuid
@@ -172,6 +173,7 @@ class Session:
 
     def install(self):
         self.native_sql = self.db.sql
+        native_sql_signature = inspect.signature(self.native_sql)
         native_commit, native_rollback = self.db.commit, self.db.rollback
 
         def observe_before(manager, kind):
@@ -194,8 +196,26 @@ class Session:
         self.db.before_commit = observe_before(self.db.before_commit, "commit")
         self.db.before_rollback = observe_before(self.db.before_rollback, "rollback")
 
+        def native_sql(query, *args, **kwargs):
+            try:
+                return self.native_sql(query, *args, **kwargs)
+            except Exception as error:
+                if error.args and error.args[0] in (2006, 2013, 2055):
+                    self.poison("database_disconnected")
+                raise
+
         def sql(query, *args, **kwargs):
             self.authority()
+            try:
+                arguments = native_sql_signature.bind(query, *args, **kwargs)
+            except TypeError:
+                return native_sql(query, *args, **kwargs)  # native signature/error, no SQL boundary
+            arguments.apply_defaults()
+            # Native run/explain return before transaction execution. Bind its
+            # actual signature (query/values positional; options keyword-only)
+            # so previews preserve authority without changing the SQL epoch.
+            if not arguments.arguments["run"] or arguments.arguments["explain"]:
+                return native_sql(query, *args, **kwargs)
             raw_command = str(query).strip()
             command = re.sub(r"\A(?:(?:/\*(?!\!).*?\*/|--[ \t][^\n]*\n|#[^\n]*\n)\s*)*", "",
                 raw_command, flags=re.S).strip().lower()
@@ -212,12 +232,7 @@ class Session:
                     _reject("未经核查的原生事务结束方式")
             if not ending:
                 self.begin_expected = False
-            try:
-                result = self.native_sql(query, *args, **kwargs)
-            except Exception as error:
-                if error.args and error.args[0] in (2006, 2013, 2055):
-                    self.poison("database_disconnected")
-                raise
+            result = native_sql(query, *args, **kwargs)
             if ending:
                 # A nested/raw boundary inside before_* is not this native
                 # method's SQL boundary. It may then create new pending writes

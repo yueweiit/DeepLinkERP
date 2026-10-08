@@ -4,6 +4,7 @@ import subprocess
 import sys
 import uuid
 import unittest
+from functools import wraps
 from unittest.mock import patch
 
 import frappe
@@ -445,6 +446,7 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
 
     def test_native_session_lease_sql_epochs_callbacks_and_two_connection_authority(self):
         from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        self.commit_fixture(primary_doctype="Item", name_prefix="QA-ATOMIC-")
         left, right = self.boundary_database(), self.boundary_database()
         first = boundary.initialize(left)
         second = boundary.initialize(right)
@@ -453,6 +455,42 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         key, later = boundary.lock_key("qa-lease", self.item), boundary.lock_key("qa-later", self.item)
         def assert_owner(owner):
             self.assertEqual(right.sql("SELECT IS_USED_LOCK(%s)", (key,))[0][0], owner)
+        for query in ("COMMIT", "ROLLBACK", "BEGIN", "CREATE TABLE qa_preview_only (name int)"):
+            for option in ({"run": False}, {"explain": True}):
+                for positional in (False, True):
+                    for expected_begin in (False, True) if query == "BEGIN" else (False,):
+                        with self.subTest(preview=query, option=option, positional=positional, expected_begin=expected_begin):
+                            try:
+                                with boundary.execution(db=left), boundary.acquire((key,), db=left):
+                                    if expected_begin:
+                                        left.sql("COMMIT")  # real active boundary, lease retained
+                                    else:
+                                        left.sql("UPDATE tabItem SET item_name=%s WHERE name=%s", ("QA-ATOMIC-PREVIEW-PENDING", self.item))
+                                before = (first.epoch, first.begin_expected, dict(first.locks), dict(first.references), left.transaction_writes)
+                                result = left.sql(query, (), **option) if positional else left.sql(query=query, values=(), **option)
+                                right.rollback()  # fresh peer read, not an old RR snapshot
+                                owner = right.sql("SELECT IS_USED_LOCK(%s)", (key,))[0][0]
+                                item_name = right.sql("SELECT item_name FROM tabItem WHERE name=%s", (self.item,))[0][0]
+                                print("SQL_PREVIEW_OBSERVATION", json.dumps({"query": query, "option": option,
+                                    "positional": positional, "expected_begin": expected_begin, "epoch_before": before[0],
+                                    "epoch_after": first.epoch, "owner": owner, "expected_owner": first.connection_id,
+                                    "peer_item_name": item_name, "expected_item_name": self.item}), flush=True)
+                                self.assertEqual(result, query if "run" in option else None)
+                                self.assertEqual((first.epoch, first.begin_expected, first.locks, first.references, left.transaction_writes), before)
+                                self.assertEqual(owner, first.connection_id)
+                                self.assertEqual(item_name, self.item)  # preview never commits pending business
+                                with self.assertRaises(frappe.ValidationError):
+                                    with boundary.execution(db=right), boundary.acquire((key,), db=right): pass
+                            finally:
+                                right.rollback(); left.rollback()
+        with boundary.execution(db=left), boundary.acquire((key,), db=left): pass
+        before = (first.epoch, first.begin_expected, dict(first.locks))
+        for args, kwargs in ((("COMMIT", (), False), {}), (("COMMIT",), {"unknown_sql_option": True})):
+            with self.subTest(native_argument_error=args, kwargs=kwargs), self.assertRaises(TypeError):
+                left.sql(*args, **kwargs)
+            self.assertEqual((first.epoch, first.begin_expected, first.locks), before)
+            assert_owner(first.connection_id)
+        left.rollback()
         with boundary.execution(db=left), boundary.acquire((key,), db=left):
             left.commit(); assert_owner(first.connection_id)
             left.rollback(); assert_owner(first.connection_id)
@@ -3234,6 +3272,7 @@ def boundary_peer(payload):
         from deeplinkerp_branding.services import purchase_document_actions as actions, purchase_source_service as sources
         queries = []
         native_sql = frappe.local.db.sql
+        @wraps(native_sql)  # observer must retain the real keyword-only SQL contract
         def observe(query, *args, **kwargs):
             queries.append(str(query).upper())
             return native_sql(query, *args, **kwargs)
