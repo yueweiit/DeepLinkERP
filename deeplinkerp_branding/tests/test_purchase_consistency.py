@@ -178,6 +178,24 @@ class ConsistencyTests(unittest.TestCase):
             self.guard.prepare_document(doc)
         current.assert_called_once_with("Purchase Order", "PO")
 
+    def test_shared_source_resolution_is_read_only_and_keeps_prepare_lock_order(self):
+        order = self.doc("Purchase Order", name="PO", items=[])
+        receipt = self.doc("Purchase Receipt", name="PR", items=[frappe._dict(purchase_order="PO")])
+        invoice = self.doc("Purchase Invoice", name="PI", items=[frappe._dict(purchase_receipt="PR")])
+        entry = self.doc("Payment Entry", name="PE", references=[frappe._dict(reference_doctype="Purchase Invoice", reference_name="PI")])
+        docs = {(doc.doctype, doc.name): doc for doc in (order, receipt, invoice)}
+        reader = Mock(side_effect=lambda dt, name: docs[dt, name])
+        with patch.object(self.guard.service, "_current", side_effect=AssertionError("read resolver must not lock")), \
+                patch.object(self.guard, "acknowledge_effect", side_effect=AssertionError("read resolver must not audit")):
+            identities, native = self.guard.resolve_source_documents(entry, reader=reader)
+        self.assertEqual(identities, set(docs))
+        self.assertEqual(native, set())
+        with patch.object(self.guard.service, "_read", side_effect=reader), \
+                patch.object(self.guard.service, "_current", side_effect=reader) as current:
+            self.guard.prepare_document(entry)
+        self.assertEqual([call.args for call in current.call_args_list],
+            [("Purchase Order", "PO"), ("Purchase Receipt", "PR"), ("Purchase Invoice", "PI")])
+
     def test_pending_finance_cancellation_rejects_native_commit(self):
         finance = SimpleNamespace(process_cancellation_snapshot=Mock(return_value={"status": "pending", "error": "private"}))
         with patch.object(self.guard, "finance_service", return_value=finance), \

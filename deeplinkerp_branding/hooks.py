@@ -152,6 +152,7 @@ after_migrate = [
 	"deeplinkerp_branding.operating_expense_install.after_migrate",
 	"deeplinkerp_branding.purchase_source_install.after_migrate",
 	"deeplinkerp_branding.purchase_fulfilment_install.after_migrate",
+	"deeplinkerp_branding.purchase_reversal_install.after_migrate",
 	"deeplinkerp_branding.operating_navigation.ensure_operating_navigation",
 ]
 

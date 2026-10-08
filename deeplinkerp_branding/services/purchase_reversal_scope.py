@@ -1,0 +1,467 @@
+"""Pure, bounded identities for native stock/accounting cancellation effects.
+
+No controller calculations, row locks, valuation, ledger writes, Bin creation or
+executor calls belong here. Stock selectors follow stock_ledger's >= row anchors;
+accounting selectors follow RIV's independent item/warehouse sets. The result is
+evidence for a later transaction boundary, not authorization to cancel anything.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import frappe
+from frappe.utils import get_datetime
+from erpnext.stock.utils import get_combine_datetime
+
+from . import purchase_consistency as consistency
+from . import purchase_payment_service as service
+
+MAX_PAIRS = 2500
+MAX_VOUCHERS = 5000
+MAX_SLES = 50000
+
+
+@dataclass(frozen=True, order=True)
+class StockPair:
+    item_code: str
+    warehouse: str
+
+
+@dataclass(frozen=True, order=True)
+class DocumentIdentity:
+    doctype: str
+    name: str
+
+
+@dataclass(frozen=True)
+class ReversalScope:
+    company: str
+    posting_datetime: str
+    pairs: tuple[StockPair, ...]
+    sources: tuple[DocumentIdentity, ...]
+    vouchers: tuple[DocumentIdentity, ...]
+
+
+_NATIVE = {
+    "Purchase Order": "erpnext.buying.doctype.purchase_order.purchase_order.PurchaseOrder",
+    "Purchase Receipt": "erpnext.stock.doctype.purchase_receipt.purchase_receipt.PurchaseReceipt",
+    "Purchase Invoice": "erpnext.accounts.doctype.purchase_invoice.purchase_invoice.PurchaseInvoice",
+    "Payment Entry": "erpnext.accounts.doctype.payment_entry.payment_entry.PaymentEntry",
+    "Material Request": "erpnext.stock.doctype.material_request.material_request.MaterialRequest",
+    "Stock Entry": "erpnext.stock.doctype.stock_entry.stock_entry.StockEntry",
+    "Delivery Note": "erpnext.stock.doctype.delivery_note.delivery_note.DeliveryNote",
+    "Sales Invoice": "erpnext.accounts.doctype.sales_invoice.sales_invoice.SalesInvoice",
+    "Stock Reconciliation": "erpnext.stock.doctype.stock_reconciliation.stock_reconciliation.StockReconciliation",
+    "Landed Cost Voucher": "erpnext.stock.doctype.landed_cost_voucher.landed_cost_voucher.LandedCostVoucher",
+}
+_BUYING = {"Purchase Order", "Purchase Receipt", "Purchase Invoice"}
+_STOCK = {"Purchase Receipt", "Purchase Invoice", "Stock Entry", "Delivery Note", "Sales Invoice", "Stock Reconciliation"}
+_ROW_FIELDS = {"item_code", "stock_uom", "warehouse", "from_warehouse", "rejected_warehouse", "rejected_qty",
+    "qty", "stock_qty", "s_warehouse", "t_warehouse", "target_warehouse", "purchase_order", "purchase_order_item", "po_detail",
+    "purchase_receipt", "pr_detail", "material_request", "material_request_item", "purchase_invoice",
+    "purchase_invoice_item", "delivered_by_supplier", "is_finished_item", "sales_order", "sales_order_item",
+    "sales_order_packed_item", "delivery_note_item", "sales_invoice_item"}
+_SLE_FIELDS = ["name", "company", "voucher_type", "voucher_no", "voucher_detail_no", "item_code", "warehouse",
+    "posting_datetime", "posting_date", "posting_time", "creation", "is_cancelled", "actual_qty",
+    "dependant_sle_voucher_detail_no"]
+
+
+def _reject(reason):
+    consistency.operation.reject("无法安全核查采购冲销范围：" + reason, "purchase_reversal_scope_invalid")
+
+
+def _canonical(doc):
+    """Require the audited native controller and only the known extension MRO."""
+    path = _NATIVE.get(doc.doctype)
+    if not path:
+        _reject("不支持的原生单据或来源路径")
+    boundary = "deeplinkerp_branding.services.purchase_consistency.ProcurementControllerBoundary"
+    mes = "mes_integration.mes_integration.material_request.MESMaterialRequestPerformanceMixin"
+    allowed = {boundary} if doc.doctype in (*_BUYING, "Payment Entry") else {mes} if doc.doctype == "Material Request" else set()
+    if frappe.get_hooks("override_doctype_class", {}).get(doc.doctype):
+        _reject("原生控制器已被替换")
+    extension_paths = frappe.get_hooks("extend_doctype_class", {}).get(doc.doctype, [])
+    extensions = set(extension_paths)
+    if not extensions <= allowed:
+        _reject("未核查的原生控制器扩展")
+    native = frappe.get_attr(path)
+    from frappe.model.base_document import get_controller
+    controller = get_controller(doc.doctype)
+    if type(doc) is not controller or native not in controller.__mro__:
+        _reject("原生控制器身份不一致")
+    expected = tuple(frappe.get_attr(path) for path in reversed(extension_paths)) + (native,)
+    if (not extension_paths and controller is not native) or extension_paths and (
+            controller.__bases__ != expected or controller.__mro__[:len(expected) + 1] != (controller, *expected)):
+        _reject("原生控制器实际继承路径未经核查")
+    if doc.doctype == "Material Request" and mes in extensions:
+        # The installed mixin delegates ordinary MR to native requested-qty math
+        # but MES sources enqueue a different Bin path (material_request.py82-96).
+        from mes_integration.mes_integration.material_request import is_mes_material_request
+        _fields(doc.doctype, {"custom_request_source"})
+        if is_mes_material_request(doc):
+            _reject("MES 物料请求使用未支持的异步库存来源路径")
+
+
+def _datetime(doc):
+    date = doc.get("posting_date") or doc.get("transaction_date")
+    if not date:
+        _reject("原生单据日期缺失")
+    return str(get_datetime(get_combine_datetime(date, doc.get("posting_time") or "00:00:00")))
+
+
+def _fields(doctype, names, parenttype=None):
+    # Optional native fields differ by controller; every field that exists and
+    # can influence this resolver must pass the current actor's field permission.
+    meta = frappe.get_meta(doctype)
+    service._require_fields(doctype, {name for name in names if meta.has_field(name)}, parenttype)
+
+
+def _child_parent(doc, row, table):
+    if row.get("parent") and (row.parent != doc.name or row.parenttype != doc.doctype or row.parentfield != table):
+        _reject("原生明细父单据身份不一致")
+
+
+def _matches(row, filters):
+    """Match cached system evidence so repeated queries count unseen SLE only."""
+    for field, value in filters.items():
+        actual = row.get(field)
+        if not isinstance(value, (tuple, list)):
+            if actual != value:
+                return False
+            continue
+        operator, expected = value
+        if operator == "in" and actual not in expected or operator == "not in" and actual in expected:
+            return False
+        if operator == ">=" and str(actual) < str(expected) or operator == ">" and actual <= expected:
+            return False
+        if operator == "!=" and actual == expected or operator == "is" and expected == "not set" and actual:
+            return False
+    return True
+
+
+class _Collector:
+    def __init__(self, root):
+        self.root = DocumentIdentity(root.doctype, root.name or "")
+        self.company = root.get("company")
+        self.posting_datetime = _datetime(root)
+        if not self.company:
+            _reject("公司缺失")
+        service._read("Company", self.company)
+        self.documents = {}
+        self.sources = set()
+        self.pairs = set()
+        self.vouchers = set()
+        self.sles = {}
+        self.anchors = {}
+        self.scanned = {}
+        self.expanded = set()
+        self.propagated = set()
+        self.items = {}
+        self.warehouses = {}
+        self.add_document(root)
+
+    def read(self, doctype, name, *, source=True):
+        identity = DocumentIdentity(doctype, name)
+        if identity not in self.documents:
+            doc = service._read(doctype, name)
+            self.add_document(doc, source=source)
+        elif source and identity != self.root:
+            self.add_source(identity)
+        return self.documents[identity]
+
+    def add_source(self, identity):
+        if identity not in self.sources and len(self.sources) >= MAX_VOUCHERS:
+            _reject("原生来源单据范围超过安全上限")
+        self.sources.add(identity)
+
+    def add_pair(self, item_code, warehouse, anchor=None):
+        if not item_code or not warehouse:
+            _reject("物料或仓库身份缺失")
+        item = self.items.setdefault(item_code, None)
+        if item is None:
+            item = self.items[item_code] = service._read("Item", item_code, {"is_stock_item", "stock_uom", "disabled"})
+        if not item.is_stock_item or item.get("disabled"):
+            _reject("库存流水物料不是有效库存物料")
+        location = self.warehouses.setdefault(warehouse, None)
+        if location is None:
+            location = self.warehouses[warehouse] = service._read("Warehouse", warehouse, {"company", "is_group", "disabled"})
+        if location.company != self.company or location.is_group or location.disabled:
+            _reject("仓库公司或状态不一致")
+        pair = StockPair(item_code, warehouse)
+        if pair not in self.pairs and len(self.pairs) >= MAX_PAIRS:
+            _reject("物料仓库范围超过安全上限")
+        self.pairs.add(pair)
+        if anchor and (pair not in self.anchors or anchor < self.anchors[pair]):
+            self.anchors[pair] = anchor
+
+    def document_pairs(self, doc):
+        result = set()
+        stock = doc.doctype in _STOCK and (doc.doctype not in ("Purchase Invoice", "Sales Invoice") or doc.get("update_stock"))
+        quantity_bins = doc.doctype in ("Purchase Order", "Material Request")
+        for table in ("items", "packed_items"):
+            for row in doc.get(table) or []:
+                _fields(row.doctype, _ROW_FIELDS, doc.doctype)
+                _child_parent(doc, row, table)
+                code = row.get("item_code")
+                if not code:
+                    _reject("原生明细物料缺失")
+                native_item = self.items.get(code)
+                if native_item is None:
+                    native_item = self.items[code] = service._read("Item", code, {"is_stock_item", "stock_uom", "disabled"})
+                if native_item.get("disabled") or row.get("stock_uom") and row.stock_uom != native_item.stock_uom:
+                    _reject("原生明细物料状态或库存单位不一致")
+                if not native_item.is_stock_item or not (stock or quantity_bins):
+                    continue
+                if quantity_bins and row.get("delivered_by_supplier"):
+                    continue
+                warehouse_fields = ("s_warehouse", "t_warehouse") if doc.doctype == "Stock Entry" else ("warehouse",)
+                if doc.doctype in ("Purchase Receipt", "Purchase Invoice"):
+                    warehouse_fields += ("from_warehouse",)
+                    if row.get("rejected_qty"):
+                        warehouse_fields += ("rejected_warehouse",)
+                if doc.doctype in ("Delivery Note", "Sales Invoice"):
+                    warehouse_fields += ("target_warehouse",)
+                for field in warehouse_fields:
+                    if row.get(field):
+                        result.add(StockPair(code, row.get(field)))
+        if doc.get("is_old_subcontracting_flow"):
+            _fields(doc.doctype, {"supplied_items", "supplier_warehouse"})
+            for row in doc.get("supplied_items") or []:
+                _fields(row.doctype, {"rm_item_code", "reserve_warehouse"}, doc.doctype)
+                _child_parent(doc, row, "supplied_items")
+                warehouse = row.get("reserve_warehouse") if doc.doctype == "Purchase Order" else doc.get("supplier_warehouse")
+                if row.get("rm_item_code") and warehouse:
+                    result.add(StockPair(row.rm_item_code, warehouse))
+                else:
+                    _reject("原生供料物料或仓库缺失")
+        return result
+
+    def add_document(self, doc, *, source=False):
+        identity = DocumentIdentity(doc.doctype, doc.name or "")
+        if identity in self.documents:
+            if source and identity != self.root:
+                self.add_source(identity)
+            return
+        _canonical(doc)
+        doc.check_permission("read")
+        _fields(doc.doctype, {"company", "supplier", "items", "packed_items", "supplied_items", "references",
+            "posting_date", "posting_time", "transaction_date", "update_stock", "is_return", "return_against",
+            "is_old_subcontracting_flow", "is_subcontracted", "subcontracting_order", "supplier_warehouse",
+            "purchase_receipts", "vendor_invoices", "party_type", "party", "purpose", "status", "custom_operating_source",
+            "custom_operating_recognition", "inter_company_order_reference", "inter_company_reference", "inter_company_invoice_reference"})
+        if doc.company != self.company or doc.get("docstatus") == 2:
+            _reject("单据公司或状态不一致")
+        if source and doc.docstatus != 1:
+            _reject("原生来源必须已提交")
+        if source and doc.doctype == "Purchase Order" and doc.get("status") in ("Closed", "Cancelled", "On Hold"):
+            _reject("原生采购来源已关闭或暂停")
+        if doc.get("subcontracting_order") or doc.get("is_subcontracted") and not doc.get("is_old_subcontracting_flow"):
+            _reject("不支持的新委外来源路径")
+        self.documents[identity] = doc  # cycle guard; a failure never returns partial evidence
+        consistency.check_operating_dependencies(doc)
+        if source and identity != self.root:
+            self.add_source(identity)
+        for pair in self.document_pairs(doc):
+            self.add_pair(pair.item_code, pair.warehouse)
+        if doc.doctype in (*_BUYING, "Payment Entry"):
+            consistency.check_sales_dependencies(doc, reader=self.read)
+        if doc.doctype in _BUYING:
+            consistency.check_sources(doc, reader=self.read, validate_execution=False)
+        if doc.doctype == "Payment Entry":
+            _fields("Payment Entry Reference", {"reference_doctype", "reference_name"}, "Payment Entry")
+            if doc.party_type != "Supplier":
+                _reject("不支持的付款来源路径")
+            for row in doc.get("references") or []:
+                _child_parent(doc, row, "references")
+                if row.reference_doctype not in ("Purchase Order", "Purchase Invoice") or not row.reference_name:
+                    _reject("不支持的付款来源路径")
+                target = self.read(row.reference_doctype, row.reference_name)
+                if target.supplier != doc.party:
+                    _reject("付款来源供应商不一致")
+        identities, _ = consistency.resolve_source_documents(doc, reader=self.read)
+        for doctype, name in sorted(identities):
+            self.read(doctype, name)
+        if identity == self.root and doc.doctype == "Purchase Invoice":
+            self.billing_receipts({name for doctype, name in identities if doctype == "Purchase Order"})
+        if doc.get("return_against"):
+            target = self.read(doc.doctype, doc.return_against)
+            if target.get("supplier") != doc.get("supplier") or target.get("is_return"):
+                _reject("原生退货来源不一致")
+        if doc.doctype == "Landed Cost Voucher":
+            for row in doc.get("purchase_receipts") or []:
+                _fields(row.doctype, {"receipt_document_type", "receipt_document"}, doc.doctype)
+                _child_parent(doc, row, "purchase_receipts")
+                if row.receipt_document_type not in ("Purchase Receipt", "Purchase Invoice", "Stock Entry"):
+                    _reject("不支持的到岸成本来源路径")
+                target = self.read(row.receipt_document_type, row.receipt_document)
+                if target.doctype == "Purchase Invoice" and not target.update_stock:
+                    _reject("到岸成本来源应付未更新库存")
+            # Native LCV also writes claimed_landed_cost_amount on these actual
+            # vendor PIs (LCV.py289-305); their identity is not an optional alias.
+            for row in doc.get("vendor_invoices") or []:
+                _fields(row.doctype, {"vendor_invoice"}, doc.doctype)
+                _child_parent(doc, row, "vendor_invoices")
+                if not row.get("vendor_invoice"):
+                    _reject("到岸成本供应商应付身份缺失")
+                self.read("Purchase Invoice", row.vendor_invoice)
+
+    def billing_receipts(self, orders):
+        # prepare_document's native billing transition also targets every active
+        # non-return PR against the real PO details. Identity-only bounded SELECT
+        # mirrors get_purchase_receipts_against_po_details; no billed math runs.
+        details = sorted({row.name for name in orders for row in self.read("Purchase Order", name).items})
+        if not details:
+            return
+        remaining = MAX_VOUCHERS - len(self.sources)
+        known = tuple(sorted(identity.name for identity in self.sources if identity.doctype == "Purchase Receipt")) or ("",)
+        rows = frappe.db.sql("SELECT DISTINCT pri.parent FROM `tabPurchase Receipt Item` pri "
+            "INNER JOIN `tabPurchase Receipt` pr ON pr.name=pri.parent "
+            "WHERE pri.purchase_order_item IN %(details)s AND pr.docstatus=1 AND pr.is_return=0 "
+            "AND pri.parent NOT IN %(known)s ORDER BY pri.parent LIMIT %(limit)s",
+            {"details": tuple(details), "known": known, "limit": remaining + 1}, as_dict=True)
+        if len(rows) > remaining:
+            _reject("原生账务来源范围超过安全上限")
+        for row in rows:
+            self.read("Purchase Receipt", row.parent)
+
+    def select(self, filters):
+        # A repeated frontier must not spend the remaining budget on an already
+        # consumed prefix and conceal later rows. Exclude unique names at SQL.
+        query = dict(filters)
+        if self.sles:
+            query["name"] = ["not in", sorted(self.sles)]
+        remaining = MAX_SLES - len(self.sles)
+        rows = frappe.db.get_values("Stock Ledger Entry", query, _SLE_FIELDS, as_dict=True,
+            order_by="posting_datetime asc, creation asc, name asc", limit=remaining + 1)
+        if len(rows) > remaining:
+            _reject("库存流水范围超过安全上限")
+        for row in rows:
+            if not row.name or row.company != self.company:
+                _reject("库存流水公司或身份不一致")
+            self.sles[row.name] = row
+        return [row for row in self.sles.values() if _matches(row, filters)]
+
+    def add_voucher(self, doctype, name):
+        identity = DocumentIdentity(doctype, name)
+        if identity not in self.vouchers:
+            if len(self.vouchers) >= MAX_VOUCHERS:
+                _reject("受影响凭证范围超过安全上限")
+            doc = self.read(doctype, name, source=False)
+            if doc.docstatus != 1:
+                _reject("受影响原生凭证必须已提交")
+            self.vouchers.add(identity)
+
+    def consume(self, rows, *, propagate=False):
+        for row in rows:
+            self.add_voucher(row.voucher_type, row.voucher_no)
+            doc = self.documents[DocumentIdentity(row.voucher_type, row.voucher_no)]
+            details = [item for field in ("items", "packed_items", "supplied_items")
+                for item in doc.get(field) or [] if item.name == row.voucher_detail_no]
+            if len(details) != 1 or (details[0].get("item_code") or details[0].get("rm_item_code")) != row.item_code:
+                _reject("库存流水明细身份或物料不一致")
+            pair = StockPair(row.item_code, row.warehouse)
+            if pair not in self.document_pairs(doc):
+                _reject("库存流水没有实际原生仓库来源")
+            anchor = str(get_datetime(row.posting_datetime or get_combine_datetime(row.posting_date, row.posting_time)))
+            self.add_pair(row.item_code, row.warehouse, anchor if propagate else None)
+            if not propagate or row.name in self.propagated:
+                continue
+            self.propagated.add(row.name)
+            if row.dependant_sle_voucher_detail_no:
+                target_detail = next((item for item in doc.get("items") or []
+                    if item.name == row.dependant_sle_voucher_detail_no), None)
+                if not target_detail:
+                    _reject("原生依赖明细不属于实际父凭证")
+                if doc.doctype == "Stock Entry" and doc.purpose == "Repack":
+                    # Native repack expands every positive output, including a
+                    # different item/detail, rather than only its FG pointer.
+                    targets = self.select({"voucher_type": "Stock Entry", "voucher_no": doc.name,
+                        "actual_qty": [">", 0], "is_cancelled": 0})
+                    # Native get_all's != filter treats NULL as an empty value.
+                    # db.get_values uses SQL NULL != value; filter this already
+                    # required whole-voucher evidence without dropping outputs.
+                    self.consume([target for target in targets if target.dependant_sle_voucher_detail_no !=
+                        row.dependant_sle_voucher_detail_no], propagate=True)
+                    continue
+                targets = self.select({"voucher_detail_no": row.dependant_sle_voucher_detail_no,
+                    "is_cancelled": 0, "dependant_sle_voucher_detail_no": ["is", "not set"]})
+                if not targets or any((target.voucher_type, target.voucher_no) != (row.voucher_type, row.voucher_no) for target in targets):
+                    _reject("原生依赖库存明细缺失或错配")
+                # Validate target child identities before adding their own anchor.
+                for target in targets:
+                    self.consume([target], propagate=True)
+
+    def expand_voucher(self, identity):
+        active = self.select({"voucher_type": identity.doctype, "voucher_no": identity.name, "is_cancelled": 0})
+        self.consume(active)
+        # GL sorter selects active SLE by voucher number without type; a collision
+        # would broaden native writes. Refuse explicitly rather than omit it.
+        same_number = self.select({"voucher_no": identity.name, "company": self.company, "is_cancelled": 0})
+        if any(row.voucher_type != identity.doctype for row in same_number):
+            _reject("不同原生凭证类型使用相同凭证编号")
+
+    def root_gl_candidates(self):
+        doc = self.documents[self.root]
+        if doc.doctype not in _STOCK or doc.doctype in ("Purchase Invoice", "Sales Invoice") and not doc.get("update_stock"):
+            return
+        items = {row.item_code for table in ("items", "packed_items") for row in doc.get(table) or []}
+        warehouses = {row.get(field) for table in ("items", "packed_items") for row in doc.get(table) or []
+            for field in (("warehouse", "s_warehouse", "t_warehouse") if doc.doctype == "Stock Entry" else ("warehouse",)) if row.get(field)}
+        raw = self.select({"voucher_type": doc.doctype, "voucher_no": doc.name})
+        items.update(row.item_code for row in raw)
+        warehouses.update(row.warehouse for row in raw)
+        filters = {"company": self.company, "is_cancelled": 0, "posting_datetime": [">=", _datetime(doc)]}
+        # Native get_future_stock_vouchers omits each empty dimension, not both.
+        if items: filters["item_code"] = ["in", sorted(items)]
+        if warehouses: filters["warehouse"] = ["in", sorted(warehouses)]
+        self.consume(self.select(filters))  # GL-only matches add footprint, never stock edges.
+
+    def closure(self):
+        self.add_voucher(self.root.doctype, self.root.name)
+        self.consume(self.select({"voucher_type": self.root.doctype, "voucher_no": self.root.name}), propagate=True)
+        self.root_gl_candidates()
+        while True:
+            pending = sorted(self.vouchers - self.expanded)
+            frontier = sorted((pair, anchor) for pair, anchor in self.anchors.items()
+                if pair not in self.scanned or anchor < self.scanned[pair])
+            if not pending and not frontier:
+                break
+            for identity in pending:
+                self.expanded.add(identity)
+                self.expand_voucher(identity)
+            for pair, anchor in frontier:
+                self.scanned[pair] = anchor
+                self.consume(self.select({"item_code": pair.item_code, "warehouse": pair.warehouse,
+                    "posting_datetime": [">=", anchor], "is_cancelled": 0}), propagate=True)
+        for pair in sorted(self.pairs):
+            rows = frappe.db.get_values("Bin", {"item_code": pair.item_code, "warehouse": pair.warehouse},
+                ["name"], as_dict=True, limit=2)
+            if len(rows) != 1:
+                _reject("原生库存 Bin 缺失或重复")
+
+    def result(self):
+        return ReversalScope(self.company, self.posting_datetime, tuple(sorted(self.pairs)),
+            tuple(sorted(self.sources)), tuple(sorted(self.vouchers)))
+
+
+def collect_document_scope(doc) -> ReversalScope:
+    """Actual proposed sources/pairs only; first-stock drafts need no existing Bin."""
+    return _Collector(doc).result()
+
+
+def collect_cancellation_scope(persisted_doc) -> ReversalScope:
+    """Complete bounded native closure for the four supported procurement roots.
+
+    Other canonical stock/LCV documents are evidence identities, not cancellation
+    adapters. In particular an LCV root reposts its receipts, not its own SLE.
+    """
+    if persisted_doc.doctype not in (*_BUYING, "Payment Entry"):
+        _reject("不支持该原生单据的根取消路径")
+    if not persisted_doc.name or persisted_doc.docstatus != 1:
+        _reject("取消根单据必须是已保存的已提交单据")
+    root = service._read(persisted_doc.doctype, persisted_doc.name)
+    if root.docstatus != 1:
+        _reject("取消根单据当前状态不是已提交")
+    collector = _Collector(root)
+    collector.closure()
+    return collector.result()

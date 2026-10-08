@@ -329,6 +329,7 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
             "Workflow", "Workflow State", "Workflow Action Master", "Custom Field", "Advance Payment Ledger Entry", "Account", "Supplier")
         self.types += ("Sales Order", "Stock Reservation Entry", "Submission Queue", "Repost Item Valuation",
             "Material Request", "Purchase Fulfilment Link", "China Cash Equivalent Scope", "Delivery Note", "Customer", "Price List", "Item Price", "Sales Invoice")
+        self.types += ("Stock Entry",)
         self.before = {doctype: frappe.db.count(doctype) for doctype in self.types}
         self.initial_names = {doctype: set(frappe.get_all(doctype, pluck="name", limit_page_length=0)) for doctype in self.types}
         self.committed_names = None
@@ -362,11 +363,11 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         self.assertTrue(self.committed_names[primary_doctype])
         self.assertTrue(all(name.startswith(name_prefix) for name in self.committed_names[primary_doctype]))
 
-    def order(self, currency="CNY", conversion_rate=1, supplier="QA Test Supplier", transaction_date=None, qty=10, rate=12.345):
+    def order(self, currency="CNY", conversion_rate=1, supplier="QA Test Supplier", transaction_date=None, qty=10, rate=12.345, items=None):
         po = frappe.get_doc({"doctype": "Purchase Order", "company": COMPANY,
             "transaction_date": transaction_date or nowdate(),
             "supplier": supplier, "currency": currency, "conversion_rate": conversion_rate, "schedule_date": add_days(nowdate(), 1),
-            "items": [{"item_code": self.item, "qty": qty, "rate": rate,
+            "items": items or [{"item_code": self.item, "qty": qty, "rate": rate,
                 "warehouse": "Stores - QAB", "schedule_date": add_days(nowdate(), 1)}]}).insert(
                     set_name="QA-ATOMIC-PO-" + uuid.uuid4().hex[:16])
         po.submit()
@@ -730,6 +731,14 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         full_balance = pi.grand_total
         self.commit_fixture()
         self.remember_effects()
+
+        # Native PR.on_cancel refuses a submitted PI (and its real payment chain)
+        # before stock/GL/repost. No automatic downstream cancellation is added.
+        pr = frappe.get_doc("Purchase Receipt", pr.name)
+        with self.assertRaisesRegex(frappe.ValidationError, "Purchase Invoice.*already submitted"):
+            pr.cancel()
+        self.assert_effects_unchanged()
+        pr = frappe.get_doc("Purchase Receipt", pr.name)
 
         def amounts(snapshot):
             result = defaultdict(lambda: [Decimal(0)] * 4)
@@ -1354,10 +1363,134 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         self.remember_effects()
         return po, *receipts
 
+    def scope_item(self):
+        code = "QA-ATOMIC-" + uuid.uuid4().hex[:10]
+        return frappe.get_doc({"doctype": "Item", "item_code": code, "item_name": code,
+            "item_group": "All Item Groups", "stock_uom": "Nos", "is_stock_item": 1}).insert().name
+
+    def scope_stock_entry(self, purpose, date, rows):
+        return frappe.get_doc({"doctype": "Stock Entry", "company": COMPANY, "stock_entry_type": purpose,
+            "set_posting_time": 1, "posting_date": date, "posting_time": "12:00:00", "items": rows}).insert().submit()
+
+    def test_reversal_scope_native_transfer_repack_new_item_warehouse_full_set_is_read_only(self):
+        from deeplinkerp_branding.services import purchase_reversal_scope as scope
+        po = self.order(transaction_date=add_days(nowdate(), -4))
+        root = make_purchase_receipt(po.name)
+        root.items[0].qty = 2
+        root.set_posting_time = 1
+        root.posting_date, root.posting_time = add_days(nowdate(), -3), "12:00:00"
+        root.insert().submit()
+        warehouse2, warehouse3 = "Finished Goods - QAB", "Work In Progress - QAB"
+        output, extra = self.scope_item(), self.scope_item()
+        transfer = self.scope_stock_entry("Material Transfer", add_days(nowdate(), -2), [
+            {"item_code": self.item, "qty": 1, "s_warehouse": "Stores - QAB", "t_warehouse": warehouse2}])
+        repack = self.scope_stock_entry("Repack", add_days(nowdate(), -1), [
+            {"item_code": self.item, "qty": 1, "s_warehouse": warehouse2},
+            {"item_code": output, "qty": 1, "t_warehouse": warehouse2, "is_finished_item": 1,
+                "set_basic_rate_manually": 1, "basic_rate": 6},
+            {"item_code": extra, "qty": 1, "t_warehouse": warehouse3, "set_basic_rate_manually": 1, "basic_rate": 6}])
+        repack_sles = frappe.db.get_values("Stock Ledger Entry", {"voucher_type": repack.doctype, "voucher_no": repack.name},
+            ["item_code", "warehouse", "dependant_sle_voucher_detail_no", "actual_qty"], as_dict=True)
+        self.assertTrue(any(row.dependant_sle_voucher_detail_no for row in repack_sles), repack_sles)
+        future = self.scope_stock_entry("Material Issue", nowdate(), [
+            {"item_code": extra, "qty": 1, "s_warehouse": warehouse3}])
+        self.commit_fixture()
+        self.remember_effects()
+        before = {dt: frappe.db.count(dt) for dt in self.types}
+        sql = frappe.db.sql
+        def read_only(query, *args, **kwargs):
+            text = str(query).strip().lower()
+            self.assertNotIn(text.split()[0], {"insert", "update", "delete", "replace", "alter"})
+            self.assertNotIn("for update", text)
+            return sql(query, *args, **kwargs)
+        with patch.object(frappe.db, "sql", side_effect=read_only), \
+                patch.object(frappe.db, "set_value", side_effect=AssertionError("scope cannot write")), \
+                patch.object(frappe.db, "commit", side_effect=AssertionError("scope cannot commit")), \
+                patch.object(frappe, "enqueue", side_effect=AssertionError("scope cannot enqueue")):
+            result = scope.collect_cancellation_scope(root)
+        self.assertEqual(result.company, COMPANY)
+        self.assertEqual(set(result.sources), {scope.DocumentIdentity("Purchase Order", po.name)})
+        self.assertEqual(set(result.vouchers), {scope.DocumentIdentity(doc.doctype, doc.name)
+            for doc in (root, transfer, repack, future)})
+        self.assertEqual(set(result.pairs), {scope.StockPair(self.item, "Stores - QAB"),
+            scope.StockPair(self.item, warehouse2), scope.StockPair(output, warehouse2), scope.StockPair(extra, warehouse3)})
+        self.assertEqual(before, {dt: frappe.db.count(dt) for dt in self.types})
+        self.assert_effects_unchanged()
+
+    def test_reversal_document_first_stock_draft_needs_no_bin_but_freeze_refuses_missing_bin(self):
+        from deeplinkerp_branding.services import purchase_reversal_scope as scope
+        draft = frappe.get_doc({"doctype": "Purchase Receipt", "company": COMPANY, "supplier": "QA Test Supplier",
+            "posting_date": nowdate(), "posting_time": "12:00:00", "items": [{"item_code": self.item,
+                "stock_uom": "Nos", "qty": 1, "warehouse": "Stores - QAB"}]})
+        self.assertFalse(frappe.db.exists("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"}))
+        result = scope.collect_document_scope(draft)
+        self.assertEqual(result.pairs, (scope.StockPair(self.item, "Stores - QAB"),))
+        po = self.order()
+        root = self.receipt(po)
+        frappe.db.delete("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"})
+        with self.assertRaises(frappe.ValidationError):
+            scope.collect_cancellation_scope(root)
+
+    def test_reversal_scope_native_gl_cartesian_whole_voucher_does_not_seed_extra_stock_frontier(self):
+        from deeplinkerp_branding.services import purchase_reversal_scope as scope
+        second, extra = self.scope_item(), self.scope_item()
+        warehouse2, warehouse3 = "Finished Goods - QAB", "Work In Progress - QAB"
+        po = self.order(transaction_date=add_days(nowdate(), -4), items=[
+            {"item_code": code, "qty": 2, "rate": 10, "warehouse": warehouse, "schedule_date": add_days(nowdate(), 1)}
+            for code, warehouse in ((self.item, "Stores - QAB"), (second, warehouse2))])
+        root = make_purchase_receipt(po.name)
+        root.set_posting_time = 1
+        root.posting_date, root.posting_time = add_days(nowdate(), -3), "12:00:00"
+        root.insert().submit()
+        cross = self.scope_stock_entry("Material Receipt", add_days(nowdate(), -2), [
+            {"item_code": self.item, "qty": 1, "t_warehouse": warehouse2, "basic_rate": 10},
+            {"item_code": extra, "qty": 1, "t_warehouse": warehouse3, "basic_rate": 10}])
+        future = self.scope_stock_entry("Material Issue", add_days(nowdate(), -1), [
+            {"item_code": extra, "qty": 1, "s_warehouse": warehouse3}])
+        self.commit_fixture()
+        self.remember_effects()
+        result = scope.collect_cancellation_scope(root)
+        self.assertEqual(set(result.vouchers), {scope.DocumentIdentity(root.doctype, root.name),
+            scope.DocumentIdentity(cross.doctype, cross.name)})
+        self.assertNotIn(scope.DocumentIdentity(future.doctype, future.name), result.vouchers)
+        self.assertEqual(set(result.pairs), {scope.StockPair(self.item, "Stores - QAB"),
+            scope.StockPair(second, warehouse2), scope.StockPair(self.item, warehouse2), scope.StockPair(extra, warehouse3)})
+        self.assertNotIn(scope.StockPair(second, "Stores - QAB"), result.pairs)
+        self.assert_effects_unchanged()
+
+    def test_reversal_scope_native_billing_receipts_and_cancelled_raw_seed(self):
+        from deeplinkerp_branding.services import purchase_reversal_scope as scope
+        po, prior, future = self.future_receipts()
+        invoice = frappe.get_doc({"doctype": "Purchase Invoice", "company": COMPANY, "supplier": po.supplier,
+            "posting_date": nowdate(), "items": [{"item_code": self.item, "qty": 1, "rate": 10, "stock_uom": "Nos",
+                "purchase_order": po.name, "po_detail": po.items[0].name} ]})
+        result = scope.collect_document_scope(invoice)
+        self.assertEqual(set(result.sources), {scope.DocumentIdentity(doc.doctype, doc.name) for doc in (po, prior, future)})
+        frappe.db.set_value("Stock Ledger Entry", {"voucher_type": prior.doctype, "voucher_no": prior.name}, "is_cancelled", 1)
+        result = scope.collect_cancellation_scope(prior)
+        self.assertEqual(set(result.vouchers), {scope.DocumentIdentity(doc.doctype, doc.name) for doc in (prior, future)})
+        self.assertEqual(result.pairs, (scope.StockPair(self.item, "Stores - QAB"),))
+
+    def test_reversal_scope_resolves_native_material_request_and_persists_no_business_effect(self):
+        from deeplinkerp_branding.services import purchase_reversal_scope as scope
+        from erpnext.stock.doctype.material_request.material_request import make_purchase_order
+        request = frappe.get_doc({"doctype": "Material Request", "company": COMPANY, "material_request_type": "Purchase",
+            "transaction_date": nowdate(), "schedule_date": add_days(nowdate(), 1), "items": [{"item_code": self.item,
+                "qty": 2, "warehouse": "Stores - QAB", "schedule_date": add_days(nowdate(), 1)}]}).insert().submit()
+        order = make_purchase_order(request.name)
+        order.supplier = "QA Test Supplier"
+        order.insert(set_name="QA-ATOMIC-PO-" + uuid.uuid4().hex[:16]).submit()
+        result = scope.collect_document_scope(order)
+        self.assertEqual(result.sources, (scope.DocumentIdentity("Material Request", request.name),))
+        self.assertEqual(result.pairs, (scope.StockPair(self.item, "Stores - QAB"),))
+        self.assertEqual(result.vouchers, ())
+        frappe.db.set_value("Material Request", request.name, "custom_request_source", "MES")
+        with self.assertRaises(frappe.ValidationError): scope.collect_document_scope(order)
+
     def remember_effects(self):
         from deeplinkerp_branding.services import purchase_consistency as guard
         self.fixture_effects = {(doctype, name): guard.artifact_evidence(frappe.get_doc(doctype, name))
-            for doctype in ("Purchase Order", "Purchase Receipt", "Purchase Invoice", "Payment Entry", "China Accounting Voucher", "Integration Request", "Repost Item Valuation", "Delivery Note", "Sales Order", "Sales Invoice")
+            for doctype in ("Purchase Order", "Purchase Receipt", "Purchase Invoice", "Payment Entry", "China Accounting Voucher", "Integration Request", "Repost Item Valuation", "Delivery Note", "Sales Order", "Sales Invoice", "Stock Entry")
             for name in self.committed_names[doctype]}
 
     def assert_effects_unchanged(self):

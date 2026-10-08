@@ -470,8 +470,10 @@ def _acknowledge_finance_assignments(doc, *, voucher):
         acknowledge_effect(frappe.get_doc("China Cash Flow Assignment", name, for_update=True), system_effect=True)
 
 
-def check_sources(doc):
+def check_sources(doc, *, reader=None, validate_execution=True):
     """Validate every supplied native row identity, including native forms/multi-PO."""
+    read = reader or service._current
+    identities = set()
     for row in doc.get("items") or []:
         for doctype, link, detail in (("Purchase Order", "purchase_order", "purchase_order_item" if doc.doctype == "Purchase Receipt" else "po_detail"),
             ("Purchase Receipt", "purchase_receipt", "pr_detail")):
@@ -480,13 +482,17 @@ def check_sources(doc):
                 continue
             if not name or not identity:
                 operation.reject("采购来源父单据与明细身份必须同时存在", "purchase_source_identity_missing")
-            source = service._current(doctype, name)
+            source = read(doctype, name)
+            if reader:
+                service._require_fields(doctype, {"company", "supplier", "items"})
+                service._require_fields(doctype + " Item", {"item_code", "stock_uom"}, doctype)
             original = next((item for item in source.items if item.name == identity), None)
             if not original or original.item_code != row.item_code or original.get("stock_uom") != row.get("stock_uom"):
                 operation.reject("采购来源明细、物料或库存单位不一致", "purchase_source_row_mismatch")
             if source.company != doc.company or source.supplier != doc.supplier or source.docstatus != 1:
                 operation.reject("采购来源状态、公司或供应商不一致", "purchase_source_header_mismatch")
-            if doctype == "Purchase Order":
+            identities.add((source.doctype, source.name))
+            if doctype == "Purchase Order" and validate_execution:
                 from .purchase_source_service import validate_source_before_submit
                 validate_source_before_submit(source)
                 reason = service.order_execution_reason(source)
@@ -494,6 +500,7 @@ def check_sources(doc):
                     frappe.throw(reason)
     if doc.doctype == "Purchase Invoice" and doc.get("update_stock") and any(row.get("purchase_receipt") for row in doc.items):
         operation.reject("已入库来源应付不能重复更新库存", "purchase_stock_double_posting")
+    return identities
 
 
 def check_stock(doc):
@@ -904,9 +911,14 @@ def check_auto_invoice(doc):
         equal(row, "qty", totals.get(row.name, 0), qty, "自动应付必须完整覆盖原生可开票数量")
 
 
-def check_document(doc):
+def check_operating_dependencies(doc):
+    """Read-only existing fail-closed applicability check, also used by scope reads."""
     if doc.get("custom_operating_source") or doc.get("custom_operating_recognition"):
         operation.reject("采购与经营费用关联尚无同步适配，操作已停止，请核对原生关联", "operating_dependency_unsupported")
+
+
+def check_document(doc):
+    check_operating_dependencies(doc)
     if doc.docstatus == 0:
         _stage(doc, "native draft / stock / GL / AP", lambda: check_draft(doc))
         return [{"module": "native ledgers", "result": "verified", "reason": "draft has no real movement"},
@@ -995,8 +1007,9 @@ def invalidate_reviews(doc):
         {"module": "Operating", "result": "N/A", "reason": "native procurement has no registered Operating dependency"}]
 
 
-def check_sales_dependencies(doc):
+def check_sales_dependencies(doc, *, reader=None):
     """Native Sales row/reservation links require an adapter before we claim N/A."""
+    read = reader or service._current
     intercompany_links = {
         "Purchase Order": ("inter_company_order_reference", None),
         "Purchase Receipt": ("inter_company_reference", "delivery_note_item"),
@@ -1005,11 +1018,11 @@ def check_sales_dependencies(doc):
     documents = [doc]
     for row in doc.get("references") or []:
         if row.reference_doctype in ("Purchase Invoice", "Purchase Order"):
-            documents.append(service._current(row.reference_doctype, row.reference_name))
+            documents.append(read(row.reference_doctype, row.reference_name))
     receipts = {row.get("purchase_receipt") for source in documents for row in source.get("items") or [] if row.get("purchase_receipt")}
-    documents.extend(service._current("Purchase Receipt", name) for name in sorted(receipts))
+    documents.extend(read("Purchase Receipt", name) for name in sorted(receipts))
     orders = {row.get("purchase_order") for source in documents for row in source.get("items") or [] if row.get("purchase_order")}
-    documents.extend(service._current("Purchase Order", name) for name in sorted(orders))
+    documents.extend(read("Purchase Order", name) for name in sorted(orders))
     for source in documents:
         header, detail = intercompany_links.get(source.doctype, (None, None))
         if (header and source.get(header)) or (detail and any(row.get(detail) for row in source.get("items") or [])):
@@ -1117,11 +1130,15 @@ def check_cancellation_facts(doc, old):
         operation.reject("采购取消不能同时改写来源、金额或核销事实，请刷新后单独取消", "cancellation_business_facts_changed")
 
 
-def prepare_document(doc):
-    """Acquire MR -> PO -> PR -> PI source locks before native validation."""
+def resolve_source_documents(doc, *, reader=None):
+    """Read-only identity resolution shared with the cancellation scope collector.
+
+    This does not preserve billing values, lock sources, register audit effects or
+    run controller calculations. Callers still own those orchestration steps.
+    """
+    read = reader or service._read
     orders, receipts, invoices = set(), set(), set()
-    native_sources = native_source_identities(doc)
-    requests = {name for doctype, name in native_sources if doctype == "Material Request"}
+    native_sources = native_source_identities(doc, reader=read)
     invoices.update(name for doctype, name in native_sources if doctype == "Purchase Invoice")
     for row in doc.get("items") or []:
         if row.get("purchase_order"):
@@ -1133,12 +1150,22 @@ def prepare_document(doc):
             orders.add(row.reference_name)
         elif row.reference_doctype == "Purchase Invoice":
             invoices.add(row.reference_name)
-            invoice = service._read("Purchase Invoice", row.reference_name)
+            invoice = read("Purchase Invoice", row.reference_name)
             orders.update(item.purchase_order for item in invoice.items if item.get("purchase_order"))
             receipts.update(item.purchase_receipt for item in invoice.items if item.get("purchase_receipt"))
     for name in sorted(receipts):
-        receipt = service._read("Purchase Receipt", name)
+        receipt = read("Purchase Receipt", name)
         orders.update(item.purchase_order for item in receipt.items if item.get("purchase_order"))
+    identities = native_sources | {("Purchase Order", name) for name in orders} | {
+        ("Purchase Receipt", name) for name in receipts} | {("Purchase Invoice", name) for name in invoices}
+    return identities, native_sources
+
+
+def prepare_document(doc):
+    """Acquire MR -> PO -> PR -> PI source locks before native validation."""
+    identities, native_sources = resolve_source_documents(doc)
+    requests, orders, receipts, invoices = ({name for doctype, name in identities if doctype == target}
+        for target in ("Material Request", "Purchase Order", "Purchase Receipt", "Purchase Invoice"))
     billing_transition = doc.doctype == "Purchase Invoice" and doc.get("docstatus") in (1, 2) and (
         not doc.name or frappe.db.get_value(doc.doctype, doc.name, "docstatus") != doc.docstatus)
     if billing_transition:
@@ -1164,7 +1191,7 @@ def prepare_document(doc):
         _stage(doc, "Inventory / existing native stock reposts", lambda: check_pending_reposts(doc))
 
 
-def native_source_identities(doc, *, locked=False):
+def native_source_identities(doc, *, locked=False, reader=None):
     """Resolve actual native updater targets; do not reproduce its update math."""
     identities = set()
     for mapping in getattr(doc, "status_updater", []):
@@ -1177,7 +1204,7 @@ def native_source_identities(doc, *, locked=False):
                 continue
             if not parent or not detail:
                 operation.reject("采购原生关联来源父单据与明细身份不完整", "native_source_identity_missing")
-            source = (service._current if locked else service._read)(mapping["target_parent_dt"], parent)
+            source = (reader or (service._current if locked else service._read))(mapping["target_parent_dt"], parent)
             service._require_fields(source.doctype, {"company", "items"})
             service._require_fields(mapping["target_dt"], {"item_code", "stock_uom", mapping["target_field"]}, source.doctype)
             target = next((item for item in source.get("items") or [] if item.name == detail), None)
