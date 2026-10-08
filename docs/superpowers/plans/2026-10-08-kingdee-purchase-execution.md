@@ -1,4 +1,14 @@
-# 金蝶式采购实施检查表
+# 金蝶式采购流程 Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox syntax. One implementation writer, one QA database owner, and one production release owner at a time; independent read-only reviews may run separately.
+
+**Goal:** 复用原生采购链与钉钉来源，提供整单/合并入库、应付和付款，并确保新库存取消在重算及账务核对后才显示冲销完成。
+
+**Architecture:** Integration Request 是唯一持久操作与进度记录；原生控制器负责业务单据、库存和账务。普通操作继续同事务，新库存取消采用已确认的受理/原生重算/最终核对三个阶段。共用范围服务和锁协议保护标准入口、批量入口和原生后台任务，不复制库存执行器。
+
+**Tech Stack:** Frappe/ERPNext 16、MariaDB、China Finance、现有 Branding JavaScript、pytest/unittest、Node test runner、隔离 Docker Compose。
+
+---
 
 批准范围：钉钉可靠来源生成原生订单草稿、人工审核、逐单/合并入库、单独确认应付与部分/合并付款。采购主表仅真实订单，缺项来源在同页待完善标签。内部 WMS 复用原生库存。生产测试不提交业务单据。
 
@@ -122,3 +132,119 @@
 - 当前修改保留在工作树，HEAD 仍为 `5fd416534ad2735e507414f4639407296d4fc5d2`；无本批冻结提交、推送、合并或部署。尚需修复两处报错、完整独立复验与规格/质量审查，不将失败关闭保护当作完整采购流程交付。
 - 已要求实现者在当前测试自然清理完成后停止改代码、开启测试或提交；实现者确认 rollback/清理完成并释放 QA。主线程再次检查容器进程只剩两个原有 gunicorn，工作树修改及文档均保留，`git diff --check` 无错误。没有生产业务写入或历史处理。
 - 主线程独立前端测试在本轮为 479 passed、0 failures/skips；它不能证明后台当前源码或完整采购计划通过。唯一发布负责人已收到继续 HOLD 通知，等待用户范围选择后再推进。
+
+## 已批准书面规格后的执行分解
+
+用户已明确批准 `2026-10-08-purchase-reversal-progress-design.md`，沿用既有实施和部署授权，不增加第二轮业务审批。上面的暂停段落仅保留审计历史，不代表现在仍等待授权。当前严格安全补漏、审查、异步扩展、剩余金蝶式采购任务依次执行；局部补丁不单独发布。
+
+### Task 1A：冻结并独立复核严格安全边界
+
+**Files:** 既有 `services/purchase_consistency.py`、`services/purchase_operation.py`、`services/purchase_document_actions.py`、采购表单桥、对应测试及 `deploy/local/test_purchase_document_actions_qa.py`。不改 ERPNext 核心、不实施新异步能力。
+
+- [ ] 冻结本轮五项补漏：合法零金额无 PLE；PO 真实 Bin 产物；MR/源 PI/履行关联及 Finance 真实产物；中国凭证日期/期间/反向关系；REST 取消通过删除旧采购引用逃出边界。
+- [ ] 在实际 `frappe.in_test=False` 的隔离库重跑原生脚本，并核对精确 fixture 清理、RIV 与账簿计数。命令：`docker exec -w /home/frappe/frappe-bench/sites dlp-kingdee-purchase-qa-backend-1 /home/frappe/frappe-bench/env/bin/python /workspace/deploy/local/test_purchase_document_actions_qa.py`。预期全部案例成功且计数恢复；不得用旧结果替代新提交证据。
+- [ ] 对冻结 SHA 作规格复审；规格通过后才作独立质量审查。重要问题回到同一实现者修复，重新测试和复审。
+- [ ] 主线程独立重跑全部 Branding pytest、`node --test tests/*.test.js`、Python/JS 语法与 `git diff --check`。报告案例数、参数展开、跳过、现有告警，释放 QA 与 index 后进入 1B。
+
+### Task 1B：范围、元数据与跨 commit 锁协议（先不放开取消）
+
+**Files:**
+
+- Create: `deeplinkerp_branding/services/purchase_reversal_scope.py`：闭包、旧/新范围、持久指针和业务拦截。
+- Create: `deeplinkerp_branding/services/purchase_repost_boundary.py`：物理数据库会话锁、原生 worker 身份和扩展适配；不包含重算算法。
+- Create: `deeplinkerp_branding/purchase_reversal_install.py`：可重复窄范围 schema 安装，不回填业务数据。
+- Modify: `deeplinkerp_branding/hooks.py`、现有 `ProcurementControllerBoundary`，保留其他应用扩展和钩子。
+- Test: `deeplinkerp_branding/tests/test_purchase_reversal_scope.py`、`test_purchase_repost_boundary.py`；扩展既有隔离原生测试夹具，不能复制既有取消案例。
+
+**固定契约：** 范围由公司、真实来源身份、真实物料/仓库对、受影响库存凭证身份、最早生效时间组成；排序去重。只允许存在且属于该公司的非分组仓和真实 Bin。范围查询上限为 2,500 对、5,000 凭证、50,000 SLE；超限在写业务单据前拒绝，不能截断结果再称闭包完整。
+
+```python
+from dataclasses import dataclass
+
+@dataclass(frozen=True, order=True)
+class StockPair:
+    item_code: str
+    warehouse: str
+
+@dataclass(frozen=True, order=True)
+class DocumentIdentity:
+    doctype: str
+    name: str
+
+@dataclass(frozen=True)
+class ReversalScope:
+    company: str
+    posting_datetime: str
+    pairs: tuple[StockPair, ...]
+    sources: tuple[DocumentIdentity, ...]
+    vouchers: tuple[DocumentIdentity, ...]
+```
+
+- [ ] 先写真实图案例：取消前收货 → 调拨 → 拆装/制造 → 另一物料/仓库未来凭证；以及独立公司/范围。核对原生 `_get_directly_dependent_vouchers` 的 item 集合 × warehouse 集合查询，不能只沿原始配对。测试必须对完整集合断言，包含超限拒绝、不存在 Bin、跨公司与换来源。先看到预期失败，再实现闭包。
+- [ ] 先写两连接锁案例：同一范围互斥、无关范围通过、commit 后仍持锁、rollback/异常清理、同会话重入、物理连接断开禁止继续写。使用同一实际业务连接的 MariaDB `GET_LOCK/IS_USED_LOCK/RELEASE_LOCK`，锁名采用站点/数据库/规范身份的摘要并按稳定顺序取得；不能用独立“只持锁”连接或 Redis 作为权威。
+- [ ] 非阻塞取得整个锁集；失败释放本次新取得的锁并拒绝/保留原生 pending。锁仍覆盖执行和去重；active lease 跨原生 commit 保留，结束后的 dormant lease 到实际 commit/rollback 才释放。CallbackManager 会持续消费队列，回调不得在自身内部重新加入自己；下一个边界重新注册。物理连接替换毒化当前执行，不在同一上下文重新取锁继续写。
+- [ ] 当前已核查的 mysqlclient 2.2.7 使用真实 `_conn.ping(False)` 在该连接任何业务/审计写入或 lease 前禁用 C 层重连；它可能隐式 rollback，不能放在 chunk 中间或已执行 `_reserve` 后。将握手放在最外层请求/job/内部操作初始化，记录连接物理对象和 `CONNECTION_ID()`，故障注入证明断开不会换连接写入。未知 adapter 不放行 async。相关主源：[mysqlclient C 实现](https://github.com/PyMySQL/mysqlclient/blob/v2.2.7/src/MySQLdb/_mysql.c#L1784-L1846)、[MariaDB 会话锁](https://mariadb.com/docs/server/reference/sql-functions/secondary-functions/miscellaneous-functions/get_lock)。
+- [ ] schema 只增加 `custom_purchase_reversal_operation` 隐藏、只读、no-copy、有索引的 Integration Request Link：Bin、实际 PO/PR/PI/PE 来源、实际 owned Repost Item Valuation generation。RIV 指针支持终态保护和保留，不扫描全部 IR JSON 代替身份索引。指针不改变库存量、金额或历史凭证。保护普通表单/API 的指针改写；安装重复执行不覆盖现有定义，不创建 Bin、不导入历史资料。
+- [ ] 扩展最外层 `_save/insert` 范围检查，早于原生 `check_if_latest` 和控制器业务写入；不能只依赖 before_validate（取消会跳过），也不能只用 SLE 钩子（原生取消先执行 raw SQL）。覆盖实际 stock 控制器 Stock Entry、Delivery Note、stock Sales Invoice、Stock Reconciliation、Landed Cost Voucher 的旧/新范围；PI/PE 沿真实采购引用取范围。未实现的真实关联路径明确拒绝，不伪造“不适用”。
+- [ ] 用实际 REST/controller 证明来源/仓库替换、客户端 flags、ignore_permissions 不逃逸；相交 pending 指针拒绝，无关范围仍正常。尚不允许任何新异步取消：当前 strict RIV 拒绝保持生效。
+- [ ] 在初始化 Frappe 的隔离测试环境运行两个新测试模块和原生完整脚本，保存红/绿结果；冻结此任务，规格通过后质量复审，再进入 1C。
+
+### Task 1C：原生 worker 的隔离适配和启用门禁
+
+**Files:** `services/purchase_repost_boundary.py`、`hooks.py`、上述单元/原生测试。扩展原生 RIV controller，不改原生文件。
+
+只读核查基线为 native Frappe/ERPNext 16.23.0；主线程已独立核对文件 SHA256：RIV `c4449547d07c76fd316a5b2185d4c9b60bd42e8747767fe28aea28cbc2ceafe1`，background_jobs `7db969deeb19e4a49924c2a59bcdc15e470a3d24d718845ea790fffd94046f45`，ScheduledJobType `80fbb163946521e1413d4ffa6fc8b777d003ee822ba420b4af6b84a47e4875ac`。这些是本地设计核查证据，不代表已跑 worker 并发测试或线上已对齐；发布候选必须重新验证实际原生版本及能力。
+
+- [ ] 先写直接并行 RQ 与 Scheduled Job 两条真实入口的失败测试。Frappe `execute_job` 在 before_job 前已解析直接 callable；before_job 必须为该 captured 原生 executor 取得 lease。ScheduledJobType 在调用自身 method 时才解析函数，before_job 安装一次 process-local `execute_reposting_entry` 包装器，为原生循环逐项取锁。包装器仅调用保存的原函数，不改调度策略、时间窗或算法。
+- [ ] `functools.wraps` 保留原生 module/qualname 和 RQ pickle 路径；断言原生 job_name、native started-job 查询和并行 enqueue 路径不变。before_job 在原生 try/finally 外，任何失败自行清理；after_job 释放实际外层提交后的 lease。不得新增直接 enqueue executor 的应用队列。
+- [ ] 信任证据来自实际 RQ current job、原生 execute_job func_name、站点、原始 method、persisted Scheduled Job Type 及真实任务 ID；请求参数/flags/job_name 单独不构成证据。当前锁定读取确认 generation/status，再调用 native；终态任务返回，不让 REPEATABLE READ 的旧快照再次执行已完成任务。
+- [ ] 用原生 RIV class extension 覆盖 `restart_reposting`（内部 db_update）、`repost_now`、discard/cancel、删除及 `clear_old_logs`。bulk_restart 继续调用原生逐项方法，同一 guard；原生日志清理走 raw delete，必须保留 pending 操作依赖任务，不以 on_trash 代替。完成证据存 IR 后可按原生策略清理无依赖任务。
+- [ ] 本操作完成后永久禁止重新启动其已登记的 root/child generation；新业务创建新任务不受该终态保护影响。测试直接调用 Completed root 的 document method、mixed bulk_restart、当前权限被撤销和 old cached scheduler 候选，不只检查前端隐藏的按钮。
+- [ ] 测试控制 native repost 内 commit、去重后外层 commit、第二个 cached worker 和最终核对并发：完成状态提交后旧任务不再改 SLE/Bin/GL。模拟断开连接必须实际失败；未知驱动/原生能力关闭 async，不能仅设置未验证的 auto_reconnect 属性。
+- [ ] 发布启用前必须 drain 旧 worker、重启所有参与 web/queue/scheduler、核对同一候选资源和 hooks/controller 能力。旧代码已经运行的任务无法靠新钩子追溯隔离；未完成这一步保持 strict 取消限制。QA 也必须重启并测试实际 worker，不用内存 mock 当作部署门禁通过。
+- [ ] 保存 native 版本及相关入口的能力签名；升级变更在集成测试发现并失败关闭。冻结、专项/原生回归、规格审查、质量审查通过后才进入 1D。
+
+### Task 1D：原子受理、持久阶段与最终核对
+
+**Files:**
+
+- Create: `deeplinkerp_branding/services/purchase_reversal_progress.py`：唯一 IR 上的阶段服务、对账恢复和有限 retry。
+- Modify: `purchase_operation.py`、`purchase_consistency.py`、`hooks.py`；复用原有 source/finance/ledger checker 和运行日志。
+- Test: `deeplinkerp_branding/tests/test_purchase_reversal_progress.py`、隔离原生测试。
+
+**IR 数据契约：** 接受事实与可变进度分开。下列为真实受理记录形状示例，不是新 DocType：
+
+```json
+{"reversal":{"schema":1,"acceptance":{"source":{"doctype":"Purchase Receipt","name":"QA-PR"},"company":"QA Second Company","scope":{"pairs":[],"sources":[],"vouchers":[]},"root_tasks":[],"capabilities":{}},"progress":{"stage":"waiting_inventory","reason_id":null,"dependencies":[],"final_evidence":null}}}
+```
+
+实际数组必须由原单和 native 创建上下文填充；示例的空 scope 不可受理。受理事实在 Queued 后不可改写；未授权用户无法修改进度或清除指针。stage 固定为 `waiting_inventory/recalculating/verifying/completed/failed`，仅最终 completed 映射 IR Completed，其余处理中 Queued、失败 Failed。
+
+- [ ] 先写无 RIV 同步取消和真实 stock 取消对照：严格普通操作不退化；只有实际 submitted→cancelled procurement 路径且创建 native RIV 才允许受理。源 docstatus2、同步账务/China cancellation、scope 指针、真实根任务和 Queued IR 同事务。每个接受步骤故障注入整体回滚，不能在事务内跑 repost 执行器。
+- [ ] 捕获实际 `on_submit` RIV 对象，包括 Item/Warehouse 无 voucher 字段的根；禁止事后按日期模糊推断。现有 check_native_repost 仅在实际 server acceptance 上下文允许该例外，普通改价/submit、历史 pending 和伪造 bypass 仍失败关闭。
+- [ ] 扩展相同操作键 replay：payload/user/current ACL 仍校验，但 accepted 操作返回持久当前 progress，不按受理时未完成的流水 hash 否定合法后台重算，不再次取消。完成之后重放核对最终证据；失去源权限则拒绝读取。
+- [ ] 新 readonly progress API：`get_reversal_progress(doctype, name)` 返回 operation_id、stage、fixed message、safe reason_id、can_retry；按真实来源原生 read 权限，不返回原始 data/output。retry 只恢复本操作真实任务，检查当前办理权限；不重新 cancel、重写快照或创建第二条重算。
+- [ ] 定期扫描仅本 SERVICE 的本次 accepted 未完成 IR；aftercommit 仅通知对账加速，失败不丢记录。保留 native scheduler/timeslots，根/child 在 Queued 或 In Progress 时只更新阶段；不从应用直接执行/再 enqueue RIV。
+- [ ] 递归核对实际 root/ref 链及 frozen expected voucher coverage。Failed/Cancelled/missing 或裸 Skipped 不能完成；如接受替代必须证明 Completed 覆盖和账簿一致。GL 子任务创建吞异常案例即使父任务 Completed 也拒绝。
+- [ ] 在相同会话隔离锁下校验所有 scope pair 的 SLE 数量/估值递推、Bin 与 latest SLE、仓库公司；原生 expected GL 计划和实际四列/维度；采购来源量、原生 PLE/AP、China Posting/Cancellation 日期/来源/反向链接与金额。复用 `_compare_gl` 等既有函数，不写第二套库存计算或财务凭证。
+- [ ] future GL 与旧中国 Posting 漂移保持 failed 和指针，不修改历史快照。校验/完成/指针清除逐点故障注入，必须整个最终事务回滚；已经提交的原生 chunk 不声称回滚。终态和解除拦截同事务成功后才 Completed。
+- [ ] 覆盖响应丢失、重复点击、Redis 丢失、重启、两连接并发、native recoverable/permanent error、遗漏 child、Skipped after failure、审计篡改/retention 和 rollback 日志留存；顶层 `frappe.in_test=False`。
+- [ ] 专项/完整/原生/语法回归后冻结，先规格后质量审查；未完成该任务不开放生产 async。
+
+### Task 1E：统一进度显示，复用列表、抽屉和标准表单
+
+**Files:** 既有 `purchase_payment_service.py`、`purchase_document_actions.py`、`public/js/purchase_payments.js`、`purchase_payment_form.js`、`compact_list.js`，以及它们的现有 tests。
+
+- [ ] 先扩展现有 projection/chain 测试，加入唯一 progress 输出和操作禁止原因；前端 tests 覆盖五阶段与 docstatus2 并列、受理消息不报完成、取消窗口无写入、失败刷新不默认完成。
+- [ ] 复用统一 drawer/form/list 获取进度；未完成禁用实际入库/应付/付款/修改/取消后续按钮，不建立新取消入口。Backend 同一 scope guard 保持权威。native 当前权限被撤销时立即去掉操作能力。
+- [ ] 收到受理结果显示“取消已受理，库存重算未完成”；只在 server completed 刷新后显示“冲销完成”。轮询失败保留最后可信阶段和重试提示；不以 timeout、docstatus2 或 HTTP200 推断成功。
+- [ ] 真实本地 browser 逐条验证 native form、采购 list、receipt list 和 drawer 的阶段/拦截/自动刷新，无提交的 preview/cancel 路径零业务写入；记录所用 QA/asset SHA。运行 `node --test tests/*.test.js`、asset build 及资源副本核对，规格/质量审查。
+
+### 后续采购任务与统一发布
+
+- [ ] 合并入库继续扩展 `purchase_document_actions` 的原生 mapper、税费兼容和真实 source row，批量整事务；付款继续扩展 `purchase_payment_service` 的真实 PI 去重和同公司/供应商/币种核销。不能由两个新 standalone 业务服务替代已有入口。
+- [ ] 同步继续复用 `purchase_source_service` 的审批判定、版本和人工值保护，完整有效来源仅建 PO draft，缺项留同页待完善；读取失败整批不落部分数据。不得生成同步付款或覆盖历史付款。
+- [ ] UI 继续复用 compact_list/payments：主表真实订单、待完善独立同页 tab、真实物料明细 rowspan、整单选择、当前页全选、统一布局迁移与集中操作栏；旧组合列默认值只迁移本采购配置，其他模块不变。
+- [ ] 完整候选串行吸收唯一发布者较新 Branding 基线，保留 dirty/untracked/server 状态；核对 Finance 固定候选、联合 CI、相关窄 schema 安装、全量回归、真实 browser 采购→入库→应付→付款流程。不是只发布冲销补丁。
+- [ ] 交付独立跨模块联动清单、数据一致性校验点、测试用例与实际结果；分类统计新增/修改/删除、重复逻辑、手写业务/测试/文档行数、业务场景/参数展开、兼容真实调用与退出条件及未处理债务。
+- [ ] 由既定唯一负责人 drain/部署/清缓存/重启并核查 Vultr SHA 和所有 worker 能力，再在线只读检查真实页面及 preview/cancel。线上真实提交/取消不得作为验收测试。所有影响页面尚未验收时不报告完整完成。
