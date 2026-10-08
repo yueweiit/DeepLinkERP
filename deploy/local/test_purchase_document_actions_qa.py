@@ -1324,6 +1324,16 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         expected = first.items[0].amount + returned.items[0].amount + next_invoice.items[0].amount
         self.assertEqual(frappe.db.get_value("Purchase Order Item", po.items[0].name, "billed_amt"), expected)
         self.assertEqual(frappe.db.get_value("Purchase Receipt Item", pr.items[0].name, "billed_amt"), expected)
+        from deeplinkerp_branding.services import purchase_reversal_scope as scope
+        frappe.db.set_single_value("Buying Settings", "set_landed_cost_based_on_purchase_invoice_rate", 1)
+        frappe.clear_document_cache("Buying Settings", "Buying Settings")
+        try:
+            result = self.read_reversal_scope(returned)
+            self.assertEqual(result.vouchers, (scope.DocumentIdentity(returned.doctype, returned.name),))
+            self.assertIn(scope.DocumentIdentity(pr.doctype, pr.name), result.sources)
+        finally:
+            frappe.db.set_single_value("Buying Settings", "set_landed_cost_based_on_purchase_invoice_rate", 0)
+            frappe.clear_document_cache("Buying Settings", "Buying Settings")
 
     def test_native_invoice_rate_calculator_on_copy_cannot_write_or_repost(self):
         from deeplinkerp_branding.services import purchase_consistency as guard
@@ -1368,9 +1378,23 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         return frappe.get_doc({"doctype": "Item", "item_code": code, "item_name": code,
             "item_group": "All Item Groups", "stock_uom": "Nos", "is_stock_item": 1}).insert().name
 
-    def scope_stock_entry(self, purpose, date, rows):
+    def scope_stock_entry(self, purpose, date, rows, **headers):
         return frappe.get_doc({"doctype": "Stock Entry", "company": COMPANY, "stock_entry_type": purpose,
-            "set_posting_time": 1, "posting_date": date, "posting_time": "12:00:00", "items": rows}).insert().submit()
+            "set_posting_time": 1, "posting_date": date, "posting_time": "12:00:00", "items": rows, **headers}).insert().submit()
+
+    def read_reversal_scope(self, doc, *, cancellation=True):
+        from deeplinkerp_branding.services import purchase_reversal_scope as scope
+        sql = frappe.db.sql
+        def read_only(query, *args, **kwargs):
+            text = str(query).strip().lower()
+            self.assertNotIn(text.split()[0], {"insert", "update", "delete", "replace", "alter"})
+            self.assertNotIn("for update", text)
+            return sql(query, *args, **kwargs)
+        with patch.object(frappe.db, "sql", side_effect=read_only), \
+                patch.object(frappe.db, "set_value", side_effect=AssertionError("scope cannot write")), \
+                patch.object(frappe.db, "commit", side_effect=AssertionError("scope cannot commit")), \
+                patch.object(frappe, "enqueue", side_effect=AssertionError("scope cannot enqueue")):
+            return (scope.collect_cancellation_scope if cancellation else scope.collect_document_scope)(doc)
 
     def test_reversal_scope_native_transfer_repack_new_item_warehouse_full_set_is_read_only(self):
         from deeplinkerp_branding.services import purchase_reversal_scope as scope
@@ -1397,17 +1421,7 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         self.commit_fixture()
         self.remember_effects()
         before = {dt: frappe.db.count(dt) for dt in self.types}
-        sql = frappe.db.sql
-        def read_only(query, *args, **kwargs):
-            text = str(query).strip().lower()
-            self.assertNotIn(text.split()[0], {"insert", "update", "delete", "replace", "alter"})
-            self.assertNotIn("for update", text)
-            return sql(query, *args, **kwargs)
-        with patch.object(frappe.db, "sql", side_effect=read_only), \
-                patch.object(frappe.db, "set_value", side_effect=AssertionError("scope cannot write")), \
-                patch.object(frappe.db, "commit", side_effect=AssertionError("scope cannot commit")), \
-                patch.object(frappe, "enqueue", side_effect=AssertionError("scope cannot enqueue")):
-            result = scope.collect_cancellation_scope(root)
+        result = self.read_reversal_scope(root)
         self.assertEqual(result.company, COMPANY)
         self.assertEqual(set(result.sources), {scope.DocumentIdentity("Purchase Order", po.name)})
         self.assertEqual(set(result.vouchers), {scope.DocumentIdentity(doc.doctype, doc.name)
@@ -1430,6 +1444,28 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         frappe.db.delete("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"})
         with self.assertRaises(frappe.ValidationError):
             scope.collect_cancellation_scope(root)
+
+    def test_reversal_scope_native_same_item_warehouse_is_bound_to_exact_receipt_detail(self):
+        from deeplinkerp_branding.services import purchase_reversal_scope as scope
+        warehouses = ("Stores - QAB", "Work In Progress - QAB")
+        po = self.order(items=[{"item_code": self.item, "qty": 1, "rate": 10, "warehouse": warehouse,
+            "schedule_date": add_days(nowdate(), 1)} for warehouse in warehouses])
+        root = make_purchase_receipt(po.name).insert().submit()
+        self.commit_fixture()
+        self.remember_effects()
+        result = self.read_reversal_scope(root)
+        self.assertEqual(set(result.pairs), {scope.StockPair(self.item, warehouse) for warehouse in warehouses})
+        entry = frappe.db.get_value("Stock Ledger Entry", {"voucher_type": root.doctype, "voucher_no": root.name,
+            "voucher_detail_no": root.items[0].name}, "name")
+        self.assertTrue(entry)
+        original = frappe.db.get_value("Stock Ledger Entry", entry, "warehouse")
+        try:
+            other = next(warehouse for warehouse in warehouses if warehouse != original)
+            frappe.db.set_value("Stock Ledger Entry", entry, "warehouse", other, update_modified=False)
+            with self.assertRaises(frappe.ValidationError): self.read_reversal_scope(root)
+        finally:
+            frappe.db.set_value("Stock Ledger Entry", entry, "warehouse", original, update_modified=False)
+        self.assert_effects_unchanged()
 
     def test_reversal_scope_native_gl_cartesian_whole_voucher_does_not_seed_extra_stock_frontier(self):
         from deeplinkerp_branding.services import purchase_reversal_scope as scope
@@ -1486,6 +1522,82 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         self.assertEqual(result.vouchers, ())
         frappe.db.set_value("Material Request", request.name, "custom_request_source", "MES")
         with self.assertRaises(frappe.ValidationError): scope.collect_document_scope(order)
+
+    def test_reversal_scope_native_stock_entry_direct_transit_mr_and_old_supply_sources(self):
+        from deeplinkerp_branding.services import purchase_reversal_scope as scope
+        po, prior, future = self.future_receipts()
+        request = frappe.get_doc({"doctype": "Material Request", "company": COMPANY, "material_request_type": "Material Transfer",
+            "transaction_date": nowdate(), "schedule_date": nowdate(), "items": [{"item_code": self.item, "qty": 1,
+                "from_warehouse": "Stores - QAB", "warehouse": "Work In Progress - QAB", "schedule_date": nowdate()}]}).insert().submit()
+        outgoing = self.scope_stock_entry("Material Transfer", nowdate(), [{"item_code": self.item, "qty": 1,
+            "s_warehouse": "Stores - QAB", "t_warehouse": "Goods In Transit - QAB",
+            "material_request": request.name, "material_request_item": request.items[0].name}], add_to_transit=1)
+        self.assertEqual(self.read_reversal_scope(outgoing, cancellation=False).sources,
+            (scope.DocumentIdentity(request.doctype, request.name),))
+        incoming = self.scope_stock_entry("Material Transfer", nowdate(), [{"item_code": self.item, "qty": 1,
+            "s_warehouse": "Goods In Transit - QAB", "t_warehouse": "Work In Progress - QAB",
+            "against_stock_entry": outgoing.name, "ste_detail": outgoing.items[0].name}], outgoing_stock_entry=outgoing.name)
+        result = self.read_reversal_scope(incoming, cancellation=False)
+        self.assertEqual(set(result.sources), {scope.DocumentIdentity(doc.doctype, doc.name) for doc in (request, outgoing)})
+        self.assertIn(scope.StockPair(self.item, "Work In Progress - QAB"), result.pairs)
+        frappe.db.set_value("Material Request", request.name, "custom_request_source", "MES")
+        with self.assertRaises(frappe.ValidationError): self.read_reversal_scope(incoming, cancellation=False)
+        frappe.db.set_value("Material Request", request.name, "custom_request_source", "手动创建")
+        finished = self.scope_item()
+        order = self.order(items=[{"item_code": finished, "qty": 10, "rate": 10, "warehouse": "Stores - QAB", "schedule_date": nowdate()}])
+        # Exact new synthetic old-PO source records; no historical PO/BOM repair.
+        frappe.db.set_value("Purchase Order", order.name, {"is_subcontracted": 1, "is_old_subcontracting_flow": 1})
+        supplied = frappe.get_doc({"doctype": "Purchase Order Item Supplied", "parent": order.name, "parenttype": "Purchase Order",
+            "parentfield": "supplied_items", "rm_item_code": self.item, "main_item_code": finished,
+            "docstatus": 1, "stock_uom": "Nos", "reserve_warehouse": "Work In Progress - QAB", "required_qty": 10, "idx": 1})
+        self.assertTrue(frappe.get_meta(supplied.doctype).has_field("stock_uom"))
+        self.assertFalse(frappe.get_meta(supplied.doctype).has_field("uom"))
+        supplied.db_insert()
+        sent = self.scope_stock_entry("Send to Subcontractor", nowdate(), [{"item_code": self.item, "qty": 1,
+            "s_warehouse": "Stores - QAB", "t_warehouse": "Finished Goods - QAB", "po_detail": supplied.name,
+            "subcontracted_item": finished}], purchase_order=order.name, supplier=order.supplier)
+        result = self.read_reversal_scope(sent, cancellation=False)
+        self.assertEqual(result.sources, (scope.DocumentIdentity(order.doctype, order.name),))
+        self.assertIn(scope.StockPair(self.item, "Work In Progress - QAB"), result.pairs)
+        frappe.db.set_value(supplied.doctype, supplied.name, "stock_uom", "Kg", update_modified=False)
+        with self.assertRaises(frappe.ValidationError): self.read_reversal_scope(sent, cancellation=False)
+        frappe.db.set_value(supplied.doctype, supplied.name, "stock_uom", "Nos", update_modified=False)
+
+    def test_reversal_scope_native_invoice_cost_setting_direct_and_fifo_potential_seeds(self):
+        from deeplinkerp_branding.services import purchase_reversal_scope as scope
+        from erpnext.buying.doctype.purchase_order.purchase_order import make_purchase_invoice as from_order
+        po, prior, future = self.future_receipts()
+        invoice = make_purchase_invoice(prior.name)
+        invoice.items[0].qty = 1
+        invoice.insert().submit()
+        fifo = from_order(po.name)
+        fifo.items[0].qty = 1
+        fifo.insert().submit()
+        stock = from_order(po.name)
+        stock.update_stock = 1; stock.items[0].qty = 1; stock.items[0].warehouse = "Stores - QAB"
+        stock.insert().submit()
+        self.commit_fixture()
+        self.remember_effects()
+        for enabled in (0, 1):
+            frappe.db.set_single_value("Buying Settings", "set_landed_cost_based_on_purchase_invoice_rate", enabled)
+            frappe.clear_document_cache("Buying Settings", "Buying Settings")
+            for root in (invoice, fifo, stock):
+                with self.subTest(enabled=enabled, update_stock=root.update_stock, direct=bool(root.items[0].pr_detail)):
+                    result = self.read_reversal_scope(root)
+                    expected = {scope.DocumentIdentity(root.doctype, root.name)}
+                    if enabled:
+                        expected |= {scope.DocumentIdentity(doc.doctype, doc.name) for doc in (prior, future, stock)}
+                        self.assertEqual(result.posting_datetime, str(prior.posting_date) + " " + str(prior.posting_time))
+                    self.assertEqual(set(result.vouchers), expected)
+        # Real native cancellation invokes the PR force-repost path and the
+        # strict floor rejects it atomically; never run its native executor.
+        from erpnext.stock.doctype.purchase_receipt.purchase_receipt import PurchaseReceipt
+        native = PurchaseReceipt.repost_future_sle_and_gle
+        with patch.object(PurchaseReceipt, "repost_future_sle_and_gle", autospec=True, side_effect=native) as repost:
+            with self.assertRaises(frappe.ValidationError) as caught: invoice.reload().cancel()
+        self.assertEqual(caught.exception.purchase_error_id, "native_stock_repost_incomplete")
+        self.assertTrue(any(call.kwargs.get("force") for call in repost.call_args_list))
+        self.assert_effects_unchanged()
 
     def remember_effects(self):
         from deeplinkerp_branding.services import purchase_consistency as guard
@@ -1677,17 +1789,27 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
     def test_actual_system_rounding_policy_is_used_by_quantity_guard(self):
         from deeplinkerp_branding.services import purchase_consistency as guard
         from frappe.utils import flt
+        from frappe.core.doctype.system_settings.system_settings import clear_system_settings_cache
         try:
-            for policy, expected in (("Banker's Rounding", .002), ("Commercial Rounding", .003)):
-                with self.subTest(policy=policy):
-                    frappe.db.set_single_value("System Settings", {"rounding_method": policy, "float_precision": "3"})
-                    frappe.clear_document_cache("System Settings", "System Settings")
-                    row = frappe.new_doc("Purchase Order Item")
-                    self.assertEqual(row.precision("qty"), 3)
-                    self.assertEqual(flt(.0025, 3), expected)
-                    guard.equal(row, "qty", .0025, expected, "实际系统舍入")
+            frappe.db.set_single_value("System Settings", {"rounding_method": "Banker's Rounding", "float_precision": "3"})
+            clear_system_settings_cache()
+            frappe.clear_document_cache("System Settings", "System Settings")
+            self.assertEqual(frappe.get_system_settings("rounding_method"), "Banker's Rounding")
+            # Real client-local RLock holds background Redis invalidations. A
+            # document-cache-only fixture can read the previous rounding policy.
+            with frappe.client_cache.lock:
+                for policy, expected in (("Banker's Rounding", .002), ("Commercial Rounding", .003)):
+                    with self.subTest(policy=policy):
+                        frappe.db.set_single_value("System Settings", {"rounding_method": policy, "float_precision": "3"})
+                        clear_system_settings_cache()
+                        frappe.clear_document_cache("System Settings", "System Settings")
+                        row = frappe.new_doc("Purchase Order Item")
+                        self.assertEqual(row.precision("qty"), 3)
+                        self.assertEqual(flt(.0025, 3), expected)
+                        guard.equal(row, "qty", .0025, expected, "实际系统舍入")
         finally:
             frappe.db.rollback()
+            clear_system_settings_cache()
             frappe.clear_document_cache("System Settings", "System Settings")
 
     def test_identical_new_native_docs_with_distinct_requests_both_insert(self):

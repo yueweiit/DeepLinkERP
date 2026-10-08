@@ -39,6 +39,7 @@ class ReversalScopeTests(unittest.TestCase):
             patch.object(frappe.db, "get_values", side_effect=self.rows),
             patch.object(frappe.db, "sql", side_effect=self.billing_rows),
             patch.object(frappe.db, "exists", return_value=False),
+            patch.object(frappe.db, "get_single_value", return_value=0),
             patch.object(frappe.db, "set_value", side_effect=AssertionError("business write")),
             patch.object(frappe.db, "commit", side_effect=AssertionError("commit")),
             patch.object(frappe, "enqueue", side_effect=AssertionError("enqueue"))]
@@ -287,7 +288,7 @@ class ReversalScopeTests(unittest.TestCase):
     def test_actual_from_rejected_and_old_subcontract_pairs_are_in_footprint(self):
         root = self.add(document("Purchase Receipt", "PR", is_old_subcontracting_flow=1, supplier_warehouse="W2",
             items=[item("R", from_warehouse="W2", rejected_warehouse="W3", rejected_qty=1)],
-            supplied_items=[frappe._dict(doctype="Purchase Receipt Item Supplied", name="SUP", rm_item_code="D")]))
+            supplied_items=[frappe._dict(doctype="Purchase Receipt Item Supplied", name="SUP", rm_item_code="D", stock_uom="Nos")]))
         result = self.scope.collect_document_scope(root)
         self.assertEqual(set(result.pairs), {self.scope.StockPair("A", "W1"), self.scope.StockPair("A", "W2"),
             self.scope.StockPair("A", "W3"), self.scope.StockPair("D", "W2")})
@@ -436,3 +437,202 @@ class ReversalScopeTests(unittest.TestCase):
                 root = document("Payment Entry" if table == "references" else "Landed Cost Voucher", "ROOT",
                     party_type="Supplier", party="Supplier", **{table: [row]})
                 with self.assertRaises(frappe.ValidationError): self.scope.collect_document_scope(root)
+
+    def test_sle_warehouse_is_bound_to_actual_detail_not_a_same_item_sibling(self):
+        root = self.add(document("Purchase Receipt", "PR", items=[item("R1", "A", "W1"), item("R2", "A", "W2")]))
+        self.sle(root, root.items[0], warehouse="W2")
+        with self.assertRaises(frappe.ValidationError): self.scope.collect_cancellation_scope(root)
+
+    def test_sle_row_paths_keep_from_rejected_transfer_and_old_supplied_warehouses(self):
+        for path in ("from", "rejected", "transfer", "supplied"):
+            with self.subTest(path=path):
+                self.sles.clear()
+                root = self.add(document("Purchase Receipt", "PR", items=[item("R")]))
+                self.sle(root, root.items[0])
+                if path == "transfer":
+                    target = self.add(document("Stock Entry", "SE", purpose="Material Transfer", posting_date="2026-01-11",
+                        items=[item("SEI", warehouse=None, s_warehouse="W1", t_warehouse="W2")]))
+                    self.sle(target, target.items[0], "W1", actual_qty=-1, dependant_sle_voucher_detail_no="SEI")
+                    self.sle(target, target.items[0], "W2")
+                elif path == "supplied":
+                    self.bins.add(("D", "W2"))
+                    root.is_old_subcontracting_flow = 1; root.supplier_warehouse = "W2"
+                    root.supplied_items = [frappe._dict(name="SUP", doctype="Purchase Receipt Item Supplied", rm_item_code="D", stock_uom="Nos")]
+                    self.sle(root, root.supplied_items[0], "W2", item_code="D", actual_qty=-1)
+                else:
+                    setattr(root.items[0], path + "_warehouse", "W2")
+                    if path == "rejected": root.items[0].rejected_qty = 1
+                    self.sle(root, root.items[0], "W2", actual_qty=-1)
+                result = self.scope.collect_cancellation_scope(root)
+                self.assertIn(self.scope.StockPair("D" if path == "supplied" else "A", "W2"), result.pairs)
+
+    def test_stock_entry_direct_and_transit_material_request_sources_are_actual_footprint(self):
+        request = self.add(document("Material Request", "MR", items=[item("MRI", "A", "W4", doctype="Material Request Item")]))
+        outgoing = self.add(document("Stock Entry", "OUT", purpose="Material Transfer", add_to_transit=1, items=[
+            item("OUTI", doctype="Stock Entry Detail", warehouse=None, s_warehouse="W1", t_warehouse="W2",
+                material_request="MR", material_request_item="MRI")]))
+        result = self.scope.collect_document_scope(outgoing)
+        self.assertEqual(result.sources, (self.scope.DocumentIdentity("Material Request", "MR"),))
+        incoming = document("Stock Entry", "IN", purpose="Material Transfer", outgoing_stock_entry="OUT", items=[
+            item("INI", doctype="Stock Entry Detail", warehouse=None, s_warehouse="W2", t_warehouse="W3",
+                against_stock_entry="OUT", ste_detail="OUTI")])
+        result = self.scope.collect_document_scope(incoming)
+        self.assertEqual(set(result.sources), {self.scope.DocumentIdentity(doc.doctype, doc.name) for doc in (request, outgoing)})
+        self.assertIn(self.scope.StockPair("A", "W4"), result.pairs)
+
+    def test_stock_entry_source_rows_require_real_identity_company_uom_and_acl(self):
+        request = self.add(document("Material Request", "MR", items=[item("MRI", doctype="Material Request Item")]))
+        root = document("Stock Entry", "SE", purpose="Material Transfer", items=[item("SEI", doctype="Stock Entry Detail",
+            warehouse=None, s_warehouse="W1", t_warehouse="W2", material_request="MR", material_request_item="MRI")])
+        for invalid in ("detail", "company", "uom", "parent", "read", "field"):
+            with self.subTest(invalid=invalid):
+                request.company = "C"; request.items[0].stock_uom = "Nos"; request.items[0].parent = "MR"
+                request.items[0].parenttype = "Material Request"; request.items[0].parentfield = "items"
+                request.check_permission.side_effect = None; root.items[0].material_request_item = "MRI"
+                if invalid == "detail": root.items[0].material_request_item = "MISSING"
+                if invalid == "company": request.company = "OTHER"
+                if invalid == "uom": request.items[0].stock_uom = "Kg"
+                if invalid == "parent": request.items[0].parent = "OTHER"
+                if invalid == "read": request.check_permission.side_effect = frappe.PermissionError("MR denied")
+                with patch.object(self.scope.service, "_require_fields", side_effect=(
+                        lambda dt, fields, parenttype=None: (_ for _ in ()).throw(frappe.PermissionError("MR field denied"))
+                        if invalid == "field" and dt == "Material Request Item" else None)):
+                    with self.assertRaises((frappe.ValidationError, frappe.PermissionError)):
+                        self.scope.collect_document_scope(root)
+
+    def test_stock_entry_old_subcontract_header_freezes_real_supplied_reserve_pair(self):
+        order = self.add(document("Purchase Order", "PO", is_old_subcontracting_flow=1, is_subcontracted=1,
+            items=[item("MAIN", "FG", "W2")], supplied_items=[frappe._dict(name="SUP", doctype="Purchase Order Item Supplied",
+                rm_item_code="D", main_item_code="FG", stock_uom="Nos", reserve_warehouse="W3", parent="PO", parenttype="Purchase Order", parentfield="supplied_items")]))
+        root = document("Stock Entry", "SE", purchase_order="PO", purpose="Send to Subcontractor", items=[item("SEI", "D",
+            doctype="Stock Entry Detail", warehouse=None, s_warehouse="W1", t_warehouse="W2", po_detail="SUP", subcontracted_item="FG")])
+        result = self.scope.collect_document_scope(root)
+        self.assertEqual(result.sources, (self.scope.DocumentIdentity("Purchase Order", "PO"),))
+        self.assertIn(self.scope.StockPair("D", "W3"), result.pairs)
+        order.supplied_items[0].stock_uom = "Kg"
+        with self.assertRaises(frappe.ValidationError): self.scope.collect_document_scope(root)
+        order.supplied_items[0].stock_uom = "Nos"
+        for field, value in (("po_detail", "MAIN"), ("allow_alternative_item", 1), ("original_item", "OTHER")):
+            with self.subTest(field=field):
+                original = root.items[0].get(field); root.items[0][field] = value
+                with self.assertRaises(frappe.ValidationError): self.scope.collect_document_scope(root)
+                root.items[0][field] = original
+        order.items[0].job_card = "JC"
+        with self.assertRaises(frappe.ValidationError): self.scope.collect_document_scope(root)
+        root.purpose = "Material Transfer"  # native WO release only runs for Send to Subcontractor
+        self.scope.collect_document_scope(root)
+        root.purpose = "Send to Subcontractor"
+        root.purchase_order = None; root.subcontracting_inward_order = "SIO"
+        with self.assertRaises(frappe.ValidationError): self.scope.collect_document_scope(root)
+
+    def test_stock_entry_transit_parent_detail_and_inherited_sources_cannot_be_substituted(self):
+        for invalid in ("header", "detail", "parent", "company", "uom", "read", "field", "conflict", "half"):
+            with self.subTest(invalid=invalid):
+                request = self.add(document("Material Request", "MR", items=[item("MRI", doctype="Material Request Item")]))
+                self.add(document("Material Request", "MR2", items=[item("MRI2", doctype="Material Request Item")]))
+                outgoing = self.add(document("Stock Entry", "OUT", purpose="Material Transfer", add_to_transit=1, items=[
+                    item("OUTI", doctype="Stock Entry Detail", warehouse=None, s_warehouse="W1", t_warehouse="W2",
+                        parent="OUT", parenttype="Stock Entry", parentfield="items", material_request=request.name, material_request_item="MRI")]))
+                self.add(document("Stock Entry", "OTHER", purpose="Material Transfer"))
+                root = document("Stock Entry", "IN", purpose="Material Transfer", outgoing_stock_entry="OUT", items=[
+                    item("INI", doctype="Stock Entry Detail", warehouse=None, s_warehouse="W2", t_warehouse="W3",
+                        against_stock_entry="OUT", ste_detail="OUTI")])
+                if invalid == "header": root.outgoing_stock_entry = "OTHER"
+                if invalid == "detail": root.items[0].ste_detail = "MISSING"
+                if invalid == "parent": outgoing.items[0].parent = "OTHER"
+                if invalid == "company": outgoing.company = "OTHER"
+                if invalid == "uom": outgoing.items[0].stock_uom = "Kg"
+                if invalid == "read": outgoing.check_permission.side_effect = frappe.PermissionError("SE source denied")
+                if invalid == "conflict": root.items[0].update(material_request="MR2", material_request_item="MRI2")
+                if invalid == "half": root.items[0].against_stock_entry = None
+                def fields(doctype, names, parenttype=None):
+                    if invalid == "field" and doctype == "Stock Entry Detail" and "ste_detail" in names:
+                        raise frappe.PermissionError("transit source field denied")
+                with patch.object(self.scope.service, "_require_fields", side_effect=fields):
+                    with self.assertRaises((frappe.ValidationError, frappe.PermissionError)): self.scope.collect_document_scope(root)
+    def test_invoice_billing_repost_uses_actual_receipt_anchor_only_when_native_setting_applies(self):
+        receipt = self.add(document("Purchase Receipt", "PR", items=[item("R")]))
+        self.sle(receipt, receipt.items[0])
+        future = self.add(document("Purchase Receipt", "FUTURE", posting_date="2026-01-11", items=[item("F")]))
+        self.sle(future, future.items[0])
+        for enabled, is_return, update_billed, seeded in ((1, 0, 0, True), (0, 0, 0, False), (1, 1, 0, False), (1, 1, 1, True)):
+            with self.subTest(enabled=enabled, is_return=is_return, update_billed=update_billed):
+                root = self.add(document("Purchase Invoice", "PI", posting_date="2026-01-15", is_return=is_return,
+                    update_billed_amount_in_purchase_receipt=update_billed, items=[item("PII", purchase_receipt="PR", pr_detail="R")]))
+                with patch.object(frappe.db, "get_single_value", return_value=enabled):
+                    result = self.scope.collect_cancellation_scope(root)
+                expected = {self.scope.DocumentIdentity("Purchase Invoice", "PI")}
+                if seeded: expected |= {self.scope.DocumentIdentity(doc.doctype, doc.name) for doc in (receipt, future)}
+                self.assertEqual(set(result.vouchers), expected)
+                self.assertEqual(result.posting_datetime, "2026-01-10 12:00:00" if seeded else "2026-01-15 12:00:00")
+                self.assertIn(self.scope.DocumentIdentity("Purchase Receipt", "PR"), result.sources)
+
+    def test_invoice_fifo_potential_seeds_use_only_actual_else_po_details_including_stock_pi(self):
+        order = self.add(document("Purchase Order", "PO", items=[item("PO1"), item("PO2", "B", "W2")]))
+        receipt = self.add(document("Purchase Receipt", "PR", items=[item("R", purchase_order="PO", purchase_order_item="PO1")]))
+        unrelated = self.add(document("Purchase Receipt", "OTHER", items=[item("O", "B", "W2", purchase_order="PO", purchase_order_item="PO2")]))
+        future = self.add(document("Purchase Receipt", "FUTURE", posting_date="2026-01-11", items=[item("F")]))
+        self.sle(receipt, receipt.items[0]); self.sle(unrelated, unrelated.items[0]); self.sle(future, future.items[0])
+        for update_stock in (0, 1):
+            with self.subTest(update_stock=update_stock):
+                root = self.add(document("Purchase Invoice", "PI", posting_date="2026-01-15", update_stock=update_stock,
+                    items=[item("PII", purchase_order="PO", po_detail="PO1")]))
+                with patch.object(frappe.db, "get_single_value", return_value=1): result = self.scope.collect_cancellation_scope(root)
+                self.assertEqual(set(result.vouchers), {self.scope.DocumentIdentity(doc.doctype, doc.name) for doc in (root, receipt, future)})
+                self.assertNotIn(self.scope.DocumentIdentity("Purchase Receipt", "OTHER"), result.sources)
+                self.assertIn(self.scope.StockPair("B", "W2"), result.pairs)  # whole actual PO footprint, not stock seed
+        root.items[0].purchase_receipt = "PR"; root.items[0].pr_detail = "R"; root.update_stock = 0
+        with patch.object(frappe.db, "get_single_value", return_value=1): result = self.scope.collect_cancellation_scope(root)
+        self.assertEqual(set(result.vouchers), {self.scope.DocumentIdentity(doc.doctype, doc.name) for doc in (root, receipt, future)})
+        self.assertFalse(any(query[0] == "Purchase Receipt Item" for query in self.queries))
+
+    def test_invoice_repost_setting_metadata_missing_is_not_treated_as_disabled(self):
+        root = self.add(document("Purchase Invoice", "PI"))
+        with patch.object(frappe, "get_meta", return_value=Mock(has_field=lambda field: False)):
+            with self.assertRaises(frappe.ValidationError): self.scope.collect_cancellation_scope(root)
+
+    def test_ordinary_stock_entry_external_writers_refuse_without_blocking_future_valuation(self):
+        for field in ("work_order", "job_card", "project", "asset_repair", "pick_list", "source_stock_entry"):
+            with self.subTest(field=field):
+                root = document("Stock Entry", "SE", purpose="Material Transfer", **{field: "UNADAPTED"})
+                with self.assertRaises(frappe.ValidationError): self.scope.collect_document_scope(root)
+        root = document("Stock Entry", "SE", purpose="Material Transfer", inspection_required=1,
+            items=[item("SEI", doctype="Stock Entry Detail", quality_inspection="QI")])
+        with self.assertRaises(frappe.ValidationError): self.scope.collect_document_scope(root)
+        root = self.add(document("Purchase Receipt", "PR", items=[item("R")]))
+        self.sle(root, root.items[0])
+        future = self.add(document("Stock Entry", "SE", purpose="Material Transfer", posting_date="2026-01-11",
+            work_order="WO", job_card="JC", project="PROJECT", asset_repair="AR", pick_list="PICK", source_stock_entry="SOURCE",
+            inspection_required=1, items=[item("SEI", doctype="Stock Entry Detail", quality_inspection="QI", s_warehouse="W1")]))
+        self.sle(future, future.items[0], "W1")
+        result = self.scope.collect_cancellation_scope(root)
+        self.assertEqual({doc.name for doc in result.vouchers}, {"PR", "SE"})
+
+    def test_future_manufacture_consumption_cost_path_refuses_only_actual_stock_rate_dependency(self):
+        root = self.add(document("Purchase Receipt", "PR", items=[item("R")]))
+        self.sle(root, root.items[0])
+        future = self.add(document("Stock Entry", "MAN", purpose="Manufacture", work_order="WO", posting_date="2026-01-11",
+            items=[item("RM", doctype="Stock Entry Detail", warehouse=None, s_warehouse="W1"),
+                item("FG", "D", doctype="Stock Entry Detail", warehouse=None, t_warehouse="W3", is_finished_item=1)]))
+        self.sle(future, future.items[0], "W1", actual_qty=-1)
+        self.sle(future, future.items[1], "W3")
+        with patch.object(frappe.db, "get_single_value", return_value=1), \
+                patch.object(frappe.db, "exists", side_effect=lambda dt, filters=None: dt == "Stock Entry"):
+            with self.assertRaises(frappe.ValidationError): self.scope.collect_cancellation_scope(root)
+        result = self.scope.collect_cancellation_scope(root)  # configuration off does not invent WO writes
+        self.assertEqual({doc.name for doc in result.vouchers}, {"PR", "MAN"})
+
+    def test_positive_manufacture_finished_sle_actual_recalculation_also_checks_cost_path(self):
+        root = self.add(document("Purchase Receipt", "PR", items=[item("R", "D", "W3")]))
+        self.sle(root, root.items[0])
+        future = self.add(document("Stock Entry", "MAN", purpose="Manufacture", work_order="WO", posting_date="2026-01-11",
+            items=[item("RM", doctype="Stock Entry Detail", warehouse=None, s_warehouse="W1"),
+                item("FG", "D", doctype="Stock Entry Detail", warehouse=None, t_warehouse="W3", is_finished_item=1)]))
+        self.sle(future, future.items[0], "W1", actual_qty=-1)
+        finished = self.sle(future, future.items[1], "W3", recalculate_rate=1)
+        with patch.object(frappe.db, "get_single_value", return_value=1), \
+                patch.object(frappe.db, "exists", side_effect=lambda dt, filters=None: dt == "Stock Entry"):
+            with self.assertRaises(frappe.ValidationError): self.scope.collect_cancellation_scope(root)
+            finished.recalculate_rate = 0
+            result = self.scope.collect_cancellation_scope(root)
+        self.assertEqual({doc.name for doc in result.vouchers}, {"PR", "MAN"})

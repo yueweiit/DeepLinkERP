@@ -61,9 +61,10 @@ _ROW_FIELDS = {"item_code", "stock_uom", "warehouse", "from_warehouse", "rejecte
     "purchase_receipt", "pr_detail", "material_request", "material_request_item", "purchase_invoice",
     "purchase_invoice_item", "delivered_by_supplier", "is_finished_item", "sales_order", "sales_order_item",
     "sales_order_packed_item", "delivery_note_item", "sales_invoice_item"}
+_ROW_FIELDS |= {"against_stock_entry", "ste_detail", "original_item", "subcontracted_item", "allow_alternative_item", "job_card", "scio_detail", "project", "quality_inspection"}
 _SLE_FIELDS = ["name", "company", "voucher_type", "voucher_no", "voucher_detail_no", "item_code", "warehouse",
     "posting_datetime", "posting_date", "posting_time", "creation", "is_cancelled", "actual_qty",
-    "dependant_sle_voucher_detail_no"]
+    "dependant_sle_voucher_detail_no", "recalculate_rate"]
 
 
 def _reject(reason):
@@ -158,6 +159,7 @@ class _Collector:
         self.propagated = set()
         self.items = {}
         self.warehouses = {}
+        self.potential_billing_receipts = set()
         self.add_document(root)
 
     def read(self, doctype, name, *, source=True):
@@ -194,46 +196,48 @@ class _Collector:
         if anchor and (pair not in self.anchors or anchor < self.anchors[pair]):
             self.anchors[pair] = anchor
 
-    def document_pairs(self, doc):
-        result = set()
+    def row_pairs(self, doc, row, table):
+        """Pairs from this exact native detail, never a same-item sibling row."""
+        _child_parent(doc, row, table)
+        if table == "supplied_items":
+            if not doc.get("is_old_subcontracting_flow"):
+                return set()
+            _fields(doc.doctype, {"supplied_items", "supplier_warehouse"})
+            _fields(row.doctype, {"rm_item_code", "stock_uom", "reserve_warehouse"}, doc.doctype)
+            warehouse = row.get("reserve_warehouse") if doc.doctype == "Purchase Order" else doc.get("supplier_warehouse")
+            if not row.get("rm_item_code") or not warehouse:
+                _reject("原生供料物料或仓库缺失")
+            item = service._read("Item", row.rm_item_code, {"is_stock_item", "stock_uom", "disabled"})
+            if not item.is_stock_item or item.get("disabled") or row.get("stock_uom") != item.stock_uom:
+                _reject("原生供料物料状态或库存单位不一致")
+            return {StockPair(row.rm_item_code, warehouse)}
+        _fields(row.doctype, _ROW_FIELDS, doc.doctype)
+        code = row.get("item_code")
+        if not code:
+            _reject("原生明细物料缺失")
+        native_item = self.items.get(code)
+        if native_item is None:
+            native_item = self.items[code] = service._read("Item", code, {"is_stock_item", "stock_uom", "disabled"})
+        if native_item.get("disabled") or row.get("stock_uom") and row.stock_uom != native_item.stock_uom:
+            _reject("原生明细物料状态或库存单位不一致")
         stock = doc.doctype in _STOCK and (doc.doctype not in ("Purchase Invoice", "Sales Invoice") or doc.get("update_stock"))
         quantity_bins = doc.doctype in ("Purchase Order", "Material Request")
-        for table in ("items", "packed_items"):
+        if not native_item.is_stock_item or not (stock or quantity_bins) or quantity_bins and row.get("delivered_by_supplier"):
+            return set()
+        warehouse_fields = ("s_warehouse", "t_warehouse") if doc.doctype == "Stock Entry" else ("warehouse",)
+        if doc.doctype in ("Purchase Receipt", "Purchase Invoice"):
+            warehouse_fields += ("from_warehouse",)
+            if row.get("rejected_qty"):
+                warehouse_fields += ("rejected_warehouse",)
+        if doc.doctype in ("Delivery Note", "Sales Invoice"):
+            warehouse_fields += ("target_warehouse",)
+        return {StockPair(code, row.get(field)) for field in warehouse_fields if row.get(field)}
+
+    def document_pairs(self, doc):
+        result = set()
+        for table in ("items", "packed_items", "supplied_items"):
             for row in doc.get(table) or []:
-                _fields(row.doctype, _ROW_FIELDS, doc.doctype)
-                _child_parent(doc, row, table)
-                code = row.get("item_code")
-                if not code:
-                    _reject("原生明细物料缺失")
-                native_item = self.items.get(code)
-                if native_item is None:
-                    native_item = self.items[code] = service._read("Item", code, {"is_stock_item", "stock_uom", "disabled"})
-                if native_item.get("disabled") or row.get("stock_uom") and row.stock_uom != native_item.stock_uom:
-                    _reject("原生明细物料状态或库存单位不一致")
-                if not native_item.is_stock_item or not (stock or quantity_bins):
-                    continue
-                if quantity_bins and row.get("delivered_by_supplier"):
-                    continue
-                warehouse_fields = ("s_warehouse", "t_warehouse") if doc.doctype == "Stock Entry" else ("warehouse",)
-                if doc.doctype in ("Purchase Receipt", "Purchase Invoice"):
-                    warehouse_fields += ("from_warehouse",)
-                    if row.get("rejected_qty"):
-                        warehouse_fields += ("rejected_warehouse",)
-                if doc.doctype in ("Delivery Note", "Sales Invoice"):
-                    warehouse_fields += ("target_warehouse",)
-                for field in warehouse_fields:
-                    if row.get(field):
-                        result.add(StockPair(code, row.get(field)))
-        if doc.get("is_old_subcontracting_flow"):
-            _fields(doc.doctype, {"supplied_items", "supplier_warehouse"})
-            for row in doc.get("supplied_items") or []:
-                _fields(row.doctype, {"rm_item_code", "reserve_warehouse"}, doc.doctype)
-                _child_parent(doc, row, "supplied_items")
-                warehouse = row.get("reserve_warehouse") if doc.doctype == "Purchase Order" else doc.get("supplier_warehouse")
-                if row.get("rm_item_code") and warehouse:
-                    result.add(StockPair(row.rm_item_code, warehouse))
-                else:
-                    _reject("原生供料物料或仓库缺失")
+                result.update(self.row_pairs(doc, row, table))
         return result
 
     def add_document(self, doc, *, source=False):
@@ -246,7 +250,9 @@ class _Collector:
         doc.check_permission("read")
         _fields(doc.doctype, {"company", "supplier", "items", "packed_items", "supplied_items", "references",
             "posting_date", "posting_time", "transaction_date", "update_stock", "is_return", "return_against",
-            "is_old_subcontracting_flow", "is_subcontracted", "subcontracting_order", "supplier_warehouse",
+            "is_old_subcontracting_flow", "is_subcontracted", "subcontracting_order", "subcontracting_inward_order", "supplier_warehouse",
+            "purchase_order", "outgoing_stock_entry", "add_to_transit", "work_order", "job_card", "project",
+            "asset_repair", "pick_list", "source_stock_entry", "inspection_required", "update_billed_amount_in_purchase_receipt",
             "purchase_receipts", "vendor_invoices", "party_type", "party", "purpose", "status", "custom_operating_source",
             "custom_operating_recognition", "inter_company_order_reference", "inter_company_reference", "inter_company_invoice_reference"})
         if doc.company != self.company or doc.get("docstatus") == 2:
@@ -278,11 +284,16 @@ class _Collector:
                 target = self.read(row.reference_doctype, row.reference_name)
                 if target.supplier != doc.party:
                     _reject("付款来源供应商不一致")
-        identities, _ = consistency.resolve_source_documents(doc, reader=self.read)
+        identities, _ = consistency.resolve_source_documents(doc, reader=self.read, stock_entry_lifecycle=identity == self.root)
         for doctype, name in sorted(identities):
             self.read(doctype, name)
         if identity == self.root and doc.doctype == "Purchase Invoice":
-            self.billing_receipts({name for doctype, name in identities if doctype == "Purchase Order"})
+            self.potential_billing_receipts.update(DocumentIdentity("Purchase Receipt", row.purchase_receipt)
+                for row in doc.items if row.get("pr_detail"))
+            # Native IF pr_detail ELSE po_detail: unrelated details on the same
+            # PO and arbitrary source-only PRs must never become repost seeds.
+            self.potential_billing_receipts.update(self.billing_receipts({row.po_detail for row in doc.items
+                if not row.get("pr_detail") and row.get("po_detail")}))
         if doc.get("return_against"):
             target = self.read(doc.doctype, doc.return_against)
             if target.get("supplier") != doc.get("supplier") or target.get("is_return"):
@@ -305,13 +316,18 @@ class _Collector:
                     _reject("到岸成本供应商应付身份缺失")
                 self.read("Purchase Invoice", row.vendor_invoice)
 
-    def billing_receipts(self, orders):
+    def billing_receipts(self, details):
         # prepare_document's native billing transition also targets every active
         # non-return PR against the real PO details. Identity-only bounded SELECT
         # mirrors get_purchase_receipts_against_po_details; no billed math runs.
-        details = sorted({row.name for name in orders for row in self.read("Purchase Order", name).items})
+        details = sorted(details)
         if not details:
-            return
+            return set()
+        def candidate(doc):
+            return doc.docstatus == 1 and not doc.get("is_return") and any(
+                row.get("purchase_order_item") in details for row in doc.items)
+        candidates = {identity for identity, doc in self.documents.items()
+            if identity.doctype == "Purchase Receipt" and candidate(doc)}
         remaining = MAX_VOUCHERS - len(self.sources)
         known = tuple(sorted(identity.name for identity in self.sources if identity.doctype == "Purchase Receipt")) or ("",)
         rows = frappe.db.sql("SELECT DISTINCT pri.parent FROM `tabPurchase Receipt Item` pri "
@@ -322,7 +338,11 @@ class _Collector:
         if len(rows) > remaining:
             _reject("原生账务来源范围超过安全上限")
         for row in rows:
-            self.read("Purchase Receipt", row.parent)
+            doc = self.read("Purchase Receipt", row.parent)
+            if not candidate(doc):
+                _reject("原生账务候选收货明细身份不一致")
+            candidates.add(DocumentIdentity(doc.doctype, doc.name))
+        return candidates
 
     def select(self, filters):
         # A repeated frontier must not spend the remaining budget on an already
@@ -355,13 +375,27 @@ class _Collector:
         for row in rows:
             self.add_voucher(row.voucher_type, row.voucher_no)
             doc = self.documents[DocumentIdentity(row.voucher_type, row.voucher_no)]
-            details = [item for field in ("items", "packed_items", "supplied_items")
+            details = [(field, item) for field in ("items", "packed_items", "supplied_items")
                 for item in doc.get(field) or [] if item.name == row.voucher_detail_no]
-            if len(details) != 1 or (details[0].get("item_code") or details[0].get("rm_item_code")) != row.item_code:
+            if len(details) != 1 or (details[0][1].get("item_code") or details[0][1].get("rm_item_code")) != row.item_code:
                 _reject("库存流水明细身份或物料不一致")
             pair = StockPair(row.item_code, row.warehouse)
-            if pair not in self.document_pairs(doc):
+            table, detail = details[0]
+            if pair not in self.row_pairs(doc, detail, table):
                 _reject("库存流水没有实际原生仓库来源")
+            if propagate and (row.actual_qty < 0 or row.get("recalculate_rate")) and doc.doctype == "Stock Entry" and doc.purpose == "Manufacture" and doc.get("work_order") and any(
+                    item.get("is_finished_item") and item.get("t_warehouse") and not item.get("s_warehouse") for item in doc.items):
+                # Native SE1503-1558 may read costs from other consumption SEs.
+                # No bounded identity/ACL planner for that rate path exists yet.
+                # This is a stock-rate edge, including a recalculate_rate FG SLE,
+                # not every GL-only child with a WO (SLE1193-1221, SE2107-2120).
+                settings = frappe.get_meta("Manufacturing Settings")
+                flags = ("material_consumption", "get_rm_cost_from_consumption_entry")
+                if not all(settings.has_field(field) for field in flags):
+                    _reject("原生制造成本配置元数据缺失")
+                if all(frappe.db.get_single_value("Manufacturing Settings", field) for field in flags) and frappe.db.exists(
+                        "Stock Entry", {"work_order": doc.work_order, "docstatus": 1, "purpose": "Material Consumption for Manufacture"}):
+                    _reject("制造消耗成本来源尚无有界权限范围适配")
             anchor = str(get_datetime(row.posting_datetime or get_combine_datetime(row.posting_date, row.posting_time)))
             self.add_pair(row.item_code, row.warehouse, anchor if propagate else None)
             if not propagate or row.name in self.propagated:
@@ -400,8 +434,7 @@ class _Collector:
         if any(row.voucher_type != identity.doctype for row in same_number):
             _reject("不同原生凭证类型使用相同凭证编号")
 
-    def root_gl_candidates(self):
-        doc = self.documents[self.root]
+    def document_gl_candidates(self, doc):
         if doc.doctype not in _STOCK or doc.doctype in ("Purchase Invoice", "Sales Invoice") and not doc.get("update_stock"):
             return
         items = {row.item_code for table in ("items", "packed_items") for row in doc.get(table) or []}
@@ -416,10 +449,27 @@ class _Collector:
         if warehouses: filters["warehouse"] = ["in", sorted(warehouses)]
         self.consume(self.select(filters))  # GL-only matches add footprint, never stock edges.
 
+    def seed_document(self, doc):
+        """One verified native transaction context, reused for billing PRs."""
+        self.add_voucher(doc.doctype, doc.name)
+        self.posting_datetime = min(self.posting_datetime, _datetime(doc))
+        self.consume(self.select({"voucher_type": doc.doctype, "voucher_no": doc.name}), propagate=True)
+        self.document_gl_candidates(doc)
+
     def closure(self):
-        self.add_voucher(self.root.doctype, self.root.name)
-        self.consume(self.select({"voucher_type": self.root.doctype, "voucher_no": self.root.name}), propagate=True)
-        self.root_gl_candidates()
+        root = self.documents[self.root]
+        self.seed_document(root)
+        if root.doctype == "Purchase Invoice":
+            setting = "set_landed_cost_based_on_purchase_invoice_rate"
+            if not frappe.get_meta("Buying Settings").has_field(setting):
+                _reject("原生采购成本重贴配置元数据缺失")
+            if frappe.db.get_single_value("Buying Settings", setting) and not (
+                    root.get("is_return") and not root.get("update_billed_amount_in_purchase_receipt")):
+                # FIFO may leave some candidates unchanged. This is a bounded
+                # potential lease footprint, NOT a claim each PR created a RIV.
+                # Later execution must capture only actual native RIV roots.
+                for identity in sorted(self.potential_billing_receipts):
+                    self.seed_document(self.documents[identity])
         while True:
             pending = sorted(self.vouchers - self.expanded)
             frontier = sorted((pair, anchor) for pair, anchor in self.anchors.items()

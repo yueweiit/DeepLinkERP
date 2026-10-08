@@ -1130,7 +1130,7 @@ def check_cancellation_facts(doc, old):
         operation.reject("采购取消不能同时改写来源、金额或核销事实，请刷新后单独取消", "cancellation_business_facts_changed")
 
 
-def resolve_source_documents(doc, *, reader=None):
+def resolve_source_documents(doc, *, reader=None, stock_entry_lifecycle=True):
     """Read-only identity resolution shared with the cancellation scope collector.
 
     This does not preserve billing values, lock sources, register audit effects or
@@ -1138,7 +1138,7 @@ def resolve_source_documents(doc, *, reader=None):
     """
     read = reader or service._read
     orders, receipts, invoices = set(), set(), set()
-    native_sources = native_source_identities(doc, reader=read)
+    native_sources = native_source_identities(doc, reader=read, stock_entry_lifecycle=stock_entry_lifecycle)
     invoices.update(name for doctype, name in native_sources if doctype == "Purchase Invoice")
     for row in doc.get("items") or []:
         if row.get("purchase_order"):
@@ -1191,9 +1191,102 @@ def prepare_document(doc):
         _stage(doc, "Inventory / existing native stock reposts", lambda: check_pending_reposts(doc))
 
 
-def native_source_identities(doc, *, locked=False, reader=None):
+def _native_source_row(doc, row, source, detail, table, target_doctype, *, item_field="item_code", fields=()):
+    """Shared pure parent/detail proof for actual native updater identities."""
+    service._require_fields(source.doctype, {"company", table})
+    service._require_fields(target_doctype, {item_field, "stock_uom", *fields}, source.doctype)
+    targets = [item for item in source.get(table) or [] if item.name == detail]
+    target = targets[0] if len(targets) == 1 else None
+    if not target or target.doctype != target_doctype or target.get(item_field) != row.item_code or (
+            target.get("stock_uom") != row.get("stock_uom")) or source.company != doc.company or source.docstatus != 1 or (
+            target.get("parent") and (target.parent != source.name or target.parenttype != source.doctype or target.parentfield != table)):
+        operation.reject("采购原生关联来源身份、公司或状态不一致", "native_source_identity_mismatch")
+    return target
+
+
+def _stock_entry_source_identities(doc, read, *, lifecycle):
+    """SELECT-only native MR, transit-SE and explicit old-PO supplied identities.
+
+    StockEntry's updater relationships are not in its status_updater list. This
+    follows actual pointers; no MR/transfer/supply/reservation calculations run.
+    """
+    service._require_fields("Stock Entry", {"company", "items", "purpose", "purchase_order", "supplier",
+        "is_return", "outgoing_stock_entry", "add_to_transit", "subcontracting_inward_order"})
+    service._require_fields("Stock Entry Detail", {"item_code", "stock_uom", "material_request", "material_request_item",
+        "against_stock_entry", "ste_detail", "po_detail", "original_item", "subcontracted_item", "allow_alternative_item", "scio_detail"}, "Stock Entry")
+    if doc.get("subcontracting_inward_order") or any(row.get("scio_detail") for row in doc.get("items") or []):
+        operation.reject("委外入库来源尚无同步范围适配", "native_source_path_unsupported")
+    identities = set()
+    if lifecycle:
+        service._require_fields("Stock Entry", {"work_order", "job_card", "project", "asset_repair", "pick_list",
+            "source_stock_entry", "inspection_required"})
+        service._require_fields("Stock Entry Detail", {"project", "quality_inspection"}, "Stock Entry")
+        if any(doc.get(field) for field in ("work_order", "job_card", "project", "asset_repair", "pick_list", "source_stock_entry")) or (
+                any(row.get("project") or doc.get("inspection_required") and row.get("quality_inspection") for row in doc.get("items") or [])
+                or doc.purpose in ("Send to Warehouse", "Receive at Warehouse")):
+            operation.reject("库存单据存在尚未适配的原生外部写入或转换路径", "native_source_path_unsupported")
+
+    def request(row, parent, detail):
+        if not parent and not detail:
+            return
+        if not parent or not detail:
+            operation.reject("原生物料请求父单据与明细身份不完整", "native_source_identity_missing")
+        source = read("Material Request", parent)
+        _native_source_row(doc, row, source, detail, "items", "Material Request Item")
+        identities.add((source.doctype, source.name))
+
+    outgoing = None
+    if doc.get("outgoing_stock_entry"):
+        if doc.purpose != "Material Transfer" or doc.outgoing_stock_entry == doc.name:
+            operation.reject("未支持的库存中转来源路径", "native_source_path_unsupported")
+        outgoing = read("Stock Entry", doc.outgoing_stock_entry)
+        service._require_fields("Stock Entry", {"company", "items", "purpose", "add_to_transit"})
+        if outgoing.company != doc.company or outgoing.docstatus != 1 or outgoing.purpose != "Material Transfer":
+            operation.reject("库存中转来源公司或状态不一致", "native_source_identity_mismatch")
+        identities.add((outgoing.doctype, outgoing.name))
+    for row in doc.get("items") or []:
+        direct = (row.get("material_request"), row.get("material_request_item"))
+        request(row, *direct)
+        if outgoing:
+            if row.get("against_stock_entry") != outgoing.name or not row.get("ste_detail"):
+                operation.reject("库存中转来源父单据与明细错配", "native_source_identity_missing")
+            target = _native_source_row(doc, row, outgoing, row.ste_detail, "items", "Stock Entry Detail",
+                fields={"material_request", "material_request_item", "transferred_qty"})
+            inherited = (target.get("material_request"), target.get("material_request_item"))
+            request(row, *inherited)
+            if any(direct) and any(inherited) and direct != inherited:
+                operation.reject("库存中转物料请求来源冲突", "native_source_identity_mismatch")
+        elif row.get("against_stock_entry") or row.get("ste_detail"):
+            operation.reject("库存中转来源缺少真实父库存单据", "native_source_identity_missing")
+    if doc.get("purchase_order"):
+        source = read("Purchase Order", doc.purchase_order)
+        service._require_fields("Purchase Order", {"company", "supplier", "items", "supplied_items", "is_old_subcontracting_flow"})
+        service._require_fields("Purchase Order Item", {"job_card"}, "Purchase Order")
+        if source.company != doc.company or source.docstatus != 1 or not source.get("is_old_subcontracting_flow") or (
+                doc.get("supplier") and doc.supplier != source.supplier):
+            operation.reject("原生旧委外采购来源公司、供应商或状态不一致", "native_source_identity_mismatch")
+        if (lifecycle and doc.purpose == "Send to Subcontractor" and any(row.get("job_card") for row in source.items)) or not (
+                doc.purpose in ("Send to Subcontractor", "Material Transfer") or doc.get("is_return")):
+            operation.reject("旧委外工单或库存来源路径尚无同步范围适配", "native_source_path_unsupported")
+        for row in doc.get("items") or []:
+            if not row.get("po_detail") or row.get("original_item") or row.get("allow_alternative_item"):
+                operation.reject("旧委外供料需明确的已核查原生明细，不支持自动补链或替代物料", "native_source_path_unsupported")
+            target = _native_source_row(doc, row, source, row.po_detail, "supplied_items", "Purchase Order Item Supplied",
+                item_field="rm_item_code", fields={"main_item_code", "reserve_warehouse"})
+            item = service._read("Item", target.rm_item_code, {"stock_uom"})
+            if item.stock_uom != row.get("stock_uom") or not target.get("main_item_code") or (
+                    row.get("subcontracted_item") != target.main_item_code) or not target.get("reserve_warehouse"):
+                operation.reject("旧委外供料物料、单位或主物料身份不一致", "native_source_identity_mismatch")
+        identities.add((source.doctype, source.name))
+    return identities
+
+
+def native_source_identities(doc, *, locked=False, reader=None, stock_entry_lifecycle=True):
     """Resolve actual native updater targets; do not reproduce its update math."""
     identities = set()
+    read = reader or (service._current if locked else service._read)
+    if doc.doctype == "Stock Entry":
+        return _stock_entry_source_identities(doc, read, lifecycle=stock_entry_lifecycle)
     for mapping in getattr(doc, "status_updater", []):
         if (doc.doctype, mapping.get("target_parent_dt")) not in (("Purchase Order", "Material Request"),
                 ("Purchase Receipt", "Material Request"), ("Purchase Receipt", "Purchase Invoice")):
@@ -1204,13 +1297,8 @@ def native_source_identities(doc, *, locked=False, reader=None):
                 continue
             if not parent or not detail:
                 operation.reject("采购原生关联来源父单据与明细身份不完整", "native_source_identity_missing")
-            source = (reader or (service._current if locked else service._read))(mapping["target_parent_dt"], parent)
-            service._require_fields(source.doctype, {"company", "items"})
-            service._require_fields(mapping["target_dt"], {"item_code", "stock_uom", mapping["target_field"]}, source.doctype)
-            target = next((item for item in source.get("items") or [] if item.name == detail), None)
-            if not target or target.doctype != mapping["target_dt"] or target.item_code != row.item_code or (
-                    target.get("stock_uom") != row.get("stock_uom")) or source.company != doc.company or source.docstatus != 1:
-                operation.reject("采购原生关联来源身份、公司或状态不一致", "native_source_identity_mismatch")
+            source = read(mapping["target_parent_dt"], parent)
+            _native_source_row(doc, row, source, detail, "items", mapping["target_dt"], fields={mapping["target_field"]})
             identities.add((source.doctype, source.name))
     return identities
 
