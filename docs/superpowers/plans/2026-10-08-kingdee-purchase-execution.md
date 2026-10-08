@@ -18,7 +18,7 @@
 
 - [x] 核对 Branding 远端与 Vultr 当前 image，协调唯一发布负责人。
 - [x] 采购 JS 基线：128 个测试通过；不将旧 QA 报告算作当前验证。
-- [ ] 替换 Redis 唯一结果缓存为共用、持久化 Integration Request 操作边界；原生入口/同步冲销/日志和提交前校验。
+- [x] 替换 Redis 唯一结果缓存为共用、持久化 Integration Request 严格基础边界；原生入口/可同步冲销/日志和提交前校验，未支持关联保持明确拒绝。Task 1A 已独立验收；新库存取消的分阶段例外仍在后续任务实现。
 - [ ] 按已确认的狭义异步例外扩展库存取消：持久阶段、实际 RIV 及传播范围、前后端拦截、最终核对与恢复；其余业务继续同事务。
 - [ ] 扩展既有原生转换和付款服务支持同主体合并；整批事务/来源行/当前余量与权限。
 - [ ] 可靠钉钉来源自动草稿；不足字段保持待完善，人工值与历史付款保护不变。
@@ -141,10 +141,10 @@
 
 **Files:** 既有 `services/purchase_consistency.py`、`services/purchase_operation.py`、`services/purchase_document_actions.py`、采购表单桥、对应测试及 `deploy/local/test_purchase_document_actions_qa.py`。不改 ERPNext 核心、不实施新异步能力。
 
-- [x] 冻结本轮五项补漏：合法零金额无 PLE；PO 真实 Bin 产物；MR/源 PI/履行关联及 Finance 真实产物；中国凭证日期/期间/反向关系；REST 取消通过删除旧采购引用逃出边界。随后追加 DN 及内部交易 Sales 关联识别/预写旧身份检查，最新冻结 `ce985c3f`。
+- [x] 冻结本轮五项补漏：合法零金额无 PLE；PO 真实 Bin 产物；MR/源 PI/履行关联及 Finance 真实产物；中国凭证日期/期间/反向关系；REST 取消通过删除旧采购引用逃出边界。随后追加 DN 及内部交易 Sales 关联识别/预写旧身份检查、直接付款草稿 replay 和非采购表单透传，最新冻结 `1ce76c0a`。
 - [x] 在实际 `frappe.in_test=False` 的隔离库重跑原生脚本，并核对精确 fixture 清理、RIV 与账簿计数。命令：`docker exec -w /home/frappe/frappe-bench/sites dlp-kingdee-purchase-qa-backend-1 /home/frappe/frappe-bench/env/bin/python /workspace/deploy/local/test_purchase_document_actions_qa.py`。预期全部案例成功且计数恢复；不得用旧结果替代新提交证据。
-- [ ] 对冻结 SHA 作规格复审；规格通过后才作独立质量审查。重要问题回到同一实现者修复，重新测试和复审。
-- [ ] 主线程独立重跑全部 Branding pytest、`node --test tests/*.test.js`、Python/JS 语法与 `git diff --check`。报告案例数、参数展开、跳过、现有告警，释放 QA 与 index 后进入 1B。
+- [x] 对冻结 SHA 作规格复审；规格通过后才作独立质量审查。重要问题回到同一实现者修复，重新测试和复审；最终 `1ce76c0a` 两轮通过。
+- [x] 主线程独立重跑全部 Branding pytest、`node --test tests/*.test.js`、Python/JS 语法与 `git diff --check`。报告案例数、参数展开、跳过、现有告警，释放 QA 与 index 后进入 1B。
 
 2026-10-08 当前冻结补漏为 `eb02a1107ca411135fd6d61b37614fd64b25e4d8`，4 文件 +486/-17（业务源、单测、原生脚本、局部规格），不包括本执行计划。主线程独立实际复验：native 完整脚本 51 tests / 39.223s / OK；Branding 615 passed、325 subtests passed / 53.26s；Node 479 passed、0 failed/skipped；Python 编译、JS 语法及 diff 检查成功。原生脚本保持顶层 `frappe.in_test=False`，每个 fixture 清理后原计数恢复，重跑后容器只剩两个原有 gunicorn。规格复审与其后的质量审查仍未完成，不将这些 green 结果认定为安全阶段或完整采购候选验收。旧委外 supplied Bin 的新增案例是 native-shaped 单测，不是旧委外全业务原生验收。零 GL 取消留下 Finance Pending issue 仍失败关闭，作为当前限制明确保留。
 
@@ -169,7 +169,22 @@
 
 两项均已由主线程核对实际入口源码，交回同一 writer 作有限 red→green，不扩大非采购业务改造；之后重跑独立验证、规格和质量复审。以上 green 结果不覆盖这两条新缺口。
 
+**两项质量补漏的新检查点：** `1ce76c0ad74c27ea658f424df1de3da6d60b2876`，5 个修改文件 +191/-11，无新增/删除文件。直接草稿 replay 调用已有 `replay_artifacts`；同一 form 分类 helper 检查 proposed 与 persisted 采购身份，未使用 `_current` 给无关单据增加 read ACL，清除旧来源或伪造 `__islocal` 不能逃离已有边界。3 个新增独立原生场景、1 个单位选路矩阵（32 个参数）；已有采购队列场景增加 4 个旧身份参数。
+
+实现者实际 red 已观察到草稿两个合法编辑参数不拒绝旧回执、4 个非采购队列参数被误拒、2 个 keyed Save 产生采购审计、2 个 keyed Cancel 被要求快照。首轮完整 native 58 exit 1 的四个队列失败另为夹具 scheduler alias 提前导入造成；仅补受控夹具 native save 模块与 wrapper 的两个真实 alias，不改变公司/调度配置。Queue 插入和状态保持原生，仅隔离外部 `queue_action` dispatch。该失败轮不算通过。
+
+主线程对同一冻结 SHA 独立重跑并确认 exit 0：native **58 tests / 47.709s / OK**；全部 Branding **618 passed、369 subtests passed / 53.67s**；Node **479 passed、0 failed/skipped / 457.558875ms**；四文件 Python 编译、JS 语法及冻结范围/工作树 diff 检查通过。脚本 SHA256 `e5141b81ef76fb3148ef523819677032fe8ddf13565050016f0e8a0ce3a698cc` 与容器一致，Finance voucher 仍为固定候选 `3956eeb851212e210f6f9fddaaa2f380caa496845e6164bad3b395f3c5539f4d`。所有 fixture 的 37 类计数核对成功；完整测试后再次只读查询 37 类，PO139、PR114、PI5、PE6、GL16、PLE8、Bin306、CAV8、SyncIssue19，IR/SubmissionQueue/RIV/SLE/新 Sales/DN 均 0，顶层 `frappe.in_test=False`；仅两个原有 gunicorn。正式规格复审已通过，随后的独立质量复审进行中，尚不标记 1A 完成或进入 1B。
+
+随后同一冻结 `1ce76c0a` 独立质量复审通过，两个 Important 均关闭，无剩余 Critical/Important 或可行动 Minor。只批准限定 Task 1A 进入 1B1，未批准完整候选发布。主线程停止全部 QA 活动、保持原生脚本结果和退出证据，串行交接下个 writer。继续保留严格 RIV、未适配 Sales/Operating、零 GL Finance Pending 限制；新 async、批量、来源同步、UI、集成 CI/browser 和统一部署均未完成。
+
 ### Task 1B：范围、元数据与跨 commit 锁协议（先不放开取消）
+
+执行时分为两个连续审查的小步骤，沿用下面的同一契约，不建立平行服务或增加业务审批：
+
+- **1B1 闭包与窄元数据：** 只实现 `purchase_reversal_scope.py` 的完整、有界原生范围收集、`purchase_reversal_install.py` 的可重复元数据安装及其已有 QA 夹具测试。验证取消种子、同时间未来行、调拨/拆装/制造传播、原生 GL 的 item 集合 × warehouse 集合与 whole-voucher 影响，以及来源替换/权限/超限。安装钩子可注册但没有启用异步取消、运行后台任务或给业务写入豁免。普通首笔库存草稿缺少 Bin 不应被取消冻结规则误拦。
+- **1B2 会话 lease 与统一入口：** 在 1B1 冻结、独立规格和质量审查通过后，实现 `purchase_repost_boundary.py` 的物理连接握手/锁生命周期、指针保护及原生 `_save/insert` 的旧/新范围拦截，运行真实两连接和入口覆盖测试。只有两个步骤均通过才能完成 Task 1B，之后进入 worker 隔离 Task 1C。
+
+原生闭包须合并真实 stock propagation 与 GL propagation：根凭证的 raw SLE 包含取消行；未来库存行使用原生时间比较和依赖 detail 引用；GL 查询使用原生 item 集合 × warehouse 集合，而不是仅原始 pair。查到的真实凭证须纳入其全部实际行和相关来源。原生按 voucher name 排序造成跨 doctype 同名扩张时，纳入完整真实身份或明确拒绝碰撞，不静默漏算。任何无法验证的公司/仓库/来源/控制器路径在业务写入前失败关闭；不得借 UI 100 条限制、忽略 read 权限或截断查询伪装完整闭包。
 
 **Files:**
 
