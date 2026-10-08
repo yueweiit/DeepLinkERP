@@ -982,19 +982,111 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
 
     def test_native_savedocs_queue_is_stopped_before_dispatch(self):
         from deeplinkerp_branding.services import purchase_consistency as guard
+        from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
         po = self.order()
+        pr = self.receipt(po)
+        pi = make_purchase_invoice(pr.name).insert()
+        pi.submit()
+        pe = get_payment_entry(pi.doctype, pi.name, bank_account="Cash - QAB", bank_amount=10).insert()
         self.commit_fixture()
-        payload = json.dumps(po.as_dict(), default=str)
-        meta = frappe.get_meta("Purchase Order")
-        with patch.object(meta, "queue_in_background", True), \
-                patch("frappe.utils.scheduler.is_scheduler_inactive", return_value=False), \
-                patch("frappe.desk.form.save.queue_submission", side_effect=AssertionError("No queue dispatch")):
-            for key in (None, str(uuid.uuid4())):
-                with self.subTest(request_id=key), self.assertRaises(frappe.ValidationError) as caught:
-                    guard.savedocs(payload, "Submit", request_id=key)
-                self.assertEqual(caught.exception.purchase_error_id, "native_background_submission_unsupported")
+        for document in (po, pi, pe):
+            payload = document.as_dict()
+            if document.doctype == "Purchase Invoice":
+                for row in payload["items"]:
+                    for field in ("purchase_order", "po_detail", "purchase_receipt", "pr_detail"):
+                        row[field] = None
+            elif document.doctype == "Payment Entry":
+                payload["references"] = []
+            with patch.object(frappe.get_meta(document.doctype), "queue_in_background", True), \
+                    patch("frappe.utils.scheduler.is_scheduler_inactive", return_value=False), \
+                    patch("frappe.desk.form.save.queue_submission", side_effect=AssertionError("No queue dispatch")):
+                for key in (None, str(uuid.uuid4())):
+                    with self.subTest(doctype=document.doctype, request_id=key), self.assertRaises(frappe.ValidationError) as caught:
+                        guard.savedocs(json.dumps(payload, default=str), "Submit", request_id=key)
+                    self.assertEqual(caught.exception.purchase_error_id, "native_background_submission_unsupported")
         self.assertEqual(frappe.db.get_value("Purchase Order", po.name, "docstatus"), 1)
         self.assertEqual(self.before["Submission Queue"], frappe.db.count("Submission Queue"))
+
+    def unrelated_financial_documents(self):
+        frappe.db.set_value("Item", self.item, "is_stock_item", 0)
+        frappe.clear_document_cache("Item", self.item)
+        pi = frappe.get_doc({"doctype": "Purchase Invoice", "company": COMPANY,
+            "supplier": "QA Test Supplier", "currency": "CNY", "conversion_rate": 1, "update_stock": 0,
+            "items": [{"item_code": self.item, "qty": 2, "rate": 20}]}).insert(
+                set_name="QA-ATOMIC-PI-" + uuid.uuid4().hex[:16])
+        pe = frappe.get_doc({"doctype": "Payment Entry", "company": COMPANY, "payment_type": "Receive",
+            "party_type": "Customer", "party": "QA Purchase Payments Customer",
+            "paid_from": frappe.get_cached_value("Company", COMPANY, "default_receivable_account"),
+            "paid_to": "Cash - QAB", "paid_amount": 10, "received_amount": 10,
+            "source_exchange_rate": 1, "target_exchange_rate": 1,
+            "reference_no": "QA-UNRELATED", "reference_date": nowdate()}).insert()
+        return pi, pe
+
+    def test_unrelated_native_savedocs_preserves_real_submission_queue_with_or_without_key(self):
+        from deeplinkerp_branding.services import purchase_consistency as guard
+        from frappe.core.doctype.submission_queue.submission_queue import SubmissionQueue
+        pi, pe = self.unrelated_financial_documents()
+        self.commit_fixture("Purchase Invoice", "QA-ATOMIC-PI-")
+        counts = {doctype: frappe.db.count(doctype) for doctype in self.types}
+        for document in (pi, pe):
+            self.assertFalse(guard.is_procurement(document))
+            for key in (None, str(uuid.uuid4())):
+                with self.subTest(doctype=document.doctype, request_id=key):
+                    try:
+                        with patch.object(frappe.get_meta(document.doctype), "queue_in_background", True), \
+                                patch("frappe.utils.scheduler.is_scheduler_inactive", return_value=False), \
+                                patch("frappe.desk.form.save.is_scheduler_inactive", return_value=False), \
+                                patch.object(SubmissionQueue, "queue_action"):  # isolate external dispatch, not native queue insertion
+                            guard.savedocs(json.dumps(document.as_dict(), default=str), "Submit", request_id=key)
+                        queues = frappe.get_all("Submission Queue", filters={"ref_doctype": document.doctype,
+                            "ref_docname": document.name}, fields=["name", "status"])
+                        self.assertEqual(len(queues), 1)
+                        self.assertEqual(queues[0].status, "Queued")
+                        self.assertEqual(frappe.db.get_value(document.doctype, document.name, "docstatus"), 0)
+                        self.assertEqual(frappe.db.count("Integration Request"), counts["Integration Request"])
+                    finally:
+                        frappe.db.rollback()
+        self.assertEqual(counts, {doctype: frappe.db.count(doctype) for doctype in self.types})
+
+    def test_unrelated_native_savedocs_and_cancel_keep_native_results_and_acl(self):
+        from deeplinkerp_branding.services import purchase_consistency as guard
+        from frappe import permissions
+        native_permission = permissions.has_permission
+        def denied_permission(doctype, ptype="read", *args, **kwargs):
+            if doctype in ("Purchase Invoice", "Payment Entry") and ptype in ("write", "cancel"):
+                return False
+            return native_permission(doctype, ptype, *args, **kwargs)
+        pi, pe = self.unrelated_financial_documents()
+        self.commit_fixture("Purchase Invoice", "QA-ATOMIC-PI-")
+        for document in (pi, pe):
+            for key in (None, str(uuid.uuid4())):
+                with self.subTest(doctype=document.doctype, action="Save", request_id=key):
+                    payload = frappe.get_doc(document.doctype, document.name).as_dict()
+                    payload["remarks"] = "QA unrelated native save " + str(key)
+                    before = frappe.db.count("Integration Request")
+                    with patch.object(permissions, "has_permission", side_effect=denied_permission), self.assertRaises(frappe.PermissionError):
+                        guard.savedocs(json.dumps(payload, default=str), "Save", request_id=key)
+                    self.assertEqual(frappe.db.count("Integration Request"), before)
+                    guard.savedocs(json.dumps(payload, default=str), "Save", request_id=key)
+                    self.assertEqual(frappe.response.docs[-1]["name"], document.name)
+                    self.assertEqual(frappe.db.count("Integration Request"), before)
+            document.reload().submit()
+        self.commit_fixture("Purchase Invoice", "QA-ATOMIC-PI-")
+        for document in (pi, pe):
+            for key in (None, str(uuid.uuid4())):
+                with self.subTest(doctype=document.doctype, action="Cancel", request_id=key):
+                    try:
+                        before = frappe.db.count("Integration Request")
+                        with patch.object(permissions, "has_permission", side_effect=denied_permission), self.assertRaises(frappe.PermissionError):
+                            guard.cancel(document.doctype, document.name, request_id=key)
+                        self.assertEqual(frappe.db.get_value(document.doctype, document.name, "docstatus"), 1)
+                        self.assertEqual(frappe.db.count("Integration Request"), before)
+                        guard.cancel(document.doctype, document.name, request_id=key)  # native cancel needs no supplied snapshot
+                        self.assertEqual(frappe.response.docs[-1]["docstatus"], 2)
+                        self.assertEqual(frappe.db.get_value(document.doctype, document.name, "docstatus"), 2)
+                        self.assertEqual(frappe.db.count("Integration Request"), before)
+                    finally:
+                        frappe.db.rollback()
 
     def test_auto_invoice_rejects_real_purchase_user_without_invoice_create(self):
         po = self.order()
@@ -1636,6 +1728,45 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         with self.assertRaises(frappe.ValidationError) as caught:
             actions.record_payment(**args)
         self.assertEqual(caught.exception.purchase_error_id, "replay_evidence_changed")
+
+    def test_direct_payment_draft_replay_rechecks_acknowledged_evidence_and_write_acl(self):
+        from deeplinkerp_branding.services import purchase_consistency as guard
+        from deeplinkerp_branding.services import purchase_payment_service as service
+        from deeplinkerp_branding.services import purchase_document_actions as actions
+        from deeplinkerp_branding.services import purchase_operation as kernel
+        po = self.order()
+        pr = self.receipt(po)
+        pi = make_purchase_invoice(pr.name).insert()
+        pi.submit()
+        self.commit_fixture()
+        for change in ({"remarks": "QA legitimate changed draft"}, {"amount": 11}):
+            with self.subTest(change=change):
+                args = dict(source_doctype="Purchase Receipt", source_name=pr.name, purchase_invoice=pi.name,
+                    amount_to_pay=10, bank_account="Cash - QAB", request_id=str(uuid.uuid4()))
+                original = service.create_payment_draft(**args)
+                self.commit_fixture()
+                receipt = json.loads(frappe.get_doc("Integration Request",
+                    kernel.identity("Administrator", args["request_id"])).output)
+                self.assertTrue(any(row["name"] == original["name"] for row in receipt["artifacts"]))
+                self.assertEqual(service.create_payment_draft(**args), {**original, "reused": True})
+                from frappe import permissions
+                native_permission = permissions.has_permission
+                def deny_write(doctype, ptype="read", *args, **kwargs):
+                    if doctype == "Payment Entry" and ptype == "write":
+                        return False
+                    return native_permission(doctype, ptype, *args, **kwargs)
+                with patch.object(permissions, "has_permission", side_effect=deny_write), self.assertRaises(frappe.PermissionError):
+                    service.create_payment_draft(**args)
+                current = actions.preview_payment(original["name"])["document"]
+                actions.update_payment_draft(original["name"], change, current["modified"])
+                self.commit_fixture()
+                before = guard.artifact_evidence(frappe.get_doc("Payment Entry", original["name"]))
+                counts = {doctype: frappe.db.count(doctype) for doctype in self.types}
+                with self.assertRaises(frappe.ValidationError) as caught:
+                    service.create_payment_draft(**args)
+                self.assertEqual(caught.exception.purchase_error_id, "replay_evidence_changed")
+                self.assertEqual(before, guard.artifact_evidence(frappe.get_doc("Payment Entry", original["name"])))
+                self.assertEqual(counts, {doctype: frappe.db.count(doctype) for doctype in self.types})
 
     def test_existing_finance_posting_cannot_be_stranded_when_settings_turn_inactive(self):
         from china_finance.services import voucher

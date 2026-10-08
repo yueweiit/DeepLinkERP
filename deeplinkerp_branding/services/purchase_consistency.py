@@ -136,11 +136,27 @@ def _form_operation(request_id, payload, native):
     operation.run(request_id, business_payload(payload), write, _form_replay)
 
 
+def _form_is_procurement(payload, *, doctype=None, name=None):
+    """Classify only; native actions still own unrelated document permissions."""
+    doctype = doctype or (payload or {}).get("doctype")
+    if doctype in ("Purchase Order", "Purchase Receipt"):
+        return True
+    if doctype not in ("Purchase Invoice", "Payment Entry"):
+        return False
+    if payload and is_procurement(frappe.get_doc(payload)):
+        return True
+    name = name or (payload or {}).get("name")
+    # Neither cleared links nor __islocal can erase a persisted purchase identity.
+    # This read is not source authorization and returns no content to the actor;
+    # procurement controllers retain their existing source locks and ACL checks.
+    return bool(name and frappe.db.exists(doctype, name) and is_procurement(frappe.get_doc(doctype, name)))
+
+
 @frappe.whitelist(methods=["POST", "PUT"])
 def savedocs(doc, action, request_id=None):
     from frappe.desk.form.save import savedocs as native_savedocs
     payload = json.loads(doc) if isinstance(doc, str) else doc
-    if payload.get("doctype") not in ("Purchase Order", "Purchase Receipt", "Purchase Invoice", "Payment Entry"):
+    if not _form_is_procurement(payload):
         return native_savedocs(doc, action)
     def native():
         from frappe.utils.scheduler import is_scheduler_inactive
@@ -159,6 +175,8 @@ def cancel(doctype=None, name=None, workflow_state_fieldname=None, workflow_stat
     if doctype not in ("Purchase Order", "Purchase Receipt", "Purchase Invoice", "Payment Entry") or not request_id:
         return native()
     payload = json.loads(doc) if isinstance(doc, str) else doc
+    if not _form_is_procurement(payload, doctype=doctype, name=name):
+        return native()
     if not payload or (payload.get("doctype"), payload.get("name")) != (doctype, name):
         operation.reject("原生采购取消缺少完整单据快照，请刷新", "native_cancel_payload_missing")
     _form_operation(request_id, {"doc": payload, "action": "Cancel", "workflow_state_fieldname": workflow_state_fieldname,

@@ -1008,7 +1008,9 @@ def create_payment_draft(source_doctype, source_name, purchase_invoice=None, amo
 
     def replay(previous):
         # Read the complete native context and current ACLs; never trust audit output.
+        from .purchase_operation import replay_artifacts
         from .purchase_document_actions import _payment
+        replay_artifacts(previous)
         entry = _current("Payment Entry", previous["name"])
         entry.check_permission("write")
         _payment(entry)

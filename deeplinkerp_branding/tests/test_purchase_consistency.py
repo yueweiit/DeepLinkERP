@@ -337,6 +337,33 @@ class ConsistencyTests(unittest.TestCase):
             self.guard.savedocs(json.dumps({"doctype": "Sales Order"}), "Submit")
         native.assert_called_once()
 
+    def test_native_form_scope_preserves_old_identity_without_adding_read_acl(self):
+        for doctype in ("Purchase Invoice", "Payment Entry"):
+            for old_scope, incoming_scope in ((False, False), (True, False), (False, True), (True, True)):
+                def document(procurement):
+                    return frappe._dict(doctype=doctype, name="EXISTING", party_type="Supplier",
+                        items=[frappe._dict(purchase_order="PO" if procurement else None)],
+                        references=[frappe._dict(reference_doctype="Purchase Order", reference_name="PO")] if procurement else [])
+                old, incoming = document(old_scope), document(incoming_scope)
+                incoming["__islocal"] = 1  # incoming bookkeeping cannot hide a stored purchase identity
+                for key in (None, "12345678-12345678"):
+                    for endpoint in ("savedocs", "cancel"):
+                        with self.subTest(doctype=doctype, old_scope=old_scope, incoming_scope=incoming_scope,
+                                request_id=key, endpoint=endpoint):
+                            with patch.object(frappe.db, "exists", return_value=True), \
+                                    patch.object(frappe, "get_doc", side_effect=lambda value, *args: old if isinstance(value, str) else incoming), \
+                                    patch.object(self.guard.service, "_current", side_effect=AssertionError("No procurement read ACL before native passthrough")), \
+                                    patch.object(self.guard, "_form_operation", side_effect=RuntimeError("durable procurement boundary")), \
+                                    patch("frappe.desk.form.save.savedocs", return_value="native"), \
+                                    patch("frappe.desk.form.save.cancel", return_value="native"):
+                                invoke = lambda: self.guard.savedocs(json.dumps(incoming), "Save", key) if endpoint == "savedocs" else \
+                                    self.guard.cancel(doctype, "EXISTING", request_id=key, doc=json.dumps(incoming))
+                                if key and (old_scope or incoming_scope):
+                                    with self.assertRaisesRegex(RuntimeError, "durable procurement boundary"):
+                                        invoke()
+                                else:
+                                    self.assertEqual(invoke(), "native")
+
     def test_unproved_skipped_native_repost_cannot_acknowledge_operation(self):
         context = {"operation_id": "ID", "user": "QA", "documents": []}
         doc = self.doc("Repost Item Valuation", status="Skipped")
