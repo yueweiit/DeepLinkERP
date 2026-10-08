@@ -47,7 +47,7 @@ def equal(doc, field, actual, expected, label):
 
 
 def snapshot(doc):
-    return {"doctype": doc.doctype, "name": doc.name, "docstatus": doc.docstatus,
+    return {"doctype": doc.doctype, "name": doc.name, "docstatus": doc.docstatus, "status": doc.get("status"),
         "modified": str(doc.get("modified") or ""), "amount": doc.get("paid_amount") if doc.doctype == "Payment Entry" else doc.get("grand_total"),
         "currency": doc.get("paid_from_account_currency") if doc.doctype == "Payment Entry" else doc.get("currency"),
         "items": [{"key": row.get("name"), "qty": row.get("qty"), "rate": row.get("rate"),
@@ -470,7 +470,7 @@ def _acknowledge_finance_assignments(doc, *, voucher):
         acknowledge_effect(frappe.get_doc("China Cash Flow Assignment", name, for_update=True), system_effect=True)
 
 
-def check_sources(doc, *, reader=None, validate_execution=True):
+def check_sources(doc, *, reader=None, validate_execution=True, allow_draft_receipts=False):
     """Validate every supplied native row identity, including native forms/multi-PO."""
     read = reader or service._current
     identities = set()
@@ -489,7 +489,8 @@ def check_sources(doc, *, reader=None, validate_execution=True):
             original = next((item for item in source.items if item.name == identity), None)
             if not original or original.item_code != row.item_code or original.get("stock_uom") != row.get("stock_uom"):
                 operation.reject("采购来源明细、物料或库存单位不一致", "purchase_source_row_mismatch")
-            if source.company != doc.company or source.supplier != doc.supplier or source.docstatus != 1:
+            draft_receipt = allow_draft_receipts and doc.doctype == "Purchase Invoice" and doc.docstatus == 0 and not doc.get("update_stock") and doctype == "Purchase Receipt" and source.docstatus == 0
+            if source.company != doc.company or source.supplier != doc.supplier or (source.docstatus != 1 and not draft_receipt):
                 operation.reject("采购来源状态、公司或供应商不一致", "purchase_source_header_mismatch")
             identities.add((source.doctype, source.name))
             if doctype == "Purchase Order" and validate_execution:
@@ -1042,13 +1043,13 @@ def check_sales_dependencies(doc, *, reader=None):
 
 class ProcurementControllerBoundary:
     """Also roll back native form/import controller failures, without touching other PE flows."""
-    def _procurement_call(self, method, *args, **kwargs):
+    def _procurement_call(self, method, *args, _purchase_payload=None, **kwargs):
         persisted = None
         if self.doctype in ("Purchase Invoice", "Payment Entry") and self.name and not self.is_new():
             # Resource PUT merges incoming rows before save; incoming links must
             # not erase the already persisted procurement boundary. This read is
             # classification only, never exposed; scoped ACL/locks follow below.
-            persisted = frappe.get_doc(self.doctype, self.name)
+            persisted = service._read(self.doctype, self.name)
         if not is_procurement(self) and not (persisted and is_procurement(persisted)):
             return method(*args, **kwargs)
         initial = deepcopy(self.as_dict())
@@ -1100,17 +1101,37 @@ class ProcurementControllerBoundary:
             key = self.flags.get("purchase_request_id") or frappe.flags.get("purchase_request_id") or str(uuid.uuid4())
             # Unkeyed programmatic calls get a distinct invocation identity;
             # only a caller-provided key promises cross-request replay.
-            outcome = operation.run(key, {"doc": business_payload(initial), "action": initial_action or method.__name__}, write,
+            outcome = operation.run(key, _purchase_payload or {"doc": business_payload(initial), "action": initial_action or method.__name__}, write,
                 _form_replay)
             if "doc" not in result:
                 result["doc"] = frappe.get_doc(outcome["document"]["doctype"], outcome["document"]["name"])
         return result["doc"]
 
     def insert(self, *args, **kwargs):
-        return self._procurement_call(super().insert, *args, **kwargs)
+        from .purchase_repost_boundary import document_boundary
+        with document_boundary(self):
+            return self._procurement_call(super().insert, *args, **kwargs)
 
     def _save(self, *args, **kwargs):
-        return self._procurement_call(super()._save, *args, **kwargs)
+        from .purchase_repost_boundary import document_boundary
+        with document_boundary(self):
+            return self._procurement_call(super()._save, *args, **kwargs)
+
+    def db_set(self, fieldname, *args, **kwargs):
+        from .purchase_repost_boundary import POINTER, document_boundary, execution
+        if fieldname == POINTER or isinstance(fieldname, dict) and POINTER in fieldname:
+            frappe.throw("库存保护指针不能由普通单据写入、清除或替换", frappe.PermissionError)
+        fields = set(fieldname) if isinstance(fieldname, dict) else {fieldname}
+        if self.doctype == "Purchase Invoice" and fields & {"on_hold", "hold_comment", "release_date"}:
+            with execution():
+                persisted = service._read(self.doctype, self.name) if self.name and not self.is_new() else None
+                if is_procurement(self) or persisted and is_procurement(persisted):
+                    from .purchase_source_service import _write_fields
+                    self.check_permission("write")
+                    _write_fields(self.doctype, fields)
+                    with document_boundary(self):
+                        return super().db_set(fieldname, *args, **kwargs)
+        return super().db_set(fieldname, *args, **kwargs)
 
 
 def check_cancellation_facts(doc, old):

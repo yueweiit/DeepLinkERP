@@ -187,10 +187,21 @@ extend_doctype_class = {
     **{doctype: ["deeplinkerp_branding.services.purchase_consistency.ProcurementControllerBoundary"]
        for doctype in ("Purchase Order", "Purchase Receipt", "Purchase Invoice", "Payment Entry")},
     "Integration Request": ["deeplinkerp_branding.services.purchase_operation.ProcurementAuditRetention"],
+    **{doctype: ["deeplinkerp_branding.services.purchase_repost_boundary.NativeRangeBoundary"]
+       for doctype in ("Stock Entry", "Delivery Note", "Sales Invoice", "Stock Reconciliation", "Landed Cost Voucher", "Material Request")},
+    **{doctype: ["deeplinkerp_branding.services.purchase_repost_boundary.PointerBoundary"]
+       for doctype in ("Bin", "Repost Item Valuation")},
 }
+before_request = ["deeplinkerp_branding.services.purchase_repost_boundary.before_execution"]
+for _status_doctype in ("Purchase Order", "Purchase Receipt", "Material Request"):
+    extend_doctype_class[_status_doctype].append("deeplinkerp_branding.services.purchase_repost_boundary.NativeStatusBoundary")
+before_job = ["deeplinkerp_branding.services.purchase_repost_boundary.before_execution"]
 override_whitelisted_methods = {"oa_purchase_request.oa_purchase_request.oa_purchase_request.create_purchase_order":"deeplinkerp_branding.services.purchase_source_service.legacy_create_purchase_order"}
 override_whitelisted_methods.update({"frappe.desk.form.save.savedocs": "deeplinkerp_branding.services.purchase_consistency.savedocs",
-    "frappe.desk.form.save.cancel": "deeplinkerp_branding.services.purchase_consistency.cancel"})
+    "frappe.desk.form.save.cancel": "deeplinkerp_branding.services.purchase_consistency.cancel",
+    "erpnext.buying.doctype.purchase_order.purchase_order.update_status": "deeplinkerp_branding.services.purchase_repost_boundary.update_purchase_order_status",
+    "erpnext.buying.doctype.purchase_order.purchase_order.close_or_unclose_purchase_orders": "deeplinkerp_branding.services.purchase_repost_boundary.close_or_unclose_purchase_orders",
+    "erpnext.controllers.accounts_controller.update_child_qty_rate": "deeplinkerp_branding.services.purchase_repost_boundary.update_child_qty_rate"})
 scheduler_events = {"cron": {"*/15 * * * *": ["deeplinkerp_branding.services.operating_expenses.scheduled_sync", "deeplinkerp_branding.services.purchase_source_service.scheduled_sync"]}}
 website_context = {
 	"favicon": "/assets/deeplinkerp_branding/logo/tab_logo.svg?v=0.0.6",

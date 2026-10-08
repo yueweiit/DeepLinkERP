@@ -1,5 +1,7 @@
 """Native drawer actions on one synthetic site, always rolled back."""
 import json
+import subprocess
+import sys
 import uuid
 import unittest
 from unittest.mock import patch
@@ -323,6 +325,9 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         frappe.set_user("Administrator")
         frappe.flags.in_test = True
         frappe.flags.mute_emails = True
+        from deeplinkerp_branding.services.purchase_repost_boundary import initialize
+        initialize()  # BEFORE this fixture's first synthetic business insert.
+        frappe.db.after_commit.reset()  # BEFORE any fixture acquires a lease.
         self.types = ("Purchase Order", "Purchase Receipt", "Purchase Invoice", "Payment Entry", "GL Entry",
             "Payment Ledger Entry", "Stock Ledger Entry", "Bin", "China Accounting Voucher", "China Voucher Sync Issue", "Integration Request", "Item",
             "ToDo", "Version", "Notification Log", "China Cash Flow Assignment", "User", "Warehouse",
@@ -330,6 +335,10 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         self.types += ("Sales Order", "Stock Reservation Entry", "Submission Queue", "Repost Item Valuation",
             "Material Request", "Purchase Fulfilment Link", "China Cash Equivalent Scope", "Delivery Note", "Customer", "Price List", "Item Price", "Sales Invoice")
         self.types += ("Stock Entry",)
+        self.types += ("Stock Entry Type", "Project")  # exact new native default/opaque fixtures
+        self.types += ("Product Bundle",)  # exact new native late-packed-items fixture
+        self.types += ("Putaway Rule",)  # exact new late warehouse native fixture
+        self.types += ("OA Purchase Request", "Comment")  # exact source recheck/write boundary fixture
         self.before = {doctype: frappe.db.count(doctype) for doctype in self.types}
         self.initial_names = {doctype: set(frappe.get_all(doctype, pluck="name", limit_page_length=0)) for doctype in self.types}
         self.committed_names = None
@@ -356,22 +365,875 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         self.assertEqual(self.before, {doctype: frappe.db.count(doctype) for doctype in self.types})
 
     def commit_fixture(self, primary_doctype="Purchase Order", name_prefix="QA-ATOMIC-PO-"):
-        frappe.db.after_commit.reset()  # test fixture must not dispatch notifications/jobs
         frappe.db.commit()
-        self.committed_names = {doctype: set(frappe.get_all(doctype, pluck="name", limit_page_length=0)) - self.initial_names[doctype]
-            for doctype in self.types}
+        self.remember_new_names()
         self.assertTrue(self.committed_names[primary_doctype])
         self.assertTrue(all(name.startswith(name_prefix) for name in self.committed_names[primary_doctype]))
 
-    def order(self, currency="CNY", conversion_rate=1, supplier="QA Test Supplier", transaction_date=None, qty=10, rate=12.345, items=None):
+    def remember_new_names(self):
+        """Immediate exact deltas, including subjects of a failed subTest."""
+        if self.committed_names is None:
+            self.committed_names = {doctype: set() for doctype in self.types}
+        for doctype in self.types:
+            self.committed_names[doctype] |= set(frappe.get_all(doctype, pluck="name", limit_page_length=0)) - self.initial_names[doctype]
+
+    def order(self, currency="CNY", conversion_rate=1, supplier="QA Test Supplier", transaction_date=None, qty=10, rate=12.345, items=None, submit=True):
         po = frappe.get_doc({"doctype": "Purchase Order", "company": COMPANY,
             "transaction_date": transaction_date or nowdate(),
             "supplier": supplier, "currency": currency, "conversion_rate": conversion_rate, "schedule_date": add_days(nowdate(), 1),
             "items": items or [{"item_code": self.item, "qty": qty, "rate": rate,
                 "warehouse": "Stores - QAB", "schedule_date": add_days(nowdate(), 1)}]}).insert(
                     set_name="QA-ATOMIC-PO-" + uuid.uuid4().hex[:16])
-        po.submit()
+        if submit:
+            po.submit()
         return po
+
+    def test_native_source_same_link_recheck_pending_blocks_evidence_and_comment_then_nested_write_rolls_back(self):
+        from deeplinkerp_branding.services import purchase_source_service as sources, purchase_repost_boundary as boundary
+        po = self.order(submit=False)
+        raw = {"version": "QA-ATOMIC-SOURCE-OLD", "eligible": True, "currency": "CNY", "items": []}
+        with sources.managed_write():
+            oa = frappe.get_doc({"doctype": "OA Purchase Request", "oa_code": "QA-ATOMIC-OA-" + uuid.uuid4().hex,
+                "purchase_order": po.name, "target_company": COMPANY,
+                sources.SOURCE_FIELD: json.dumps(raw), sources.BOUND_FIELD: raw["version"]}).insert()
+        frappe.db.set_value(po.doctype, po.name, "custom_oa_purchase_expense", oa.name, update_modified=False)
+        owner = self.pending_owner()
+        frappe.db.set_value(po.doctype, po.name, boundary.POINTER, owner.name, update_modified=False)
+        self.commit_fixture()
+        comments, before = frappe.db.count("Comment"), frappe.get_doc(oa.doctype, oa.name).as_dict()
+        fresh = {**raw, "version": "QA-ATOMIC-SOURCE-NEW"}
+        with self.assertRaisesRegex(frappe.ValidationError, "相关采购来源待完成"):
+            sources._bind(oa, po.reload(), fresh, {}, "QA-ATOMIC-source recheck")
+        self.assertEqual(frappe.get_doc(oa.doctype, oa.name).as_dict(), before)
+        self.assertEqual(frappe.db.count("Comment"), comments)
+        with boundary.execution(), boundary.acquire((boundary.fence_key(),)):
+            with boundary.acquire((boundary.lock_key("document", po.doctype, po.name),)):
+                frappe.db.set_value(po.doctype, po.name, boundary.POINTER, None, update_modified=False)
+        self.commit_fixture()
+        modified = frappe.db.get_value(po.doctype, po.name, "modified")
+        sources._bind(oa, po.reload(), fresh, {}, "QA-ATOMIC-source recheck")
+        self.assertEqual(frappe.db.get_value(po.doctype, po.name, "modified"), modified)
+        self.assertEqual(frappe.db.get_value(oa.doctype, oa.name, sources.BOUND_FIELD), fresh["version"])
+        self.assertEqual(frappe.db.count("Comment"), comments + 1)
+        self.commit_fixture()
+        # Changed-link still uses native PO save and its existing audit flow.
+        # A later OA failure rolls both nested writes back as one execution.
+        frappe.db.set_value(po.doctype, po.name, "custom_oa_purchase_expense", None, update_modified=False)
+        self.commit_fixture()
+        sql_set = frappe.db.set_value
+        def fail_source(doctype, *args, **kwargs):
+            if doctype == oa.doctype:
+                raise RuntimeError("QA-ATOMIC source evidence failure")
+            return sql_set(doctype, *args, **kwargs)
+        audits = frappe.db.count("Integration Request")
+        with patch.object(frappe.db, "set_value", side_effect=fail_source), self.assertRaisesRegex(RuntimeError, "source evidence failure"):
+            sources._bind(oa, po.reload(), {**fresh, "version": "QA-ATOMIC-SOURCE-NEXT"}, {})
+        self.assertFalse(frappe.db.get_value(po.doctype, po.name, "custom_oa_purchase_expense"))
+        self.assertEqual(frappe.db.count("Integration Request"), audits)
+        self.assertEqual(frappe.db.get_value(oa.doctype, oa.name, sources.BOUND_FIELD), fresh["version"])
+        sources._bind(oa, po.reload(), fresh, {})
+        self.assertEqual(frappe.db.get_value(po.doctype, po.name, "custom_oa_purchase_expense"), oa.name)
+
+    def boundary_database(self):
+        """Actual second mysqlclient business adapter, never a lock-only service."""
+        from frappe.database import get_db
+        database = get_db(socket=frappe.conf.db_socket, host=frappe.conf.db_host, port=frappe.conf.db_port,
+            user=frappe.conf.db_user, password=frappe.conf.db_password, cur_db_name=frappe.conf.db_name)
+        database.connect()
+        self.addCleanup(lambda: database.close())
+        return database
+
+    def test_native_session_lease_sql_epochs_callbacks_and_two_connection_authority(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        left, right = self.boundary_database(), self.boundary_database()
+        first = boundary.initialize(left)
+        second = boundary.initialize(right)
+        self.assertNotEqual(first.connection_id, second.connection_id)
+        self.assertEqual(type(first.connection).__module__, "MySQLdb.connections")
+        key, later = boundary.lock_key("qa-lease", self.item), boundary.lock_key("qa-later", self.item)
+        def assert_owner(owner):
+            self.assertEqual(right.sql("SELECT IS_USED_LOCK(%s)", (key,))[0][0], owner)
+        with boundary.execution(db=left), boundary.acquire((key,), db=left):
+            left.commit(); assert_owner(first.connection_id)
+            left.rollback(); assert_owner(first.connection_id)
+            left.savepoint("scope_test"); left.rollback(save_point="scope_test"); assert_owner(first.connection_id)
+            with self.assertRaises(frappe.ValidationError):
+                with boundary.execution(db=right), boundary.acquire((key,), db=right): pass
+        assert_owner(first.connection_id)
+        left.before_commit.add(lambda: (_ for _ in ()).throw(RuntimeError("native early callback")))
+        with self.assertRaisesRegex(RuntimeError, "native early callback"): left.commit()
+        assert_owner(None)
+        left.before_commit.reset()
+        with boundary.execution(db=left), boundary.acquire((key,), db=left): pass
+        left.before_rollback.add(lambda: (_ for _ in ()).throw(RuntimeError("native rollback callback")))
+        with self.assertRaisesRegex(RuntimeError, "native rollback callback"): left.rollback()
+        assert_owner(None)
+        left.before_rollback.reset()
+        with boundary.execution(db=left), boundary.acquire((key,), db=left): pass
+        def next_epoch():
+            with boundary.execution(db=left), boundary.acquire((later,), db=left): pass
+            raise RuntimeError("after physical commit")
+        left.after_commit.add(next_epoch)
+        with self.assertRaisesRegex(RuntimeError, "after physical commit"): left.commit()
+        assert_owner(None)
+        self.assertEqual(right.sql("SELECT IS_USED_LOCK(%s)", (later,))[0][0], first.connection_id)
+        left.commit()
+        self.assertIsNone(right.sql("SELECT IS_USED_LOCK(%s)", (later,))[0][0])
+        with boundary.execution(db=left), boundary.acquire((key,), db=left): pass
+        left.close()
+        assert_owner(None)
+        with self.assertRaises(frappe.ValidationError): boundary.initialize(left)
+
+    def test_native_killed_session_cannot_reconnect_or_reacquire(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        left, right = self.boundary_database(), self.boundary_database()
+        state = boundary.initialize(left)
+        key = boundary.lock_key("qa-kill", self.item)
+        with boundary.execution(db=left), boundary.acquire((key,), db=left):
+            right.sql("KILL CONNECTION %s", (state.connection_id,))
+            with self.assertRaises(Exception): left.sql("SELECT CONNECTION_ID()")
+            self.assertTrue(state.poisoned)
+            with self.assertRaises(frappe.ValidationError): boundary.initialize(left)
+        self.assertIsNone(right.sql("SELECT IS_USED_LOCK(%s)", (key,))[0][0])
+
+    def test_native_killed_before_first_handshake_poisons_execution_without_reconnect(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        left, right = self.boundary_database(), self.boundary_database()
+        physical = left._conn
+        right.sql("KILL CONNECTION %s", (physical.thread_id(),))
+        with self.assertRaises(Exception): boundary.initialize(left)
+        self.assertTrue(left._purchase_session.poisoned)
+        self.assertFalse(physical.open)
+        with self.assertRaises(frappe.ValidationError): boundary.initialize(left)
+        self.assertIs(left._conn, physical)
+
+    def test_nested_native_before_commit_rollback_then_new_writes_fail_physically_cleaned(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        self.commit_fixture(primary_doctype="Item", name_prefix="QA-ATOMIC-")
+        left, right = self.boundary_database(), self.boundary_database()
+        state = boundary.initialize(left)
+        key = boundary.lock_key("qa-nested-callback", self.item)
+        committed_markers = []
+        with boundary.execution(db=left), boundary.acquire((key,), db=left): pass
+        def callback():
+            left.rollback()
+            with boundary.execution(db=left), boundary.acquire((key,), db=left):
+                left.sql("UPDATE tabItem SET item_name=%s WHERE name=%s", ("QA-ATOMIC-PENDING", self.item))
+                left.after_commit.add(lambda: committed_markers.append("rolled-back business"))
+            raise RuntimeError("original nested callback failure")
+        left.before_commit.add(callback)
+        with self.assertRaisesRegex(RuntimeError, "original nested callback failure"):
+            left.commit()
+        self.assertFalse(state.poisoned)
+        self.assertIsNone(right.sql("SELECT IS_USED_LOCK(%s)", (key,))[0][0])
+        self.assertEqual(right.sql("SELECT item_name FROM tabItem WHERE name=%s", (self.item,))[0][0], self.item)
+        left.commit()  # genuine later native status/error-path commit
+        self.assertEqual(committed_markers, [])
+
+    def test_native_before_rollback_nested_commit_and_after_commit_new_epoch_data(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        self.commit_fixture(primary_doctype="Item", name_prefix="QA-ATOMIC-")
+        left, right = self.boundary_database(), self.boundary_database()
+        state = boundary.initialize(left)
+        key, later = boundary.lock_key("qa-before-rollback", self.item), boundary.lock_key("qa-after-commit", self.item)
+        markers = []
+        def before():
+            left.commit()  # actually commits prior chunk, cannot undo it
+            left.sql("UPDATE tabItem SET item_name=%s WHERE name=%s", ("QA-ATOMIC-ROLLBACK-PENDING", self.item))
+            left.after_commit.add(lambda: markers.append("rolled-back callback"))
+            raise RuntimeError("original before rollback nested failure")
+        with boundary.execution(db=left), boundary.acquire((key,), db=left):
+            left.sql("UPDATE tabItem SET item_name=%s WHERE name=%s", ("QA-ATOMIC-COMMITTED-CHUNK", self.item))
+            left.before_rollback.add(before)
+            with self.assertRaisesRegex(RuntimeError, "original before rollback nested failure"):
+                left.rollback()
+            self.assertEqual(right.sql("SELECT IS_USED_LOCK(%s)", (key,))[0][0], state.connection_id)
+            self.assertEqual(right.sql("SELECT item_name FROM tabItem WHERE name=%s", (self.item,))[0][0], "QA-ATOMIC-COMMITTED-CHUNK")
+            left.commit()  # native status/error commit, still active lease
+            self.assertEqual(markers, [])
+        left.commit()
+        self.assertIsNone(right.sql("SELECT IS_USED_LOCK(%s)", (key,))[0][0])
+        def after():
+            with boundary.execution(db=left), boundary.acquire((later,), db=left):
+                left.sql("UPDATE tabItem SET item_name=%s WHERE name=%s", ("QA-ATOMIC-NEXT-EPOCH", self.item))
+            raise RuntimeError("after own real commit")
+        left.after_commit.add(after)
+        with self.assertRaisesRegex(RuntimeError, "after own real commit"): left.commit()
+        self.assertEqual(right.sql("SELECT IS_USED_LOCK(%s)", (later,))[0][0], state.connection_id)
+        right.rollback()
+        self.assertEqual(right.sql("SELECT item_name FROM tabItem WHERE name=%s", (self.item,))[0][0], "QA-ATOMIC-COMMITTED-CHUNK")
+        left.commit()  # only NEXT actual commit publishes/releases new epoch
+        right.rollback()
+        self.assertEqual(right.sql("SELECT item_name FROM tabItem WHERE name=%s", (self.item,))[0][0], "QA-ATOMIC-NEXT-EPOCH")
+        self.assertIsNone(right.sql("SELECT IS_USED_LOCK(%s)", (later,))[0][0])
+
+        for cleanup_failure in (False, True):
+            with self.subTest(nested_rollback_cleanup_failure=cleanup_failure):
+                left, right = self.boundary_database(), self.boundary_database()
+                state = boundary.initialize(left)
+                key = boundary.lock_key("qa-before-rollback-nested", self.item, cleanup_failure)
+                previous = right.sql("SELECT item_name FROM tabItem WHERE name=%s", (self.item,))[0][0]
+                markers = []
+                def nested_rollback():
+                    left.rollback()  # nested SQL is not the enclosing rollback's SQL
+                    left.sql("UPDATE tabItem SET item_name=%s WHERE name=%s", ("QA-ATOMIC-NESTED-PENDING", self.item))
+                    left.after_commit.add(lambda: markers.append("rolled-back business"))
+                    if cleanup_failure:
+                        left.after_rollback.add(lambda: (_ for _ in ()).throw(RuntimeError("unsafe cleanup")))
+                    raise RuntimeError("original nested rollback failure")
+                with boundary.execution(db=left), boundary.acquire((key,), db=left):
+                    left.before_rollback.add(nested_rollback)
+                    with self.assertRaisesRegex(RuntimeError, "original nested rollback failure"):
+                        left.rollback()
+                    right.rollback()
+                    self.assertEqual(right.sql("SELECT item_name FROM tabItem WHERE name=%s", (self.item,))[0][0], previous)
+                    if cleanup_failure:
+                        self.assertTrue(state.poisoned)
+                        self.assertFalse(state.connection.open)
+                        self.assertIsNone(right.sql("SELECT IS_USED_LOCK(%s)", (key,))[0][0])
+                        with self.assertRaises(frappe.ValidationError): left.commit()
+                    else:
+                        self.assertFalse(state.poisoned)
+                        self.assertEqual(right.sql("SELECT IS_USED_LOCK(%s)", (key,))[0][0], state.connection_id)
+                        left.commit()  # allowed native follow-up cannot carry stale callbacks
+                    self.assertEqual(markers, [])
+                if not cleanup_failure:
+                    left.commit()
+                    self.assertIsNone(right.sql("SELECT IS_USED_LOCK(%s)", (key,))[0][0])
+
+    def test_real_fresh_public_payment_and_source_entries_handshake_before_first_lock(self):
+        from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
+        po = self.order()
+        pr = self.receipt(po)
+        pi = make_purchase_invoice(pr.name).insert()
+        pi.submit()
+        pe = get_payment_entry(pi.doctype, pi.name, bank_account="Cash - QAB", bank_amount=10).insert()
+        self.commit_fixture()
+        for action in ("entry-payment-update", "entry-payment-submit", "entry-source-create"):
+            with self.subTest(action=action):
+                pe.reload()
+                result = self.native_peer({"action": action, "item": self.item, "name": pe.name,
+                    "modified": str(pe.modified)})
+                self.assertLess(result["identity_query"], result["first_lock"])
+                self.assertTrue(result["same_physical"])
+                self.assertTrue(result["execution_id"])
+                frappe.db.rollback()  # only this fixture's read epoch, no pending business writes
+
+    def pending_owner(self):
+        return frappe.get_doc({"doctype": "Integration Request", "integration_request_service": "QA Boundary Pointer",
+            "status": "Queued", "data": "{}"}).insert(ignore_permissions=True)
+
+    def native_peer(self, payload):
+        process = subprocess.run([sys.executable, __file__, "--boundary-peer", json.dumps(payload)],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        result = json.loads(process.stdout.strip().splitlines()[-1])
+        # A may still own an old RR snapshot. Register the peer's exact typed
+        # committed delta immediately, even if the next assertion fails.
+        for doctype, names in result["created"].items():
+            self.committed_names.setdefault(doctype, set()).update(names)
+        return result
+
+    def test_pending_bin_blocks_real_native_stock_draft_but_unrelated_first_stock_works(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        po = self.order()
+        owner = self.pending_owner()
+        frappe.db.set_value("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"}, boundary.POINTER, owner.name)
+        self.commit_fixture()
+        blocked = frappe.get_doc({"doctype": "Stock Entry", "purpose": "Material Receipt", "stock_entry_type": "Material Receipt", "company": COMPANY,
+            "items": [{"item_code": self.item, "qty": 1, "t_warehouse": "Stores - QAB"}]})
+        blocked.flags.purchase_reversal_internal = True
+        with self.assertRaises(frappe.ValidationError): blocked.insert(ignore_permissions=True)
+        extra = self.scope_item()
+        self.assertFalse(frappe.db.exists("Bin", {"item_code": extra, "warehouse": "Stores - QAB"}))
+        ordinary = frappe.get_doc({"doctype": "Stock Entry", "purpose": "Material Receipt", "stock_entry_type": "Material Receipt", "company": COMPANY,
+            "items": [{"item_code": extra, "qty": 1, "t_warehouse": "Stores - QAB"}]}).insert()
+        self.assertEqual(ordinary.docstatus, 0)
+        self.assertEqual(ordinary.items[0].stock_uom, "Nos")
+        self.assertFalse(frappe.db.exists("Bin", {"item_code": extra, "warehouse": "Stores - QAB"}))
+
+    def test_pointer_rewrite_is_rejected_before_native_ignore_permission_save(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        po, owner = self.order(), self.pending_owner()
+        self.commit_fixture()
+        po.reload()
+        po.set(boundary.POINTER, owner.name)
+        po.flags.purchase_reversal_internal = True
+        with self.assertRaises(frappe.PermissionError): po.save(ignore_permissions=True)
+        self.assertFalse(frappe.db.get_value(po.doctype, po.name, boundary.POINTER))
+
+    def test_pending_bin_unchanged_pointer_blocks_native_qty_api_and_same_pair_insert(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        from frappe.client import set_value
+        self.order()
+        owner = self.pending_owner()
+        name = frappe.db.get_value("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"}, "name")
+        frappe.db.set_value("Bin", name, boundary.POINTER, owner.name, update_modified=False)
+        self.commit_fixture()
+        for action in ("native", "rpc", "insert"):
+            with self.subTest(action=action):
+                original = frappe.get_doc("Bin", name)
+                before = original.actual_qty
+                with self.assertRaisesRegex(frappe.ValidationError, "相关库存范围待完成"):
+                    if action == "native":
+                        original.actual_qty = before + 7
+                        original.flags.purchase_reversal_internal = True
+                        original.save(ignore_permissions=True)
+                    elif action == "rpc":
+                        set_value("Bin", name, "actual_qty", before + 7)
+                    else:
+                        frappe.get_doc({"doctype": "Bin", "item_code": self.item, "warehouse": "Stores - QAB",
+                            "actual_qty": 7}).insert(ignore_permissions=True)
+                self.assertEqual(frappe.db.get_value("Bin", name, "actual_qty"), before)
+                self.assertEqual(frappe.db.count("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"}), 1)
+
+    def test_material_request_real_purchase_backlink_pointer_blocks_native_save(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        mr, po = self.material_request_order()
+        po.submit()
+        owner = self.pending_owner()
+        frappe.db.set_value(po.doctype, po.name, boundary.POINTER, owner.name, update_modified=False)
+        self.commit_fixture()
+        mr.reload()
+        with self.assertRaises(frappe.ValidationError): mr.save(ignore_permissions=True)
+
+    def test_native_material_request_status_rpc_pending_bin_and_backlinks_then_native_resume(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        from erpnext.stock.doctype.material_request.material_request import update_status
+        mr, po = self.material_request_order()
+        owner = self.pending_owner()
+        bin_name = frappe.db.get_value("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"}, "name")
+        self.commit_fixture()
+        for doctype, name in (("Bin", bin_name), (po.doctype, po.name)):
+            frappe.db.set_value(doctype, name, boundary.POINTER, owner.name, update_modified=False)
+            self.commit_fixture()
+            before = (frappe.db.get_value(mr.doctype, mr.name, "status"),
+                frappe.db.get_value("Bin", bin_name, "indented_qty"),
+                frappe.db.get_value("Purchase Order Item", po.items[0].name, "material_request_item"))
+            with self.assertRaisesRegex(frappe.ValidationError, "相关.*待完成"):
+                update_status(mr.name, "Stopped")
+            self.assertEqual(before, (frappe.db.get_value(mr.doctype, mr.name, "status"),
+                frappe.db.get_value("Bin", bin_name, "indented_qty"),
+                frappe.db.get_value("Purchase Order Item", po.items[0].name, "material_request_item")))
+            frappe.db.set_value(doctype, name, boundary.POINTER, None, update_modified=False)
+            self.commit_fixture()
+        update_status(mr.name, "Stopped")
+        self.assertEqual(frappe.db.get_value("Bin", bin_name, "indented_qty"), 0)
+        self.commit_fixture()
+        update_status(mr.name, "Pending")
+        self.assertEqual(frappe.db.get_value("Bin", bin_name, "indented_qty"), 10)
+        self.commit_fixture()
+        po.reload().submit()
+        pr = make_purchase_receipt(po.name).insert()
+        frappe.db.set_value(pr.doctype, pr.name, boundary.POINTER, owner.name, update_modified=False)
+        self.commit_fixture()
+        before = (frappe.db.get_value(mr.doctype, mr.name, "status"), frappe.db.get_value("Bin", bin_name, "indented_qty"))
+        with self.assertRaisesRegex(frappe.ValidationError, "相关.*待完成"):
+            update_status(mr.name, "Stopped")
+        self.assertEqual((frappe.db.get_value(mr.doctype, mr.name, "status"),
+            frappe.db.get_value("Bin", bin_name, "indented_qty")), before)
+
+    def test_native_purchase_status_rpc_and_bulk_preflight_all_before_any_write(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        first, second = self.order(), self.order()
+        receipt = self.receipt(first)
+        owner = self.pending_owner()
+        self.commit_fixture()
+        cases = [("Purchase Order", second.name,
+            "erpnext.buying.doctype.purchase_order.purchase_order.update_status", {"name": second.name, "status": "Closed"}),
+            ("Purchase Receipt", receipt.name,
+            "erpnext.stock.doctype.purchase_receipt.purchase_receipt.update_purchase_receipt_status",
+            {"docname": receipt.name, "status": "Closed"})]
+        for doctype, name, path, kwargs in cases:
+            frappe.db.set_value(doctype, name, boundary.POINTER, owner.name, update_modified=False)
+            self.commit_fixture()
+            before = frappe.db.get_value(doctype, name, "status")
+            with self.assertRaisesRegex(frappe.ValidationError, "相关.*待完成"):
+                frappe.get_attr(frappe.override_whitelisted_method(path))(**kwargs)
+            self.assertEqual(frappe.db.get_value(doctype, name, "status"), before)
+            frappe.db.set_value(doctype, name, boundary.POINTER, None, update_modified=False)
+            self.commit_fixture()
+        frappe.db.set_value(second.doctype, second.name, boundary.POINTER, owner.name, update_modified=False)
+        self.commit_fixture()
+        path = "erpnext.buying.doctype.purchase_order.purchase_order.close_or_unclose_purchase_orders"
+        before = [frappe.db.get_value("Purchase Order", doc.name, "status") for doc in (first, second)]
+        with self.assertRaisesRegex(frappe.ValidationError, "相关.*待完成"):
+            frappe.get_attr(frappe.override_whitelisted_method(path))(json.dumps([first.name, second.name]), "Closed")
+        self.assertEqual([frappe.db.get_value("Purchase Order", doc.name, "status") for doc in (first, second)], before)
+        frappe.db.set_value(second.doctype, second.name, boundary.POINTER, None, update_modified=False)
+        self.commit_fixture()
+        audits = set(frappe.get_all("Integration Request", pluck="name"))
+        frappe.get_attr(frappe.override_whitelisted_method(path))(json.dumps([first.name, second.name]), "Closed")
+        self.assertEqual([frappe.db.get_value("Purchase Order", doc.name, "status") for doc in (first, second)], ["Closed", "Closed"])
+        new_audits = set(frappe.get_all("Integration Request", pluck="name")) - audits
+        self.assertEqual(len(new_audits), 1)  # one existing operation/postcheck graph, not per-doc queues
+        facts = json.loads(frappe.get_doc("Integration Request", next(iter(new_audits))).data)
+        for doc in (first, second):
+            self.assertEqual(facts["after"][doc.doctype + ":" + doc.name]["status"], "Closed")
+
+    def test_native_order_update_child_qty_rate_guards_before_delete_or_child_writes_and_validates_parent(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        from erpnext.controllers import accounts_controller as native
+        po = self.order(items=[{"item_code": self.item, "qty": qty, "rate": 12.345,
+            "warehouse": "Stores - QAB", "schedule_date": add_days(nowdate(), 1)} for qty in (10, 2)])
+        other = self.order()
+        owner = self.pending_owner()
+        frappe.db.set_value(po.doctype, po.name, boundary.POINTER, owner.name, update_modified=False)
+        self.commit_fixture()
+        path = "erpnext.controllers.accounts_controller.update_child_qty_rate"
+        def data(rows, qty=8):
+            return json.dumps([{"docname": row.name, "item_code": row.item_code, "qty": qty,
+                "rate": row.rate, "uom": row.uom, "conversion_factor": row.conversion_factor,
+                "schedule_date": str(row.schedule_date), "description": row.description} for row in rows])
+        for rows in (po.items, po.items[:1]):
+            with patch.object(native, "validate_and_delete_children", wraps=native.validate_and_delete_children) as deletion:
+                with self.assertRaisesRegex(frappe.ValidationError, "相关.*待完成"):
+                    frappe.get_attr(frappe.override_whitelisted_method(path))(po.doctype, data(rows), po.name)
+                deletion.assert_not_called()  # actual native early delete helper must not run
+            self.assertEqual([row.qty for row in frappe.get_doc(po.doctype, po.name).items], [10, 2])
+        frappe.db.set_value(po.doctype, po.name, boundary.POINTER, None, update_modified=False)
+        self.commit_fixture()
+        with patch.object(native, "validate_and_delete_children", wraps=native.validate_and_delete_children) as deletion:
+            with self.assertRaisesRegex(frappe.ValidationError, "明细.*所属"):
+                frappe.get_attr(frappe.override_whitelisted_method(path))(po.doctype, data(other.items), po.name)
+            deletion.assert_not_called()
+        self.assertEqual(frappe.db.get_value("Purchase Order Item", other.items[0].name, "qty"), 10)
+        frappe.get_attr(frappe.override_whitelisted_method(path))(po.doctype, data(po.items, 8), po.name)
+        self.assertEqual([row.qty for row in frappe.get_doc(po.doctype, po.name).items], [8, 8])
+        self.commit_fixture()
+        po.reload()
+        frappe.get_attr(frappe.override_whitelisted_method(path))(po.doctype, data(po.items[:1], 7), po.name)
+        self.assertEqual([row.qty for row in frappe.get_doc(po.doctype, po.name).items], [7])
+
+    def test_native_order_update_child_qty_rate_cross_parent_refused_before_native_helper(self):
+        from erpnext.controllers import accounts_controller as native
+        po, other = self.order(), self.order()
+        self.commit_fixture()
+        row = other.items[0]
+        data = json.dumps([{"docname": row.name, "item_code": row.item_code, "qty": 8, "rate": row.rate,
+            "uom": row.uom, "conversion_factor": row.conversion_factor, "schedule_date": str(row.schedule_date),
+            "description": row.description}])
+        with patch.object(native, "validate_and_delete_children", wraps=native.validate_and_delete_children) as deletion:
+            with self.assertRaisesRegex(frappe.ValidationError, "明细.*所属"):
+                frappe.get_attr(frappe.override_whitelisted_method("erpnext.controllers.accounts_controller.update_child_qty_rate"))(
+                    po.doctype, data, po.name)
+            deletion.assert_not_called()
+
+    def test_native_purchase_invoice_hold_db_set_pending_refuses_entire_block_and_clear_works(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        from erpnext.accounts.doctype.purchase_invoice.purchase_invoice import block_invoice, unblock_invoice, change_release_date
+        po = self.order()
+        pi = make_purchase_invoice(self.receipt(po).name).insert()
+        owner = self.pending_owner()
+        frappe.db.set_value(pi.doctype, pi.name, boundary.POINTER, owner.name, update_modified=False)
+        self.commit_fixture()
+        before = frappe.db.get_value(pi.doctype, pi.name, ["on_hold", "hold_comment", "release_date"])
+        for call in (lambda: block_invoice(pi.name, add_days(nowdate(), 2), "QA hold"),
+                lambda: unblock_invoice(pi.name), lambda: change_release_date(pi.name, add_days(nowdate(), 3))):
+            with self.assertRaisesRegex(frappe.ValidationError, "相关.*待完成"):
+                call()
+            self.assertEqual(frappe.db.get_value(pi.doctype, pi.name, ["on_hold", "hold_comment", "release_date"]), before)
+        frappe.db.set_value(pi.doctype, pi.name, boundary.POINTER, None, update_modified=False)
+        self.commit_fixture()
+        block_invoice(pi.name, add_days(nowdate(), 2), "QA hold")
+        self.assertEqual(frappe.db.get_value(pi.doctype, pi.name, ["on_hold", "hold_comment"]), (1, "QA hold"))
+        self.commit_fixture()
+        change_release_date(pi.name, add_days(nowdate(), 3))
+        self.assertEqual(str(frappe.db.get_value(pi.doctype, pi.name, "release_date")), add_days(nowdate(), 3))
+        unblock_invoice(pi.name)
+        self.assertEqual(frappe.db.get_value(pi.doctype, pi.name, ["on_hold", "release_date"]), (0, None))
+
+    def test_material_request_backlink_requires_actual_detail_and_shared_union_budget(self):
+        from deeplinkerp_branding.services import purchase_reversal_scope as scope
+        mr, po = self.material_request_order()
+        detail = po.items[0].material_request_item
+        self.commit_fixture()
+        audit_before = frappe.db.count("Integration Request")
+        frappe.db.set_value("Purchase Order Item", po.items[0].name, "material_request_item",
+            "QA-ATOMIC-DETAIL-MISSING-" + uuid.uuid4().hex, update_modified=False)
+        self.commit_fixture()
+        with self.assertRaises(frappe.ValidationError) as caught:
+            mr.reload().save(ignore_permissions=True)
+        self.assertEqual(caught.exception.purchase_error_id, "native_source_identity_mismatch")
+        self.assertEqual(frappe.db.count("Integration Request"), audit_before)
+        # A parent-only historical string is not a native detail updater edge.
+        # Do not repair history, and do not permanently disable an ordinary MR.
+        frappe.db.set_value("Purchase Order Item", po.items[0].name, "material_request_item", None, update_modified=False)
+        self.commit_fixture()
+        mr.reload().save(ignore_permissions=True)
+        self.assertEqual(frappe.db.get_value("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"}, "indented_qty"), 10)
+        frappe.db.set_value("Purchase Order Item", po.items[0].name, "material_request_item", detail, update_modified=False)
+        self.commit_fixture()
+        with patch.object(scope, "MAX_VOUCHERS", 2):
+            mr.reload().save(ignore_permissions=True)  # duplicate old/new MR counts once
+        with patch.object(scope, "MAX_VOUCHERS", 1), self.assertRaises(frappe.ValidationError):
+            mr.reload().save(ignore_permissions=True)  # real PO backlink is identity two
+
+    def test_current_scope_sees_peer_native_transfer_and_rejects_expansion_before_write(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        po, prior, future = self.future_receipts()
+        frappe.db.rollback()  # release only commit_fixture's evidence read locks, BEFORE tested scope
+        original, peer = boundary._scopes, {}
+        def interleave(roots, *, current, opaque):
+            result = original(roots, current=current, opaque=opaque)
+            if not current and not peer:
+                peer.update(self.native_peer({"action": "transfer", "item": self.item}))
+            return result
+        audit_before = frappe.db.count("Integration Request")
+        with patch.object(boundary, "_scopes", side_effect=interleave):
+            with self.assertRaises((frappe.QueryDeadlockError, frappe.ValidationError)) as caught:
+                prior.save(ignore_permissions=True)
+        if isinstance(caught.exception, frappe.QueryDeadlockError):
+            self.assertEqual(caught.exception.args[0].args[0], 1020)
+        else:
+            self.assertIn("范围已扩大", str(caught.exception))
+        # Exact peer-created synthetic identities, collected before any failure
+        # rolls A back; no historical record or broad cleanup target is added.
+        frappe.db.rollback()
+        self.remember_new_names()
+        fresh = boundary._scopes([prior], current=True, opaque=False)
+        self.assertIn(peer["name"], {row.name for scope in fresh for row in scope.vouchers})
+        self.assertEqual(frappe.db.count("Integration Request"), audit_before)
+
+    def test_current_scope_peer_native_source_replacement_refuses_old_snapshot_then_fresh_reads_new_identity(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        first = self.order()
+        second = self.order(items=[{"item_code": self.item, "qty": 10, "rate": 12.345,
+            "warehouse": "Work In Progress - QAB", "schedule_date": add_days(nowdate(), 1)}])
+        receipt = make_purchase_receipt(first.name).insert()
+        self.commit_fixture()
+        frappe.db.rollback()  # fixture-only evidence epoch, before A's tested initial scope
+        original, peer = boundary._scopes, {}
+        def interleave(roots, *, current, opaque):
+            result = original(roots, current=current, opaque=opaque)
+            if not current and not peer:
+                peer.update(self.native_peer({"action": "source", "item": self.item, "name": receipt.name,
+                    "source": second.name, "detail": second.items[0].name}))
+            return result
+        with patch.object(boundary, "_scopes", side_effect=interleave):
+            with self.assertRaises((frappe.QueryDeadlockError, frappe.ValidationError)):
+                receipt.save(ignore_permissions=True)
+        frappe.db.rollback()
+        current = frappe.get_doc(receipt.doctype, receipt.name)
+        scopes = boundary._scopes([current], current=True, opaque=False)
+        sources = {(row.doctype, row.name) for scope in scopes for row in scope.sources}
+        self.assertIn((second.doctype, second.name), sources)
+        self.assertNotIn((first.doctype, first.name), sources)
+        self.assertEqual((current.items[0].purchase_order, current.items[0].purchase_order_item,
+            current.items[0].warehouse), (second.name, second.items[0].name, "Work In Progress - QAB"))
+
+    def test_real_rpc_payment_reference_and_party_replacement_cannot_hide_old_pending_purchase_invoice(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
+        from frappe.client import save
+        po = self.order()
+        pr = self.receipt(po)
+        pi = make_purchase_invoice(pr.name).insert()
+        pi.submit()
+        pe = get_payment_entry(pi.doctype, pi.name, bank_account="Cash - QAB", bank_amount=10).insert()
+        owner = self.pending_owner()
+        frappe.db.set_value(pi.doctype, pi.name, boundary.POINTER, owner.name, update_modified=False)
+        self.commit_fixture()
+        pe.reload()
+        before = [(row.reference_doctype, row.reference_name) for row in pe.references]
+        pe.set("references", [])
+        pe.party_type, pe.party = "Customer", "QA Purchase Payments Customer"
+        pe.flags.ignore_permissions = True
+        pe.flags.purchase_reversal_internal = True
+        with self.assertRaisesRegex(frappe.ValidationError, "相关采购来源待完成"):
+            save(json.dumps(pe.as_dict(), default=str))
+        stored = frappe.get_doc(pe.doctype, pe.name)
+        self.assertEqual(stored.party_type, "Supplier")
+        self.assertEqual([(row.reference_doctype, row.reference_name) for row in stored.references], before)
+
+    def test_native_cached_type_and_item_snapshot_mismatch_refuses_then_new_request_works(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        entry_type = frappe.get_doc({"doctype": "Stock Entry Type", "name": "QA-ATOMIC-TYPE-" + uuid.uuid4().hex[:10],
+            "purpose": "Material Receipt", "is_standard": 0}).insert()
+        self.commit_fixture(primary_doctype="Item", name_prefix="QA-ATOMIC-")
+        entry_type.purpose = "Material Transfer"
+        with self.assertRaises(frappe.CannotChangeConstantError): entry_type.save()
+        frappe.db.rollback()  # native immutable-default proof, before A's tested snapshot
+        frappe.get_cached_value(entry_type.doctype, entry_type.name, "purpose")
+        frappe.db.get_value(entry_type.doctype, entry_type.name, ("name", "purpose"), as_dict=True, cache=True)
+        self.assertEqual(frappe.db.get_value("Item", self.item, "stock_uom"), "Nos")
+        self.native_peer({"action": "defaults", "item": self.item, "entry_type": entry_type.name})
+        draft = frappe.get_doc({"doctype": "Stock Entry", "company": COMPANY, "stock_entry_type": entry_type.name,
+            "items": [{"item_code": self.item, "qty": 1, "t_warehouse": "Stores - QAB"}]})
+        with self.assertRaises((frappe.QueryDeadlockError, frappe.ValidationError)) as caught: draft.insert()
+        if isinstance(caught.exception, frappe.QueryDeadlockError):
+            self.assertEqual(caught.exception.args[0].args[0], 1020)
+        else:
+            self.assertIn("快照", str(caught.exception))
+        # A genuinely new native process/physical session, not clearing the old
+        # execution identity or changing isolation in-place.
+        peer = self.native_peer({"action": "draft", "item": self.item, "entry_type": entry_type.name})
+        self.assertEqual((peer["purpose"], peer["stock_uom"]), ("Material Receipt", "Kg"))
+        frappe.db.rollback()
+        self.remember_new_names()
+
+    def test_all_six_pointer_fields_reject_real_rpc_rewrite_clear_and_db_set_flags(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
+        from frappe.client import save
+        po = self.order()
+        pr = self.receipt(po)
+        pi = make_purchase_invoice(pr.name).insert()
+        pe = get_payment_entry(po.doctype, po.name, bank_account="Cash - QAB", party_amount=10).insert()
+        stock_bin = frappe.get_doc("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"})
+        riv = frappe.get_doc({"doctype": "Repost Item Valuation", "company": COMPANY,
+            "based_on": "Item and Warehouse", "item_code": self.item, "warehouse": "Stores - QAB",
+            "posting_date": nowdate(), "posting_time": "00:00:00"}).insert()
+        owner = self.pending_owner()
+        docs = [stock_bin, po, pr, pi, pe, riv]
+        self.assertEqual({doc.doctype for doc in docs}, set(boundary.POINTER_TYPES))
+        for doc in docs:
+            frappe.db.set_value(doc.doctype, doc.name, boundary.POINTER, owner.name, update_modified=False)
+        self.commit_fixture()
+        for doc in docs:
+            for action in ("rpc-clear", "native-rewrite", "db-set"):
+                with self.subTest(doctype=doc.doctype, action=action):
+                    current = frappe.get_doc(doc.doctype, doc.name)
+                    current.flags.purchase_reversal_internal = True
+                    current.flags.ignore_permissions = True
+                    with self.assertRaises(frappe.PermissionError):
+                        if action == "rpc-clear":
+                            current.set(boundary.POINTER, None)
+                            save(json.dumps(current.as_dict(), default=str))
+                        elif action == "native-rewrite":
+                            current.set(boundary.POINTER, "QA-ATOMIC-CLIENT-" + uuid.uuid4().hex)
+                            current.save(ignore_permissions=True)
+                        else:
+                            current.db_set(boundary.POINTER, None)
+                    self.assertEqual(frappe.db.get_value(doc.doctype, doc.name, boundary.POINTER), owner.name)
+
+    def test_real_rpc_old_source_and_warehouse_replacement_cannot_escape_pending(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        from frappe.client import save
+        po = self.order()
+        pr = make_purchase_receipt(po.name).insert()
+        owner = self.pending_owner()
+        frappe.db.set_value(po.doctype, po.name, boundary.POINTER, owner.name, update_modified=False)
+        self.commit_fixture()
+        pr.reload()
+        old_pair = (pr.items[0].purchase_order, pr.items[0].warehouse)
+        pr.items[0].purchase_order = None
+        pr.items[0].purchase_order_item = None
+        pr.items[0].warehouse = "Work In Progress - QAB"
+        pr.flags.purchase_reversal_internal = True
+        pr.flags.ignore_permissions = True
+        with self.assertRaisesRegex(frappe.ValidationError, "相关采购来源待完成"):
+            save(json.dumps(pr.as_dict(), default=str))
+        stored = frappe.get_doc(pr.doctype, pr.name)
+        self.assertEqual((stored.items[0].purchase_order, stored.items[0].warehouse), old_pair)
+        # The native Material Request really changes requested Bin quantity;
+        # both its pair and actual PR backlink must participate, no MR pointer.
+        mr, second_po = self.material_request_order()
+        self.assertEqual(frappe.db.get_value("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"}, "indented_qty"), 10)
+        second_po.submit()
+        second_pr = make_purchase_receipt(second_po.name).insert()
+        self.assertEqual(second_pr.items[0].material_request, mr.name)
+        frappe.db.set_value(second_pr.doctype, second_pr.name, boundary.POINTER, owner.name, update_modified=False)
+        self.commit_fixture()
+        mr.reload()
+        mr.items[0].qty += 1
+        with self.assertRaisesRegex(frappe.ValidationError, "相关采购来源待完成"):
+            mr.save(ignore_permissions=True)
+        self.assertEqual(frappe.db.get_value("Material Request Item", mr.items[0].name, "qty"), 10)
+
+    def test_opaque_native_and_stored_mes_zero_pending_fence_blocks_cross_company_publication(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        from deeplinkerp_branding.services.purchase_reversal_scope import collect_document_scope
+        project = frappe.get_doc({"doctype": "Project", "project_name": "QA-ATOMIC-PROJECT-" + uuid.uuid4().hex[:10],
+            "company": COMPANY}).insert()
+        mr = frappe.get_doc({"doctype": "Material Request", "company": "Yuewei", "material_request_type": "Purchase",
+            "transaction_date": nowdate(), "schedule_date": add_days(nowdate(), 1),
+            "items": [{"item_code": self.item, "qty": 3, "warehouse": "Stores - Y", "schedule_date": add_days(nowdate(), 1)}]}).insert()
+        # Exact synthetic stored classification, not an actor flag exemption.
+        frappe.db.set_value(mr.doctype, mr.name, "custom_request_source", "MES", update_modified=False)
+        owner = self.pending_owner()
+        self.commit_fixture(primary_doctype="Item", name_prefix="QA-ATOMIC-")
+        mr.reload()
+        mr.flags.mes_integration_request = False
+        mr.submit()  # installed performance mixin delegates this ordinary branch
+        self.assertEqual(frappe.db.get_value("Bin", {"item_code": self.item, "warehouse": "Stores - Y"}, "indented_qty"), 3)
+        with self.assertRaisesRegex(frappe.ValidationError, "MES"):
+            collect_document_scope(mr)  # still NOT an async cancellation adapter
+        frappe.db.commit()
+        # B1 resolver refusal is read-only; no scope/audit/business rollback.
+        self.remember_new_names()
+        opaque = frappe.get_doc({"doctype": "Stock Entry", "company": COMPANY, "project": project.name,
+            "stock_entry_type": "Material Receipt", "items": [{"item_code": self.item, "qty": 1,
+                "t_warehouse": "Stores - QAB", "allow_zero_valuation_rate": 1}]}).insert()
+        self.assertEqual(opaque.docstatus, 0)  # genuine native no-pending compatibility
+        right = self.boundary_database()
+        with self.assertRaises(frappe.ValidationError):
+            with boundary.execution(db=right), boundary.acquire((boundary.fence_key(),), db=right): pass
+        frappe.db.commit()  # method return alone did NOT free the dormant fence
+        self.remember_new_names()
+        name = frappe.db.get_value("Bin", {"item_code": self.item, "warehouse": "Stores - Y"}, "name")
+        with boundary.execution(db=right), boundary.acquire((boundary.fence_key(),), db=right):
+            # Native QB-backed set_value resolves frappe.db, not this peer
+            # instance. Explicit SQL is essential to prove B really commits.
+            right.sql("UPDATE `tabBin` SET custom_purchase_reversal_operation=%s WHERE name=%s", (owner.name, name))
+        right.commit()  # D-style fixture publication, NOT implemented D authority
+        self.assertEqual(right.sql("SELECT custom_purchase_reversal_operation FROM `tabBin` WHERE name=%s", (name,))[0][0], owner.name)
+        with self.assertRaises((frappe.QueryDeadlockError, frappe.ValidationError)):
+            opaque.reload().save(ignore_permissions=True)
+        mr.reload()
+        self.assertTrue(boundary._opaque(mr), mr.custom_request_source)
+        self.assertEqual(frappe.db.get_value("Bin", name, boundary.POINTER), owner.name)
+        with self.assertRaisesRegex(frappe.ValidationError, "未核查的原生关联路径"):
+            mr.save(ignore_permissions=True)
+        with boundary.execution(db=right), boundary.acquire((boundary.fence_key(),), db=right):
+            right.sql("UPDATE `tabBin` SET custom_purchase_reversal_operation=NULL WHERE name=%s", (name,))
+        right.commit()
+        opaque.reload().save(ignore_permissions=True)
+        mr.reload().save(ignore_permissions=True)
+
+    def test_native_bundle_late_packed_pairs_and_real_mes_source_use_fence_absence_gate(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        from erpnext.stock.doctype.material_request.material_request import make_purchase_order
+        parent = self.scope_item()
+        item = frappe.get_doc("Item", parent)
+        item.is_stock_item = 0
+        item.save()
+        frappe.get_doc({"doctype": "Product Bundle", "new_item_code": parent,
+            "items": [{"item_code": self.item, "qty": 1, "uom": "Nos"}]}).insert()
+        mr = frappe.get_doc({"doctype": "Material Request", "company": COMPANY, "material_request_type": "Purchase",
+            "transaction_date": nowdate(), "schedule_date": add_days(nowdate(), 1), "items": [
+                {"item_code": self.item, "qty": 4, "warehouse": "Stores - QAB", "schedule_date": add_days(nowdate(), 1)}]}).insert()
+        mr.submit()
+        frappe.db.set_value(mr.doctype, mr.name, "custom_request_source", "MES", update_modified=False)
+        self.commit_fixture(primary_doctype="Item", name_prefix="QA-ATOMIC-")
+        mr.reload()
+        po = make_purchase_order(mr.name)
+        po.supplier = "QA Test Supplier"
+        po.items[0].rate = 10
+        po.insert(set_name="QA-ATOMIC-PO-" + uuid.uuid4().hex[:16])
+        self.assertEqual(po.items[0].material_request, mr.name)
+        self.assertIn(boundary.fence_key(), boundary.initialize().locks)
+        # Parent Item is non-stock and packed_items is initially EMPTY. The
+        # untouched native calculator really creates the late stock child.
+        dn = frappe.get_doc({"doctype": "Delivery Note", "company": COMPANY, "customer": "QA Purchase Payments Customer",
+            "currency": "CNY", "conversion_rate": 1, "selling_price_list": "Standard Selling",
+            "items": [{"item_code": parent, "qty": 1, "rate": 10, "warehouse": "Stores - QAB"}]}).insert()
+        self.assertEqual([(row.item_code, row.warehouse) for row in dn.packed_items], [(self.item, "Stores - QAB")])
+        owner = self.pending_owner()
+        name = frappe.db.get_value("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"}, "name")
+        frappe.db.set_value("Bin", name, boundary.POINTER, owner.name, update_modified=False)
+        self.commit_fixture()
+        for doc in (po, dn):
+            with self.subTest(doctype=doc.doctype), self.assertRaisesRegex(frappe.ValidationError, "未核查的原生关联路径"):
+                doc.reload().save(ignore_permissions=True)
+        # Fixture-only final publication/unlock also borrows the same fence.
+        with boundary.execution(), boundary.acquire((boundary.fence_key(),)):
+            frappe.db.set_value("Bin", name, boundary.POINTER, None, update_modified=False)
+        self.commit_fixture()
+        po.reload().save(ignore_permissions=True)
+        dn.reload().save(ignore_permissions=True)
+
+    def test_empty_incoming_bundle_packing_cannot_late_create_pending_child_pair(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        parent = self.scope_item()
+        item = frappe.get_doc("Item", parent)
+        item.is_stock_item = 0
+        item.save()
+        frappe.get_doc({"doctype": "Product Bundle", "new_item_code": parent,
+            "items": [{"item_code": self.item, "qty": 1, "uom": "Nos"}]}).insert()
+        self.order()  # real native ordered Bin for the late stock child
+        def draft():
+            return frappe.get_doc({"doctype": "Delivery Note", "company": COMPANY, "customer": "QA Purchase Payments Customer",
+                "currency": "CNY", "conversion_rate": 1, "selling_price_list": "Standard Selling",
+                "items": [{"item_code": parent, "qty": 1, "rate": 10, "warehouse": "Stores - QAB"}]})
+        normal = draft().insert()
+        self.assertEqual([(row.item_code, row.warehouse) for row in normal.packed_items], [(self.item, "Stores - QAB")])
+        owner = self.pending_owner()
+        name = frappe.db.get_value("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"}, "name")
+        frappe.db.set_value("Bin", name, boundary.POINTER, owner.name, update_modified=False)
+        self.commit_fixture()
+        incoming = draft()
+        self.assertFalse(incoming.packed_items)
+        with self.assertRaisesRegex(frappe.ValidationError, "未核查的原生关联路径"):
+            incoming.insert(ignore_permissions=True)
+        with boundary.execution(), boundary.acquire((boundary.fence_key(),)):
+            frappe.db.set_value("Bin", name, boundary.POINTER, None, update_modified=False)
+        self.commit_fixture()
+        self.assertTrue(draft().insert().packed_items)
+
+    def test_union_budget_real_old_new_native_pairs_and_sources_refuse_before_audit_sql(self):
+        from deeplinkerp_branding.services import purchase_reversal_scope as scope
+        first = self.order()
+        second = self.order(items=[{"item_code": self.item, "qty": 10, "rate": 12.345,
+            "warehouse": "Work In Progress - QAB", "schedule_date": add_days(nowdate(), 1)}])
+        receipt = make_purchase_receipt(first.name).insert()
+        self.commit_fixture()
+        for kind in ("pairs", "identities"):
+            with self.subTest(kind=kind):
+                doc = frappe.get_doc(first.doctype, first.name) if kind == "pairs" else frappe.get_doc(receipt.doctype, receipt.name)
+                doc.items[0].warehouse = "Work In Progress - QAB"
+                if kind == "identities":
+                    doc.items[0].purchase_order, doc.items[0].purchase_order_item = second.name, second.items[0].name
+                statements, sql = [], frappe.db.sql
+                def observe(query, *args, **kwargs):
+                    statements.append(str(query))
+                    return sql(query, *args, **kwargs)
+                with patch.object(scope, "MAX_PAIRS" if kind == "pairs" else "MAX_VOUCHERS", 1 if kind == "pairs" else 2), \
+                        patch.object(frappe.db, "sql", side_effect=observe):
+                    with self.assertRaisesRegex(frappe.ValidationError, "范围超过安全上限"):
+                        doc.save(ignore_permissions=True)
+                self.assertFalse(any("INSERT INTO `tabIntegration Request`" in query for query in statements))
+
+    def test_header_only_stock_entry_native_warehouse_fill_respects_pending_absence_fence(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        self.order()
+        def draft():
+            return frappe.get_doc({"doctype": "Stock Entry", "company": COMPANY, "stock_entry_type": "Material Receipt",
+                "to_warehouse": "Stores - QAB", "items": [{"item_code": self.item, "qty": 1, "allow_zero_valuation_rate": 1}]})
+        normal = draft().insert()
+        self.assertEqual(normal.items[0].t_warehouse, "Stores - QAB")
+        owner = self.pending_owner()
+        name = frappe.db.get_value("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"}, "name")
+        frappe.db.set_value("Bin", name, boundary.POINTER, owner.name, update_modified=False)
+        self.commit_fixture()
+        with self.assertRaisesRegex(frappe.ValidationError, "未核查的原生关联路径"):
+            draft().insert(ignore_permissions=True)
+        with boundary.execution(), boundary.acquire((boundary.fence_key(),)):
+            frappe.db.set_value("Bin", name, boundary.POINTER, None, update_modified=False)
+        self.commit_fixture()
+        self.assertEqual(draft().insert().items[0].t_warehouse, "Stores - QAB")
+
+    def test_real_putaway_rule_late_stock_entry_and_receipt_warehouse_use_absence_fence(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        source = self.order()
+        self.order(items=[{"item_code": self.item, "qty": 10, "rate": 12.345,
+            "warehouse": "Work In Progress - QAB", "schedule_date": add_days(nowdate(), 1)}])
+        frappe.get_doc({"doctype": "Putaway Rule", "company": COMPANY, "item_code": self.item,
+            "warehouse": "Work In Progress - QAB", "capacity": 100, "priority": 1, "uom": "Nos", "conversion_factor": 1}).insert()
+        def draft(doctype):
+            if doctype == "Purchase Receipt":
+                doc = make_purchase_receipt(source.name)
+                doc.apply_putaway_rule = 1
+                return doc
+            return frappe.get_doc({"doctype": "Stock Entry", "company": COMPANY, "stock_entry_type": "Material Receipt",
+                "apply_putaway_rule": 1, "items": [{"item_code": self.item, "qty": 1, "transfer_qty": 1,
+                    "uom": "Nos", "stock_uom": "Nos", "conversion_factor": 1, "t_warehouse": "Stores - QAB",
+                    "allow_zero_valuation_rate": 1}]})
+        for doctype in ("Stock Entry", "Purchase Receipt"):
+            doc = draft(doctype).insert()
+            self.assertEqual(doc.items[0].get("t_warehouse" if doctype == "Stock Entry" else "warehouse"), "Work In Progress - QAB")
+        owner = self.pending_owner()
+        name = frappe.db.get_value("Bin", {"item_code": self.item, "warehouse": "Work In Progress - QAB"}, "name")
+        frappe.db.set_value("Bin", name, boundary.POINTER, owner.name, update_modified=False)
+        self.commit_fixture()
+        for doctype in ("Stock Entry", "Purchase Receipt"):
+            with self.subTest(doctype=doctype), self.assertRaisesRegex(frappe.ValidationError, "未核查的原生关联路径"):
+                draft(doctype).insert(ignore_permissions=True)
+        with boundary.execution(), boundary.acquire((boundary.fence_key(),)):
+            frappe.db.set_value("Bin", name, boundary.POINTER, None, update_modified=False)
+        self.commit_fixture()
+        for doctype in ("Stock Entry", "Purchase Receipt"):
+            draft(doctype).insert()
 
     def receipt(self, po):
         from deeplinkerp_branding.services import purchase_document_actions as actions
@@ -1079,7 +1941,12 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
                     guard.savedocs(json.dumps(payload, default=str), "Save", request_id=key)
                     self.assertEqual(frappe.response.docs[-1]["name"], document.name)
                     self.assertEqual(frappe.db.count("Integration Request"), before)
+                    # Distinct real requests each commit their own successful
+                    # native save. A later denied request's full rollback must
+                    # not erase a previous uncommitted fixture mutation.
+                    self.commit_fixture("Purchase Invoice", "QA-ATOMIC-PI-")
             document.reload().submit()
+            self.commit_fixture("Purchase Invoice", "QA-ATOMIC-PI-")
         self.commit_fixture("Purchase Invoice", "QA-ATOMIC-PI-")
         for document in (pi, pe):
             for key in (None, str(uuid.uuid4())):
@@ -1158,6 +2025,7 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         self.assertFalse(frappe.db.exists("Purchase Invoice Item", {"purchase_receipt": pr.name}))
 
     def test_partial_existing_auto_invoice_draft_is_preserved_on_failure(self):
+        from frappe.client import save
         po = self.order()
         pr = make_purchase_receipt(po.name).insert()
         pi = frappe.get_doc({"doctype": "Purchase Invoice", "company": COMPANY, "supplier": pr.supplier,
@@ -1166,6 +2034,13 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
                 "purchase_order": po.name, "po_detail": po.items[0].name, "purchase_receipt": pr.name,
                 "pr_detail": pr.items[0].name, "warehouse": "Stores - QAB"}]}).insert()
         self.commit_fixture()
+        pi.remarks = "QA-ATOMIC-native draft PR reference"
+        save(json.dumps(pi.as_dict(), default=str))  # real ordinary RPC draft succeeds
+        self.commit_fixture()  # that successful request is committed independently
+        with self.assertRaises(frappe.ValidationError):
+            pi.reload().submit()  # no draft-source submit capability is granted
+        self.assertEqual(frappe.db.get_value(pi.doctype, pi.name, "docstatus"), 0)
+        self.assertEqual(frappe.db.get_value(pr.doctype, pr.name, "docstatus"), 0)
         before = pi.as_dict()
         frappe.db.set_value("China Finance Settings", COMPANY, "auto_submit_purchase_invoice", 1)
         with self.assertRaisesRegex(frappe.ValidationError, "完整覆盖"):
@@ -2143,13 +3018,105 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
             audit.delete()
 
 
+def boundary_peer(payload):
+    """One native peer in the SAME guarded synthetic QA harness, no executor."""
+    from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+    if frappe.local.site != SITE or frappe.conf.db_name != "qa_procurement_5" or frappe.conf.db_host != "db":
+        raise RuntimeError("Isolated synthetic procurement database only")
+    if not str(payload.get("item") or "").startswith("QA-ATOMIC-"):
+        raise RuntimeError("Exact new synthetic item only")
+    frappe.in_test = False
+    frappe.flags.in_test = True
+    frappe.flags.mute_emails = True
+    if not payload["action"].startswith("entry-"):
+        boundary.initialize()
+    frappe.db.after_commit.reset()  # before any peer document acquires leases
+    # Reuse the same harness's cleanup inventory without executing setUp or
+    # creating another cancellation fixture/test class.
+    import ast
+    import inspect
+    import textwrap
+    method = ast.parse(textwrap.dedent(inspect.getsource(NativeAtomicPurchaseTests.setUp))).body[0]
+    types = ()
+    for node in method.body:
+        target = node.targets[0] if isinstance(node, ast.Assign) else node.target if isinstance(node, ast.AugAssign) else None
+        if isinstance(target, ast.Attribute) and target.attr == "types":
+            value = ast.literal_eval(node.value)
+            types = types + value if isinstance(node, ast.AugAssign) else value
+    before = {doctype: set(frappe.get_all(doctype, pluck="name", limit_page_length=0)) for doctype in types}
+    action = payload["action"]
+    if action.startswith("entry-"):
+        from deeplinkerp_branding.services import purchase_document_actions as actions, purchase_source_service as sources
+        queries = []
+        native_sql = frappe.local.db.sql
+        def observe(query, *args, **kwargs):
+            queries.append(str(query).upper())
+            return native_sql(query, *args, **kwargs)
+        frappe.local.db.sql = observe
+        physical = frappe.local.db._conn
+        if action == "entry-payment-update":
+            actions.update_payment_draft(payload["name"], {"remarks": "QA-ATOMIC-EARLY"}, payload["modified"])
+        elif action == "entry-payment-submit":
+            actions.submit_document("Payment Entry", payload["name"], payload["modified"])
+        elif action == "entry-source-create":
+            try:
+                sources.create_purchase_order_from_source("QA-ATOMIC-SOURCE-MISSING-" + uuid.uuid4().hex,
+                    "", COMPANY, "QA Test Supplier", "CNY", add_days(nowdate(), 1), [])
+            except frappe.DoesNotExistError:
+                pass  # exact nonexistent source: still exercises real earliest locked public entry
+            else:
+                raise AssertionError("Missing source unexpectedly accepted")
+        else:
+            raise RuntimeError("Unknown public entry")
+        state = boundary.initialize()
+        result = {"identity_query": next(i for i, query in enumerate(queries) if "CONNECTION_ID()" in query),
+            "first_lock": next(i for i, query in enumerate(queries) if "FOR UPDATE" in query),
+            "same_physical": state.connection is physical, "execution_id": state.execution_id}
+    elif action == "defaults":
+        entry_type = frappe.get_doc("Stock Entry Type", payload["entry_type"])
+        if not entry_type.name.startswith("QA-ATOMIC-TYPE-"):
+            raise RuntimeError("Exact new synthetic Stock Entry Type only")
+        # Purpose is native set_only_once. This positive peer changes only the
+        # legally mutable Item stock_uom, through its real save/cache hooks.
+        item = frappe.get_doc("Item", payload["item"])
+        item.stock_uom = "Kg"
+        item.save()
+        result = {"updated": True}
+    elif action == "source":
+        receipt = frappe.get_doc("Purchase Receipt", payload["name"])
+        receipt.items[0].purchase_order = payload["source"]
+        receipt.items[0].purchase_order_item = payload["detail"]
+        receipt.items[0].warehouse = "Work In Progress - QAB"
+        receipt.save()
+        result = {"name": receipt.name, "detail": receipt.items[0].name}
+    elif action in ("transfer", "draft"):
+        draft = frappe.get_doc({"doctype": "Stock Entry", "company": COMPANY,
+            "stock_entry_type": payload.get("entry_type") or "Material Transfer",
+            "set_posting_time": 1, "posting_date": add_days(nowdate(), 2), "posting_time": "12:00:00",
+            "items": [{"item_code": payload["item"], "qty": 1, "s_warehouse": "Stores - QAB",
+                "t_warehouse": "Work In Progress - QAB"}]}).insert()
+        if action == "transfer":
+            draft.submit()
+        result = {"name": draft.name, "detail": draft.items[0].name, "purpose": draft.purpose,
+            "stock_uom": draft.items[0].stock_uom}
+    else:
+        raise RuntimeError("Unknown synthetic peer action")
+    frappe.db.commit()
+    result["created"] = {doctype: sorted(set(frappe.get_all(doctype, pluck="name", limit_page_length=0)) - before[doctype])
+        for doctype in types}
+    print(json.dumps(result))
+
+
 if __name__ == "__main__":
     frappe.init(site=SITE, sites_path="/home/frappe/frappe-bench/sites")
     frappe.connect()
     try:
         # The legacy single-transaction harness predates whole-request rollback.
         # Run explicit native transaction scenarios on the guarded isolated clone.
-        result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(NativeAtomicPurchaseTests))
-        raise SystemExit(not result.wasSuccessful())
+        if len(sys.argv) == 3 and sys.argv[1] == "--boundary-peer":
+            boundary_peer(json.loads(sys.argv[2]))
+        else:
+            result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(NativeAtomicPurchaseTests))
+            raise SystemExit(not result.wasSuccessful())
     finally:
         frappe.destroy()

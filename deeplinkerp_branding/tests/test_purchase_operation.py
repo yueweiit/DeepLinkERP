@@ -39,6 +39,10 @@ class AuditDatabase:
 class DurableOperationTests(unittest.TestCase):
     def setUp(self):
         self.db = AuditDatabase()
+        # Audit storage is intentionally in-memory; do not infer physical
+        # session evidence from it. Dedicated session/native tests own that.
+        guard = patch("deeplinkerp_branding.services.purchase_repost_boundary.execution", return_value=nullcontext())
+        guard.start(); self.addCleanup(guard.stop)
         self.cache_values = {}
         self.cache = SimpleNamespace(lock=lambda *a, **kw: nullcontext(),
             get_value=self.cache_values.get, set_value=lambda key, value, **kw: self.cache_values.update({key: value}),

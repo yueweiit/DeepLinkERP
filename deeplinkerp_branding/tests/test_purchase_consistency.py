@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -13,6 +14,10 @@ class ConsistencyTests(unittest.TestCase):
         path = "deeplinkerp_branding.services.purchase_consistency"
         self.assertIsNotNone(importlib.util.find_spec(path), "Shared native procurement consistency guard is missing")
         self.guard = __import__(path, fromlist=["guard"])
+        for method in ("execution", "initialize"):
+            guard = patch("deeplinkerp_branding.services.purchase_repost_boundary." + method,
+                return_value=nullcontext() if method == "execution" else None)
+            guard.start(); self.addCleanup(guard.stop)
         flags = patch.object(frappe, "flags", frappe._dict())
         flags.start(); self.addCleanup(flags.stop)
         session = patch.object(frappe, "session", SimpleNamespace(user="QA"))

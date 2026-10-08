@@ -1,7 +1,7 @@
 """Native boundary tests: source evidence must not bypass purchase permissions."""
 import json
 import unittest
-from contextlib import contextmanager, ExitStack
+from contextlib import contextmanager, ExitStack, nullcontext
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
@@ -15,6 +15,12 @@ class PurchaseSourceServiceTests(unittest.TestCase):
         # These boundary tests run both with an initialized native site and in
         # CI's site-free pytest process. Do not depend on thread-local DB/flags.
         self.db = Mock()
+        # These existing source contract tests own an in-memory DB/order. Real
+        # physical leases and native _bind writes are covered by NativeAtomic.
+        for method in ("execution", "initialize", "document_boundary"):
+            guard = patch("deeplinkerp_branding.services.purchase_repost_boundary." + method,
+                return_value=nullcontext() if method != "initialize" else None)
+            guard.start(); self.addCleanup(guard.stop)
         self.db_patch = patch.object(frappe, "db", self.db)
         self.db_patch.start(); self.addCleanup(self.db_patch.stop)
         def throw(message, exc=frappe.ValidationError, **kwargs):

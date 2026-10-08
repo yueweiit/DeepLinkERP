@@ -167,6 +167,10 @@ def reject(message, identifier, exception=frappe.ValidationError, *, invariant=N
         raise
 
 
+from .purchase_repost_boundary import procurement_entry
+
+
+@procurement_entry
 def run(request_id, payload, operation, replay, *, digest=None, acknowledge_validation=False):
     """Run once, or re-read the acknowledged native documents under current ACLs."""
     if current() is not None:

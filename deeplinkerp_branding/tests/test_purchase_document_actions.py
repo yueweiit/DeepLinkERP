@@ -109,6 +109,10 @@ class QuantityCapTests(unittest.TestCase):
 
 class OrderInvoiceMappingTests(unittest.TestCase):
     def setUp(self):
+        for method in ("execution", "initialize"):
+            guard = patch("deeplinkerp_branding.services.purchase_repost_boundary." + method,
+                return_value=nullcontext() if method == "execution" else None)
+            guard.start(); self.addCleanup(guard.stop)
         self.fields = patch.object(actions, "_fields", side_effect=lambda dt, fields, *args, **kwargs: fields)
         self.fields.start(); self.addCleanup(self.fields.stop)
         permission = patch.object(frappe, "has_permission", return_value=True)
@@ -366,6 +370,10 @@ class NativeQueryTests(unittest.TestCase):
 
 
 class PaymentCompletionTests(unittest.TestCase):
+    def setUp(self):
+        guard = patch("deeplinkerp_branding.services.purchase_repost_boundary.execution", return_value=nullcontext())
+        guard.start(); self.addCleanup(guard.stop)
+
     def test_configured_workflow_never_guesses_a_submit_action(self):
         doc = SimpleNamespace(name="PE", modified="v1")
         with patch("frappe.model.workflow.get_workflow_name", return_value="Approval"), patch.object(actions, "_payment", return_value={"document": {"docstatus": 0}}), patch.object(actions, "submit_document") as submit:

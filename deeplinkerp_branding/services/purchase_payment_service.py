@@ -13,6 +13,7 @@ from frappe.model import get_permitted_fields
 from frappe.utils import getdate, nowdate
 
 from deeplinkerp_branding.services.unified_purchase_service import _require_export_permission
+from .purchase_repost_boundary import procurement_entry
 
 SOURCES = {"Purchase Receipt", "Purchase Order"}
 PI_FIELDS = {"company", "supplier", "currency", "party_account_currency", "grand_total", "base_grand_total",
@@ -119,11 +120,34 @@ def _read(doctype, name, fields=()):
 
 
 def _current(doctype, name):
+    from .purchase_repost_boundary import initialize
+    initialize()
     doc = frappe.get_doc(doctype, name, for_update=True)
     doc.check_permission("read")
     if doc.get("company"):
         _read("Company", doc.company)
     return doc
+
+
+class _CurrentReader(_RecordReader):
+    """Fresh locking parents AND children; never the UI bulk-reader cache."""
+    def doc(self, doctype, name):
+        # A nested native hook can update a parent already read by the outer
+        # call (PO submit -> automatic PR draft). The collector owns its own
+        # immutable-phase cache; the orchestration reader must not retain it.
+        return frappe.get_doc(doctype, name, for_update=True)
+
+    def check(self, doc):
+        doc.check_permission("read")
+
+
+@contextmanager
+def current_reads():
+    token = _record_reader.set(_CurrentReader())
+    try:
+        yield
+    finally:
+        _record_reader.reset(token)
 
 
 def order_execution_reason(order):
@@ -283,6 +307,9 @@ def _query_fields(doctype):
 
 
 def _bank_account(name, company, currency, for_update=False):
+    if for_update:
+        from .purchase_repost_boundary import initialize
+        initialize()
     """One bank guard for reads and drawer writes; framework account names stay private."""
     fields = {"company", "account_currency", "is_group", "account_type", "disabled"}
     denied = False
@@ -957,6 +984,7 @@ def _receipt_list(filters, start, page_length, native_filters, or_filters, order
 
 
 @frappe.whitelist(methods=["POST"])
+@procurement_entry
 def create_payment_draft(source_doctype, source_name, purchase_invoice=None, amount_to_pay=None, bank_account=None, posting_date=None, remarks=None, request_id=None, reference_no=None):
     """Save exactly a native draft. Never bypass create/read/write or approval permissions."""
     source = _source(source_doctype, source_name)

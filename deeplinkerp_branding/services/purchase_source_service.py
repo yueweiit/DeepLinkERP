@@ -19,6 +19,7 @@ from frappe.model import get_permitted_fields
 
 from . import operating_oa_source as oa, purchase_source_contract as contract
 from .operating_expense_contract import digest
+from .purchase_repost_boundary import procurement_entry, initialize
 
 DOCTYPE = "OA Purchase Request"
 SOURCE_FIELD = "custom_purchase_source_json"
@@ -83,6 +84,8 @@ def _confirmed_company(doc):
 
 
 def _source(name, write=False):
+    if write:
+        initialize()
     doc = frappe.get_doc(DOCTYPE, name, for_update=write)
     doc.check_permission("write" if write else "read")
     required = {"target_company", "purchase_order", "approval_status", "process_instance_id", "process_code",
@@ -420,27 +423,32 @@ def _bind(doc, order, source, evidence, correction_reason="", *, beneficiary_com
     _write_fields("Purchase Order",{"custom_oa_purchase_expense"})
     role_values = {key:value for key,value in ((BENEFICIARY_FIELD,beneficiary_company),(PROJECT_FIELD,project)) if value is not None}
     _write_fields(DOCTYPE,{"purchase_order","target_company", *role_values})
-    if order.get("custom_oa_purchase_expense") not in (None,"",doc.name):
-        frappe.throw("采购订单已关联另一条钉钉申请")
-    if not order.meta.has_field("custom_oa_purchase_expense"):
-        frappe.throw("采购关联字段未安装，请联系管理员")
-    # Rechecking the same link updates source evidence only, not the native PO.
-    if order.get("custom_oa_purchase_expense") != doc.name:
-        if order.docstatus == 1 and not order.meta.get_field("custom_oa_purchase_expense").allow_on_submit:
-            frappe.throw("该已提交订单不允许更新采购关联，请先核对元数据策略")
-        order.custom_oa_purchase_expense=doc.name
-        with managed_write():
-            order.save()  # Native permissions/update-after-submit still apply.
-    values = {"purchase_order":order.name, "target_company":order.company, BOUND_FIELD:source["version"],
-              CONFIRMED_FIELD:1, CONFIRMED_BY_FIELD:frappe.session.user, CONFIRMED_ON_FIELD:frappe.utils.now_datetime(), **role_values,
-              SOURCE_FIELD:json.dumps(source,ensure_ascii=False,default=str), EVIDENCE_FIELD:json.dumps(evidence,ensure_ascii=False,default=str),
-              "source_stale":0, "source_invalid":0, "source_pending":0, "sync_status":"Purchase Order Created"}
-    frappe.db.set_value(DOCTYPE,doc.name,values)
-    if correction_reason:
-        doc.add_comment("Comment", "采购来源人工核对：" + str(correction_reason)[:2000])
+    from .purchase_repost_boundary import document_boundary
+    # Same-link rechecks do not save PO, but still mutate authoritative source
+    # evidence. Borrow the SAME boundary before either OA evidence or Comment.
+    with document_boundary(order):
+        if order.get("custom_oa_purchase_expense") not in (None,"",doc.name):
+            frappe.throw("采购订单已关联另一条钉钉申请")
+        if not order.meta.has_field("custom_oa_purchase_expense"):
+            frappe.throw("采购关联字段未安装，请联系管理员")
+        # Rechecking the same link updates source evidence only, not the native PO.
+        if order.get("custom_oa_purchase_expense") != doc.name:
+            if order.docstatus == 1 and not order.meta.get_field("custom_oa_purchase_expense").allow_on_submit:
+                frappe.throw("该已提交订单不允许更新采购关联，请先核对元数据策略")
+            order.custom_oa_purchase_expense=doc.name
+            with managed_write():
+                order.save()  # Native permissions/update-after-submit still apply.
+        values = {"purchase_order":order.name, "target_company":order.company, BOUND_FIELD:source["version"],
+                  CONFIRMED_FIELD:1, CONFIRMED_BY_FIELD:frappe.session.user, CONFIRMED_ON_FIELD:frappe.utils.now_datetime(), **role_values,
+                  SOURCE_FIELD:json.dumps(source,ensure_ascii=False,default=str), EVIDENCE_FIELD:json.dumps(evidence,ensure_ascii=False,default=str),
+                  "source_stale":0, "source_invalid":0, "source_pending":0, "sync_status":"Purchase Order Created"}
+        frappe.db.set_value(DOCTYPE,doc.name,values)
+        if correction_reason:
+            doc.add_comment("Comment", "采购来源人工核对：" + str(correction_reason)[:2000])
 
 
 @frappe.whitelist(methods=["POST"])
+@procurement_entry
 def create_purchase_order_from_source(name, expected_version, company, supplier, currency, schedule_date, items, correction_reason="", beneficiary_company=None, project=None):
     doc = _source(name, write=True)
     if doc.get("purchase_order"):
@@ -483,6 +491,7 @@ def create_purchase_order_from_source(name, expected_version, company, supplier,
 
 
 @frappe.whitelist(methods=["POST"])
+@procurement_entry
 def associate_purchase_order(name, purchase_order, expected_version, correction_reason="", beneficiary_company=None, project=None):
     doc = _source(name,write=True)
     if doc.get("purchase_order") and doc.purchase_order != purchase_order:

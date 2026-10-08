@@ -1,5 +1,6 @@
 """Bounded read-only native cancellation dependency collection."""
 import importlib.util
+import sys
 import unittest
 from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
@@ -32,6 +33,14 @@ class ReversalScopeTests(unittest.TestCase):
         self.sles = []
         self.bins = {("A", "W1"), ("A", "W2"), ("B", "W1"), ("B", "W2"), ("D", "W3")}
         self.queries = []
+        # This SELECT simulator is a pure test double, not the current site's
+        # LocalProxy. It must work under the site's AND site-free pytest entry.
+        database = patch.object(frappe, "db", Mock())
+        database.start(); self.addCleanup(database.stop)
+        def throw(message, exception=frappe.ValidationError, **kwargs):
+            raise exception(message)
+        messages = patch.object(frappe, "throw", side_effect=throw)
+        messages.start(); self.addCleanup(messages.stop)
         self.patches = [patch.object(self.scope, "_canonical"),
             patch.object(self.scope.service, "_read", side_effect=self.read),
             patch.object(self.scope.service, "_require_fields"),
@@ -115,6 +124,76 @@ class ReversalScopeTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError): result.company = "OTHER"
         self.assertEqual(self.queries, [])
         self.assertEqual(root.items[0].warehouse, "W2")
+
+    def test_boundary_budget_old_new_pairs_are_one_union_not_two_root_limits(self):
+        first = document("Purchase Receipt", "ROOT", docstatus=0, items=[item("R", warehouse="W1")])
+        second = document("Purchase Receipt", "ROOT", docstatus=0, items=[item("R", warehouse="W2")])
+        with patch.object(self.scope, "MAX_PAIRS", 1):
+            self.scope.collect_document_scope(first)
+            self.scope.collect_document_scope(second)
+            budget = self.scope._ScopeBudget()
+            self.scope._Collector(first, budget=budget)
+            with self.assertRaises(frappe.ValidationError): self.scope._Collector(second, budget=budget)
+
+    def test_ordinary_non_stock_invoice_draft_protects_real_draft_receipt_without_public_b1_relaxation(self):
+        receipt = self.add(document("Purchase Receipt", "PR", docstatus=0, items=[item("R")]))
+        invoice = document("Purchase Invoice", "PI", docstatus=0, update_stock=0,
+            items=[item("I", purchase_receipt=receipt.name, pr_detail="R")])
+        with self.assertRaises(frappe.ValidationError):
+            self.scope.collect_document_scope(invoice)  # public capability remains strict
+        result = self.scope.collect_boundary_scope(invoice)
+        self.assertIn(self.scope.DocumentIdentity(receipt.doctype, receipt.name), result.sources)
+        self.assertEqual(result.vouchers, ())
+        for state, stock in ((1, 0), (0, 1)):
+            with self.subTest(state=state, stock=stock):
+                invoice.docstatus, invoice.update_stock = state, stock
+                with self.assertRaises(frappe.ValidationError): self.scope.collect_boundary_scope(invoice)
+        invoice.docstatus, invoice.update_stock = 0, 0
+        for field, wrong in (("company", "OTHER"), ("supplier", "OTHER"), ("docstatus", 2)):
+            with self.subTest(receipt_field=field):
+                original = getattr(receipt, field)
+                setattr(receipt, field, wrong)
+                with self.assertRaises(frappe.ValidationError): self.scope.collect_boundary_scope(invoice)
+                setattr(receipt, field, original)
+        for field, wrong in (("pr_detail", "OTHER"), ("stock_uom", "Kg")):
+            with self.subTest(invoice_detail_field=field):
+                original = invoice.items[0][field]
+                invoice.items[0][field] = wrong
+                with self.assertRaises(frappe.ValidationError): self.scope.collect_boundary_scope(invoice)
+                invoice.items[0][field] = original
+
+    def test_boundary_budget_combines_real_source_and_root_typed_identities(self):
+        po1 = self.add(document("Purchase Order", "PO1", items=[item("P1", doctype="Purchase Order Item")]))
+        po2 = self.add(document("Purchase Order", "PO2", items=[item("P2", doctype="Purchase Order Item")]))
+        first = document("Purchase Receipt", "ROOT", docstatus=0,
+            items=[item("R", purchase_order=po1.name, purchase_order_item="P1")])
+        second = document("Purchase Receipt", "ROOT", docstatus=0,
+            items=[item("R", purchase_order=po2.name, purchase_order_item="P2")])
+        with patch.object(self.scope, "MAX_VOUCHERS", 2):
+            self.scope.collect_document_scope(first)
+            self.scope.collect_document_scope(second)
+            budget = self.scope._ScopeBudget()
+            self.scope._Collector(first, budget=budget)
+            with self.assertRaises(frappe.ValidationError): self.scope._Collector(second, budget=budget)
+
+    def test_boundary_budget_shared_sle_names_are_cached_not_counted_twice_or_prefix_truncated(self):
+        first = self.add(document("Purchase Receipt", "PR1", items=[item("R1")]))
+        second = self.add(document("Purchase Receipt", "PR2", items=[item("R2")]))
+        for doc in (first, second): self.sle(doc, doc.items[0])
+        with patch.object(self.scope, "MAX_SLES", 2):
+            budget = self.scope._ScopeBudget()
+            one = self.scope._Collector(first, budget=budget)
+            one.closure()
+            before = len(self.queries)
+            two = self.scope._Collector(second, budget=budget)
+            two.closure()
+            self.assertEqual({row.name for row in one.result().vouchers}, {"PR1", "PR2"})
+            self.assertEqual(two.result().vouchers, one.result().vouchers)
+            self.assertEqual(set(budget.sles), {"SLE-0", "SLE-1"})
+            for doctype, filters, limit in self.queries[before:]:
+                if doctype == "Stock Ledger Entry":
+                    self.assertEqual(limit, 1)
+                    self.assertEqual(filters["name"], ["not in", ["SLE-0", "SLE-1"]])
 
     def test_native_fixed_point_includes_cancelled_root_equal_time_and_whole_vouchers(self):
         root = self.add(document("Purchase Receipt", "PR", items=[item("R")]))
@@ -372,11 +451,12 @@ class ReversalScopeTests(unittest.TestCase):
         mixin = type("MESMixin", (), {})
         controller = type("ExtendedSimpleNamespace", (mixin, SimpleNamespace), {})
         doc = controller(**vars(document("Material Request", "MR")))
+        classify = Mock(return_value=False)
         with patch.object(frappe, "get_hooks", side_effect=hooks), \
                 patch.object(frappe, "get_attr", side_effect=lambda path: mixin if path == mes else SimpleNamespace), \
                 patch("frappe.model.base_document.get_controller", return_value=controller), \
                 patch.object(self.scope.service, "_require_fields", side_effect=require), \
-                patch("mes_integration.mes_integration.material_request.is_mes_material_request", return_value=False) as classify:
+                patch.dict(sys.modules, {"mes_integration.mes_integration.material_request": SimpleNamespace(is_mes_material_request=classify)}):
             with self.assertRaises(frappe.PermissionError):
                 self.scope.collect_document_scope(doc)
             classify.assert_not_called()

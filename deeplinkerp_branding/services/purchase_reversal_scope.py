@@ -7,7 +7,7 @@ evidence for a later transaction boundary, not authorization to cancel anything.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import frappe
 from frappe.utils import get_datetime
@@ -71,14 +71,18 @@ def _reject(reason):
     consistency.operation.reject("无法安全核查采购冲销范围：" + reason, "purchase_reversal_scope_invalid")
 
 
-def _canonical(doc):
+def _canonical(doc, *, opaque=False):
     """Require the audited native controller and only the known extension MRO."""
     path = _NATIVE.get(doc.doctype)
     if not path:
         _reject("不支持的原生单据或来源路径")
     boundary = "deeplinkerp_branding.services.purchase_consistency.ProcurementControllerBoundary"
     mes = "mes_integration.mes_integration.material_request.MESMaterialRequestPerformanceMixin"
-    allowed = {boundary} if doc.doctype in (*_BUYING, "Payment Entry") else {mes} if doc.doctype == "Material Request" else set()
+    range_boundary = "deeplinkerp_branding.services.purchase_repost_boundary.NativeRangeBoundary"
+    status_boundary = "deeplinkerp_branding.services.purchase_repost_boundary.NativeStatusBoundary"
+    allowed = {boundary} if doc.doctype in (*_BUYING, "Payment Entry") else {mes, range_boundary} if doc.doctype == "Material Request" else {range_boundary}
+    if doc.doctype in ("Purchase Order", "Purchase Receipt", "Material Request"):
+        allowed.add(status_boundary)
     if frappe.get_hooks("override_doctype_class", {}).get(doc.doctype):
         _reject("原生控制器已被替换")
     extension_paths = frappe.get_hooks("extend_doctype_class", {}).get(doc.doctype, [])
@@ -88,7 +92,14 @@ def _canonical(doc):
     native = frappe.get_attr(path)
     from frappe.model.base_document import get_controller
     controller = get_controller(doc.doctype)
-    if type(doc) is not controller or native not in controller.__mro__:
+    from frappe.model.document import LazyDocument, get_lazy_controller
+    actual_type = type(doc)
+    lazy_native = False
+    if actual_type is not controller:
+        lazy = get_lazy_controller(doc.doctype)
+        lazy_native = actual_type is lazy and lazy.__bases__ == (LazyDocument, controller) and (
+            lazy.__mro__[:3] == (lazy, LazyDocument, controller))
+    if actual_type is not controller and not lazy_native or native not in controller.__mro__:
         _reject("原生控制器身份不一致")
     expected = tuple(frappe.get_attr(path) for path in reversed(extension_paths)) + (native,)
     if (not extension_paths and controller is not native) or extension_paths and (
@@ -99,7 +110,7 @@ def _canonical(doc):
         # but MES sources enqueue a different Bin path (material_request.py82-96).
         from mes_integration.mes_integration.material_request import is_mes_material_request
         _fields(doc.doctype, {"custom_request_source"})
-        if is_mes_material_request(doc):
+        if is_mes_material_request(doc) and not opaque:
             _reject("MES 物料请求使用未支持的异步库存来源路径")
 
 
@@ -140,8 +151,38 @@ def _matches(row, filters):
     return True
 
 
+@dataclass
+class _ScopeBudget:
+    """Private per-phase UNION proof, shared only by the existing collectors."""
+    pairs: set = field(default_factory=set)
+    identities: set = field(default_factory=set)
+    sles: dict = field(default_factory=dict)
+    documents: dict = field(default_factory=dict)
+
+    def identity(self, identity):
+        if not identity.name:
+            return  # an unnamed incoming draft is not a fabricated identity
+        if identity not in self.identities and len(self.identities) >= MAX_VOUCHERS:
+            _reject("原生单据联合范围超过安全上限")
+        self.identities.add(identity)
+
+    def pair(self, pair):
+        if pair not in self.pairs and len(self.pairs) >= MAX_PAIRS:
+            _reject("物料仓库联合范围超过安全上限")
+        self.pairs.add(pair)
+
+
 class _Collector:
-    def __init__(self, root):
+    def __init__(self, root, *, current=False, stock_entry_lifecycle=True, opaque=False, boundary_gate=False, budget=None):
+        self.current = current
+        self.stock_entry_lifecycle = stock_entry_lifecycle
+        self.opaque = opaque
+        self.boundary_gate = boundary_gate
+        # Native ordinary non-stock PI drafts may preserve a manual draft PR
+        # reference (existing auto-invoice completeness scenario). This is only
+        # a protected read identity, never a submit/repost/cancel capability.
+        self.allow_draft_receipts = boundary_gate and root.doctype == "Purchase Invoice" and root.docstatus == 0 and not root.get("update_stock")
+        self.budget = budget
         self.root = DocumentIdentity(root.doctype, root.name or "")
         self.company = root.get("company")
         self.posting_datetime = _datetime(root)
@@ -190,6 +231,8 @@ class _Collector:
         if location.company != self.company or location.is_group or location.disabled:
             _reject("仓库公司或状态不一致")
         pair = StockPair(item_code, warehouse)
+        if self.budget is not None:
+            self.budget.pair(pair)
         if pair not in self.pairs and len(self.pairs) >= MAX_PAIRS:
             _reject("物料仓库范围超过安全上限")
         self.pairs.add(pair)
@@ -246,7 +289,7 @@ class _Collector:
             if source and identity != self.root:
                 self.add_source(identity)
             return
-        _canonical(doc)
+        _canonical(doc, **({"opaque": True} if self.opaque or self.boundary_gate and doc.doctype == "Material Request" else {}))
         doc.check_permission("read")
         _fields(doc.doctype, {"company", "supplier", "items", "packed_items", "supplied_items", "references",
             "posting_date", "posting_time", "transaction_date", "update_stock", "is_return", "return_against",
@@ -257,11 +300,15 @@ class _Collector:
             "custom_operating_recognition", "inter_company_order_reference", "inter_company_reference", "inter_company_invoice_reference"})
         if doc.company != self.company or doc.get("docstatus") == 2:
             _reject("单据公司或状态不一致")
-        if source and doc.docstatus != 1:
+        if source and doc.docstatus != 1 and not (self.allow_draft_receipts and doc.doctype == "Purchase Receipt" and doc.docstatus == 0):
             _reject("原生来源必须已提交")
         if source and doc.doctype == "Purchase Order" and doc.get("status") in ("Closed", "Cancelled", "On Hold"):
             _reject("原生采购来源已关闭或暂停")
-        if doc.get("subcontracting_order") or doc.get("is_subcontracted") and not doc.get("is_old_subcontracting_flow"):
+        if self.budget is not None:
+            self.budget.identity(identity)
+            if source or identity != self.root:
+                self.budget.documents.setdefault(identity, doc)
+        if not self.opaque and (doc.get("subcontracting_order") or doc.get("is_subcontracted") and not doc.get("is_old_subcontracting_flow")):
             _reject("不支持的新委外来源路径")
         self.documents[identity] = doc  # cycle guard; a failure never returns partial evidence
         consistency.check_operating_dependencies(doc)
@@ -272,7 +319,7 @@ class _Collector:
         if doc.doctype in (*_BUYING, "Payment Entry"):
             consistency.check_sales_dependencies(doc, reader=self.read)
         if doc.doctype in _BUYING:
-            consistency.check_sources(doc, reader=self.read, validate_execution=False)
+            consistency.check_sources(doc, reader=self.read, validate_execution=False, allow_draft_receipts=self.allow_draft_receipts)
         if doc.doctype == "Payment Entry":
             _fields("Payment Entry Reference", {"reference_doctype", "reference_name"}, "Payment Entry")
             if doc.party_type != "Supplier":
@@ -284,7 +331,14 @@ class _Collector:
                 target = self.read(row.reference_doctype, row.reference_name)
                 if target.supplier != doc.party:
                     _reject("付款来源供应商不一致")
-        identities, _ = consistency.resolve_source_documents(doc, reader=self.read, stock_entry_lifecycle=identity == self.root)
+        if self.opaque and doc.doctype not in (*_BUYING, "Payment Entry"):
+            if doc.doctype != "Stock Entry":
+                return  # Only site-wide absence authorizes opaque lifecycle.
+            from .purchase_repost_boundary import _opaque
+            if _opaque(doc, current=self.current):
+                return
+        identities, _ = consistency.resolve_source_documents(doc, reader=self.read,
+            stock_entry_lifecycle=self.stock_entry_lifecycle and identity == self.root)
         for doctype, name in sorted(identities):
             self.read(doctype, name)
         if identity == self.root and doc.doctype == "Purchase Invoice":
@@ -328,12 +382,18 @@ class _Collector:
                 row.get("purchase_order_item") in details for row in doc.items)
         candidates = {identity for identity, doc in self.documents.items()
             if identity.doctype == "Purchase Receipt" and candidate(doc)}
-        remaining = MAX_VOUCHERS - len(self.sources)
-        known = tuple(sorted(identity.name for identity in self.sources if identity.doctype == "Purchase Receipt")) or ("",)
+        identities = self.budget.identities if self.budget is not None else self.sources
+        if self.budget is not None:
+            for identity, doc in tuple(self.budget.documents.items()):
+                if identity.doctype == "Purchase Receipt" and candidate(doc):
+                    self.read(identity.doctype, identity.name)
+                    candidates.add(identity)
+        remaining = MAX_VOUCHERS - len(identities)
+        known = tuple(sorted(identity.name for identity in identities if identity.doctype == "Purchase Receipt")) or ("",)
         rows = frappe.db.sql("SELECT DISTINCT pri.parent FROM `tabPurchase Receipt Item` pri "
             "INNER JOIN `tabPurchase Receipt` pr ON pr.name=pri.parent "
             "WHERE pri.purchase_order_item IN %(details)s AND pr.docstatus=1 AND pr.is_return=0 "
-            "AND pri.parent NOT IN %(known)s ORDER BY pri.parent LIMIT %(limit)s",
+            "AND pri.parent NOT IN %(known)s ORDER BY pri.parent LIMIT %(limit)s" + (" FOR UPDATE" if self.current else ""),
             {"details": tuple(details), "known": known, "limit": remaining + 1}, as_dict=True)
         if len(rows) > remaining:
             _reject("原生账务来源范围超过安全上限")
@@ -348,18 +408,25 @@ class _Collector:
         # A repeated frontier must not spend the remaining budget on an already
         # consumed prefix and conceal later rows. Exclude unique names at SQL.
         query = dict(filters)
-        if self.sles:
-            query["name"] = ["not in", sorted(self.sles)]
-        remaining = MAX_SLES - len(self.sles)
+        seen = self.budget.sles if self.budget is not None else self.sles
+        if seen:
+            query["name"] = ["not in", sorted(seen)]
+        remaining = MAX_SLES - len(seen)
         rows = frappe.db.get_values("Stock Ledger Entry", query, _SLE_FIELDS, as_dict=True,
-            order_by="posting_datetime asc, creation asc, name asc", limit=remaining + 1)
+            order_by="posting_datetime asc, creation asc, name asc", limit=remaining + 1,
+            **({"for_update": True} if self.current else {}))
         if len(rows) > remaining:
             _reject("库存流水范围超过安全上限")
         for row in rows:
             if not row.name or row.company != self.company:
                 _reject("库存流水公司或身份不一致")
+            seen[row.name] = row
+        matched = [row for row in seen.values() if _matches(row, filters)]
+        for row in matched:
+            if row.company != self.company:
+                _reject("库存流水公司或身份不一致")
             self.sles[row.name] = row
-        return [row for row in self.sles.values() if _matches(row, filters)]
+        return matched
 
     def add_voucher(self, doctype, name):
         identity = DocumentIdentity(doctype, name)
@@ -393,8 +460,10 @@ class _Collector:
                 flags = ("material_consumption", "get_rm_cost_from_consumption_entry")
                 if not all(settings.has_field(field) for field in flags):
                     _reject("原生制造成本配置元数据缺失")
-                if all(frappe.db.get_single_value("Manufacturing Settings", field) for field in flags) and frappe.db.exists(
-                        "Stock Entry", {"work_order": doc.work_order, "docstatus": 1, "purpose": "Material Consumption for Manufacture"}):
+                filters = {"work_order": doc.work_order, "docstatus": 1, "purpose": "Material Consumption for Manufacture"}
+                if all(self.setting("Manufacturing Settings", field) for field in flags) and (
+                        frappe.db.get_value("Stock Entry", filters, "name", for_update=True) if self.current else
+                        frappe.db.exists("Stock Entry", filters)):
                     _reject("制造消耗成本来源尚无有界权限范围适配")
             anchor = str(get_datetime(row.posting_datetime or get_combine_datetime(row.posting_date, row.posting_time)))
             self.add_pair(row.item_code, row.warehouse, anchor if propagate else None)
@@ -440,7 +509,7 @@ class _Collector:
         items = {row.item_code for table in ("items", "packed_items") for row in doc.get(table) or []}
         warehouses = {row.get(field) for table in ("items", "packed_items") for row in doc.get(table) or []
             for field in (("warehouse", "s_warehouse", "t_warehouse") if doc.doctype == "Stock Entry" else ("warehouse",)) if row.get(field)}
-        raw = self.select({"voucher_type": doc.doctype, "voucher_no": doc.name})
+        raw = self.select({"voucher_type": doc.doctype, "voucher_no": doc.name}) if doc.name else []
         items.update(row.item_code for row in raw)
         warehouses.update(row.warehouse for row in raw)
         filters = {"company": self.company, "is_cancelled": 0, "posting_datetime": [">=", _datetime(doc)]}
@@ -451,19 +520,31 @@ class _Collector:
 
     def seed_document(self, doc):
         """One verified native transaction context, reused for billing PRs."""
-        self.add_voucher(doc.doctype, doc.name)
+        if doc.name:
+            self.add_voucher(doc.doctype, doc.name)
         self.posting_datetime = min(self.posting_datetime, _datetime(doc))
-        self.consume(self.select({"voucher_type": doc.doctype, "voucher_no": doc.name}), propagate=True)
+        if doc.name:
+            self.consume(self.select({"voucher_type": doc.doctype, "voucher_no": doc.name}), propagate=True)
         self.document_gl_candidates(doc)
 
-    def closure(self):
+    def setting(self, doctype, field):
+        return frappe.db.get_single_value(doctype, field,
+            **({"cache": False, "for_update": True} if self.current else {}))
+
+    def closure(self, *, require_bins=True, proposed_stock=False):
         root = self.documents[self.root]
+        if proposed_stock:
+            # Before a native stock write the root's SLE does not yet exist.
+            # Its actual stock detail paths are the possible newly written raw
+            # seed, not arbitrary source-only pairs or GL-child extra rows.
+            for pair in self.document_pairs(root):
+                self.add_pair(pair.item_code, pair.warehouse, _datetime(root))
         self.seed_document(root)
         if root.doctype == "Purchase Invoice":
             setting = "set_landed_cost_based_on_purchase_invoice_rate"
             if not frappe.get_meta("Buying Settings").has_field(setting):
                 _reject("原生采购成本重贴配置元数据缺失")
-            if frappe.db.get_single_value("Buying Settings", setting) and not (
+            if self.setting("Buying Settings", setting) and not (
                     root.get("is_return") and not root.get("update_billed_amount_in_purchase_receipt")):
                 # FIFO may leave some candidates unchanged. This is a bounded
                 # potential lease footprint, NOT a claim each PR created a RIV.
@@ -483,9 +564,9 @@ class _Collector:
                 self.scanned[pair] = anchor
                 self.consume(self.select({"item_code": pair.item_code, "warehouse": pair.warehouse,
                     "posting_datetime": [">=", anchor], "is_cancelled": 0}), propagate=True)
-        for pair in sorted(self.pairs):
+        for pair in sorted(self.pairs) if require_bins else ():
             rows = frappe.db.get_values("Bin", {"item_code": pair.item_code, "warehouse": pair.warehouse},
-                ["name"], as_dict=True, limit=2)
+                ["name"], as_dict=True, limit=2, **({"for_update": True} if self.current else {}))
             if len(rows) != 1:
                 _reject("原生库存 Bin 缺失或重复")
 
@@ -515,3 +596,25 @@ def collect_cancellation_scope(persisted_doc) -> ReversalScope:
     collector = _Collector(root)
     collector.closure()
     return collector.result()
+
+
+def collect_boundary_scope(doc, *, current=False, stock_entry_lifecycle=True, opaque=False, budget=None):
+    """Internal ordinary native write footprint; NOT a new cancellation API.
+
+    Submitted stock writes may reach real future selectors. LCV valuation uses
+    its verified receipt contexts; no arbitrary source-only document is seeded.
+    Drafts keep the first-stock/no-Bin behavior. The public B1 APIs stay pure.
+    """
+    from contextlib import nullcontext
+    with service.current_reads() if current else nullcontext():
+        collector = _Collector(doc, current=current, stock_entry_lifecycle=stock_entry_lifecycle,
+            opaque=opaque, boundary_gate=True, budget=budget)
+        if doc.docstatus == 1 and not opaque:
+            if doc.doctype in _STOCK:
+                collector.closure(require_bins=False, proposed_stock=True)
+            elif doc.doctype == "Landed Cost Voucher":
+                for row in doc.purchase_receipts:
+                    collector.seed_document(collector.documents[DocumentIdentity(row.receipt_document_type, row.receipt_document)])
+                # Existing stock frontier expansion is reused, not LCV-as-SLE.
+                collector.closure(require_bins=False)
+        return collector.result()

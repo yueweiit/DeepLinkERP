@@ -6,6 +6,7 @@ import json
 import re
 
 import frappe
+from .purchase_repost_boundary import procurement_entry
 from frappe.model import get_permitted_fields
 from frappe.utils import getdate
 
@@ -586,6 +587,7 @@ def _payment_balance(doc, validate_allocations=True):
 
 
 @frappe.whitelist(methods=["POST"])
+@procurement_entry
 def update_payment_draft(name, changes, expected_modified):
     changes = _changes(changes)
     allowed = {"posting_date", "reference_no", "remarks", "amount", "bank_account"}
@@ -747,6 +749,7 @@ def record_payment(source_doctype, source_name, purchase_invoice=None, amount_to
 
 
 @frappe.whitelist(methods=["POST"])
+@procurement_entry
 def submit_document(doctype, name, expected_modified, workflow_action=None, request_id=None):
     if request_id or doctype == "Purchase Receipt":
         return _native_request(request_id, [doctype, name, expected_modified, workflow_action],
