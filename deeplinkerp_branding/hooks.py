@@ -173,6 +173,19 @@ doc_events = {
 }
 doc_events["OA Purchase Request"] = {"validate":"deeplinkerp_branding.services.purchase_source_service.validate_managed_source","before_rename":"deeplinkerp_branding.services.purchase_source_service.protect_managed_source_identity","on_trash":"deeplinkerp_branding.services.purchase_source_service.protect_managed_source_identity"}
 doc_events["Purchase Order"] = {"validate":"deeplinkerp_branding.services.purchase_source_service.validate_managed_order","before_submit":"deeplinkerp_branding.services.purchase_source_service.validate_source_before_submit"}
+for procurement_doctype in ("Purchase Order", "Purchase Receipt", "Purchase Invoice", "Payment Entry"):
+    events = doc_events.setdefault(procurement_doctype, {})
+    for procurement_event in ("on_update", "on_submit", "on_cancel", "on_update_after_submit"):
+        events[procurement_event] = "deeplinkerp_branding.services.purchase_consistency.register_document"
+doc_events["Integration Request"] = {
+    "on_trash": "deeplinkerp_branding.services.purchase_operation.protect_audit",
+    "before_rename": "deeplinkerp_branding.services.purchase_operation.protect_audit",
+}
+extend_doctype_class = {
+    **{doctype: ["deeplinkerp_branding.services.purchase_consistency.ProcurementControllerBoundary"]
+       for doctype in ("Purchase Order", "Purchase Receipt", "Purchase Invoice", "Payment Entry")},
+    "Integration Request": ["deeplinkerp_branding.services.purchase_operation.ProcurementAuditRetention"],
+}
 override_whitelisted_methods = {"oa_purchase_request.oa_purchase_request.oa_purchase_request.create_purchase_order":"deeplinkerp_branding.services.purchase_source_service.legacy_create_purchase_order"}
 scheduler_events = {"cron": {"*/15 * * * *": ["deeplinkerp_branding.services.operating_expenses.scheduled_sync", "deeplinkerp_branding.services.purchase_source_service.scheduled_sync"]}}
 website_context = {

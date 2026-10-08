@@ -10,6 +10,7 @@ from frappe.model import get_permitted_fields
 from frappe.utils import getdate
 
 from deeplinkerp_branding.services import purchase_payment_service as service
+from deeplinkerp_branding.services import purchase_operation
 
 TARGETS = {("Purchase Receipt", "Purchase Invoice"), ("Purchase Order", "Purchase Receipt"),
            ("Purchase Order", "Purchase Invoice")}
@@ -459,56 +460,47 @@ def save_document_draft(source_doctype, source_name, target_doctype, changes, re
     if expected_source_modified is not None:
         payload.append({"expected_source_modified": expected_source_modified})
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
-    key = "dlp-document-draft:" + hashlib.sha256((frappe.session.user + ":" + request_id).encode()).hexdigest()
-    cache = frappe.cache()
-    with cache.lock(key + ":lock", timeout=60, blocking_timeout=5):
-        previous = cache.get_value(key)
-        if previous:
-            if previous["digest"] != digest:
-                frappe.throw("同一请求内容已改变，请刷新")
-            if not frappe.db.exists(target_doctype, previous["name"]):
-                frappe.throw("上次请求尚未完成，请稍后重试")
-            source, _ = _source(source_doctype, source_name)
-            saved = service._read(target_doctype, previous["name"], HEADER_FIELDS)
-            if saved.company != source.company or saved.supplier != source.supplier or _advanced(saved, source):
-                frappe.throw(ADVANCED)
-            result = _projection(saved, source=source)
-            result["reused"] = True
-            return result
-        locked_orders = {}
-        source = _locked_source(source_doctype, source_name, target_doctype, locked_orders)
-        _source(source_doctype, source_name)
-        if expected_source_modified is not None or (source_doctype, target_doctype) == ("Purchase Order", "Purchase Invoice"):
-            _version(source, expected_source_modified)
-        if not target_name and not allow_another_draft and _current_drafts(source, target_doctype):
-            frappe.throw("已有入库或应付草稿，请选择继续编辑；新建另一张需明确确认")
-        doc = _locked(target_doctype, target_name) if target_name else None
-        if target_name:
-            _version(doc, expected_modified)
-            doc.check_permission("write")
-            if doc.company != source.company or doc.supplier != source.supplier or _advanced(doc, source):
-                frappe.throw(ADVANCED)
-        if doc and doc.docstatus != 0:
-            frappe.throw("只能保存草稿")
-        native = _native(source, target_doctype)
-        maximum = _current_maximum(source, target_doctype, locked_orders=locked_orders)
-        if _advanced(native, source):
+
+    def operation():
+        return _save_document_draft(source_doctype, source_name, target_doctype, changes, target_name,
+            expected_modified, allow_another_draft, expected_source_modified)
+
+    return purchase_operation.run(request_id, payload, operation, _replay_native, digest=digest)
+
+
+def _save_document_draft(source_doctype, source_name, target_doctype, changes, target_name=None,
+                         expected_modified=None, allow_another_draft=False, expected_source_modified=None):
+    locked_orders = {}
+    source = _locked_source(source_doctype, source_name, target_doctype, locked_orders)
+    _source(source_doctype, source_name)
+    if expected_source_modified is not None or (source_doctype, target_doctype) == ("Purchase Order", "Purchase Invoice"):
+        _version(source, expected_source_modified)
+    if not target_name and not allow_another_draft and _current_drafts(source, target_doctype):
+        frappe.throw("已有入库或应付草稿，请选择继续编辑；新建另一张需明确确认")
+    doc = _locked(target_doctype, target_name) if target_name else None
+    if target_name:
+        _version(doc, expected_modified)
+        doc.check_permission("write")
+        if doc.company != source.company or doc.supplier != source.supplier or _advanced(doc, source):
             frappe.throw(ADVANCED)
-        _limit_native(native, maximum, source)
-        # The native mapper remains authoritative when it supplies a stricter cap.
-        maximum = {_key(row, target_doctype, source): min(service.amount(row.qty), maximum.get(_key(row, target_doctype, source), service.amount(0)))
-                   for row in native.items}
-        doc = doc or native
-        doc.check_permission("write" if target_name else "create")
-        _edit_document(doc, changes, maximum, source)
-        doc.save() if target_name else doc.insert()
-        if doc.docstatus != 0 or (target_doctype == "Purchase Invoice" and doc.update_stock):
-            frappe.throw("保存必须保持草稿状态")
-        cache.set_value(key, {"digest": digest, "name": doc.name}, expires_in_sec=86400)
-        frappe.db.after_rollback.add(lambda: cache.delete_value(key))
-        result = _projection(doc, maximum, source)
-        result["reused"] = False
-        return result
+    if doc and doc.docstatus != 0:
+        frappe.throw("只能保存草稿")
+    native = _native(source, target_doctype)
+    maximum = _current_maximum(source, target_doctype, locked_orders=locked_orders)
+    if _advanced(native, source):
+        frappe.throw(ADVANCED)
+    _limit_native(native, maximum, source)
+    maximum = {_key(row, target_doctype, source): min(service.amount(row.qty), maximum.get(_key(row, target_doctype, source), service.amount(0)))
+               for row in native.items}
+    doc = doc or native
+    doc.check_permission("write" if target_name else "create")
+    _edit_document(doc, changes, maximum, source)
+    doc.save() if target_name else doc.insert()
+    if doc.docstatus != 0 or (target_doctype == "Purchase Invoice" and doc.update_stock):
+        frappe.throw("保存必须保持草稿状态")
+    result = _projection(doc, maximum, source)
+    result["reused"] = False
+    return result
 
 
 def _payment(doc):
@@ -643,39 +635,22 @@ def update_payment_draft(name, changes, expected_modified):
 
 
 def _native_request(request_id, payload, operation):
-    """Keep an acknowledged native operation retryable without repeating its write."""
-    if not re.fullmatch(r"[a-zA-Z0-9-]{16,80}", str(request_id or "")):
-        frappe.throw("缺少有效请求标识，请刷新付款抽屉")
-    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
-    key = "dlp-payment-action:" + hashlib.sha256((frappe.session.user + ":" + request_id).encode()).hexdigest()
-    cache = frappe.cache()
-    with cache.lock(key + ":lock", timeout=60, blocking_timeout=5):
-        previous = cache.get_value(key)
-        if previous:
-            if previous["digest"] != digest:
-                frappe.throw("同一请求内容已改变，请先核对付款记录")
-            doc = _locked(previous.get("doctype", "Payment Entry"), previous["name"])
-            if doc.doctype == "Payment Entry":
-                result = _payment(doc)
-            else:
-                source, _ = _source(*_document_source_link(doc))
-                _mapping_fields(source, doc.doctype)
-                if source.company != doc.company or source.supplier != doc.supplier or _advanced(doc, source):
-                    frappe.throw(ADVANCED)
-                result = _projection(doc, source=source)
-            result.update(reused=True, needs_review=previous.get("needs_review", False))
-            return result
-        try:
-            result = operation()
-        except (frappe.ValidationError, frappe.PermissionError) as error:
-            # A known native rejection is acknowledged only after full rollback.
-            # The client may then correct inputs; network failures retain their token.
-            frappe.db.rollback()
-            return {"failed": True, "error": str(error)}
-        cache.set_value(key, {"digest": digest, "name": result["document"]["name"], "doctype": result["document"]["doctype"],
-                              "needs_review": result.get("needs_review", False)}, expires_in_sec=86400)
-        frappe.db.after_rollback.add(lambda: cache.delete_value(key))
-        return result
+    return purchase_operation.run(request_id, payload, operation, _replay_native, acknowledge_validation=True)
+
+
+def _replay_native(previous):
+    doc = _locked(previous.get("doctype", "Payment Entry"), previous["name"])
+    doc.check_permission(previous.get("permission", "read"))
+    if doc.doctype == "Payment Entry":
+        result = _payment(doc)
+    else:
+        source, _ = _source(*_document_source_link(doc))
+        _mapping_fields(source, doc.doctype)
+        if source.company != doc.company or source.supplier != doc.supplier or _advanced(doc, source):
+            frappe.throw(ADVANCED)
+        result = _projection(doc, source=source)
+    result.update(reused=True, needs_review=previous.get("needs_review", False))
+    return result
 
 
 def _payment_request(request_id, payload, operation):

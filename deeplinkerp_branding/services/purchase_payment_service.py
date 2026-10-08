@@ -976,17 +976,8 @@ def create_payment_draft(source_doctype, source_name, purchase_invoice=None, amo
         frappe.throw("本次金额必须大于0")
     payload = [source_doctype, source_name, purchase_invoice, str(value), bank_account, str(posting_date or nowdate()), remarks or "", reference_no or ""]
     digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False).encode()).hexdigest()
-    key = "dlp-purchase-draft:" + hashlib.sha256((frappe.session.user + ":" + request_id).encode()).hexdigest()
-    cache = frappe.cache()
-    with cache.lock(key + ":lock", timeout=60, blocking_timeout=5):
-        previous = cache.get_value(key)
-        if previous:
-            if previous["digest"] != digest:
-                frappe.throw("同一请求内容已改变，请重新打开付款抽屉")
-            if not frappe.db.exists("Payment Entry", previous["name"]):
-                frappe.throw("上次请求正在提交或失败，请稍后重试；不要重复创建")
-            entry = _read("Payment Entry", previous["name"])
-            return {"name": entry.name, "docstatus": entry.docstatus, "reused": True}
+
+    def operation():
         source, target, balance = payment_target(source_doctype, source_name, purchase_invoice)
         if value > amount(balance["outstanding"]):
             frappe.throw("本次金额超过最新未付余额，请刷新")
@@ -1013,7 +1004,16 @@ def create_payment_draft(source_doctype, source_name, purchase_invoice=None, amo
         entry.insert()  # normal Frappe validation, workflow, field and document permissions
         if entry.docstatus != 0:
             frappe.throw("付款草稿状态异常")
-        # A concurrent retry sees the same name, or 'pending', never creates another draft.
-        cache.set_value(key, {"digest": digest, "name": entry.name}, expires_in_sec=86400)
-        frappe.db.after_rollback.add(lambda: cache.delete_value(key))
-        return {"name": entry.name, "docstatus": 0, "reused": False}
+        return {"doctype": "Payment Entry", "name": entry.name, "docstatus": 0, "reused": False}
+
+    def replay(previous):
+        # Read the complete native context and current ACLs; never trust audit output.
+        from .purchase_document_actions import _payment
+        entry = _current("Payment Entry", previous["name"])
+        entry.check_permission("write")
+        _payment(entry)
+        return {"name": entry.name, "docstatus": entry.docstatus, "reused": True}
+
+    from .purchase_operation import run
+    result = run(request_id, payload, operation, replay, digest=digest)
+    return {key: result[key] for key in ("name", "docstatus", "reused")}

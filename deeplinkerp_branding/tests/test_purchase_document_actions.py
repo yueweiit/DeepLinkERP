@@ -236,12 +236,15 @@ class OrderInvoiceMappingTests(unittest.TestCase):
 
     def test_legacy_retry_digest_is_unchanged_when_source_token_absent(self):
         source = document("Purchase Receipt", "PR")
-        saved = document("Purchase Invoice", "PI", items=[])
+        saved = document("Purchase Invoice", "PI", items=[frappe._dict(purchase_receipt="PR", pr_detail="R1")])
         payload = ["Purchase Receipt", "PR", "Purchase Invoice", None, None, {}]
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
         cache = SimpleNamespace(lock=lambda *args, **kwargs: nullcontext(), get_value=lambda key: {"name": "PI", "digest": digest})
-        with patch.object(frappe, "session", SimpleNamespace(user="QA")), patch.object(frappe, "cache", return_value=cache), \
-             patch.object(frappe, "db", SimpleNamespace(exists=lambda *args: True)), \
+        previous = frappe._dict(status="Completed", data=json.dumps({"user": "QA", "digest": digest}),
+            output=json.dumps({"name": "PI", "doctype": "Purchase Invoice", "permission": "write"}))
+        with patch.object(frappe, "session", SimpleNamespace(user="QA")), \
+             patch.object(actions.purchase_operation, "_existing", return_value=previous), \
+             patch.object(actions, "_locked", return_value=saved), \
              patch.object(actions, "_source", return_value=(source, {})), patch.object(actions.service, "_read", return_value=saved), \
              patch.object(actions, "_advanced", return_value=False), patch.object(actions, "_projection", return_value={"document": {"name": "PI"}}), \
              patch.object(actions, "_native") as mapper:
@@ -272,7 +275,10 @@ class OrderInvoiceMappingTests(unittest.TestCase):
         cache = SimpleNamespace(lock=lambda *args, **kwargs: nullcontext(),
             get_value=lambda key: {"name": "PI", "doctype": "Purchase Invoice", "digest": digest})
         operation = Mock()
-        with patch.object(frappe, "session", SimpleNamespace(user="QA")), patch.object(frappe, "cache", return_value=cache), \
+        previous = frappe._dict(status="Completed", data=json.dumps({"user": "QA", "digest": digest}),
+            output=json.dumps({"name": "PI", "doctype": "Purchase Invoice", "permission": "submit"}))
+        with patch.object(frappe, "session", SimpleNamespace(user="QA")), \
+             patch.object(actions.purchase_operation, "_existing", return_value=previous), \
              patch.object(actions, "_locked", return_value=target), patch.object(actions, "_source", return_value=(source, {})) as read_source, \
              patch.object(actions, "_workflow_actions", return_value=[]), patch.object(actions, "_editable_fields", return_value=[]):
             result = actions._native_request("12345678-1234-1234", payload, operation)
@@ -290,7 +296,10 @@ class OrderInvoiceMappingTests(unittest.TestCase):
         cache = SimpleNamespace(lock=lambda *args, **kwargs: nullcontext(),
             get_value=lambda key: {"name": "PI", "doctype": "Purchase Invoice", "digest": digest})
         operation = Mock()
-        with patch.object(frappe, "session", SimpleNamespace(user="QA")), patch.object(frappe, "cache", return_value=cache), \
+        previous = frappe._dict(status="Completed", data=json.dumps({"user": "QA", "digest": digest}),
+            output=json.dumps({"name": "PI", "doctype": "Purchase Invoice", "permission": "submit"}))
+        with patch.object(frappe, "session", SimpleNamespace(user="QA")), \
+             patch.object(actions.purchase_operation, "_existing", return_value=previous), \
              patch.object(actions, "_locked", return_value=target), patch.object(actions, "_source", side_effect=frappe.PermissionError), \
              patch.object(actions, "_workflow_actions", return_value=[]), patch.object(actions, "_editable_fields", return_value=[]):
             with self.assertRaises(frappe.PermissionError):
@@ -380,7 +389,10 @@ class PaymentCompletionTests(unittest.TestCase):
 
         cache = SimpleNamespace(lock=lambda *args, **kwargs: nullcontext(), get_value=lambda key: None)
         rollback = Mock()
-        with patch.object(frappe, "session", SimpleNamespace(user="QA")), patch.object(frappe, "cache", return_value=cache), patch.object(frappe, "db", SimpleNamespace(rollback=rollback)):
+        with patch.object(frappe, "session", SimpleNamespace(user="QA")), \
+             patch.object(actions.purchase_operation, "_existing", return_value=None), \
+             patch.object(actions.purchase_operation, "_reserve"), \
+             patch.object(frappe, "db", SimpleNamespace(rollback=rollback)):
             result = actions._payment_request("12345678-1234-1234-1234-123456789abc", [], Mock(side_effect=frappe.ValidationError("Native failure")))
         rollback.assert_called_once_with()
         self.assertEqual(result, {"failed": True, "error": "Native failure"})
