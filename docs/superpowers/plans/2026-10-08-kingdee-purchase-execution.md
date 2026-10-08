@@ -146,6 +146,8 @@
 - [ ] 对冻结 SHA 作规格复审；规格通过后才作独立质量审查。重要问题回到同一实现者修复，重新测试和复审。
 - [ ] 主线程独立重跑全部 Branding pytest、`node --test tests/*.test.js`、Python/JS 语法与 `git diff --check`。报告案例数、参数展开、跳过、现有告警，释放 QA 与 index 后进入 1B。
 
+2026-10-08 当前冻结补漏为 `eb02a1107ca411135fd6d61b37614fd64b25e4d8`，4 文件 +486/-17（业务源、单测、原生脚本、局部规格），不包括本执行计划。主线程独立实际复验：native 完整脚本 51 tests / 39.223s / OK；Branding 615 passed、325 subtests passed / 53.26s；Node 479 passed、0 failed/skipped；Python 编译、JS 语法及 diff 检查成功。原生脚本保持顶层 `frappe.in_test=False`，每个 fixture 清理后原计数恢复，重跑后容器只剩两个原有 gunicorn。规格复审与其后的质量审查仍未完成，不将这些 green 结果认定为安全阶段或完整采购候选验收。旧委外 supplied Bin 的新增案例是 native-shaped 单测，不是旧委外全业务原生验收。零 GL 取消留下 Finance Pending issue 仍失败关闭，作为当前限制明确保留。
+
 ### Task 1B：范围、元数据与跨 commit 锁协议（先不放开取消）
 
 **Files:**
