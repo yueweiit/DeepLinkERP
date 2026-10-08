@@ -184,7 +184,21 @@
 - **1B1 闭包与窄元数据：** 只实现 `purchase_reversal_scope.py` 的完整、有界原生范围收集、`purchase_reversal_install.py` 的可重复元数据安装及其已有 QA 夹具测试。验证取消种子、同时间未来行、调拨/拆装/制造传播、原生 GL 的 item 集合 × warehouse 集合与 whole-voucher 影响，以及来源替换/权限/超限。安装钩子可注册但没有启用异步取消、运行后台任务或给业务写入豁免。普通首笔库存草稿缺少 Bin 不应被取消冻结规则误拦。
 - **1B2 会话 lease 与统一入口：** 在 1B1 冻结、独立规格和质量审查通过后，实现 `purchase_repost_boundary.py` 的物理连接握手/锁生命周期、指针保护及原生 `_save/insert` 的旧/新范围拦截，运行真实两连接和入口覆盖测试。只有两个步骤均通过才能完成 Task 1B，之后进入 worker 隔离 Task 1C。
 
+**1B1 首次冻结未通过（2026-10-08）：** `2252f49b19470fa97204f3b4dec898e4f11aae1f`，8 文件 +1217/-19。正式规格复审指出三项必要修复：SLE pair 必须绑定对应真实明细而非整单集合；Stock Entry 直接/在途 MR、旧委外 PO 与 reserve Bin 的真实来源不能静默遗漏；启用发票价成本调整时，非库存 PI 的真实 PR 重贴种子和最早时间不能遗漏。仍未进入质量审查、1B2 或部署。
+
+主线程独立复验此冻结：native 63 methods / 44.852s / exit 1，唯一失败为既有 System Settings 舍入夹具，另 62 方法通过；Branding 651 passed、398 subtests / 50.44s / exit 0；Node 479 passed、0 failed/skipped / 381.553834ms / exit 0；7 文件 Python 编译、冻结范围和工作树 diff 检查通过。脚本 SHA256 `fafaedb48df0d8a1da941bcbca6cdbd0626a0a2e73b85df729e996b774f83bc5`。38 类业务计数均恢复，六类新元数据指针全空、索引和定义准确；scheduler_disabled=True、enable_scheduler=0、frappe.in_test=False，探测结束后仅两原有 gunicorn。
+
+主线程对舍入失败完成原生受控证据：实际持有 ClientCache 的锁阻塞异步失效，数据库已为 Commercial Rounding 而进程缓存仍为 Banker's Rounding，原生 `.0025` 得 `.002`；调用原生 `clear_system_settings_cache` 和 document cache 失效后为 `.003`。只允许修测试夹具的同步缓存失效及 rollback 清理，不修改业务 rounding 算法、不以重复运行绿结果掩盖首轮失败。主线程已关闭全部 QA/探测，交回同一实现者修复三项规格缺口与该夹具，再重新冻结和独立复验。
+
+**1B1 第二次冻结独立检查点（2026-10-08，限定 B1 已验收）：** `451fda9e0c673bb24bab4f709fbd935988482f30`，本次修复 4 文件 +545/-85，累计相对 `d72c12a...` 8 文件 +1691/-33，无删除文件。正式规格复审限定 B1 通过：按实际 detail 绑定 pair、直接/在途 MR 与真实旧 PO supplied `stock_uom`/reserve Bin、PI 原生 IF-pr-detail/ELSE-po-detail 的 potential PR seeds 均关闭；正向 Manufacture FG 的实际 `recalculate_rate` 也在未适配消费成本来源处拒绝。未启用异步取消，不将 potential PR 说成实际 RIV 根。
+
+主线程 fresh native 66 methods / 54.156s / exit 0；Branding 663 passed + 432 subtests / 53.99s / exit 0；Node 479 passed、0 failed/skipped / 594.258667ms / exit 0；7 文件 Python 编译与冻结范围 diff 检查 exit 0。QA 脚本 SHA256 `6876b06ba78f82916569aac6240964cf202867a3ecd80551aabe5776e29a7b03`；Finance voucher SHA256 `3956eeb851212e210f6f9fddaaa2f380caa496845e6164bad3b395f3c5539f4d` 未变。隔离 site/database/host 精确防护的只读后检确认 38 类计数恢复（Custom Field133 为原127+exact6元数据、ItemPrice515历史不动），六类指针全空、定义/物理列/非 virtual/唯一单列索引准确，`frappe.in_test=False`、enable_scheduler0、原生 scheduler_disabled=True。所有 QA/probe 退出，docker top 仅两个原 gunicorn。正式质量复审无剩余 Critical/Important/可行动 Minor，主线程据源码、两正式只读审查及 fresh 执行证据接受限定 B1。尚未交付 1B2/worker/最终对账/UI/CI/browser/deploy，也不称整体采购流程完成。
+
 原生闭包须合并真实 stock propagation 与 GL propagation：根凭证的 raw SLE 包含取消行；未来库存行使用原生时间比较和依赖 detail 引用；GL 查询使用原生 item 集合 × warehouse 集合，而不是仅原始 pair。查到的真实凭证须纳入其全部实际行和相关来源。原生按 voucher name 排序造成跨 doctype 同名扩张时，纳入完整真实身份或明确拒绝碰撞，不静默漏算。任何无法验证的公司/仓库/来源/控制器路径在业务写入前失败关闭；不得借 UI 100 条限制、忽略 read 权限或截断查询伪装完整闭包。
+
+1B1 的原生阶段复核进一步限定固定点算法：**库存传播 frontier 与整单保护/证据 footprint 分开**。库存 frontier 只由根 raw SLE、原生未来 pair 扫描、实际 dependency detail 和 repack incoming 路径扩展；每条新 pair 使用实际传播 SLE 的时间，并保留已知更早 anchor。GL 候选合并根任务原生 direct Cartesian selector 与库存阶段可能受影响的 typed transactions。原生 `repost_only_accounting_ledgers` Transaction 子任务只处理自身一个 voucher，不再调用 direct selector；因此不能因一个 GL-only 子任务或整单额外行而递归播种新的 stock/Cartesian 查询。它们的全部真实行、pair 和来源仍加入保护及最终证据集合。source-only PO/MR/nonstock PI 的真实 Bin 影响可加入 footprint，但不凭空播种估值传播。重复到原生 stock frontier 和真实来源身份不再增长，而不是迭代一个扩大到无关业务的 GL 传染图。
+
+1B1 的 `collect_cancellation_scope` 根只允许本次采购范围的 PO/PR/PI/PE；SE/DN/stock SI/Stock Reconciliation 是已核对的实际依赖身份，不授权新增根取消业务。LCV 的 `collect_document_scope` 读取其真实 PR/stock PI/SE 来源 footprint，但本轮不假称已实现 LCV 自身取消触发各来源重贴的完整闭包，取消根明确拒绝。后续原生 worker 若需其它实际 RIV 范围，沿同一内部收集器复用已验证原生种子，不能建立第二套传播算法。安装器对已有兼容指针字段同时预检非 virtual 及真实 SQL 列；缺列只停止，不覆盖/修复现有定义。
 
 **Files:**
 
@@ -221,9 +235,15 @@ class ReversalScope:
 - [ ] 先写真实图案例：取消前收货 → 调拨 → 拆装/制造 → 另一物料/仓库未来凭证；以及独立公司/范围。核对原生 `_get_directly_dependent_vouchers` 的 item 集合 × warehouse 集合查询，不能只沿原始配对。测试必须对完整集合断言，包含超限拒绝、不存在 Bin、跨公司与换来源。先看到预期失败，再实现闭包。
 - [ ] 先写两连接锁案例：同一范围互斥、无关范围通过、commit 后仍持锁、rollback/异常清理、同会话重入、物理连接断开禁止继续写。使用同一实际业务连接的 MariaDB `GET_LOCK/IS_USED_LOCK/RELEASE_LOCK`，锁名采用站点/数据库/规范身份的摘要并按稳定顺序取得；不能用独立“只持锁”连接或 Redis 作为权威。
 - [ ] 非阻塞取得整个锁集；失败释放本次新取得的锁并拒绝/保留原生 pending。锁仍覆盖执行和去重；active lease 跨原生 commit 保留，结束后的 dormant lease 到实际 commit/rollback 才释放。CallbackManager 会持续消费队列，回调不得在自身内部重新加入自己；下一个边界重新注册。物理连接替换毒化当前执行，不在同一上下文重新取锁继续写。
+- [ ] 实际原生 `Database.commit` 在 `before_commit.run` 前先清空两个 rollback 队列；更早 before_commit 抛错会让 lease 自己的回调尚未运行，其原 after_rollback 又已丢失。回滚也先清空 commit 队列。清理必须有不依赖该回调已经运行的真实事务/执行边界路径；用两连接覆盖先于/后于本应用回调的失败、before_rollback 失败及 savepoint rollback（不释放外层 lease），不只测 mock callback 列表。现有 QA `commit_fixture` 会 reset after_commit，不能在被测 lease 后清空释放回调再称时序已通过。
+- [ ] 取得 lease 后用真实 current/locking read 重新核对来源、SLE 和 scope，而不是重复 REPEATABLE READ 下的旧快照；覆盖“另一事务在初次只读范围计算后、取得 lease 前已提交调拨/新增来源”的两连接场景。必要范围扩展按同一有界收集器处理或明确拒绝重试，不能以旧范围放行。不得在审计/业务已写入后 rollback 只为刷新快照，也不改变数据库全局隔离级别。
 - [ ] 当前已核查的 mysqlclient 2.2.7 使用真实 `_conn.ping(False)` 在该连接任何业务/审计写入或 lease 前禁用 C 层重连；它可能隐式 rollback，不能放在 chunk 中间或已执行 `_reserve` 后。将握手放在最外层请求/job/内部操作初始化，记录连接物理对象和 `CONNECTION_ID()`，故障注入证明断开不会换连接写入。未知 adapter 不放行 async。相关主源：[mysqlclient C 实现](https://github.com/PyMySQL/mysqlclient/blob/v2.2.7/src/MySQLdb/_mysql.c#L1784-L1846)、[MariaDB 会话锁](https://mariadb.com/docs/server/reference/sql-functions/secondary-functions/miscellaneous-functions/get_lock)。
+- [ ] 公共入口也必须早于其已有行锁初始化握手：未 keyed 的 `update_payment_draft` 和 `submit_document(Payment Entry/其他目标)` 先 `_locked` 或 `_locked_source`，来源 PO 的 `create/associate` 先 `_source(for_update=True)`。请求初始化与已连接的新内部执行上下文复用同一初始化；深层 `run/insert/_save` 仅验证既有物理身份，不能在持锁后首次 ping 或在原生 commit 后重握手。待真实原生请求/callback 时序核对后实现，不将 host 预审当作执行证据。
+- [ ] 补充实际请求/退出源码证据：Frappe `HTTPRequest` 在 `before_request` 前创建/恢复 Session，登录分支已写 Session/User 并原生 commit；不能称 before_request 是全请求第一条数据库写入。区分原生会话维护与本计划业务/审计写入，核查之前的登录钩子和 hook 顺序；任何可进入采购业务的早期路径必须在其写入/行锁前握手或明确拒绝。真实 `frappe.destroy` 直接调用 `db.close` 后释放 local，没有事务 callback；close/KILL/物理替换清理与毒化必须据此测试，不假设 after_rollback 自动触发。主线程只读副本 `/tmp/dlp-b2-request-native.bAiTcG` 的 `__init__.py` SHA `018ed9b4c3a50f0f5682f46310255d60e452e8c88a63055a3e70f659ba706db6`、`auth.py` SHA `30783d5da46d0b6f2cfc1cede2b6de15463c3a173cbdf88e998801979462309d`、`sessions.py` SHA `fb1708255852cedcfcdd7d1661b646310ad3cb034401733d0681b094eaf55ae1` 仅为设计核查，不是 B2 运行验收。
 - [ ] schema 只增加 `custom_purchase_reversal_operation` 隐藏、只读、no-copy、有索引的 Integration Request Link：Bin、实际 PO/PR/PI/PE 来源、实际 owned Repost Item Valuation generation。RIV 指针支持终态保护和保留，不扫描全部 IR JSON 代替身份索引。指针不改变库存量、金额或历史凭证。保护普通表单/API 的指针改写；安装重复执行不覆盖现有定义，不创建 Bin、不导入历史资料。
 - [ ] 扩展最外层 `_save/insert` 范围检查，早于原生 `check_if_latest` 和控制器业务写入；不能只依赖 before_validate（取消会跳过），也不能只用 SLE 钩子（原生取消先执行 raw SQL）。覆盖实际 stock 控制器 Stock Entry、Delivery Note、stock Sales Invoice、Stock Reconciliation、Landed Cost Voucher 的旧/新范围；PI/PE 沿真实采购引用取范围。未实现的真实关联路径明确拒绝，不伪造“不适用”。
+- [ ] 普通 Material Request 自身可修改实际 requested Bin，不能只在 PO/PR/SE 读取来源时检查它。保留现有 MES performance mixin 和普通原生路径，按真实旧/新 stock pairs 及必要实际 PO/PR backlink 检查 pending gate；MR 不新增第七类指针，也不扫描全量 IR JSON。实际 MES 分支在未验证其异步适配前仍明确拒绝进入新异步取消范围。
+- [ ] 比例验证普通新草稿兼容：原生 insert 在 wrapper 后才填部分默认日期/公司；如需在最早业务边界前补齐只读 scope 输入，复用经源码核查的原生、纯内存默认填充，不自行猜公司/库位，不运行业务计算或命名序列写入。真实最小 native 新单和首次库存无 Bin 场景必须继续可用；既有来源缺失或单位不明不能假称已验证。
 - [ ] 用实际 REST/controller 证明来源/仓库替换、客户端 flags、ignore_permissions 不逃逸；相交 pending 指针拒绝，无关范围仍正常。尚不允许任何新异步取消：当前 strict RIV 拒绝保持生效。
 - [ ] 在初始化 Frappe 的隔离测试环境运行两个新测试模块和原生完整脚本，保存红/绿结果；冻结此任务，规格通过后质量复审，再进入 1C。
 
@@ -286,3 +306,4 @@ class ReversalScope:
 - [ ] 完整候选串行吸收唯一发布者较新 Branding 基线，保留 dirty/untracked/server 状态；核对 Finance 固定候选、联合 CI、相关窄 schema 安装、全量回归、真实 browser 采购→入库→应付→付款流程。不是只发布冲销补丁。
 - [ ] 交付独立跨模块联动清单、数据一致性校验点、测试用例与实际结果；分类统计新增/修改/删除、重复逻辑、手写业务/测试/文档行数、业务场景/参数展开、兼容真实调用与退出条件及未处理债务。
 - [ ] 由既定唯一负责人 drain/部署/清缓存/重启并核查 Vultr SHA 和所有 worker 能力，再在线只读检查真实页面及 preview/cancel。线上真实提交/取消不得作为验收测试。所有影响页面尚未验收时不报告完整完成。
+- [ ] 发布脚本现有 narrow metadata scope 尚未包含六类 reversal 指针和 native scheduler 适配，需在最终候选扩展同一审计/窄安装/恢复工具；不能靠全局 migrate 顺便安装。现有 `quiesce_release_workers` 的 compose stop 不单独构成在途任务已 drain 的证明；记录真实 job/进程退出及恢复策略，保留队列和历史 RIV，完成门禁后才启用新异步取消。
