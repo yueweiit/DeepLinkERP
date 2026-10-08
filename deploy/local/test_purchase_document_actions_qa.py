@@ -328,7 +328,7 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
             "ToDo", "Version", "Notification Log", "China Cash Flow Assignment", "User", "Warehouse",
             "Workflow", "Workflow State", "Workflow Action Master", "Custom Field", "Advance Payment Ledger Entry", "Account", "Supplier")
         self.types += ("Sales Order", "Stock Reservation Entry", "Submission Queue", "Repost Item Valuation",
-            "Material Request", "Purchase Fulfilment Link", "China Cash Equivalent Scope", "Delivery Note", "Customer", "Price List", "Item Price")
+            "Material Request", "Purchase Fulfilment Link", "China Cash Equivalent Scope", "Delivery Note", "Customer", "Price List", "Item Price", "Sales Invoice")
         self.before = {doctype: frappe.db.count(doctype) for doctype in self.types}
         self.initial_names = {doctype: set(frappe.get_all(doctype, pluck="name", limit_page_length=0)) for doctype in self.types}
         self.committed_names = None
@@ -832,20 +832,25 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         self.assertEqual(caught.exception.purchase_error_id, "sales_dependency_unsupported")
         self.assertFalse(frappe.db.exists("Purchase Order", po.name))
 
-    def test_real_native_delivery_note_receipt_dependency_fails_closed(self):
-        from deeplinkerp_branding.services import purchase_consistency as guard
-        from erpnext.stock.doctype.delivery_note.delivery_note import make_inter_company_purchase_receipt
+    def internal_sales_parties(self):
+        """Real, same-currency cross-company parties shared by native Sales fixtures."""
         selling_company = "Yuewei"
         self.assertEqual(frappe.db.get_value("Company", selling_company, "default_currency"), "CNY")
         frappe.db.set_value("Item", self.item, "is_stock_item", 0)
         customer = frappe.get_doc({"doctype": "Customer", "customer_name": "QA-ATOMIC-CUSTOMER-" + uuid.uuid4().hex[:10],
             "customer_type": "Company", "customer_group": "Government", "territory": "Rest Of The World",
             "is_internal_customer": 1, "represents_company": COMPANY, "companies": [{"company": selling_company}]}).insert()
-        frappe.get_doc({"doctype": "Supplier", "supplier_name": "QA-ATOMIC-SUPPLIER-" + uuid.uuid4().hex[:10],
+        supplier = frappe.get_doc({"doctype": "Supplier", "supplier_name": "QA-ATOMIC-SUPPLIER-" + uuid.uuid4().hex[:10],
             "supplier_group": "All Supplier Groups", "supplier_type": "Company", "is_internal_supplier": 1,
             "represents_company": selling_company, "companies": [{"company": COMPANY}]}).insert()
         price_list = frappe.get_doc({"doctype": "Price List", "price_list_name": "QA-ATOMIC-PRICE-" + uuid.uuid4().hex[:10],
             "enabled": 1, "buying": 1, "selling": 1, "currency": "CNY"}).insert()
+        return selling_company, customer, supplier, price_list
+
+    def test_real_native_delivery_note_receipt_dependency_fails_closed(self):
+        from deeplinkerp_branding.services import purchase_consistency as guard
+        from erpnext.stock.doctype.delivery_note.delivery_note import make_inter_company_purchase_receipt
+        selling_company, customer, supplier, price_list = self.internal_sales_parties()
         dn = frappe.get_doc({"doctype": "Delivery Note", "company": selling_company, "customer": customer.name,
             "currency": "CNY", "conversion_rate": 1, "selling_price_list": price_list.name,
             "items": [{"item_code": self.item, "qty": 2, "rate": 20}]}).insert(
@@ -871,6 +876,108 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
             self.fail("Native standalone DN -> PR submitted and changed DN received_qty without the Sales dependency guard")
         self.assertFalse(frappe.db.exists("Purchase Receipt", pr.name))
         self.assertEqual(guard.artifact_evidence(frappe.get_doc("Delivery Note", dn.name)), original)
+        self.assertEqual({doctype: frappe.db.count(doctype) for doctype in self.types}, counts)
+
+    def test_real_native_sales_invoice_with_purchase_order_dependency_fails_closed(self):
+        from deeplinkerp_branding.services import purchase_consistency as guard
+        from erpnext.accounts.doctype.sales_invoice.sales_invoice import make_inter_company_purchase_invoice
+        selling_company, customer, supplier, price_list = self.internal_sales_parties()
+        po = self.order(supplier=supplier.name, qty=2, rate=20)
+        si = frappe.get_doc({"doctype": "Sales Invoice", "company": selling_company, "customer": customer.name,
+            "currency": "CNY", "conversion_rate": 1, "selling_price_list": price_list.name, "update_stock": 0,
+            "items": [{"item_code": self.item, "qty": 2, "rate": 20}]}).insert(
+                set_name="QA-ATOMIC-SI-" + uuid.uuid4().hex[:16])
+        si.submit()
+        self.commit_fixture()
+        self.remember_effects()
+        counts = {doctype: frappe.db.count(doctype) for doctype in self.types}
+        pi = make_inter_company_purchase_invoice(si.name)
+        self.assertEqual(pi.inter_company_invoice_reference, si.name)
+        self.assertEqual(pi.items[0].sales_invoice_item, si.items[0].name)
+        self.assertFalse(si.items[0].get("sales_order") or si.items[0].get("dn_detail"))
+        pi.items[0].purchase_order, pi.items[0].po_detail = po.name, po.items[0].name
+        try:
+            pi.insert()
+        except frappe.ValidationError as caught:
+            self.assertEqual(caught.purchase_error_id, "sales_dependency_unsupported")
+        else:
+            self.assertEqual(frappe.db.get_value("Purchase Invoice", pi.name, "docstatus"), 0)
+            self.assertTrue(any(row["module"] == "Sales/procurement review" and row["result"] == "N/A"
+                for row in guard.invalidate_reviews(frappe.get_doc("Purchase Invoice", pi.name))))
+            self.fail("Native SI -> PI with a valid PO source saved and falsely reported Sales N/A")
+        self.assertFalse(frappe.db.exists("Purchase Invoice", pi.name))
+        self.assert_effects_unchanged()
+        self.assertEqual({doctype: frappe.db.count(doctype) for doctype in self.types}, counts)
+
+    def test_real_native_parent_only_intercompany_order_cancellation_fails_closed(self):
+        from deeplinkerp_branding.services import purchase_consistency as guard
+        from erpnext.selling.doctype.sales_order.sales_order import make_inter_company_purchase_order
+        selling_company, customer, supplier, price_list = self.internal_sales_parties()
+        # Create a synthetic already-existing unsupported association. Only our
+        # app guard is paused during setup; all native mapping/validation/effects run.
+        with patch.object(guard, "check_sales_dependencies"):
+            so = frappe.get_doc({"doctype": "Sales Order", "company": selling_company, "customer": customer.name,
+                "currency": "CNY", "conversion_rate": 1, "selling_price_list": price_list.name,
+                "delivery_date": add_days(nowdate(), 1), "items": [{"item_code": self.item, "qty": 2, "rate": 20,
+                    "delivery_date": add_days(nowdate(), 1)}]}).insert(set_name="QA-ATOMIC-SO-" + uuid.uuid4().hex[:16])
+            po = make_inter_company_purchase_order(so.name)
+            self.assertEqual(po.inter_company_order_reference, so.name)
+            po.schedule_date = add_days(nowdate(), 1)
+            for row in po.items:
+                row.schedule_date = po.schedule_date
+                row.sales_order = row.sales_order_item = row.sales_order_packed_item = None
+            po.insert(set_name="QA-ATOMIC-PO-" + uuid.uuid4().hex[:16])
+            so.inter_company_order_reference = po.name
+            so.save()
+            so.submit()
+            po.reload().submit()
+            self.commit_fixture()
+        self.remember_effects()
+        counts = {doctype: frappe.db.count(doctype) for doctype in self.types}
+        try:
+            po.cancel()
+        except frappe.ValidationError as caught:
+            self.assertEqual(caught.purchase_error_id, "sales_dependency_unsupported")
+        else:
+            self.assertEqual(frappe.db.get_value("Purchase Order", po.name, "docstatus"), 2)
+            self.assertFalse(frappe.db.get_value("Sales Order", so.name, "inter_company_order_reference"))
+            self.assertFalse(frappe.db.get_value("Purchase Order", po.name, "inter_company_order_reference"))
+            self.fail("Native parent-only PO cancellation cleared the real Sales Order header without a Sales guard")
+        self.assert_effects_unchanged()
+        self.assertEqual({doctype: frappe.db.count(doctype) for doctype in self.types}, counts)
+
+    def test_real_native_parent_only_intercompany_invoice_cancellation_fails_closed(self):
+        from deeplinkerp_branding.services import purchase_consistency as guard
+        from erpnext.accounts.doctype.sales_invoice.sales_invoice import make_inter_company_purchase_invoice
+        selling_company, customer, supplier, price_list = self.internal_sales_parties()
+        with patch.object(guard, "check_sales_dependencies"):
+            po = self.order(supplier=supplier.name, qty=2, rate=20)
+            si = frappe.get_doc({"doctype": "Sales Invoice", "company": selling_company, "customer": customer.name,
+                "currency": "CNY", "conversion_rate": 1, "selling_price_list": price_list.name, "update_stock": 0,
+                "items": [{"item_code": self.item, "qty": 2, "rate": 20}]}).insert(
+                    set_name="QA-ATOMIC-SI-" + uuid.uuid4().hex[:16])
+            pi = make_inter_company_purchase_invoice(si.name)
+            self.assertEqual(pi.inter_company_invoice_reference, si.name)
+            pi.items[0].purchase_order, pi.items[0].po_detail = po.name, po.items[0].name
+            pi.items[0].sales_invoice_item = None
+            pi.insert()
+            si.inter_company_invoice_reference = pi.name
+            si.save()
+            si.submit()
+            pi.submit()
+            self.commit_fixture()
+        self.remember_effects()
+        counts = {doctype: frappe.db.count(doctype) for doctype in self.types}
+        try:
+            pi.cancel()
+        except frappe.ValidationError as caught:
+            self.assertEqual(caught.purchase_error_id, "sales_dependency_unsupported")
+        else:
+            self.assertEqual(frappe.db.get_value("Purchase Invoice", pi.name, "docstatus"), 2)
+            self.assertFalse(frappe.db.get_value("Sales Invoice", si.name, "inter_company_invoice_reference"))
+            self.assertFalse(frappe.db.get_value("Purchase Invoice", pi.name, "inter_company_invoice_reference"))
+            self.fail("Native parent-only PI cancellation cleared the real Sales Invoice header without a Sales guard")
+        self.assert_effects_unchanged()
         self.assertEqual({doctype: frappe.db.count(doctype) for doctype in self.types}, counts)
 
     def test_native_savedocs_queue_is_stopped_before_dispatch(self):
@@ -1158,7 +1265,7 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
     def remember_effects(self):
         from deeplinkerp_branding.services import purchase_consistency as guard
         self.fixture_effects = {(doctype, name): guard.artifact_evidence(frappe.get_doc(doctype, name))
-            for doctype in ("Purchase Order", "Purchase Receipt", "Purchase Invoice", "Payment Entry", "China Accounting Voucher", "Integration Request", "Repost Item Valuation")
+            for doctype in ("Purchase Order", "Purchase Receipt", "Purchase Invoice", "Payment Entry", "China Accounting Voucher", "Integration Request", "Repost Item Valuation", "Delivery Note", "Sales Order", "Sales Invoice")
             for name in self.committed_names[doctype]}
 
     def assert_effects_unchanged(self):

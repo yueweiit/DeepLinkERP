@@ -979,6 +979,11 @@ def invalidate_reviews(doc):
 
 def check_sales_dependencies(doc):
     """Native Sales row/reservation links require an adapter before we claim N/A."""
+    intercompany_links = {
+        "Purchase Order": ("inter_company_order_reference", None),
+        "Purchase Receipt": ("inter_company_reference", "delivery_note_item"),
+        "Purchase Invoice": ("inter_company_invoice_reference", "sales_invoice_item"),
+    }
     documents = [doc]
     for row in doc.get("references") or []:
         if row.reference_doctype in ("Purchase Invoice", "Purchase Order"):
@@ -988,9 +993,9 @@ def check_sales_dependencies(doc):
     orders = {row.get("purchase_order") for source in documents for row in source.get("items") or [] if row.get("purchase_order")}
     documents.extend(service._current("Purchase Order", name) for name in sorted(orders))
     for source in documents:
-        if source.doctype == "Purchase Receipt" and (source.get("inter_company_reference") or
-                any(row.get("delivery_note_item") for row in source.get("items") or [])):
-            operation.reject("采购存在原生销售发货单关联，尚无完整同步适配，操作已停止", "sales_dependency_unsupported")
+        header, detail = intercompany_links.get(source.doctype, (None, None))
+        if (header and source.get(header)) or (detail and any(row.get(detail) for row in source.get("items") or [])):
+            operation.reject("采购存在原生销售关联，尚无完整同步适配，操作已停止", "sales_dependency_unsupported")
         for row in source.get("items") or []:
             if not any(row.get(field) for field in ("sales_order", "sales_order_item", "sales_order_packed_item")):
                 continue
@@ -1036,9 +1041,13 @@ class ProcurementControllerBoundary:
                     check_cancellation_facts(self, old)
                     # All reliable old sources pass the same business ACL/locks.
                     prepare_document(old)
+                # Native cancellation unlinks intercompany headers with raw DB
+                # updates; current post-hook state alone cannot prove Sales N/A.
+                _stage(old, "Sales / persisted native associations", lambda: check_sales_dependencies(old))
             facts = snapshot(self)
             context.update(amount=facts["amount"], currency=facts["currency"], quantity=[row.get("qty") for row in self.get("items") or []])
             prepare_document(self)
+            _stage(self, "Sales / proposed native associations", lambda: check_sales_dependencies(self))
             prepare_auto_invoice(self)
             if self.name and not any((row["doctype"], row["name"]) == (self.doctype, self.name) for row in context["documents"]):
                 context["documents"].append({"doctype": self.doctype, "name": self.name})

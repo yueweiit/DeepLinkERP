@@ -254,7 +254,10 @@ class ConsistencyTests(unittest.TestCase):
         cases = [("Purchase Order", {"items": [frappe._dict(sales_order="SO", **{field: "SO-ROW"})]})
             for field in ("sales_order_item", "sales_order_packed_item")]
         cases += [("Purchase Receipt", {"items": [frappe._dict(delivery_note_item="DN-ROW")]}),
-            ("Purchase Receipt", {"inter_company_reference": "DN"})]
+            ("Purchase Receipt", {"inter_company_reference": "DN"}),
+            ("Purchase Order", {"inter_company_order_reference": "SO"}),
+            ("Purchase Invoice", {"inter_company_invoice_reference": "SI"}),
+            ("Purchase Invoice", {"items": [frappe._dict(sales_invoice_item="SI-ROW")]})]
         for doctype, values in cases:
             with self.subTest(doctype=doctype, values=values):
                 doc = self.doc(doctype, **values)
@@ -286,6 +289,29 @@ class ConsistencyTests(unittest.TestCase):
                         current.assert_any_call("Purchase Receipt", "PR")
                         if permitted:
                             self.assertEqual(caught.exception.purchase_error_id, "sales_dependency_unsupported")
+
+    def test_native_controller_checks_persisted_and_proposed_sales_identity_before_write(self):
+        for old_link, new_link in (("SO", None), (None, "SO"), (None, None)):
+            with self.subTest(old_link=old_link, new_link=new_link):
+                old = frappe.get_doc({"doctype": "Purchase Order", "name": "PO", "company": "C", "docstatus": 0,
+                    "inter_company_order_reference": old_link})
+                incoming = frappe.get_doc({"doctype": "Purchase Order", "name": "PO", "company": "C", "docstatus": 0,
+                    "inter_company_order_reference": new_link})
+                writes = []
+                def _save():
+                    writes.append(True)
+                    return incoming
+                context = {"operation_id": "TEST", "user": "QA", "documents": [], "before": {}, "after": {}}
+                with patch.object(self.guard.operation, "current", return_value=context), \
+                        patch.object(self.guard.service, "_current", return_value=old):
+                    if old_link or new_link:
+                        with self.assertRaises(frappe.ValidationError) as caught:
+                            self.guard.ProcurementControllerBoundary._procurement_call(incoming, _save)
+                        self.assertEqual(caught.exception.purchase_error_id, "sales_dependency_unsupported")
+                        self.assertEqual(writes, [])
+                    else:
+                        self.guard.ProcurementControllerBoundary._procurement_call(incoming, _save)
+                        self.assertEqual(writes, [True])
 
     def test_cancel_requires_advance_payment_ledger_to_be_delinked_too(self):
         doc = self.doc("Payment Entry", docstatus=2)
