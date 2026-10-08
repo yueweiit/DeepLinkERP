@@ -1357,14 +1357,21 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
     def test_native_intent_ir_paths_reject_current_and_proposed_forgery_before_commit(self):
         from itertools import product
         from frappe.model.rename_doc import rename_doc
-        for action, initial_status in product(("save", "db_set", "update_status", "success", "failure", "rename", "delete", "insert",
-                "incoming-prefix-insert", "incoming-prefix-rename", "db_insert", "db_update"), ("Queued", "Completed")):
-            with self.subTest(action=action, current_status=initial_status):
-                name = "DLP-MES-BIN-" + uuid.uuid4().hex
+        paths = list(product(("save", "db_set", "update_status", "success", "failure", "rename", "delete", "insert",
+            "incoming-prefix-insert", "incoming-prefix-rename", "db_insert", "db_update"), ("Queued", "Completed"), ("DLP-MES-BIN-",)))
+        paths += list(product(("incoming-prefix-insert", "incoming-prefix-rename", "db_insert", "save", "db_set",
+            "update_status", "success", "failure", "rename", "delete", "db_update"), ("Queued", "Completed"),
+            ("dlp-mes-bin-", "D\u0139P-M\u00c9S-B\u00cdN-")))
+        for action, initial_status, prefix in paths:
+            with self.subTest(action=action, current_status=initial_status, prefix=prefix):
+                self.assertEqual(frappe.db.sql("SELECT CAST(%s AS CHAR CHARACTER SET utf8mb4) "
+                    "COLLATE utf8mb4_unicode_ci LIKE %s", (prefix + uuid.uuid4().hex, "DLP-MES-BIN-%"))[0][0], 1)
+                name = prefix + uuid.uuid4().hex
                 frappe.db.sql("INSERT INTO `tabIntegration Request` "
                     "(name,creation,modified,owner,modified_by,integration_request_service,request_id,"
                     "request_description,status,data) VALUES (%s,NOW(6),NOW(6),%s,%s,%s,%s,%s,%s,%s)",
-                    (name, "Administrator", "Administrator", "DeepLinkERP native MES Bin intent", uuid.uuid4().hex,
+                    (name, "Administrator", "Administrator",
+                        "DeepLinkERP native MES Bin intent" if prefix == "DLP-MES-BIN-" else "QA ordinary", uuid.uuid4().hex,
                         "Native MES Bin sync acknowledged" if initial_status == "Completed" else "Native MES Bin sync pending",
                         initial_status, json.dumps({"generation": name})))
                 frappe.db.commit()
@@ -1396,26 +1403,41 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
                 elif action == "incoming-prefix-insert":
                     doc = frappe.get_doc({"doctype": "Integration Request", "integration_request_service": "QA ordinary",
                         "status": "Queued", "data": "{}"})
-                    call = lambda: doc.insert(ignore_permissions=True, set_name="DLP-MES-BIN-" + uuid.uuid4().hex)
+                    incoming_name = prefix + uuid.uuid4().hex
+                    call = lambda: doc.insert(ignore_permissions=True, set_name=incoming_name)
                 elif action == "incoming-prefix-rename":
                     doc = frappe.get_doc({"doctype": "Integration Request", "integration_request_service": "QA ordinary",
                         "status": "Queued", "data": "{}"}).insert(ignore_permissions=True)
                     frappe.db.commit()
                     self.remember_new_names()
-                    call = lambda: rename_doc("Integration Request", doc.name, "DLP-MES-BIN-" + uuid.uuid4().hex,
+                    incoming_name = prefix + uuid.uuid4().hex
+                    call = lambda: rename_doc("Integration Request", doc.name, incoming_name,
                         ignore_permissions=True)
                 elif action == "db_insert":
-                    doc = frappe.get_doc({"doctype": "Integration Request", "name": "DLP-MES-BIN-" + uuid.uuid4().hex,
+                    doc = frappe.get_doc({"doctype": "Integration Request", "name": prefix + uuid.uuid4().hex,
                         "integration_request_service": "QA ordinary", "status": "Queued", "data": "{}"})
                     call = doc.db_insert
                 else:
                     doc.integration_request_service = "QA ordinary"
                     call = doc.db_update
                 try:
-                    with patch.object(frappe.db, "commit", wraps=frappe.db.commit) as commit:
-                        with self.assertRaises(frappe.PermissionError):
+                    with patch.object(frappe.db, "commit", wraps=frappe.db.commit) as commit, \
+                            patch.object(frappe.db, "sql", wraps=frappe.db.sql) as sql:
+                        error = None
+                        try:
                             call()
+                        except Exception as caught:
+                            error = caught
+                        if not isinstance(error, frappe.PermissionError):
+                            target = incoming_name if action in ("incoming-prefix-insert", "incoming-prefix-rename") else doc.name
+                            print("C1_SPEC_PREFIX_ADMISSION=" + json.dumps({"action": action, "prefix": prefix,
+                                "target": target, "persisted": frappe.db.get_value("Integration Request", target,
+                                    ["name", "integration_request_service", "status"], as_dict=True, for_update=True),
+                                "error_type": type(error).__name__ if error else None}, default=str, sort_keys=True), flush=True)
+                        self.assertIsInstance(error, frappe.PermissionError)
                         commit.assert_not_called()
+                        self.assertFalse(any(str(entry.args[0]).lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE"))
+                            for entry in sql.call_args_list), "Namespace refusal must precede native writes")
                     self.assertEqual(frappe.db.get_value("Integration Request", name, "status", for_update=True), initial_status)
                 finally:
                     self.remember_new_names()  # native update_status may have committed before RED failure
@@ -1811,13 +1833,50 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
                 intent.install()
 
     def test_mes_late_server_flag_cannot_take_publication_fence_after_pair_lease(self):
-        mr = frappe.get_doc({"doctype": "Material Request", "company": COMPANY,
-            "material_request_type": "Purchase", "transaction_date": nowdate(),
-            "schedule_date": add_days(nowdate(), 1), "items": [{"item_code": self.item,
-                "qty": 3, "warehouse": "Stores - QAB", "schedule_date": add_days(nowdate(), 1)}]}).insert()
-        mr.flags.mes_integration_request = True
-        with self.assertRaisesRegex(frappe.ValidationError, "发布隔离顺序"):
-            mr.submit()
+        from types import SimpleNamespace
+        from frappe.utils import CallbackManager
+        import mes_integration.mes_integration.material_request as mes
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        captured = mes.enqueue_mes_material_request_bin_sync
+        self.commit_fixture(primary_doctype="Item", name_prefix="QA-ATOMIC-")
+        for action in ("submit", "update_requested_qty", "captured_producer"):
+            with self.subTest(native_entry=action):
+                request = SimpleNamespace(after_response=CallbackManager())
+                with patch.object(frappe.local, "request", request, create=True), boundary.execution() as state:
+                    mr = frappe.get_doc({"doctype": "Material Request", "company": COMPANY,
+                        "material_request_type": "Purchase", "transaction_date": nowdate(),
+                        "schedule_date": add_days(nowdate(), 1), "items": [{"item_code": self.item,
+                            "qty": 3, "warehouse": "Stores - QAB", "schedule_date": add_days(nowdate(), 1)}]}).insert()
+                    mr.flags.mes_integration_request = True
+                    self.assertTrue(state.locks)
+                    self.assertNotIn(boundary.fence_key(), state.locks)
+                    held = dict(state.locks)
+                    before = frappe.db.count("Integration Request")
+                    callbacks = tuple(request.after_response._functions)
+                    call = mr.submit if action == "submit" else (mr.update_requested_qty if action == "update_requested_qty"
+                        else lambda: captured(mr, [mr.items[0].name]))
+                    with patch.object(frappe.db, "commit", wraps=frappe.db.commit) as commit, \
+                            patch.object(frappe.db, "rollback", wraps=frappe.db.rollback) as rollback, \
+                            patch.object(boundary, "acquire", wraps=boundary.acquire) as acquire:
+                        error = None
+                        try:
+                            call()
+                        except Exception as caught:
+                            error = caught
+                        print("C1_SPEC_PUBLICATION_ORDER=" + json.dumps({"entry": action, "material_request": mr.name,
+                            "prior_lease_count": len(held), "after_lease_count": len(state.locks),
+                            "fence_after": boundary.fence_key() in state.locks,
+                            "intents_before": before, "intents_after": frappe.db.count("Integration Request"),
+                            "callbacks_added": len(request.after_response._functions) - len(callbacks),
+                            "error_type": type(error).__name__ if error else None}, sort_keys=True), flush=True)
+                        self.assertIsInstance(error, frappe.ValidationError)
+                        self.assertIn("发布隔离顺序", str(error))
+                        commit.assert_not_called(); rollback.assert_not_called()
+                        self.assertEqual(tuple(request.after_response._functions), callbacks)
+                        self.assertFalse(any(boundary.fence_key() in tuple(entry.args[0]) for entry in acquire.call_args_list))
+                        self.assertEqual(state.locks, held)
+                        self.assertEqual(frappe.db.count("Integration Request"), before)
+                frappe.db.rollback()  # a distinct request fixture, never a business-view refresh/reorder
 
     def native_mes_intent(self, warehouses=("Stores - QAB",)):
         from types import SimpleNamespace

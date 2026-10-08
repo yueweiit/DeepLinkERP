@@ -727,6 +727,13 @@ def _native_default_proof(doc):
             _reject("原生物料库存单位快照已过期，请重试独立请求")
 
 
+def require_publication_order(state=None):
+    """Every deferred producer must take the existing site fence first."""
+    state = state or initialize()
+    if state.locks and fence_key() not in state.locks:
+        _reject("原生库存同步发布隔离顺序无效，请重试独立请求")
+
+
 @contextmanager
 def _documents_boundary(documents, *, force_opaque=False, creating=False):
     """One complete sorted lease and UNION budget for the actual native batch."""
@@ -736,9 +743,7 @@ def _documents_boundary(documents, *, force_opaque=False, creating=False):
             if doc.doctype == "Material Request" and doc.flags.get("mes_integration_request"):
                 from .purchase_native_intent import install
                 install()  # supported native asynchronous producer only
-                state = initialize()
-                if state.locks and fence_key() not in state.locks:
-                    _reject("原生库存同步发布隔离顺序无效，请重试独立请求")
+                require_publication_order()
         # Exactly native pure in-memory defaults: no naming, item calculation,
         # company/warehouse guessing or substitute source identities.
         roots = []

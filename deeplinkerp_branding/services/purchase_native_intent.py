@@ -327,20 +327,21 @@ def _reject(reason):
     boundary._reject("原生库存同步意图" + reason)
 
 
-def _service_identity(value):
+def _namespace_identity(value, identity, *, prefix=False):
     # Use the installed column's exact equality namespace (including accent,
     # case and PAD SPACE equivalence); Python casefold is not that collation.
-    if value == SERVICE:
+    if value == identity:
         return True
     if not isinstance(value, (str, bytes)):
         return False
+    operator = "LIKE" if prefix else "="
     return frappe.db.sql("SELECT CAST(%s AS CHAR CHARACTER SET utf8mb4) "
-        "COLLATE utf8mb4_unicode_ci = %s", (value, SERVICE))[0][0] == 1
+        f"COLLATE utf8mb4_unicode_ci {operator} %s", (value, identity + "%" if prefix else identity))[0][0] == 1
 
 
 def protected(doc):
-    return bool(doc and (_service_identity(doc.get("integration_request_service")) or
-        str(doc.get("name") or "").startswith(PREFIX)))
+    return bool(doc and (_namespace_identity(doc.get("integration_request_service"), SERVICE) or
+        _namespace_identity(doc.get("name"), PREFIX, prefix=True)))
 
 
 @contextmanager
@@ -439,6 +440,7 @@ def register(material_request, mr_item_rows=None):
     name, generation = PREFIX + uuid.uuid4().hex, uuid.uuid4().hex
     frozen_name = str(material_request.name)
     state = boundary.initialize()
+    boundary.require_publication_order(state)
     epoch = state.epoch
     with boundary.execution(), boundary.acquire((boundary.fence_key(),)):
         headers = _headers()
