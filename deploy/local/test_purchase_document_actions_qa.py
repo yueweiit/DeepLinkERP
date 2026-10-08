@@ -843,6 +843,58 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         unblock_invoice(pi.name)
         self.assertEqual(frappe.db.get_value(pi.doctype, pi.name, ["on_hold", "release_date"]), (0, None))
 
+    def test_native_purchase_invoice_partial_hold_failure_rolls_back_prior_real_fields(self):
+        from erpnext.accounts.doctype.purchase_invoice.purchase_invoice import block_invoice, unblock_invoice, change_release_date
+        po = self.order()
+        pi = make_purchase_invoice(self.receipt(po).name).insert()
+        self.commit_fixture()
+        fields = ["on_hold", "hold_comment", "release_date", "modified", "modified_by"]
+        for action, failed_field, after_write in (("block", "hold_comment", False),
+                ("block", "release_date", False), ("unblock", "release_date", False),
+                ("change-release", "release_date", True)):
+            with self.subTest(action=action, failed_field=failed_field):
+                if action == "block":
+                    unblock_invoice(pi.name)
+                else:
+                    block_invoice(pi.name, add_days(nowdate(), 2), "QA original hold")
+                self.commit_fixture()  # distinct real request baseline, never inside tested failure
+                before = frappe.db.get_value(pi.doctype, pi.name, fields)
+                counts = {doctype: frappe.db.count(doctype) for doctype in self.types}
+                self.remember_effects()  # shared native stock/financial/source/audit evidence
+                written, partial = [], []
+                native_set = frappe.db.set_value
+                first_error = RuntimeError("QA-ATOMIC first hold failure " + action + " " + failed_field)
+                def fail_field(doctype, name, fieldname, *args, **kwargs):
+                    target = doctype == pi.doctype and name == pi.name and fieldname in fields[:3]
+                    if target and fieldname == failed_field and not after_write:
+                        partial.append(frappe.db.get_value(pi.doctype, pi.name, fields))
+                        raise first_error
+                    result = native_set(doctype, name, fieldname, *args, **kwargs)
+                    if target:
+                        written.append(fieldname)
+                        if fieldname == failed_field:
+                            partial.append(frappe.db.get_value(pi.doctype, pi.name, fields))
+                            raise first_error
+                    return result
+                with patch.object(frappe.db, "set_value", side_effect=fail_field), self.assertRaises(RuntimeError) as caught:
+                    if action == "block":
+                        block_invoice(pi.name, add_days(nowdate(), 4), "QA changed hold")
+                    elif action == "unblock":
+                        unblock_invoice(pi.name)
+                    else:
+                        change_release_date(pi.name, add_days(nowdate(), 4))
+                self.assertIs(caught.exception, first_error)
+                expected = ["on_hold", "hold_comment"] if action == "block" and failed_field == "release_date" else (
+                    ["release_date"] if action == "change-release" else ["on_hold"])
+                self.assertEqual(written, expected)  # preceding native SQL really ran
+                self.assertEqual(len(partial), 1)
+                self.assertNotEqual(partial[0][:3], before[:3])
+                # No test-side rollback: the actual boundary has restored the
+                # whole request, including prior db_set writes and timestamps.
+                self.assertEqual(frappe.db.get_value(pi.doctype, pi.name, fields), before)
+                self.assertEqual({doctype: frappe.db.count(doctype) for doctype in self.types}, counts)
+                self.assert_effects_unchanged()
+
     def test_material_request_backlink_requires_actual_detail_and_shared_union_budget(self):
         from deeplinkerp_branding.services import purchase_reversal_scope as scope
         mr, po = self.material_request_order()
@@ -973,9 +1025,10 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         self.remember_new_names()
 
     def test_all_six_pointer_fields_reject_real_rpc_rewrite_clear_and_db_set_flags(self):
-        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary, purchase_operation as operation
         from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
-        from frappe.client import save
+        from frappe.client import insert, save
+        from frappe.model.document import Document
         po = self.order()
         pr = self.receipt(po)
         pi = make_purchase_invoice(pr.name).insert()
@@ -985,27 +1038,94 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
             "based_on": "Item and Warehouse", "item_code": self.item, "warehouse": "Stores - QAB",
             "posting_date": nowdate(), "posting_time": "00:00:00"}).insert()
         owner = self.pending_owner()
-        docs = [stock_bin, po, pr, pi, pe, riv]
+        docs = [riv, stock_bin, po, pr, pi, pe]
         self.assertEqual({doc.doctype for doc in docs}, set(boundary.POINTER_TYPES))
         for doc in docs:
             frappe.db.set_value(doc.doctype, doc.name, boundary.POINTER, owner.name, update_modified=False)
         self.commit_fixture()
+        names = {doctype: set(frappe.get_all(doctype, pluck="name", limit_page_length=0)) for doctype in self.types}
+        owned = {doc.doctype: set(frappe.get_all(doc.doctype, filters={boundary.POINTER: owner.name},
+            pluck="name", limit_page_length=0)) for doc in docs}
+        native_insert = Document.insert
+        def rpc_payload(subject):
+            data = subject.as_dict()
+            data["flags"] = {"ignore_permissions": True, "purchase_reversal_internal": True}
+            return json.dumps(data, default=str)
         for doc in docs:
-            for action in ("rpc-clear", "native-rewrite", "db-set"):
+            for action in ("native-insert-new", "rpc-insert-old", "rpc-save-local", "native-save-local",
+                    "rpc-save-no-name", "native-copy-owner", "rpc-clear", "native-rewrite", "db-set"):
                 with self.subTest(doctype=doc.doctype, action=action):
                     current = frappe.get_doc(doc.doctype, doc.name)
                     current.flags.purchase_reversal_internal = True
                     current.flags.ignore_permissions = True
-                    with self.assertRaises(frappe.PermissionError):
-                        if action == "rpc-clear":
-                            current.set(boundary.POINTER, None)
-                            save(json.dumps(current.as_dict(), default=str))
-                        elif action == "native-rewrite":
-                            current.set(boundary.POINTER, "QA-ATOMIC-CLIENT-" + uuid.uuid4().hex)
-                            current.save(ignore_permissions=True)
-                        else:
-                            current.db_set(boundary.POINTER, None)
+                    inserted = []
+                    def observe_insert(subject, *args, **kwargs):
+                        inserted.append((subject.doctype, subject.name))
+                        return native_insert(subject, *args, **kwargs)
+                    try:
+                        with patch.object(Document, "insert", new=observe_insert), patch.object(
+                                operation, "_reserve", wraps=operation._reserve) as reserved:
+                            with self.assertRaises(frappe.PermissionError):
+                                if action == "native-insert-new":
+                                    current.insert(set_name="QA-ATOMIC-COPY-" + uuid.uuid4().hex, ignore_permissions=True)
+                                elif action == "rpc-insert-old":
+                                    insert(rpc_payload(current))
+                                elif action in ("rpc-save-local", "native-save-local"):
+                                    current.set("__islocal", 1)
+                                    if action == "rpc-save-local":
+                                        save(rpc_payload(current))
+                                    else:
+                                        current.save(ignore_permissions=True)
+                                elif action == "rpc-save-no-name":
+                                    current.name = None
+                                    save(rpc_payload(current))
+                                elif action == "native-copy-owner":
+                                    frappe.copy_doc(current).save(ignore_permissions=True)
+                                elif action == "rpc-clear":
+                                    current.set(boundary.POINTER, None)
+                                    save(rpc_payload(current))
+                                elif action == "native-rewrite":
+                                    current.set(boundary.POINTER, "QA-ATOMIC-CLIENT-" + uuid.uuid4().hex)
+                                    current.save(ignore_permissions=True)
+                                else:
+                                    current.db_set(boundary.POINTER, None)
+                                self.assertEqual(set(frappe.get_all(doc.doctype, filters={boundary.POINTER: owner.name},
+                                    pluck="name", limit_page_length=0)), owned[doc.doctype], "Owner copied into a new identity")
+                            self.assertEqual(inserted, [], "Rejected before native insert")
+                            reserved.assert_not_called()  # including _save -> insert, not merely late rejection
+                    finally:
+                        self.remember_new_names()
+                        frappe.db.rollback()
                     self.assertEqual(frappe.db.get_value(doc.doctype, doc.name, boundary.POINTER), owner.name)
+                    self.assertEqual(names, {doctype: set(frappe.get_all(doctype, pluck="name", limit_page_length=0))
+                        for doctype in self.types})
+            # Native copy/amend preparation honors metadata no_copy, independent
+            # of whether this particular original is currently frozen.
+            safe = frappe.copy_doc(frappe.get_doc(doc.doctype, doc.name), ignore_no_copy=False)
+            self.assertFalse(safe.get(boundary.POINTER))
+            self.assertTrue(safe.get("__islocal"))
+            self.assertFalse(safe.name)
+            self.assertEqual(frappe.db.get_value(doc.doctype, doc.name, boundary.POINTER), owner.name)
+        # Existing same-identity RIV saves keep generation ownership; a genuine
+        # native no-copy draft gets its own identity without that ownership.
+        original = frappe.get_doc(riv.doctype, riv.name)
+        original.save(ignore_permissions=True)
+        copied = frappe.copy_doc(original, ignore_no_copy=False).insert(ignore_permissions=True)
+        self.assertNotEqual(copied.name, original.name)
+        self.assertFalse(copied.get(boundary.POINTER))
+        self.assertEqual(frappe.db.get_value(original.doctype, original.name, boundary.POINTER), owner.name)
+        # Actual ordinary amendment on a distinct unfrozen stock pair still
+        # uses native no-copy/naming/validation; no old identity is rewritten.
+        code = self.scope_item()
+        amended_source = self.order(items=[{"item_code": code, "qty": 2, "rate": 12,
+            "warehouse": "Stores - QAB", "schedule_date": add_days(nowdate(), 1)}])
+        amended_source.cancel()
+        amended = frappe.copy_doc(amended_source, ignore_no_copy=False)
+        amended.amended_from = amended_source.name
+        amended.insert(ignore_permissions=True)
+        self.assertNotEqual(amended.name, amended_source.name)
+        self.assertFalse(amended.get(boundary.POINTER))
+        self.assertEqual(frappe.db.get_value(amended_source.doctype, amended_source.name, "docstatus"), 2)
 
     def test_real_rpc_old_source_and_warehouse_replacement_cannot_escape_pending(self):
         from deeplinkerp_branding.services import purchase_repost_boundary as boundary

@@ -1109,7 +1109,7 @@ class ProcurementControllerBoundary:
 
     def insert(self, *args, **kwargs):
         from .purchase_repost_boundary import document_boundary
-        with document_boundary(self):
+        with document_boundary(self, creating=True):
             return self._procurement_call(super().insert, *args, **kwargs)
 
     def _save(self, *args, **kwargs):

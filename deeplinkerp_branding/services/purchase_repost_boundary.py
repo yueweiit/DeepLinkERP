@@ -352,7 +352,18 @@ POINTER_TYPES = ("Bin", "Purchase Order", "Purchase Receipt", "Purchase Invoice"
 PENDING_TYPES = POINTER_TYPES[:-1]  # RIV generation ownership is permanent, not a pending source freeze.
 
 
-def check_pointer(doc, old):
+def _creates_identity(doc, *, inserting=False):
+    # Native insert ALWAYS names a new identity. Native _save routes to insert
+    # for __islocal or a missing name (Document558); an incoming stored name is
+    # not authority to carry that identity's owner through either path.
+    return inserting or bool(doc.get("__islocal") or not doc.get("name"))
+
+
+def check_pointer(doc, old, *, creating=False):
+    if creating and doc.doctype in POINTER_TYPES:
+        if doc.get(POINTER):
+            frappe.throw("新单据不能继承库存保护指针", frappe.PermissionError)
+        return
     if doc.doctype in POINTER_TYPES and (doc.get(POINTER) or None) != (old.get(POINTER) or None if old else None):
         frappe.throw("库存保护指针不能由普通单据写入、清除或替换", frappe.PermissionError)
 
@@ -638,7 +649,7 @@ def _native_default_proof(doc):
 
 
 @contextmanager
-def _documents_boundary(documents, *, force_opaque=False):
+def _documents_boundary(documents, *, force_opaque=False, creating=False):
     """One complete sorted lease and UNION budget for the actual native batch."""
     from . import purchase_payment_service as service
     with execution():
@@ -647,8 +658,8 @@ def _documents_boundary(documents, *, force_opaque=False):
         roots = []
         for doc in documents:
             old = _persisted(doc)
+            check_pointer(doc, old, creating=_creates_identity(doc, inserting=creating))
             proposed = _proposed(doc, old)
-            check_pointer(doc, old)
             if old and old.docstatus == 1 and doc.docstatus == 2:
                 from .purchase_consistency import is_procurement, check_cancellation_facts
                 if is_procurement(old):
@@ -665,7 +676,7 @@ def _documents_boundary(documents, *, force_opaque=False):
                     current_roots, current_proposed_documents = [], []
                     for doc in documents:
                         current_old = _persisted(doc, current=True)
-                        check_pointer(doc, current_old)
+                        check_pointer(doc, current_old, creating=_creates_identity(doc, inserting=creating))
                         current_proposed = _proposed(doc, current_old)
                         current_proposed_documents.append(current_proposed)
                         current_roots.extend([current_proposed] + ([current_old] if current_old else []))
@@ -685,9 +696,9 @@ def _documents_boundary(documents, *, force_opaque=False):
 
 
 @contextmanager
-def document_boundary(doc):
+def document_boundary(doc, *, creating=False):
     """Before native insert/_save, audit reservation, latest-check or SQL write."""
-    with _documents_boundary((doc,)):
+    with _documents_boundary((doc,), creating=creating):
         yield
 
 
@@ -810,7 +821,7 @@ def update_child_qty_rate(parent_doctype, trans_items, parent_doctype_name, chil
 class NativeRangeBoundary:
     """Canonical native stock/MR insert and save, preserving other mixins."""
     def insert(self, *args, **kwargs):
-        with document_boundary(self):
+        with document_boundary(self, creating=True):
             return super().insert(*args, **kwargs)
 
     def _save(self, *args, **kwargs):
@@ -820,9 +831,12 @@ class NativeRangeBoundary:
 
 class PointerBoundary:
     """System pointer metadata is not ordinary controller write authority."""
-    def _pointer_call(self, method, *args, **kwargs):
+    def _pointer_call(self, method, *args, creating=False, **kwargs):
         from . import purchase_payment_service as service
         with execution():
+            creating = _creates_identity(self, inserting=creating)
+            if creating:
+                check_pointer(self, None, creating=True)  # before lease/native naming
             old = _persisted(self)
             keys = {lock_key("document", self.doctype, self.name)} if self.name else set()
             if self.doctype == "Bin":
@@ -834,7 +848,7 @@ class PointerBoundary:
                     keys.add(lock_key("pair", warehouse.company, doc.item_code, doc.warehouse))
             with acquire(keys), service.current_reads():
                 current_old = _persisted(self, current=True)
-                check_pointer(self, current_old)
+                check_pointer(self, current_old, creating=creating)
                 if self.doctype == "Bin":
                     for doc in (self, current_old) if current_old else (self,):
                         service._read("Item", doc.item_code, {"stock_uom", "is_stock_item"})
@@ -845,7 +859,7 @@ class PointerBoundary:
                 return method(*args, **kwargs)
 
     def insert(self, *args, **kwargs):
-        return self._pointer_call(super().insert, *args, **kwargs)
+        return self._pointer_call(super().insert, *args, creating=True, **kwargs)
 
     def _save(self, *args, **kwargs):
         return self._pointer_call(super()._save, *args, **kwargs)

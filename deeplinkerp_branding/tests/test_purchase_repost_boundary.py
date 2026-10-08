@@ -215,6 +215,17 @@ class RepostBoundarySessionTests(unittest.TestCase):
         new = frappe._dict(doctype="Purchase Receipt", custom_purchase_reversal_operation=None)
         with self.assertRaises(frappe.PermissionError): self.boundary.check_pointer(new, old)
 
+    def test_owned_pointer_is_not_new_identity_authority_even_when_incoming_name_matches(self):
+        for doctype in self.boundary.POINTER_TYPES:
+            with self.subTest(doctype=doctype):
+                old = frappe._dict(doctype=doctype, name="OLD", custom_purchase_reversal_operation="OWNER")
+                proposed = frappe._dict(old)
+                self.boundary.check_pointer(proposed, old)  # ordinary same identity is unchanged
+                with self.assertRaises(frappe.PermissionError):
+                    self.boundary.check_pointer(proposed, old, creating=True)
+                proposed.custom_purchase_reversal_operation = None
+                self.boundary.check_pointer(proposed, old, creating=True)
+
     def test_full_authority_is_batched_and_acquisition_has_no_quadratic_rechecks(self):
         for count in (2500, 7500):  # maximum pairs plus typed document budget
             with self.subTest(count=count):
