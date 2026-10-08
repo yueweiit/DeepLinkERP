@@ -495,7 +495,7 @@ def _get_cancellation_posting(doc):
 
 
 def _voucher_entries_by_accounting_key(entries):
-	"""Compare all four amount columns at their persisted precision, without netting."""
+	"""Compare all four native-loaded amount columns without display rounding or netting."""
 	key_fields = (
 		"account", "account_currency", "party_type", "party", "cost_center", "project",
 		"finance_book", "against_voucher_type", "against_voucher",
