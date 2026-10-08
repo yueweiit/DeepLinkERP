@@ -639,6 +639,7 @@ def _native_request(request_id, payload, operation):
 
 
 def _replay_native(previous):
+    purchase_operation.replay_artifacts(previous)
     doc = _locked(previous.get("doctype", "Payment Entry"), previous["name"])
     doc.check_permission(previous.get("permission", "read"))
     if doc.doctype == "Payment Entry":

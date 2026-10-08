@@ -84,8 +84,19 @@ class DurableOperationTests(unittest.TestCase):
         changed.assert_not_called()
 
     def test_deadlock_retries_at_most_three_whole_transactions(self):
-        operation = Mock(side_effect=[frappe.QueryDeadlockError(Exception(1213, "deadlock")),
-            frappe.QueryTimeoutError(Exception(1205, "lock timeout")), self.result])
+        calls = []
+        def write():
+            context = kernel.current()
+            self.assertFalse(context["documents"], "Rolled-back artifacts must not survive a retry")
+            self.assertFalse(context["after"])
+            calls.append(context)
+            if len(calls) < 3:
+                context["documents"].append({"doctype": "Payment Entry", "name": "ROLLED-BACK"})
+                context["after"]["Payment Entry:ROLLED-BACK"] = {"docstatus": 0}
+                raise (frappe.QueryDeadlockError(Exception(1213, "deadlock")) if len(calls) == 1 else
+                    frappe.QueryTimeoutError(Exception(1205, "lock timeout")))
+            return self.result
+        operation = Mock(side_effect=write)
         result = actions._native_request(self.key, [], operation)
         self.assertEqual(result["document"]["name"], "PE")
         self.assertEqual(operation.call_count, 3)
@@ -101,6 +112,11 @@ class DurableOperationTests(unittest.TestCase):
         self.db.rollback.assert_called_once_with()
         self.assertEqual(self.db.rows, {})
 
+    def test_acknowledged_permission_denial_never_returns_private_exception_text(self):
+        result = actions._native_request(self.key, [], Mock(side_effect=frappe.PermissionError("private inaccessible record")))
+        self.assertTrue(result["failed"])
+        self.assertNotIn("private", result["error"])
+
     def test_unexpected_failure_rolls_back_and_logs_only_redacted_error_type(self):
         logger = Mock()
         with patch.object(frappe, "logger", return_value=logger):
@@ -111,6 +127,29 @@ class DurableOperationTests(unittest.TestCase):
         self.assertNotIn("private", line)
         self.assertIn("RuntimeError", line)
         self.assertIn("operation_id", json.loads(line))
+        self.assertEqual(json.loads(line)["error_id"], "native_runtime_failure")
+
+    def test_rollback_failure_logs_both_types_without_shadowing_original(self):
+        original = RuntimeError("private operation detail")
+        logger = Mock()
+        self.db.rollback.side_effect = ConnectionError("private DB detail")
+        with patch.object(frappe, "logger", return_value=logger):
+            with self.assertRaises(RuntimeError) as caught:
+                actions._native_request(self.key, [], Mock(side_effect=original))
+        self.assertIs(caught.exception, original)
+        event = json.loads(logger.error.call_args.args[0])
+        self.assertEqual(event["error"], "RuntimeError")
+        self.assertEqual(event["rollback_error"], "ConnectionError")
+        self.assertNotIn("private", logger.error.call_args.args[0])
+
+    def test_known_invariant_failure_has_a_safe_stable_error_identifier(self):
+        error = frappe.ValidationError("private operation detail")
+        error.purchase_error_id = "auto_pi_permission_missing"
+        logger = Mock()
+        with patch.object(frappe, "logger", return_value=logger):
+            kernel.runtime_log({"operation_id": "ID", "user": "QA"}, "rolled_back", error)
+        self.assertEqual(json.loads(logger.error.call_args.args[0])["error_id"], "auto_pi_permission_missing")
+        self.assertNotIn("private", logger.error.call_args.args[0])
 
     def test_initial_lock_timeout_is_retried_before_any_native_write(self):
         existing = Mock(side_effect=[Exception(1205, "timeout"), None])
@@ -155,6 +194,20 @@ class DurableOperationTests(unittest.TestCase):
         self.assertEqual(event["result"], "failed")
         self.assertIn("elapsed_ms", event)
         self.assertNotIn("private", logger.error.call_args.args[0])
+
+    def test_artifact_replay_checks_every_produced_document_and_ledger(self):
+        from deeplinkerp_branding.services import purchase_consistency as guard
+        pi = frappe._dict(doctype="Purchase Invoice", name="PI", docstatus=1, modified="version")
+        receipt = {"artifacts": [{"doctype": "Purchase Invoice", "name": "PI", "docstatus": 1,
+            "modified": "version", "permission": "submit", "evidence": "saved-evidence"}]}
+        with patch.object(frappe, "get_doc", return_value=pi), patch.object(frappe, "has_permission", return_value=True), \
+             patch.object(guard, "artifact_evidence", return_value="changed-ledger"):
+            with self.assertRaises(frappe.ValidationError):
+                kernel.replay_artifacts(receipt)
+        with patch.object(frappe, "get_doc", return_value=pi), \
+             patch.object(frappe, "has_permission", side_effect=lambda doctype, ptype, **kwargs: ptype != "submit"):
+            with self.assertRaises(frappe.PermissionError):
+                kernel.replay_artifacts(receipt)
 
 
 if __name__ == "__main__":
