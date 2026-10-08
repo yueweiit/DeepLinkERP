@@ -16,6 +16,98 @@ test('operating expenses can reuse the accessible procurement drawer shell facto
   assert.equal(typeof payments().createDrawer,'function');
 });
 
+function drawerHost(mobile=false,paths=['account','operating-expenses','sales-order'],initialIndex=1) {
+ const listeners={},surfaces=[],location={href:'https://erp.test/desk/operating-expenses'};
+ const entries=paths.map(path=>({url:`https://erp.test/desk/${path}`,state:null}));let index=initialIndex,pending;
+ location.href=entries[index].url;
+ const surface={attrs:{},appendTo(){return this;},find(){return this;},on(){return this;},trigger(){return this;},toggleClass(){return this;},attr(key,value){this.attrs[key]=value;return this;},prop(){return this;},remove(){this.removed=true;return this;},filter(){return this;},toArray(){return [];}};
+ const history={get state(){return entries[index].state;},replaceState(state,_title,url){entries[index]={state,url};location.href=url;},pushState(state,_title,url){entries.splice(index+1);entries.push({state,url});index++;location.href=url;},go(delta){index+=delta;location.href=entries[index].url;pending=Promise.resolve().then(()=>router.route());}};
+ const router={on:(type,handler)=>listeners[type]=handler,async route(){router.renders=(router.renders||0)+1;listeners.change();},async set_route(path){history.pushState(null,'',`https://erp.test/desk/${path}`);await this.route();}};
+ const nativeRoute=router.route,nativeSetRoute=router.set_route;
+ const navigation={get currentEntry(){return {index};}};
+ const api=payments(undefined,{$:markup=>{surfaces.push(markup);return surface;},location,history,navigation,addEventListener:(type,handler)=>listeners[type]=handler,removeEventListener:type=>delete listeners[type],matchMedia:()=>({matches:mobile}),document:{body:{},activeElement:{focus(){}},addEventListener:(type,handler)=>listeners[type]=handler,removeEventListener:type=>delete listeners[type]},frappe:{router}});
+ return {api,router,nativeRoute,nativeSetRoute,location,navigation,surface,surfaces,listeners,entries,get index(){return index;},async traverse(delta){index+=delta;location.href=entries[index].url;await router.route();await pending;}};
+}
+test('operating opt-in is nonmodal on desktop, modal on mobile, and leaves procurement modal by default',async()=>{
+ for(const [mobile,optIn,modal] of [[false,true,false],[true,true,true],[false,false,true]]) {
+  const h=drawerHost(mobile),d=h.api.createDrawer('Details',true,optIn?{desktopNonModal:true,guardNavigation:true}:undefined);
+  assert.match(h.surfaces[0],new RegExp(`aria-modal="${modal}"`));
+  assert.equal(h.surfaces[0].includes('dlp-drawer-desktop-nonmodal'),optIn);
+  d.close(true);
+ }
+});
+test('guarded navigation confirms before native routing, preserves declined inputs, and disposes accepted drawer',async()=>{
+ const h=drawerHost(),d=h.api.createDrawer('Details',true,{desktopNonModal:true,guardNavigation:true});
+ let resolve,checks=0;d.beforeClose=()=>{checks++;return new Promise(done=>resolve=done);};
+ const rejected=h.router.set_route('account');
+ assert.equal(h.location.href,'https://erp.test/desk/operating-expenses');
+ assert.equal(h.router.renders,undefined);resolve(false);await rejected;
+ assert.equal(d.alive(),true);assert.equal(h.surface.removed,undefined);
+ const accepted=h.router.set_route('account');resolve(true);await accepted;
+ assert.equal(checks,2);assert.equal(d.alive(),false);assert.equal(h.router.renders,1);
+ assert.equal(h.router.route,h.nativeRoute);assert.equal(h.router.set_route,h.nativeSetRoute);
+});
+test('guarded browser history and saving never render a route while the operating drawer must stay open',async()=>{
+ const h=drawerHost(),d=h.api.createDrawer('Details',true,{guardNavigation:true});
+ d.setBusy(true);await h.router.set_route('account');
+ assert.equal(h.router.renders,undefined);assert.equal(d.alive(),true);
+ await h.traverse(-1);
+ assert.equal(h.location.href,'https://erp.test/desk/operating-expenses');assert.equal(h.router.renders,undefined);
+ d.setBusy(false);d.beforeClose=async()=>false;
+ await h.traverse(-1);
+ assert.equal(d.alive(),true);assert.equal(h.router.renders,undefined);
+ d.beforeClose=async()=>true;await h.traverse(-1);
+ assert.equal(d.alive(),false);assert.equal(h.router.renders,1);
+});
+test('cancelled browser Back and Forward preserve native history entries and the original cursor',async()=>{
+ for(const [paths,index,delta] of [[['account','operating-expenses'],1,-1],[['operating-expenses','account'],0,1]]) {
+  for(const blocked of ['dirty','write']) {
+   const h=drawerHost(false,paths,index),original=JSON.parse(JSON.stringify(h.entries)),d=h.api.createDrawer('Details',true,{guardNavigation:true});
+   d.beforeClose=async()=>false;if(blocked==='write')d.setBusy(true,'write');
+   await h.traverse(delta);
+   assert.deepEqual(h.entries,original,`${blocked} cancellation must not rewrite a traversed entry`);
+   assert.equal(h.index,index);assert.equal(h.location.href,original[index].url);assert.equal(h.router.renders,undefined);
+   d.setBusy(false);d.beforeClose=async()=>true;await h.traverse(delta);
+   assert.equal(h.location.href,original[index+delta].url);assert.equal(h.router.renders,1);assert.equal(d.alive(),false);
+  }
+ }
+});
+test('history without an entry index keeps dirty and write guards without rewriting entries',async()=>{
+ const h=drawerHost(false,['account','operating-expenses'],1),original=JSON.parse(JSON.stringify(h.entries));delete h.navigation.currentEntry;
+ const d=h.api.createDrawer('Details',true,{guardNavigation:true});d.beforeClose=async()=>false;
+ await h.traverse(-1);
+ assert.deepEqual(h.entries,original);assert.equal(d.alive(),true);assert.equal(h.router.renders,undefined);
+ d.setBusy(true,'write');await h.router.set_route('sales-order');
+ assert.deepEqual(h.entries,original);assert.equal(d.alive(),true);assert.equal(h.router.renders,undefined);
+ d.setBusy(false);d.beforeClose=async()=>true;await d.close();await Promise.resolve();
+ assert.equal(h.location.href,original[0].url);assert.equal(h.index,0);assert.equal(h.router.renders,1);
+});
+test('operating navigation cancels readonly loading but waits for writes without changing procurement defaults',async()=>{
+ for(const [operation,allowed] of [['read',true],['write',false]]) {
+  const h=drawerHost(),d=h.api.createDrawer('Details',true,{guardNavigation:true});
+  d.setBusy(true,operation);await h.router.set_route('account');
+  assert.equal(d.alive(),!allowed);assert.equal(h.router.renders,allowed?1:undefined);
+ }
+ const h=drawerHost(),d=h.api.createDrawer('Procurement');d.setBusy(true,'read');
+ assert.equal(d.close(),false,'Procurement keeps its original busy close behavior');d.close(true);
+});
+test('operating full-document departure warns only for dirty inputs or writes and removes its opt-in listener on close',()=>{
+ for(const [dirty,operation,blocked] of [[false,null,false],[false,'read',false],[false,'write',true],[true,null,true],[true,'read',true]]) {
+  const h=drawerHost(),d=h.api.createDrawer('Details',true,{guardNavigation:true});d.beforeUnloadShouldBlock=()=>dirty;
+  if(operation)d.setBusy(true,operation);
+  const event={prevented:false,preventDefault(){this.prevented=true;}};
+  assert.equal(typeof h.listeners.beforeunload,'function');h.listeners.beforeunload(event);
+  assert.equal(event.prevented,blocked);assert.equal(event.returnValue,blocked?'':undefined);
+  d.close(true);assert.equal(h.listeners.beforeunload,undefined);
+ }
+ const h=drawerHost();h.api.createDrawer('Procurement');assert.equal(h.listeners.beforeunload,undefined);
+});
+test('unsupported router hosts retain legacy route cleanup instead of leaving a guarded drawer alive',()=>{
+ const h=drawerHost();delete h.router.set_route;
+ const d=h.api.createDrawer('Details',true,{guardNavigation:true});
+ h.listeners.change();assert.equal(d.alive(),false);assert.equal(h.surface.removed,true);
+});
+
 test('shared procurement numeric presentation helpers keep business parse precision unchanged', () => {
   const api=payments();
   assert.equal(typeof api.formatMoney,'function'); assert.equal(typeof api.formatQuantity,'function'); assert.equal(typeof api.formatNumericInput,'function');

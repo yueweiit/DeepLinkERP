@@ -30,7 +30,10 @@ def oa_manifest():
 		forms = [{"name": key, "value": value} for key, value in (
 			("申请类型", "付款申请"), ("执行地区", "中国"), ("金额", str(400 + index * 100)),
 			("币种", "人民币"), ("事项说明", "QA OA " + case + "（纯合成，无真实付款）"),
-			("收款人", "QA Operating Supplier"), ("付款公司", OA_LEGAL_COMPANY))]
+			("收款人", "QA Operating Supplier"), ("付款公司", OA_LEGAL_COMPANY),
+			("部门/组织", OA_SHEET), ("账户性质", "公户"),
+			("付款日期", "2026-10-10"), ("归属项目", "QA合成项目"),
+			("备注", "QA完整展示字段，无真实业务"))]
 		operations, raw_tasks = [], []
 		nodes = (("manager", "主管审批"),) if case == "supervisor" else (
 			("manager", "主管审批"), ("finance", "财务审批"), ("cashier", "出纳执行"))

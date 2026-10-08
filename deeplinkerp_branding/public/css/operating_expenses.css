@@ -22,19 +22,33 @@ body.dlp-operating-expense-grid-active:not(.dlp-mes-navigation-enabled) .dlp-int
 	left: 0;
 	right: auto;
 }
+/* Finance navigation scrolls independently of the worklist, in classic and DL modes. */
+body.dlp-operating-expense-grid-active .body-sidebar .body-sidebar-top:not(#page-form-builder *) {
+	min-height: 0;
+	flex: 1;
+	overflow-y: scroll;
+	overflow-x: hidden;
+	overscroll-behavior: contain;
+	scrollbar-gutter: stable;
+	scrollbar-width: auto;
+	scrollbar-color: #687b91 #e7edf3;
+}
+body.dlp-operating-expense-grid-active .body-sidebar .body-sidebar-top:not(#page-form-builder *)::-webkit-scrollbar { width: 12px; }
+body.dlp-operating-expense-grid-active .body-sidebar .body-sidebar-top:not(#page-form-builder *)::-webkit-scrollbar-track { background: #e7edf3; }
+body.dlp-operating-expense-grid-active .body-sidebar .body-sidebar-top:not(#page-form-builder *)::-webkit-scrollbar-thumb { background: #687b91; border: 2px solid #e7edf3; border-radius: 8px; }
 .dlp-operating-ellipsis {
 	display: block;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
-.dlp-operating-identity {
+.dlp-operating-work-status {
 	width: 100%;
 	min-width: 0;
 }
-body.dlp-operating-expense-grid-active .dlp-po-grid-row :is([data-fieldname="amount"], [data-fieldname="paid_amount"], [data-fieldname="pending_amount"]) {
-	gap: 4px;
-}
+.dlp-operating-work-status > div { display: flex; align-items: center; gap: 5px; }
+.dlp-operating-work-status > .dlp-operating-ellipsis { margin-top: 2px; font-size: 11px; }
+.dlp-operating-work-status > div > small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dlp-operating-list-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 10px; border-bottom: 1px solid #dce7f4; }
 .dlp-operating-list-tabs .btn { background: transparent; border: 0; border-radius: 0; padding: 8px 14px; }
 .dlp-operating-list-tabs .active { color: #1675cc; border-bottom: 2px solid #1675cc; font-weight: 600; }
@@ -52,7 +66,6 @@ body.dlp-operating-expense-grid-active .dlp-po-grid-header { min-height: 36px; c
 .dlp-operating-hero > div:first-child { flex: 1; min-width: 150px; }
 .dlp-operating-hero h3 { margin: 0 0 6px; font-size: 17px; }
 .dlp-operating-hero p { margin: 0; color: var(--text-muted); }
-.dlp-operating-hero-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .dlp-operating-hero-badges { display: flex; gap: 8px; margin-top: 8px; }
 .dlp-operating-money-strip { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); width: 100%; gap: 10px; }
 .dlp-operating-money-strip > div { padding: 12px; border: 1px solid #e1e8f0; background: #f8fbff; border-radius: 6px; }

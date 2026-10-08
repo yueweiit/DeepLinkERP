@@ -430,30 +430,30 @@ body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp
 		right: auto;
 	}
 
-	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active, .dlp-purchase-payable-grid-active, .dlp-operating-expense-grid-active):not(.dlp-mes-navigation-enabled) {
+	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active, .dlp-purchase-payable-grid-active):not(.dlp-mes-navigation-enabled) {
 		--sidebar-width: 132px;
 	}
 
-	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active, .dlp-purchase-payable-grid-active, .dlp-operating-expense-grid-active):not(.dlp-mes-navigation-enabled) .body-sidebar {
+	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active, .dlp-purchase-payable-grid-active):not(.dlp-mes-navigation-enabled) .body-sidebar {
 		padding: 6px;
 		gap: 8px;
 	}
 
-	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active, .dlp-purchase-payable-grid-active, .dlp-operating-expense-grid-active):not(.dlp-mes-navigation-enabled) .body-sidebar .header-subtitle,
-	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active, .dlp-purchase-payable-grid-active, .dlp-operating-expense-grid-active):not(.dlp-mes-navigation-enabled) .body-sidebar .sidebar-user-button .text-secondary {
+	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active, .dlp-purchase-payable-grid-active):not(.dlp-mes-navigation-enabled) .body-sidebar .header-subtitle,
+	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active, .dlp-purchase-payable-grid-active):not(.dlp-mes-navigation-enabled) .body-sidebar .sidebar-user-button .text-secondary {
 		display: none;
 	}
 
-	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active, .dlp-purchase-payable-grid-active, .dlp-operating-expense-grid-active):not(.dlp-mes-navigation-enabled) .body-sidebar .sidebar-item-label {
+	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active, .dlp-purchase-payable-grid-active):not(.dlp-mes-navigation-enabled) .body-sidebar .sidebar-item-label {
 		font-size: 13px;
 	}
 
-	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active, .dlp-purchase-payable-grid-active, .dlp-operating-expense-grid-active):not(.dlp-mes-navigation-enabled) .custom-filters-right-sidebar-container,
-	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active, .dlp-purchase-payable-grid-active, .dlp-operating-expense-grid-active):not(.dlp-mes-navigation-enabled) .custom-filters-right-sidebar {
+	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active, .dlp-purchase-payable-grid-active):not(.dlp-mes-navigation-enabled) .custom-filters-right-sidebar-container,
+	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active, .dlp-purchase-payable-grid-active):not(.dlp-mes-navigation-enabled) .custom-filters-right-sidebar {
 		width: 56px;
 	}
 
-	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active, .dlp-purchase-payable-grid-active, .dlp-operating-expense-grid-active):not(.dlp-mes-navigation-enabled) .custom-filters-right-sidebar-item {
+	body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active, .dlp-purchase-payable-grid-active):not(.dlp-mes-navigation-enabled) .custom-filters-right-sidebar-item {
 		width: 48px;
 		min-height: 48px;
 	}

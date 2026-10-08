@@ -102,7 +102,8 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         }
         with patch.dict(frappe.conf, operating_expense_source_mode="oa_cashier"), patch.object(service, "_oa_connection", return_value=None), patch.object(oa, "read_page", return_value=([approval()], None)), patch.object(service, "_request", side_effect=lambda path, *a, **k: responses[path]):
             result = service._source_page({"limit": 100})
-        self.assertEqual(result["items"][0]["source_company"], "拉丁购")
+        self.assertIsNone(result["items"][0]["source_company"])
+        self.assertEqual(result["items"][0]["company_mapping_source"], "拉丁购")
         self.assertIsNone(result["items"][0]["paid_amount"])
         self.assertEqual(result["items"][0]["source_status"], "付款待核对")
 
@@ -429,12 +430,15 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         self.assertEqual(Decimal(both_companies["currency_totals"]["MXN"]["pending_amount"]), Decimal("60"))
         self.assertFalse(both_companies["currency_totals"]["MXN"]["incomplete"])
         for tab, keys in (("all", [key for key, value in expected.items() if value["company"] == "QA Operating China"]),
+                          ("pending_work", ["cashier", "manager", "history-unknown", "unknown"]),
                           ("pending_payment", ["cashier"]), ("approvals_running", ["cashier", "manager"]),
                           ("paid", ["paid"]), ("reconciliation", ["history-unknown", "scope-removed", "unknown"])):
             with self.subTest(tab=tab):
                 predicates = {**scope, "quick_tab": tab}
                 result = service.get_operating_expenses(filters=predicates, order_by="source_id asc", page_length=20)
                 self.assertEqual(result["total_count"], len(keys))
+                self.assertEqual(result["tab_counts"]["all"], 8)
+                self.assertEqual(result["tab_counts"]["pending_work"], 4)
                 self.assertEqual({row["source_id"] for row in result["rows"]}, {expected[key]["source_id"] for key in keys})
                 exported = self._exported_rows(service, predicates, ["display_source_id", "approval_state", "current_approver", "pending_amount", "project", "source_system"])
                 self.assertEqual([row[0] for row in exported], [row["approval_no"] for row in result["rows"]])
@@ -483,9 +487,11 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         service = self._sync()
         item = json.loads(frappe.get_doc(service.SOURCE, "1001").source_json)
         item["approval_no"] = "20260101-readable"
+        item["original_url"] = "https://aflow.dingtalk.com/dingtalk/mobile/homepage.htm?procInstId=qa-original-list"
         service._upsert(item, {item["source_company"]: "QA Operating China"})
         row = next(row for row in service.get_operating_expenses(page_length=500)["rows"] if row["source_id"] == "1001")
         self.assertEqual(row["approval_no"], "20260101-readable")
+        self.assertEqual(row["original_url"], item["original_url"])
         self.assertNotIn("source_json", row)
         # Exercise the chunk boundary with authorized source handles, without
         # creating hundreds of otherwise identical native documents.
@@ -496,7 +502,7 @@ class OperatingExpenseNativeQA(unittest.TestCase):
         self.assertEqual([len(call.args[1]["names"]) for call in projections], [500, 1])
         self.assertEqual({row["approval_no"] for row in projected}, {"20260101-readable"})
         for call in projections:
-            self.assertEqual(call.args[0].count("JSON_EXTRACT"), 7)
+            self.assertEqual(call.args[0].count("JSON_EXTRACT"), 14)
             self.assertNotIn("$.payments", call.args[0])
             self.assertNotIn("$.attachments", call.args[0])
 
@@ -523,10 +529,22 @@ class OperatingExpenseNativeQA(unittest.TestCase):
 
     def _sync(self):
         from deeplinkerp_branding.services import operating_expenses as service
-        service.save_sync_settings({"QA Operating China": "QA Operating China", "QA Operating Mexico": "QA Operating Mexico"}, "operating-source-qa-only")
-        preview = service.preview_sync()
-        service.enable_sync(preview["preview_fingerprint"])
-        service.sync_operating_expenses()
+        request = service._request
+        browser_roots = {("2101", "qa-corp", "qa-oa-completed"), ("2102", "qa-corp", "qa-oa-cashier"), ("2103", "qa-corp", "qa-oa-supervisor")}
+        def fixture_request(path, *args, **kwargs):
+            result = request(path, *args, **kwargs)
+            if path == "/api/integrations/erp/operating-expenses":
+                # Dedicated OA tests/browser checks own these exact added HTTP
+                # scenarios. Keep the original 1001/130-row suite isolated;
+                # never mutate the server, its cache or filter by title/amount.
+                result = {**result, "items": [item for item in result["items"] if
+                    (item.get("source_id"), item.get("corp_id"), item.get("process_instance_id")) not in browser_roots]}
+            return result
+        with patch.object(service, "_request", side_effect=fixture_request):
+            service.save_sync_settings({"QA Operating China": "QA Operating China", "QA Operating Mexico": "QA Operating Mexico"}, "operating-source-qa-only")
+            preview = service.preview_sync()
+            service.enable_sync(preview["preview_fingerprint"])
+            service.sync_operating_expenses()
         return service
 
     def _supplier(self):
@@ -578,6 +596,82 @@ class OperatingExpenseNativeQA(unittest.TestCase):
                 service.validate_operating_journal(journal)
         self.assertEqual(frappe.db.count("GL Entry"), 0)
         self.assertEqual(frappe.db.count("Payment Entry"), 0)
+
+    def test_native_event_insert_hook_inconsistency_rejects_create_and_link_atomically(self):
+        from frappe.model.document import Document
+        service = self._sync()
+        item = service.get_operating_expense_detail("1001")["source"]
+        original = Document.run_method
+        for operation in ("create", "link"):
+            mutations = ["event_fingerprint", "event_source", "journal_date", "journal_accounts"]
+            if operation == "create":
+                mutations.append("association_kind")
+            for mutation in mutations:
+                with self.subTest(operation=operation, mutation=mutation):
+                    frappe.db.savepoint("voucher_fixture")
+                    try:
+                        mapping = self._mapping()
+                        if operation == "link":
+                            mapping.update(recognition_mode="existing", existing_erp_coverage_confirmed=True, no_existing_erp_coverage=False)
+                        service.save_mapping("1001", mapping, item["version"])
+                        preview = service.preview_voucher("1001")
+                        journal = (frappe.get_doc({"doctype": "Journal Entry", "company": "QA Operating China", "posting_date": preview["posting_date"], "accounts": preview["accounts"]}).insert() if operation == "link" else None)
+                        before = frappe.db.count("Journal Entry")
+                        frappe.db.savepoint("voucher_write")
+                        def changed(document, method, *args, **kwargs):
+                            result = original(document, method, *args, **kwargs)
+                            if document.doctype == service.EVENT and method == "after_insert":
+                                if mutation.startswith("event_"):
+                                    field, value = ("fingerprint", "0" * 64) if mutation == "event_fingerprint" else ("source", "1002")
+                                    frappe.db.set_value(service.EVENT, document.name, field, value, update_modified=False)
+                                elif mutation == "journal_date":
+                                    frappe.db.set_value("Journal Entry", document.journal_entry, "posting_date", "2026-10-03", update_modified=False)
+                                elif mutation == "association_kind":
+                                    provenance = json.loads(document.provenance_json)
+                                    provenance["operation"] = "link_existing"
+                                    frappe.db.set_value(service.EVENT, document.name, "provenance_json", json.dumps(provenance), update_modified=False)
+                                    frappe.db.set_value("Journal Entry", document.journal_entry, "custom_operating_event_key", None, update_modified=False)
+                                else:
+                                    row = frappe.db.get_value("Journal Entry Account", {"parent": document.journal_entry, "idx": 1}, "name")
+                                    frappe.db.set_value("Journal Entry Account", row, "debit_in_account_currency", 101, update_modified=False)
+                            return result
+                        with patch.object(frappe, "logger") as logger, patch.object(Document, "run_method", new=changed), self.assertRaises(frappe.ValidationError):
+                            if operation == "create":
+                                service.create_voucher_draft("1001", preview["fingerprint"])
+                            else:
+                                service.link_existing("1001", journal.name, preview["fingerprint"])
+                        audit = logger.return_value.info.call_args.args[0]
+                        self.assertEqual((audit["operation"], audit["result"], audit["error_type"], audit["error_code"]),
+                                         ("voucher", "rejected", "ValidationError", "financial_postcondition_failed"))
+                        self.assertEqual(audit["stage"], {"event_fingerprint": "event_association", "event_source": "event_association",
+                            "journal_date": "journal_date", "journal_accounts": "journal_accounts", "association_kind": "journal_association"}[mutation])
+                        frappe.db.rollback(save_point="voucher_write")
+                        self.assertEqual(frappe.db.count("Journal Entry"), before)
+                        self.assertFalse(frappe.db.exists(service.EVENT, preview["event_key"]))
+                        if journal:
+                            restored = frappe.get_doc("Journal Entry", journal.name)
+                            service._match_journal(restored, preview["accounts"])
+                            service._match_date(restored, preview["posting_date"])
+                    finally:
+                        frappe.db.rollback(save_point="voucher_fixture")
+        self.assertEqual((frappe.db.count("GL Entry"), frappe.db.count("Payment Entry")), (0, 0))
+
+    def test_existing_voucher_return_rechecks_persisted_event_source_company_and_operation(self):
+        service = self._sync()
+        item = service.get_operating_expense_detail("1001")["source"]
+        service.save_mapping("1001", self._mapping(), item["version"])
+        preview = service.preview_voucher("1001")
+        draft = service.create_voucher_draft("1001", preview["fingerprint"])
+        for field, value in (("source", "1002"), ("company", "QA Operating Mexico"), ("operation", "payment"), ("payment_source_id", "unexpected-payment")):
+            with self.subTest(field=field):
+                frappe.db.savepoint("existing_event")
+                try:
+                    frappe.db.set_value(service.EVENT, preview["event_key"], field, value, update_modified=False)
+                    with self.assertRaises(frappe.ValidationError):
+                        service.create_voucher_draft("1001", preview["fingerprint"])
+                finally:
+                    frappe.db.rollback(save_point="existing_event")
+        self.assertEqual(frappe.db.get_value("Journal Entry", draft["journal_entry"], "docstatus"), 0)
 
     def test_fresh_withdrawal_and_financial_change_block_draft_but_copy_does_not(self):
         service = self._sync()
@@ -770,6 +864,12 @@ class OperatingExpenseNativeQA(unittest.TestCase):
             self.assertIn('formatCode="0.00"', workbook.read("xl/styles.xml").decode())
             self.assertIn('formatCode="yyyy-mm-dd"', workbook.read("xl/styles.xml").decode())
             self.assertIn('<c r="G2" s="2"><v>', xml)
+        with patch.object(service, "_list_rows", return_value=[{**authorized_rows[0], "approval_no": None}]):
+            service.export_operating_expenses(columns=["display_source_id"])
+            with ZipFile(BytesIO(frappe.response["filecontent"])) as workbook:
+                xml = workbook.read("xl/worksheets/sheet1.xml").decode()
+                self.assertNotIn(str(authorized_rows[0]["source_id"]), xml)
+                self.assertIn("—", xml)
         with patch.object(service, "_source", side_effect=AssertionError("Native full export authority must keep its lazy shortcut")):
             service.export_operating_expenses(columns=columns)
         frappe.db.set_value(service.SOURCE, "1001", "owner", "qa-export-nonowner@example.invalid", update_modified=False)

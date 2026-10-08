@@ -322,12 +322,12 @@
 			if (drawer.alive()) hooks.onState?.(w);
 		};
 		const valid = (id, load) => drawer.alive() && id === task && load === drawer.loadId;
-		async function run(action) {
+		async function run(action, operation = "write") {
 			if (!drawer.alive()) return;
 			if (drawer.busy) throw new Error(t("请等待当前操作完成"));
 			const id = ++task,
 				load = drawer.loadId;
-			drawer.setBusy(true);
+			drawer.setBusy(true, operation);
 			state();
 			try {
 				return await action(() => valid(id, load));
@@ -377,7 +377,7 @@
 					if (!current()) return;
 					state();
 					return result;
-				});
+				}, "read");
 			},
 			async save() {
 				if (!this.session?.ready()) throw new Error(t("请明确费用已发生及 ERP 覆盖情况"));
@@ -426,7 +426,7 @@
 					hooks.onPreview?.(result, payment);
 					state();
 					return result;
-				});
+				}, "read");
 			},
 			previewResult: currentPreview,
 			canCreate(payment) {
@@ -501,7 +501,8 @@
 		const balance = detail.erp_payments?.managed ? detail.erp_payments.balance || {} : s;
 		const progress = root.DeepLinkERPOperatingPaymentPanel?.balanceProgress({amount:s.amount,paid_amount:balance.paid_amount});
 		const approvalState=s.approval_state||s.approvals?.state||s.approvals?.eligibility;
-		const hero = `<header class="dlp-operating-hero"><div><h3>${display(s.summary || root.DeepLinkERPOperatingExpenses.typeLabel?.(s.effective_application_type||s.application_type)||t("运营支出详情"))}</h3><p>${esc(t("申请编号"))}：${display(s.approval_no || s.source_id)}</p><div class="dlp-operating-hero-badges"><span class="dlp-operating-badge ${["approved","eligible"].includes(approvalState)?"is-approved":approvalState==="pending"?"is-pending":"is-review"}">${esc(root.DeepLinkERPOperatingExpenses.approvalLabel(approvalState))}</span><span class="dlp-operating-badge ${s.source_status==="已付款"?"is-approved":"is-pending"}">${display(s.source_status||t("付款待核对"))}</span></div></div><div class="dlp-operating-hero-actions">${original ? `<a class="btn btn-default" href="${esc(original.desktop_url)}" title="${esc(t("需安装并登录钉钉，原单权限由钉钉校验。"))}">${esc(t("钉钉原单"))}</a>` : `<span class="text-muted">${esc(t("原单链接待核对"))}</span>`}</div><div class="dlp-operating-money-strip">${[["申请金额",s.amount],["累计已付",balance.paid_amount],["剩余待付",balance.pending_amount]].map(([label,value])=>`<div><small>${esc(t(label))}</small><strong>${money(value)} <small>${display(s.currency)}</small></strong></div>`).join("")}</div><div class="dlp-operating-progress"><span>${esc(t("付款进度"))}</span>${progress?`<div role="progressbar" aria-label="${esc(t("付款进度"))}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress.percent}"><i style="width:${progress.percent}%"></i></div><span>${progress.label}</span>`:`<span class="text-muted">${esc(t("金额待核对"))}</span>`}</div></header>`;
+		const applicationNumber = original ? `<a href="${esc(original.desktop_url)}" title="${esc(t("需安装并登录钉钉，原单权限由钉钉校验。"))}">${display(s.approval_no || s.source_id)}</a>` : display(s.approval_no || s.source_id);
+		const hero = `<header class="dlp-operating-hero"><div><h3>${display(s.summary || root.DeepLinkERPOperatingExpenses.typeLabel?.(s.effective_application_type||s.application_type)||t("运营支出详情"))}</h3><p>${esc(t("申请编号"))}：${applicationNumber}</p>${original ? "" : `<p class="text-muted">${esc(t("原单链接待核对"))}</p>`}<div class="dlp-operating-hero-badges"><span class="dlp-operating-badge ${["approved","eligible"].includes(approvalState)?"is-approved":approvalState==="pending"?"is-pending":"is-review"}">${esc(root.DeepLinkERPOperatingExpenses.approvalLabel(approvalState))}</span><span class="dlp-operating-badge ${s.source_status==="已付款"?"is-approved":"is-pending"}">${display(s.source_status||t("付款待核对"))}</span></div></div><div class="dlp-operating-money-strip">${[["申请金额",s.amount],["累计已付",balance.paid_amount],["剩余待付",balance.pending_amount]].map(([label,value])=>`<div><small>${esc(t(label))}</small><strong>${money(value)} <small>${display(s.currency)}</small></strong></div>`).join("")}</div><div class="dlp-operating-progress"><span>${esc(t("付款进度"))}</span>${progress?`<div role="progressbar" aria-label="${esc(t("付款进度"))}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress.percent}"><i style="width:${progress.percent}%"></i></div><span>${progress.label}</span>`:`<span class="text-muted">${esc(t("金额待核对"))}</span>`}</div></header>`;
 		return `${hero}<section class="dlp-operating-section" data-operating-pane="request"><div class="dlp-operating-facts">${fact("法律公司",detail.company)}${fact("收款人",s.payee_name)}${fact("申请日期",s.request_date)}${fact("申请人",s.applicant)}</div><details class="dlp-operating-advanced"><summary>${esc(t("原始来源信息"))}</summary><div class="dlp-operating-facts">${fact(
 			"申请编号",
 			s.source_id
@@ -680,8 +681,8 @@
 			for (const control of drawer.controls)
 				control.$input?.prop("disabled", drawer.busy || Boolean(control.df?.read_only));
 		};
-		drawer.setBusy = (value) => {
-			original(value);
+		drawer.setBusy = (value, operation) => {
+			original(value, operation);
 			drawer.refreshEligibility();
 		};
 		return drawer;
@@ -774,12 +775,12 @@
 		});
 		return button;
 	}
-	async function uiTask(drawer, fn) {
+	async function uiTask(drawer, fn, operation = "write") {
 		if (!drawer.alive() || drawer.busy) return;
 		const task = (drawer.uiTask = (drawer.uiTask || 0) + 1),
 			load = drawer.loadId;
 		const current = () => drawer.alive() && task === drawer.uiTask && load === drawer.loadId;
-		drawer.setBusy(true);
+		drawer.setBusy(true, operation);
 		try {
 			return await fn(current);
 		} finally {
@@ -828,7 +829,10 @@
 	}
 	async function open(sourceId, onRefresh = () => {}, initialTab = "payments") {
 		const shared = root.DeepLinkERPPurchasePayments,
-			drawer = shared.createDrawer(t("运营支出详情"), true);
+			drawer = shared.createDrawer(t("运营支出详情"), true, {
+				desktopNonModal: true,
+				guardNavigation: true,
+			});
 		if (!drawer) return;
 		configureDrawer(drawer);
 		drawer.activeOperatingTab=["payments","approvals","request","vouchers"].includes(initialTab)?initialTab:"payments";
@@ -890,6 +894,7 @@
 		}
 		async function render(detail) {
 			const load = drawer.loadId;
+			drawer.paymentDirty = null;
 			shared.disposeControls(drawer.controls);
 			drawer.actions = [];
 			existingJE = "";
@@ -931,7 +936,9 @@
 			const footer = root
 				.$('<div class="dlp-operating-footer"></div>')
 				.appendTo(drawer.panel.find("footer"));
-			action(drawer, footer, "刷新抽屉", () => w.load());
+			action(drawer, footer, "刷新抽屉", async () => {
+				if (await drawer.beforeClose()) return w.load();
+			});
 			if (!detail.company && isManager()) {
 				let company = "";
 				const control = await makeControl(
@@ -998,17 +1005,22 @@
 					},
 					values[df.fieldname],
 					(value) => {
-						const previous = w.session.revision;
-						w.session.touch(df.fieldname, value);
+						const previous = w.session.mapping()[df.fieldname] ?? "";
 						if (
 							df.fieldname === "application_type" &&
-							previous !== w.session.revision
+							String(value ?? "") !== String(previous)
 						) {
-							renderForm().catch((error) => {
-								if (drawer.alive()) drawer.error(error);
-							});
+							renderForm(() => w.session.touch(df.fieldname, value))
+								.then(async (rebuilt) => {
+									if (!rebuilt && drawer.alive() && load === drawer.loadId)
+										await control.set_value(previous);
+								})
+								.catch((error) => {
+									if (drawer.alive()) drawer.error(error);
+								});
 							return;
 						}
+						w.session.touch(df.fieldname, value);
 						updateVisibility();
 					},
 					query
@@ -1078,10 +1090,7 @@
 						drawer,
 						row.find(".dlp-operating-remove-line"),
 						"移除",
-						async () => {
-							w.session.removeLine(index);
-							await renderForm();
-						},
+						() => renderForm(() => w.session.removeLine(index)),
 						editable
 					);
 				}
@@ -1092,10 +1101,7 @@
 				drawer,
 				drawer.panel.find(".dlp-operating-line-actions"),
 				"新增费用分摊",
-				async () => {
-					w.session.addLine();
-					await renderForm();
-				},
+				() => renderForm(() => w.session.addLine()),
 				() => editable() && w.session.mapping().expense_lines.length < 100
 			);
 			action(
@@ -1266,7 +1272,7 @@
 						(row) => row.source_id === event.currentTarget.dataset.attachment
 					);
 					if (!file) return;
-					uiTask(drawer, (current) => downloadAttachment(sourceId, file, current)).catch(
+					uiTask(drawer, (current) => downloadAttachment(sourceId, file, current), "read").catch(
 						(error) => {
 							if (drawer.alive()) drawer.error(error);
 						}
@@ -1292,10 +1298,14 @@
 				.toggle(mode === "existing");
 			drawer.refreshEligibility();
 		}
-		async function renderForm() {
-			if (!drawer.alive() || drawer.busy) return;
+		async function renderForm(update) {
+			if (!drawer.alive() || drawer.busy) return false;
+			if (drawer.paymentDirty?.() && !(await drawer.beforeClose())) return false;
+			if (!drawer.alive() || drawer.busy) return false;
+			update?.();
 			drawer.loadId++;
-			return uiTask(drawer, () => render(w.detail));
+			await uiTask(drawer, () => render(w.detail), "read");
+			return true;
 		}
 		w = workflow(drawer, sourceId, {
 			onDetail: render,
@@ -1314,8 +1324,9 @@
 				drawer.panel.find(".dlp-operating-result").html(resultHTML(result));
 			},
 		});
+		drawer.beforeUnloadShouldBlock = () => Boolean(w.session?.dirty() || drawer.paymentDirty?.());
 		drawer.beforeClose = async () =>
-			!w.session?.dirty() ||
+			!(w.session?.dirty() || drawer.paymentDirty?.()) ||
 			(await new Promise((resolve) =>
 				root.frappe.confirm(
 					t("输入尚未保存，关闭会丢弃当前输入，继续？"),

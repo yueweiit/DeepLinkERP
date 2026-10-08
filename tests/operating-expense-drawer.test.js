@@ -75,6 +75,13 @@ test("drawer business title and one money strip show real progress with readonly
  assert.match(html,/dlp-operating-payment-card[^]*来源：历史付款/);
  assert.doesNotMatch(html,/办理付款|data-payment-delete/);
 });
+test("drawer application number is the original DingTalk link without a duplicate hero button", () => {
+	const a=create({DeepLinkERPOperatingExpenses:require("../deeplinkerp_branding/public/js/operating_expenses.js")({})});
+	const d=detail();d.source.approval_no="NO<&";d.source.original_url="https://aflow.dingtalk.com/?procInstId=instance-1";
+	const hero=a.sourceHTML(d).split('</header>',1)[0];
+	assert.match(hero, /<a[^>]+href="dingtalk:\/\/[^>]+>NO&lt;&amp;<\/a>/);
+	assert.doesNotMatch(hero, /class="btn|dlp-operating-hero-actions|>钉钉原单</);
+});
 test("cashier approval decisions and reported payment state remain separately labelled", () => {
 	const d = detail();
 	d.source.source_status = "付款待核对";
@@ -109,6 +116,13 @@ function drawer() {
 		error() {},
 	};
 }
+test("operating workflow distinguishes cancellable reads from saved mapping and voucher writes",async()=>{
+ const modes=[],d=drawer();d.setBusy=(value,operation)=>{d.busy=value;if(value)modes.push(operation);};
+ const a=create(host(async req=>({message:req.method.endsWith("get_operating_expense_detail")?detail():req.method.endsWith("save_mapping")?{mapping:detail().mapping}:{fingerprint:"preview",source_version:"v1",accounts:[]}})));
+ const w=a.workflow(d,"source:1");
+ await w.load();await w.save();await w.preview();await w.create();
+ assert.deepEqual(modes,["read","write","read","write"]);
+});
 
 test("source mapping uses exact decimal strings and preserves hidden payment terms", () => {
 	assert.equal(typeof api.editSession, "function");
@@ -771,8 +785,10 @@ test("drawer reuses the shared accessible shell factory and stops initializing c
 		DeepLinkERPOperatingExpenses:
 			require("../deeplinkerp_branding/public/js/operating_expenses.js")({}),
 		DeepLinkERPPurchasePayments: {
-			createDrawer() {
+			createDrawer(_title, _wide, options) {
 				sharedMade++;
+				assert.equal(options?.desktopNonModal, true);
+				assert.equal(options?.guardNavigation, true);
 				return d;
 			},
 			disposeControls: (controls) => {
@@ -1882,17 +1898,20 @@ test("server validation messages remain readable through silent RPC rejection an
 	assert.equal(saved, 0);
 	assert.equal(w.canCreate("pay:1"), false);
 });
-test("unclassified type switching rebuilds searchable native party Links and isolates old control callbacks", async () => {
+async function typeSwitchingDrawer(mapped = false) {
 	const controls = [],
-		disposed = [];
+		disposed = [], requests = [], buttons = new Map();
 	const item = detail();
-	item.mapping = null;
+	if (!mapped) item.mapping = null;
+	else item.mapping.application_type = "payment";
 	item.source.application_type = "unclassified";
 	item.source.application_type_raw = "raw unknown";
 	class Surface {
-		constructor() {
+		constructor(markup = "") {
 			this.length = 1;
 			this.attrs = {};
+			this.handlers = {};
+			if (markup.includes("<button")) buttons.set(markup.replace(/<[^>]+>/g, ""), this);
 		}
 		addClass() {
 			return this;
@@ -1903,7 +1922,8 @@ test("unclassified type switching rebuilds searchable native party Links and iso
 		html() {
 			return this;
 		}
-		on() {
+		on(name, handler) {
+			this.handlers[name] = handler;
 			return this;
 		}
 		off() {
@@ -1941,8 +1961,8 @@ test("unclassified type switching rebuilds searchable native party Links and iso
 	const d = drawer();
 	d.panel = new Surface();
 	d.controls = [];
-	const a = create({
-		$: () => new Surface(),
+	const root = {
+		$: markup => new Surface(markup),
 		DeepLinkERPOperatingExpenses:
 			require("../deeplinkerp_branding/public/js/operating_expenses.js")({}),
 		DeepLinkERPPurchasePayments: {
@@ -1953,7 +1973,7 @@ test("unclassified type switching rebuilds searchable native party Links and iso
 			},
 		},
 		frappe: {
-			...host(async () => ({ message: item })).frappe,
+			...host(async req => {requests.push(req); return { message: req.method.endsWith("save_mapping") ? {mapping: JSON.parse(req.args.mapping)} : item };}).frappe,
 			ui: {
 				form: {
 					make_control: ({ df }) => {
@@ -1976,9 +1996,14 @@ test("unclassified type switching rebuilds searchable native party Links and iso
 				},
 			},
 		},
-	});
+	};
+	const a = create(root);
 	const current = (field) => controls.filter((control) => control.df.fieldname === field).at(-1);
 	await a.open("source:1");
+	return {a, d, root, current, controls, disposed, requests, buttons, item};
+}
+test("unclassified type switching rebuilds searchable native party Links and isolates old control callbacks", async () => {
+	const {current, disposed, item} = await typeSwitchingDrawer();
 	assert.equal(current("party").$input, undefined);
 	const initialType = current("application_type");
 	await current("classification").set_value("retain this");
@@ -2010,4 +2035,77 @@ test("unclassified type switching rebuilds searchable native party Links and iso
 	assert.ok(disposed.includes(supplier));
 	assert.equal(item.source.application_type, "unclassified");
 	assert.equal(item.source.application_type_raw, "raw unknown");
+});
+test("advanced mapping rebuilds confirm dirty payment inputs before disposing their mounted controls", async () => {
+	for (const cause of ["type", "allocation", "save"]) {
+		const h = await typeSwitchingDrawer(true);
+		let confirmation, checks = 0;
+		h.d.paymentDirty = () => true;
+		h.root.frappe.confirm = (_message, yes, no) => {checks++; confirmation = {yes, no};};
+		const original = h.current("classification"), load = h.d.loadId;
+		const rebuild = async () => {
+			if (cause === "type") {
+				const control = h.current("application_type");
+				await control.set_value(control.value === "reimbursement" ? "payment" : "reimbursement");
+				control.df.change();
+			} else await h.buttons.get(cause === "allocation" ? "新增费用分摊" : "保存财务映射").handlers["click.dlpDrawer"]();
+		};
+		const declined = rebuild();
+		await new Promise(resolve => setImmediate(resolve));
+		assert.ok(confirmation, `${cause} must use the existing unsaved-input confirmation`);
+		assert.equal(h.d.loadId, load);
+		assert.equal(h.disposed.includes(original), false);
+		confirmation.no(); await declined;
+		await new Promise(resolve => setImmediate(resolve));
+		assert.equal(h.current("classification"), original);
+		assert.equal(h.d.paymentDirty(), true);
+		const accepted = rebuild();
+		await new Promise(resolve => setImmediate(resolve));
+		assert.equal(checks, 2); confirmation.yes(); await accepted;
+		await new Promise(resolve => setImmediate(resolve));
+		assert.equal(h.disposed.includes(original), true);
+		assert.equal(h.d.loadId, load + 1);
+	}
+});
+test("leaving the drawer during payment-input discard confirmation cancels the pending rebuild", async () => {
+	const h = await typeSwitchingDrawer(true);
+	let accept;
+	h.d.paymentDirty = () => true;
+	h.root.frappe.confirm = (_message, yes) => {accept = yes;};
+	const load = h.d.loadId;
+	const pending = h.buttons.get("新增费用分摊").handlers["click.dlpDrawer"]();
+	assert.equal(typeof accept, "function");
+	h.d.close(); accept(); await pending;
+	assert.equal(h.d.loadId, load);
+	assert.equal(h.disposed.length, 0);
+});
+test("declined mapping rebuilds leave type party and allocations unchanged in the next save RPC", async () => {
+	const outcomes = [];
+	for (const cause of ["add", "remove", "type"]) {
+		const h = await typeSwitchingDrawer(true);
+		h.d.paymentDirty = () => true;
+		h.root.frappe.confirm = (_message, _yes, no) => no();
+		if (cause === "type") {
+			await h.current("application_type").set_value("reimbursement");
+			h.current("application_type").df.change();
+			await new Promise(resolve => setImmediate(resolve));
+		} else await h.buttons.get(cause === "add" ? "新增费用分摊" : "移除").handlers["click.dlpDrawer"]();
+		h.d.paymentDirty = () => false;
+		await h.buttons.get("保存财务映射").handlers["click.dlpDrawer"]();
+		const saved = h.requests.find(req => req.method.endsWith("save_mapping"));
+		const values = saved && JSON.parse(saved.args.mapping);
+		outcomes.push({cause, typeControl: h.current("application_type").value, type: values?.application_type, partyType: values?.party_type, party: values?.party, lines: values?.expense_lines});
+	}
+	assert.deepEqual(outcomes, ["add", "remove", "type"].map(cause => ({cause, typeControl: "payment", type: "payment", partyType: "Supplier", party: "S", lines: detail().mapping.expense_lines})));
+});
+test("operating full-document warning predicate reuses live mapping and payment dirty state", async () => {
+	const h = await typeSwitchingDrawer(true);
+	assert.equal(typeof h.d.beforeUnloadShouldBlock, "function");
+	assert.equal(h.d.beforeUnloadShouldBlock(), false);
+	h.d.paymentDirty = () => true;assert.equal(h.d.beforeUnloadShouldBlock(), true);
+	h.d.paymentDirty = () => false;
+	await h.current("classification").set_value("changed");h.current("classification").df.change();
+	assert.equal(h.d.beforeUnloadShouldBlock(), true);
+	await h.buttons.get("保存财务映射").handlers["click.dlpDrawer"]();
+	assert.equal(h.d.beforeUnloadShouldBlock(), false);
 });
