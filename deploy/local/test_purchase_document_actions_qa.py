@@ -327,7 +327,8 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
             "Payment Ledger Entry", "Stock Ledger Entry", "Bin", "China Accounting Voucher", "China Voucher Sync Issue", "Integration Request", "Item",
             "ToDo", "Version", "Notification Log", "China Cash Flow Assignment", "User", "Warehouse",
             "Workflow", "Workflow State", "Workflow Action Master", "Custom Field", "Advance Payment Ledger Entry", "Account", "Supplier")
-        self.types += ("Sales Order", "Stock Reservation Entry", "Submission Queue", "Repost Item Valuation")
+        self.types += ("Sales Order", "Stock Reservation Entry", "Submission Queue", "Repost Item Valuation",
+            "Material Request", "Purchase Fulfilment Link", "China Cash Equivalent Scope")
         self.before = {doctype: frappe.db.count(doctype) for doctype in self.types}
         self.initial_names = {doctype: set(frappe.get_all(doctype, pluck="name", limit_page_length=0)) for doctype in self.types}
         self.committed_names = None
@@ -361,11 +362,11 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         self.assertTrue(self.committed_names["Purchase Order"])
         self.assertTrue(all(name.startswith("QA-ATOMIC-PO-") for name in self.committed_names["Purchase Order"]))
 
-    def order(self, currency="CNY", conversion_rate=1, supplier="QA Test Supplier", transaction_date=None):
+    def order(self, currency="CNY", conversion_rate=1, supplier="QA Test Supplier", transaction_date=None, qty=10, rate=12.345):
         po = frappe.get_doc({"doctype": "Purchase Order", "company": COMPANY,
             "transaction_date": transaction_date or nowdate(),
             "supplier": supplier, "currency": currency, "conversion_rate": conversion_rate, "schedule_date": add_days(nowdate(), 1),
-            "items": [{"item_code": self.item, "qty": 10, "rate": 12.345,
+            "items": [{"item_code": self.item, "qty": qty, "rate": rate,
                 "warehouse": "Stores - QAB", "schedule_date": add_days(nowdate(), 1)}]}).insert(
                     set_name="QA-ATOMIC-PO-" + uuid.uuid4().hex[:16])
         po.submit()
@@ -401,6 +402,314 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         guard.check_registered()
         frappe.db.before_commit.run()  # exercise final form hooks, without committing test data
         self.assertEqual(frappe.db.get_value("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"}, "actual_qty"), 2)
+
+    def test_zero_amount_native_invoice_without_financial_movement_is_legal(self):
+        for automatic in (0, 1):
+            with self.subTest(automatic=automatic):
+                if not frappe.db.exists("Item", self.item):
+                    frappe.get_doc({"doctype": "Item", "item_code": self.item, "item_name": self.item,
+                        "item_group": "All Item Groups", "stock_uom": "Nos", "is_stock_item": 0}).insert()
+                else:
+                    frappe.db.set_value("Item", self.item, "is_stock_item", 0)
+                    frappe.clear_document_cache("Item", self.item)
+                frappe.db.set_value("China Finance Settings", COMPANY, "auto_submit_purchase_invoice", automatic)
+                try:
+                    po = self.order(qty=2, rate=0)
+                    pr = make_purchase_receipt(po.name).insert()
+                    pr.submit()
+                    if automatic:
+                        name = frappe.db.get_value("Purchase Invoice Item", {"purchase_receipt": pr.name}, "parent")
+                        self.assertTrue(name)
+                        pi = frappe.get_doc("Purchase Invoice", name)
+                    else:
+                        pi = make_purchase_invoice(pr.name).insert()
+                        pi.submit()
+                    self.assertEqual((pi.docstatus, pi.grand_total, pi.outstanding_amount), (1, 0, 0))
+                    self.assertEqual(pi.items[0].qty, 2)
+                    self.assertEqual(pi.items[0].rate, 0)
+                    for doctype in ("GL Entry", "Payment Ledger Entry"):
+                        self.assertFalse(frappe.db.count(doctype, {"voucher_type": pi.doctype, "voucher_no": pi.name}))
+                    self.assertFalse(frappe.db.count("China Accounting Voucher", {"source_doctype": pi.doctype, "source_name": pi.name}))
+                finally:
+                    frappe.db.rollback()
+                    frappe.clear_document_cache("Item", self.item)
+
+    def test_order_inventory_bin_changes_are_bound_to_native_replay(self):
+        from deeplinkerp_branding.services import purchase_consistency as guard
+        from deeplinkerp_branding.services import purchase_operation as kernel
+        po = self.order()
+        payload = json.dumps(po.as_dict(), default=str)
+        key = str(uuid.uuid4())
+        guard.savedocs(payload, "Update", request_id=key)
+        self.commit_fixture()
+        audit = frappe.get_doc("Integration Request", kernel.identity("Administrator", key))
+        self.assertTrue(any(row["doctype"] == "Purchase Order" for row in json.loads(audit.output)["artifacts"]))
+        self.assertFalse(frappe.db.count("Stock Ledger Entry", {"voucher_type": po.doctype, "voucher_no": po.name}))
+        for field in ("ordered_qty", "indented_qty"):
+            with self.subTest(field=field):
+                quantity = frappe.db.get_value("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"}, field)
+                frappe.db.set_value("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"}, field, quantity + 1, update_modified=False)
+                try:
+                    with self.assertRaises(frappe.ValidationError) as caught:
+                        guard.savedocs(payload, "Update", request_id=key)
+                    self.assertEqual(caught.exception.purchase_error_id, "replay_evidence_changed")
+                finally:
+                    frappe.db.set_value("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"}, field, quantity, update_modified=False)
+
+    def test_nonzero_invoice_requires_native_supplier_payment_ledger(self):
+        from deeplinkerp_branding.services import purchase_consistency as guard
+        po = self.order()
+        pr = self.receipt(po)
+        pi = make_purchase_invoice(pr.name).insert()
+        native = guard.check_invoice_balance
+        def lose_ledger(doc):
+            if (doc.doctype, doc.name) == (pi.doctype, pi.name):
+                self.assertTrue(frappe.db.count("Payment Ledger Entry", {"voucher_type": pi.doctype, "voucher_no": pi.name}))
+                frappe.db.delete("Payment Ledger Entry", {"voucher_type": pi.doctype, "voucher_no": pi.name})
+            return native(doc)
+        with patch.object(guard, "check_invoice_balance", side_effect=lose_ledger), self.assertRaises(frappe.ValidationError) as caught:
+            pi.submit()
+        self.assertEqual(caught.exception.purchase_error_id, "purchase_invoice_ple_missing")
+        self.assertFalse(frappe.db.exists("Purchase Invoice", pi.name))
+
+    def material_request_order(self):
+        from erpnext.stock.doctype.material_request.material_request import make_purchase_order
+        mr = frappe.get_doc({"doctype": "Material Request", "company": COMPANY, "material_request_type": "Purchase",
+            "transaction_date": nowdate(), "schedule_date": add_days(nowdate(), 1),
+            "items": [{"item_code": self.item, "qty": 10, "warehouse": "Stores - QAB", "schedule_date": add_days(nowdate(), 1)}]}).insert()
+        mr.submit()
+        po = make_purchase_order(mr.name)
+        po.supplier = "QA Test Supplier"
+        po.items[0].rate = 12.345
+        po.insert(set_name="QA-ATOMIC-PO-" + uuid.uuid4().hex[:16])
+        return mr, po
+
+    def test_native_order_material_request_updates_are_replay_artifacts(self):
+        from deeplinkerp_branding.services import purchase_consistency as guard
+        from deeplinkerp_branding.services import purchase_operation as kernel
+        mr, po = self.material_request_order()
+        key = str(uuid.uuid4())
+        payload = json.dumps(po.as_dict(), default=str)
+        guard.savedocs(payload, "Submit", key)
+        self.commit_fixture()
+        artifacts = json.loads(frappe.get_doc("Integration Request", kernel.identity("Administrator", key)).output)["artifacts"]
+        self.assertTrue(any(row["doctype"] == mr.doctype and row["name"] == mr.name for row in artifacts))
+        self.assertEqual(frappe.db.get_value("Material Request Item", mr.items[0].name, "ordered_qty"), 10)
+        self.assertEqual(frappe.db.get_value(mr.doctype, mr.name, "per_ordered"), 100)
+        for doctype, name, field in (("Material Request Item", mr.items[0].name, "ordered_qty"), (mr.doctype, mr.name, "per_ordered")):
+            with self.subTest(field=field):
+                frappe.db.set_value(doctype, name, field, frappe.db.get_value(doctype, name, field) + 1, update_modified=False)
+                with self.assertRaises(frappe.ValidationError) as caught:
+                    guard.savedocs(payload, "Submit", key)
+                self.assertEqual(caught.exception.purchase_error_id, "replay_evidence_changed")
+
+    def test_native_receipt_material_request_updates_are_replay_artifacts(self):
+        from deeplinkerp_branding.services import purchase_consistency as guard
+        from deeplinkerp_branding.services import purchase_operation as kernel
+        mr, po = self.material_request_order()
+        po.submit()
+        self.commit_fixture()
+        pr = make_purchase_receipt(po.name).insert()
+        key = str(uuid.uuid4())
+        payload = json.dumps(pr.as_dict(), default=str)
+        guard.savedocs(payload, "Submit", key)
+        self.commit_fixture()
+        artifact = json.loads(frappe.get_doc("Integration Request", kernel.identity("Administrator", key)).output)["artifacts"]
+        self.assertTrue(any(row["doctype"] == mr.doctype and row["name"] == mr.name for row in artifact))
+        for doctype, name, field in (("Material Request Item", mr.items[0].name, "received_qty"),
+                (mr.doctype, mr.name, "per_received")):
+            with self.subTest(field=field):
+                frappe.db.set_value(doctype, name, field, frappe.db.get_value(doctype, name, field) + 1, update_modified=False)
+                with self.assertRaises(frappe.ValidationError) as caught:
+                    guard.savedocs(payload, "Submit", key)
+                self.assertEqual(caught.exception.purchase_error_id, "replay_evidence_changed")
+
+    def test_receipt_native_source_invoice_quantity_is_a_replay_artifact(self):
+        from erpnext.buying.doctype.purchase_order.purchase_order import make_purchase_invoice as invoice_from_order
+        from erpnext.accounts.doctype.purchase_invoice.purchase_invoice import make_purchase_receipt as receipt_from_invoice
+        from deeplinkerp_branding.services import purchase_consistency as guard
+        from deeplinkerp_branding.services import purchase_operation as kernel
+        frappe.db.set_value("Item", self.item, "is_stock_item", 0)
+        frappe.clear_document_cache("Item", self.item)
+        po = self.order()
+        pi = invoice_from_order(po.name).insert()
+        pi.submit()
+        self.commit_fixture()
+        pr = receipt_from_invoice(pi.name).insert()
+        self.assertEqual(pr.items[0].purchase_invoice, pi.name)
+        key = str(uuid.uuid4())
+        payload = json.dumps(pr.as_dict(), default=str)
+        guard.savedocs(payload, "Submit", key)
+        self.commit_fixture()
+        artifacts = json.loads(frappe.get_doc("Integration Request", kernel.identity("Administrator", key)).output)["artifacts"]
+        self.assertTrue(any(row["doctype"] == pi.doctype and row["name"] == pi.name for row in artifacts))
+        for doctype, name, field in (("Purchase Invoice Item", pi.items[0].name, "received_qty"), (pi.doctype, pi.name, "per_received")):
+            with self.subTest(field=field):
+                frappe.db.set_value(doctype, name, field, frappe.db.get_value(doctype, name, field) + 1, update_modified=False)
+                with self.assertRaises(frappe.ValidationError) as caught:
+                    guard.savedocs(payload, "Submit", key)
+                self.assertEqual(caught.exception.purchase_error_id, "replay_evidence_changed")
+
+    def test_managed_fulfilment_invalidation_is_a_replay_artifact(self):
+        from deeplinkerp_branding.services import purchase_consistency as guard
+        from deeplinkerp_branding.services import purchase_fulfilment_service as fulfilment
+        from deeplinkerp_branding.services import purchase_operation as kernel
+        po = self.order()
+        result = fulfilment.save_link(po.name, po.items[0].name, COMPANY, COMPANY, "trade_custody", 2,
+            str(po.modified), custody_company=COMPANY, custody_warehouse="Stores - QAB")
+        name = result["name"]
+        key = str(uuid.uuid4())
+        payload = json.dumps(po.as_dict(), default=str)
+        guard.cancel(po.doctype, po.name, request_id=key, doc=payload)
+        self.commit_fixture()
+        artifacts = json.loads(frappe.get_doc("Integration Request", kernel.identity("Administrator", key)).output)["artifacts"]
+        self.assertTrue(any(row["doctype"] == fulfilment.DOCTYPE and row["name"] == name for row in artifacts))
+        frappe.db.set_value(fulfilment.DOCTYPE, name, "source_versions_json", "{}", update_modified=False)
+        with self.assertRaises(frappe.ValidationError) as caught:
+            guard.cancel(po.doctype, po.name, request_id=key, doc=payload)
+        self.assertEqual(caught.exception.purchase_error_id, "replay_evidence_changed")
+
+    def cash_assignment_payment(self):
+        from china_finance.services import cash_flow_assignment, cash_equivalent_scope, voucher
+        from deeplinkerp_branding.services import purchase_document_actions as actions
+        if "Cash - QAB" not in cash_equivalent_scope.get_cash_scope_accounts(COMPANY, nowdate()):
+            frappe.get_doc({"doctype": "China Cash Equivalent Scope", "company": COMPANY, "account": "Cash - QAB",
+                "classification": "库存现金", "included": 1, "policy_basis": "QA synthetic cash scope",
+                "effective_from": nowdate()}).insert()
+        po = self.order()
+        pr = self.receipt(po)
+        pi = make_purchase_invoice(pr.name).insert()
+        pi.submit()
+        settings = frappe.get_doc(voucher.get_company_settings(COMPANY).as_dict())
+        settings.cash_flow_assignment_activation_date = nowdate()
+        key = str(uuid.uuid4())
+        # Local policy fixture only; native voucher/assignment writers run real.
+        with patch.object(cash_flow_assignment, "get_company_settings", return_value=settings):
+            result = actions.record_payment(source_doctype=pr.doctype, source_name=pr.name, purchase_invoice=pi.name,
+                amount_to_pay=10, bank_account="Cash - QAB", request_id=key)
+        self.assertFalse(result.get("failed"), result)
+        pe = frappe.get_doc("Payment Entry", result["document"]["name"])
+        assignment = frappe.get_doc("China Cash Flow Assignment", {"source_doctype": pe.doctype, "source_name": pe.name})
+        self.assertEqual((assignment.docstatus, assignment.status), (0, "Draft"))
+        self.commit_fixture()
+        return pe, assignment, key
+
+    def test_native_finance_posting_cash_assignment_is_a_system_artifact(self):
+        from deeplinkerp_branding.services import purchase_operation as kernel
+        pe, assignment, key = self.cash_assignment_payment()
+        artifacts = json.loads(frappe.get_doc("Integration Request", kernel.identity("Administrator", key)).output)["artifacts"]
+        found = [row for row in artifacts if (row["doctype"], row["name"]) == (assignment.doctype, assignment.name)]
+        self.assertEqual(len(found), 1)
+        self.assertTrue(found[0]["system_effect"])
+        frappe.db.set_value(assignment.items[0].doctype, assignment.items[0].name, "cash_amount", assignment.items[0].cash_amount + 1, update_modified=False)
+        with self.assertRaises(frappe.ValidationError) as caught:
+            kernel.replay_artifacts({"artifacts": artifacts})
+        self.assertEqual(caught.exception.purchase_error_id, "replay_evidence_changed")
+
+    def test_native_finance_cancellation_issue_and_cash_assignment_are_system_artifacts(self):
+        from deeplinkerp_branding.services import purchase_consistency as guard
+        from deeplinkerp_branding.services import purchase_operation as kernel
+        pe, assignment, _ = self.cash_assignment_payment()
+        key = str(uuid.uuid4())
+        payload = json.dumps(pe.as_dict(), default=str)
+        guard.cancel(pe.doctype, pe.name, request_id=key, doc=payload)
+        self.commit_fixture()
+        issue = frappe.get_doc("China Voucher Sync Issue", {"issue_key": f"Cancellation|{pe.doctype}|{pe.name}"})
+        artifacts = json.loads(frappe.get_doc("Integration Request", kernel.identity("Administrator", key)).output)["artifacts"]
+        for target, status in ((issue, "Resolved"), (assignment, "Cancelled")):
+            with self.subTest(doctype=target.doctype):
+                found = [row for row in artifacts if (row["doctype"], row["name"]) == (target.doctype, target.name)]
+                self.assertEqual(len(found), 1)
+                self.assertTrue(found[0]["system_effect"])
+                self.assertEqual(frappe.db.get_value(target.doctype, target.name, "status"), status)
+                frappe.db.set_value(target.doctype, target.name, "status", "Pending" if target is issue else "Draft", update_modified=False)
+                with self.assertRaises(frappe.ValidationError) as caught:
+                    guard.cancel(pe.doctype, pe.name, request_id=key, doc=payload)
+                self.assertEqual(caught.exception.purchase_error_id, "replay_evidence_changed")
+
+    def test_native_resource_cancel_cannot_strip_procurement_identity_or_change_business_facts(self):
+        from frappe.api import v1, v2
+        from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
+        frappe.db.set_value("Item", self.item, "is_stock_item", 0)
+        frappe.clear_document_cache("Item", self.item)
+        po = self.order()
+        pr = self.receipt(po)
+        pi = make_purchase_invoice(pr.name).insert()
+        pi.submit()
+        pe = get_payment_entry(po.doctype, po.name, bank_account="Cash - QAB", party_amount=10)
+        pe.insert()
+        pe.submit()
+        self.commit_fixture()
+        self.remember_effects()
+        for api in (v1, v2):
+            for source, change in ((pi, "links"), (pi, "amount"), (pe, "references"), (pe, "party_type")):
+                with self.subTest(api=api.__name__, source=source.doctype, change=change):
+                    payload = frappe.get_doc(source.doctype, source.name).as_dict(convert_dates_to_str=True)
+                    payload["docstatus"] = 2
+                    if change == "links":
+                        for row in payload["items"]:
+                            for field in ("purchase_order", "po_detail", "purchase_receipt", "pr_detail"):
+                                row[field] = None
+                    elif change == "amount":
+                        payload["items"][0]["qty"] += 1
+                    elif change == "references":
+                        payload["references"] = []
+                    else:
+                        payload["party_type"] = "Customer"
+                        payload["party"] = "QA Purchase Payments Customer"
+                    try:
+                        if api is v1:
+                            with patch.object(v1, "get_request_form_data", return_value=payload), self.assertRaises(frappe.ValidationError) as caught:
+                                api.update_doc(source.doctype, source.name)
+                        else:
+                            with patch.object(frappe.local, "form_dict", frappe._dict(payload)), self.assertRaises(frappe.ValidationError) as caught:
+                                api.update_doc(source.doctype, source.name)
+                        self.assertEqual(caught.exception.purchase_error_id, "cancellation_business_facts_changed")
+                    finally:
+                        frappe.db.rollback()
+                    self.assert_effects_unchanged()
+
+    def test_native_resource_docstatus_only_cancellation_keeps_finance_atomic(self):
+        from frappe.api import v1, v2
+        from deeplinkerp_branding.services import purchase_consistency as guard
+        frappe.db.set_value("Item", self.item, "is_stock_item", 0)
+        frappe.clear_document_cache("Item", self.item)
+        po = self.order()
+        pr = self.receipt(po)
+        pi = make_purchase_invoice(pr.name).insert()
+        pi.submit()
+        self.commit_fixture()
+        for api in (v1, v2):
+            with self.subTest(api=api.__name__):
+                if api is v1:
+                    with patch.object(v1, "get_request_form_data", return_value={"docstatus": 2}):
+                        api.update_doc(pi.doctype, pi.name)
+                else:
+                    with patch.object(frappe.local, "form_dict", frappe._dict(docstatus=2)):
+                        api.update_doc(pi.doctype, pi.name)
+                guard.check_registered()
+                self.assertEqual(frappe.db.get_value(pi.doctype, pi.name, "docstatus"), 2)
+                issue = frappe.get_doc("China Voucher Sync Issue", {"issue_key": f"Cancellation|{pi.doctype}|{pi.name}"})
+                self.assertEqual(issue.status, "Resolved")
+                self.assertTrue(issue.cancellation_voucher)
+                frappe.db.rollback()
+
+    def test_zero_movement_native_cancellation_cannot_hide_a_pending_finance_issue(self):
+        from frappe.api import v1
+        frappe.db.set_value("Item", self.item, "is_stock_item", 0)
+        frappe.clear_document_cache("Item", self.item)
+        po = self.order(qty=2, rate=0)
+        pr = make_purchase_receipt(po.name).insert()
+        pr.submit()
+        pi = make_purchase_invoice(pr.name).insert()
+        pi.submit()
+        self.commit_fixture()
+        self.remember_effects()
+        with patch.object(v1, "get_request_form_data", return_value={"docstatus": 2}), self.assertRaises(frappe.ValidationError) as caught:
+            v1.update_doc(pi.doctype, pi.name)
+        self.assertEqual(caught.exception.purchase_error_id, "finance_zero_movement_cancellation_unsupported")
+        self.assertFalse(frappe.db.exists("China Voucher Sync Issue", {"issue_key": f"Cancellation|{pi.doctype}|{pi.name}"}))
+        self.assert_effects_unchanged()
 
     def test_native_payment_invoice_cancellation_then_receipt_repost_refuses_atomically(self):
         """Synchronous PE/PI cancellation; stock PR cancellation is not fake success."""
@@ -1067,9 +1376,12 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
     def test_immutable_native_cancellation_reverses_gl_and_finance(self):
         from deeplinkerp_branding.services import purchase_consistency as guard
         from frappe.client import cancel
-        po = self.order()
+        po = self.order(transaction_date=add_days(nowdate(), -1))
         pr = self.receipt(po)
         pi = make_purchase_invoice(pr.name).insert()
+        pi.set_posting_time = 1
+        pi.posting_date = add_days(nowdate(), -1)
+        pi.save()
         pi.submit()
         self.commit_fixture()
         frappe.db.set_single_value("Accounts Settings", "enable_immutable_ledger", 1)
@@ -1081,6 +1393,11 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         self.assertFalse(frappe.db.count("GL Entry", {"voucher_type": pi.doctype, "voucher_no": pi.name, "is_cancelled": 1}))
         self.assertTrue(frappe.db.exists("China Accounting Voucher", {"source_doctype": pi.doctype,
             "source_name": pi.name, "source_event": "Cancellation", "docstatus": 1}))
+        self.assertEqual(str(frappe.db.get_value("China Accounting Voucher", {"source_doctype": pi.doctype,
+            "source_name": pi.name, "source_event": "Cancellation"}, "posting_date")), pi.posting_date)
+        dates = {str(row.posting_date) for row in frappe.db.get_values("GL Entry", {"voucher_type": pi.doctype,
+            "voucher_no": pi.name}, ["posting_date"], as_dict=True)}
+        self.assertEqual(dates, {pi.posting_date, nowdate()}, "Immutable GL reversal date differs from native Finance source date")
 
     def test_native_controller_failure_rolls_back_audit_and_stock(self):
         from deeplinkerp_branding.services import purchase_document_actions as actions
@@ -1197,7 +1514,9 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         self.remember_effects()
         native = voucher.create_voucher_from_source
         for altered in ({"currency": "USD"}, {"status": "Reversed"}, {"reversal_of": "QA-ATOMIC-INVALID"},
-                {"source_key": "QA-ATOMIC-INVALID"}, {"total_debit": 999, "total_credit": 999}):
+                {"source_key": "QA-ATOMIC-INVALID"}, {"total_debit": 999, "total_credit": 999},
+                {"posting_date": add_days(nowdate(), -1)}, {"fiscal_year": "1900"},
+                {"accounting_period": "1900-01"}, {"reversed_by": "QA-ATOMIC-INVALID"}):
             with self.subTest(fields=tuple(altered)):
                 pr = make_purchase_receipt(po.name).insert()
                 def corrupt(source, event):

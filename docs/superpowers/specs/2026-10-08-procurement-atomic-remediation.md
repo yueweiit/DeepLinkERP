@@ -10,6 +10,7 @@ This candidate replaces the reviewed Task1 guards on `5fd416534ad2735e507414f463
 - Native status-updater source fields, PR billed-amount/FIFO helpers, native billing-percentage calculation, native payment-ledger plans and native PO advance queries verify results. The billing calculator runs on an inert document copy, including the invoice-rate landed-cost branch; its DB, valuation and repost callbacks cannot write.
 - A no-update return compares locked source billed rows/parent percentages with their pre-call values. A subsequent normal PI clears that preservation policy and uses the native aggregate of submitted rows, including earlier returns.
 - Accepted plus rejected `received_qty`, direct-stock PI receipt quantities, native currency/field precision and the System Settings rounding policy are retained.
+- Zero-value native PI submission is legitimately non-financial only when the native GL plan and stored GL/PLE are empty and outstanding is zero. Missing PLE for a real payable still refuses submission. Manual and company-auto PI use this same proof.
 - Cancellation compares the captured original GL with native original/reverse allocations under both mutable and immutable ledger settings, verifies retained original and reverse PLE/advance amounts and delinking, and checks the synchronous China Finance original/reversal/source association. Native PE plans retain the transient advance-voucher metadata absent from persisted GL. Finance headers, totals and dynamic accounting dimensions must match the real native evidence. Application code does not change immutable-ledger settings or existing posted entries.
 
 ## Native form request compatibility
@@ -22,13 +23,19 @@ The whitelisted wrappers call the native savedocs/cancel functions directly, pre
 
 Unkeyed programmatic calls use a distinct invocation UUID, not content deduplication. This is not cross-HTTP lost-response replay. Other controller/workflow routes keep the controller transaction boundary but are not claimed to have this native Desk transport retry guarantee.
 
+Resource PUT/PATCH classification includes persisted old PI/PE procurement identity, so incoming cleared sources cannot escape the boundary. A submitted-to-cancelled transition binds all persisted business and child identities/facts; only cancellation state, timestamps and the configured root workflow-state field may differ. Old sources still pass existing read ACL and locks. Unrelated native documents retain their native path.
+
 Native queued Submit is refused only when the original endpoint would actually queue: action `Submit`, `meta.queue_in_background`, and native `!is_scheduler_inactive()`. This pre-call guard also applies without a request key. Other doctypes retain native behavior; no queue, scheduler or DocType configuration is changed.
 
 ## Durable replay and authorization
 
 Successful Integration Requests contain the primary response identity and complete affected-document artifacts, versions, action permissions and hashes of persisted document/ledger/Bin evidence. Current native read and applicable submit/cancel/write permissions are rechecked before reuse. Native updater effects on source PO/PR and payment-updated PI require read access, not permission to re-submit those source documents. New automatic PI documents also pass actual document ACL checks independently of the hook's ignore-permissions flag.
 
+PO's actual native stock/MR item-warehouse Bin evidence is included even without PO SLE. The existing native status-updater mappings resolve and lock MR and receipt-source PI identities; their actual persisted child/parent changes and managed fulfilment invalidations are acknowledged as read-authorized source effects, without a second quantity or inventory writer.
+
 China Accounting Posting/Cancellation vouchers and their original `reversed_by` effect are system-generated artifacts. Their integrity is rechecked internally after native business authorization, without giving the procurement actor CAV permissions, returning voucher content, or rerunning Finance synchronization. Native completed repost artifacts use the same system-effect distinction. A changed voucher, source, ledger or action permission refuses replay.
+
+Finance's returned resolved cancellation issue and actual cash-flow assignment effects are also internal system artifacts. Voucher dates follow native `get_posting_date(source)` and CAV's calendar year/month validation, not immutable GL's cancellation date. A Posted voucher cannot already have `reversed_by`. Zero-GL cancellation that still produces a pending Finance issue fails closed; it is not reported as N/A or silently queued.
 
 Failure file logs retain operation/actor/document/stage/before/after/amount/currency/quantity identities and fixed safe error identifiers. Unknown native exceptions retain type/category and a generic safe identifier; raw exception text and request payloads are not logged. A rollback connection error is recorded separately while preserving the original failure.
 

@@ -19,8 +19,11 @@ class ConsistencyTests(unittest.TestCase):
         session.start(); self.addCleanup(session.stop)
 
     def doc(self, doctype="Purchase Receipt", **values):
+        posting_date = "2026-01-15"  # unit fixture must not consult patched DB/settings
         doc = SimpleNamespace(**{"doctype": doctype, "name": "PR", "company": "C", "docstatus": 1,
-            "items": [], "references": [], **values})
+            "items": [], "references": [], "posting_date": posting_date,
+            "fiscal_year": posting_date[:4], "accounting_period": posting_date[:7],
+            "meta": SimpleNamespace(has_field=lambda field: field == "posting_date"), **values})
         doc.get = lambda field, default=None: getattr(doc, field, default)
         doc.get_doc_before_save = lambda: None
         doc.precision = lambda field: 3
@@ -44,6 +47,22 @@ class ConsistencyTests(unittest.TestCase):
             with self.assertRaises(frappe.ValidationError):
                 self.guard.equal(self.doc(), "grand_total", "10.001", "10.002", "native amount")
         self.guard.equal(self.doc(), "grand_total", "10.0011", "10.0012", "native amount")
+
+    def test_native_old_subcontract_po_supplied_bin_is_bound_without_sle(self):
+        order = frappe.get_doc({"doctype": "Purchase Order", "name": "PO", "is_old_subcontracting_flow": 1,
+            "items": [], "supplied_items": [{"rm_item_code": "RM", "reserve_warehouse": "Supplier WH"}]})
+        quantities = {"reserved_qty_for_sub_contract": 4}
+        native_values = frappe.db.get_values
+        def bins(doctype, filters, *args, **kwargs):
+            if doctype != "Bin":
+                return native_values(doctype, filters, *args, **kwargs)
+            self.assertEqual((doctype, filters), ("Bin", {"item_code": "RM", "warehouse": "Supplier WH"}))
+            return [frappe._dict(quantities)]
+        with patch.object(self.guard, "_ledger", return_value=[]), \
+                patch.object(frappe.db, "get_values", side_effect=bins):
+            before = self.guard.artifact_evidence(order)
+            quantities["reserved_qty_for_sub_contract"] += 1
+            self.assertNotEqual(self.guard.artifact_evidence(order), before)
 
     def test_native_rounding_policy_applies_to_fields_and_gl(self):
         key = ("A", "", "", "CNY", "", "", "", "", "")

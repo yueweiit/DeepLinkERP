@@ -73,9 +73,23 @@ def artifact_evidence(doc):
     facts["ledgers"] = {doctype: sorted(_ledger(doc, doctype), key=lambda row: row.name) for doctype in
         ("GL Entry", "Stock Ledger Entry", "Payment Ledger Entry", "Advance Payment Ledger Entry") if doc.doctype in
         ("Purchase Order", "Purchase Receipt", "Purchase Invoice", "Payment Entry")}
-    if facts["ledgers"].get("Stock Ledger Entry"):
+    bin_keys = {(row.item_code, row.warehouse) for row in facts["ledgers"].get("Stock Ledger Entry", [])}
+    if doc.doctype == "Purchase Order":
+        # PO's native requested/ordered updater changes Bin without any SLE.
+        bin_keys.update((row.item_code, row.warehouse) for row in doc.items if row.get("warehouse") and
+            not row.get("delivered_by_supplier") and frappe.get_cached_value("Item", row.item_code, "is_stock_item"))
+        for row in doc.items:
+            if row.get("material_request_item"):
+                source = frappe.db.get_value("Material Request Item", row.material_request_item,
+                    ["item_code", "warehouse"], as_dict=True)
+                if source and source.warehouse and frappe.get_cached_value("Item", source.item_code, "is_stock_item"):
+                    bin_keys.add((source.item_code, source.warehouse))
+        if doc.get("is_old_subcontracting_flow"):
+            bin_keys.update((row.rm_item_code, row.reserve_warehouse) for row in doc.get("supplied_items") or []
+                if row.get("rm_item_code") and row.get("reserve_warehouse"))
+    if bin_keys:
         facts["bins"] = [frappe.db.get_values("Bin", {"item_code": item, "warehouse": warehouse}, "*", as_dict=True, for_update=True)
-            for item, warehouse in sorted({(row.item_code, row.warehouse) for row in facts["ledgers"]["Stock Ledger Entry"]})]
+            for item, warehouse in sorted(bin_keys)]
     return hashlib.sha256(operation.encode(facts).encode()).hexdigest()
 
 
@@ -162,7 +176,8 @@ def _context():
 
 
 def register_document(doc, method=None):
-    if not is_procurement(doc):
+    old = doc.get_doc_before_save()
+    if not is_procurement(doc) and not (old and is_procurement(old)):
         return
     state = _state()
     if state is None:
@@ -173,7 +188,6 @@ def register_document(doc, method=None):
     key = (doc.doctype, doc.name)
     state["documents"][key] = doc
     context = state["context"]
-    old = doc.get_doc_before_save()
     state["before_documents"].setdefault(key, old)
     context["before"].setdefault(doc.doctype + ":" + doc.name, snapshot(old) if old else {"exists": False})
     context["after"][doc.doctype + ":" + doc.name] = snapshot(doc)
@@ -325,11 +339,17 @@ def _compare_gl(doc, actual, expected, label, *, reverse=False):
 
 
 def _check_finance_voucher(doc, voucher, event, status):
+    from china_finance.services.voucher import get_posting_date
     currency = frappe.get_cached_value("Company", doc.company, "default_currency")
+    posting_date = getdate(get_posting_date(doc))
     if voucher.docstatus != 1 or (voucher.company, voucher.source_doctype, voucher.source_name,
             voucher.source_event, voucher.get("source_key"), voucher.get("currency"), voucher.get("status")) != (
             doc.company, doc.doctype, doc.name, event, f"{event}|{doc.doctype}|{doc.name}", currency, status) or (
-            event == "Posting" and voucher.get("reversal_of")):
+            event == "Posting" and voucher.get("reversal_of")) or (
+            not voucher.get("posting_date") or getdate(voucher.get("posting_date")) != posting_date or
+            voucher.get("fiscal_year") != str(posting_date.year) or
+            voucher.get("accounting_period") != posting_date.strftime("%Y-%m") or
+            status == "Posted" and voucher.get("reversed_by")):
         operation.reject("中国会计凭证状态、公司、来源或币种不一致", "finance_voucher_header_mismatch")
     for side in ("debit", "credit"):
         field = "total_" + side
@@ -368,6 +388,7 @@ def check_finance(doc, rows):
     # Compare individual native GL allocations too; balanced totals alone are insufficient.
     _compare_gl(doc, _gl_map(voucher.entries), actual_map, "中国会计凭证与总账")
     acknowledge_effect(voucher, system_effect=True)
+    _acknowledge_finance_assignments(doc, voucher=voucher.name)
     return {"module": "China Finance", "result": "verified", "voucher": voucher.name}
 
 
@@ -380,9 +401,12 @@ def check_cancellation(doc, cancelled_gl):
             operation.reject("已有正式中国凭证，当前会计设置或总账快照不可用，采购取消已回滚",
                 "finance_cancellation_settings_inactive" if not finance else "finance_cancellation_gl_missing")
     if not cancelled_gl:
+        if finance and frappe.db.exists("China Voucher Sync Issue", {"issue_key": f"Cancellation|{doc.doctype}|{doc.name}"}):
+            operation.reject("无财务流水的原生取消仍产生会计同步任务，严格模式不能确认完成", "finance_zero_movement_cancellation_unsupported")
         return {"module": "China Finance cancellation", "result": "N/A", "reason": "source has no GL"}
     if not finance:
         return {"module": "China Finance cancellation", "result": "N/A", "reason": "company finance settings inactive"}
+    assignments = _finance_assignments(doc)
     result = finance.process_cancellation_snapshot(doc.doctype, doc.name)
     if result.get("status") != "resolved" or not result.get("voucher"):
         operation.reject("中国会计凭证冲销尚未完成，采购取消已回滚", "finance_cancellation_incomplete")
@@ -398,7 +422,34 @@ def check_cancellation(doc, cancelled_gl):
     _compare_gl(doc, _gl_map(reversal.entries), _gl_map(original.entries), "冲销凭证与原凭证反向金额", reverse=True)
     for voucher in (original, reversal):
         acknowledge_effect(voucher, system_effect=True)
+    if not result.get("issue"):
+        operation.reject("中国会计冲销缺少同步记录身份", "finance_cancellation_issue_missing")
+    issue = frappe.get_doc("China Voucher Sync Issue", result["issue"], for_update=True)
+    if (issue.company, issue.source_doctype, issue.source_name, issue.issue_key, issue.status, issue.cancellation_voucher) != (
+            doc.company, doc.doctype, doc.name, f"Cancellation|{doc.doctype}|{doc.name}", "Resolved", reversal.name):
+        operation.reject("中国会计冲销同步记录未完成或来源不一致", "finance_cancellation_issue_mismatch")
+    acknowledge_effect(issue, system_effect=True)
+    for name in assignments:
+        assignment = frappe.get_doc("China Cash Flow Assignment", name, for_update=True)
+        if assignment.status != "Cancelled" or assignment.docstatus not in (0, 2):
+            operation.reject("中国会计现金流量指定尚未完成取消", "finance_cash_assignment_not_cancelled")
+        acknowledge_effect(assignment, system_effect=True)
     return {"module": "China Finance cancellation", "result": "verified", "voucher": reversal.name}
+
+
+def _finance_assignments(doc, *, voucher=None):
+    if not frappe.db.exists("DocType", "China Cash Flow Assignment"):
+        return []
+    filters = {"company": doc.company, "source_doctype": doc.doctype, "source_name": doc.name}
+    if voucher:
+        filters["china_accounting_voucher"] = voucher
+    return [row.name for row in frappe.db.get_values("China Cash Flow Assignment", filters, ["name"],
+        as_dict=True, order_by="name", for_update=True)]
+
+
+def _acknowledge_finance_assignments(doc, *, voucher):
+    for name in _finance_assignments(doc, voucher=voucher):
+        acknowledge_effect(frappe.get_doc("China Cash Flow Assignment", name, for_update=True), system_effect=True)
 
 
 def check_sources(doc):
@@ -545,8 +596,16 @@ def check_invoice_balance(doc):
     outstanding = QueryPaymentLedger().get_voucher_outstandings([frappe._dict(voucher_type=doc.doctype, voucher_no=doc.name)],
         common_filter=[ple.party_type == "Supplier", ple.party == doc.supplier, ple.account == doc.credit_to])
     if not outstanding:
-        operation.reject("采购应付缺少原生付款账簿", "purchase_invoice_ple_missing")
+        from erpnext.accounts.general_ledger import process_gl_map
+        # A native zero-value invoice has no financial movement, hence no PLE.
+        # Prove that native plan AND stored GL/PLE are empty; a missing ledger
+        # on a real payable must still fail closed.
+        if process_gl_map(doc.get_gl_entries()) or _ledger(doc, "GL Entry") or _ledger(doc, "Payment Ledger Entry"):
+            operation.reject("采购应付缺少原生付款账簿", "purchase_invoice_ple_missing")
+        equal(doc, "outstanding_amount", doc.outstanding_amount, 0, "无财务流水应付余额必须为零")
+        return {"module": "AP / Payment Ledger", "result": "N/A", "reason": "native invoice produces no financial movement"}
     equal(doc, "outstanding_amount", doc.outstanding_amount, outstanding[0]["outstanding_in_account_currency"], "应付余额与原生付款账簿")
+    return {"module": "AP / Payment Ledger", "result": "verified"}
 
 
 def _compare_payment_ledger(doc, ledger, actual, expected, label):
@@ -834,6 +893,7 @@ def check_document(doc):
         _stage(doc, "native draft / stock / GL / AP", lambda: check_draft(doc))
         return [{"module": "native ledgers", "result": "verified", "reason": "draft has no real movement"},
             *_stage(doc, "Sales / procurement review / Operating applicability", lambda: invalidate_reviews(doc))]
+    _stage(doc, "procurement / native associated source effects", lambda: acknowledge_native_sources(doc))
     if doc.doctype == "Purchase Order":
         from .purchase_source_service import validate_source_before_submit
         if doc.docstatus == 1:
@@ -875,7 +935,7 @@ def check_document(doc):
     else:
         modules = [_stage(doc, "GL / China Finance", lambda: check_finance(doc, gl))]
         if doc.doctype == "Purchase Invoice":
-            _stage(doc, "AP / Payment Ledger", lambda: check_invoice_balance(doc))
+            modules.append(_stage(doc, "AP / Payment Ledger", lambda: check_invoice_balance(doc)))
     modules.extend(_stage(doc, "Sales / procurement review / Operating applicability", lambda: invalidate_reviews(doc)))
     return modules
 
@@ -911,6 +971,7 @@ def invalidate_reviews(doc):
         frappe.db.set_value(fulfilment.DOCTYPE, link.name, {"source_versions_json": fulfilment._dump(versions),
             "price_confirmation_json": "{}", "price_confirmed_by": None, "price_confirmed_on": None,
             "audit_json": link.audit_json})
+        acknowledge_effect(service._current(fulfilment.DOCTYPE, link.name))
     return [{"module": "Sales/procurement review", "result": "invalidated" if links else "N/A",
         "reason": "existing managed fulfilment links" if links else "no existing dependent fulfilment link"},
         {"module": "Operating", "result": "N/A", "reason": "native procurement has no registered Operating dependency"}]
@@ -941,7 +1002,13 @@ def check_sales_dependencies(doc):
 class ProcurementControllerBoundary:
     """Also roll back native form/import controller failures, without touching other PE flows."""
     def _procurement_call(self, method, *args, **kwargs):
-        if not is_procurement(self):
+        persisted = None
+        if self.doctype in ("Purchase Invoice", "Payment Entry") and self.name and not self.is_new():
+            # Resource PUT merges incoming rows before save; incoming links must
+            # not erase the already persisted procurement boundary. This read is
+            # classification only, never exposed; scoped ACL/locks follow below.
+            persisted = frappe.get_doc(self.doctype, self.name)
+        if not is_procurement(self) and not (persisted and is_procurement(persisted)):
             return method(*args, **kwargs)
         initial = deepcopy(self.as_dict())
         initial_flags, initial_action = dict(self.flags), getattr(self, "_action", None)
@@ -957,6 +1024,13 @@ class ProcurementControllerBoundary:
                 self._action = initial_action
             attempts += 1
             context = operation.current()
+            old = None
+            if self.name and not self.is_new() and method.__name__ != "insert":
+                old = service._current(self.doctype, self.name)
+                if self.docstatus == 2 and old.docstatus == 1:
+                    check_cancellation_facts(self, old)
+                    # All reliable old sources pass the same business ACL/locks.
+                    prepare_document(old)
             facts = snapshot(self)
             context.update(amount=facts["amount"], currency=facts["currency"], quantity=[row.get("qty") for row in self.get("items") or []])
             prepare_document(self)
@@ -964,7 +1038,6 @@ class ProcurementControllerBoundary:
             if self.name and not any((row["doctype"], row["name"]) == (self.doctype, self.name) for row in context["documents"]):
                 context["documents"].append({"doctype": self.doctype, "name": self.name})
             if self.name and not self.is_new() and method.__name__ != "insert":
-                old = service._current(self.doctype, self.name)
                 context["before"].setdefault(self.doctype + ":" + self.name, snapshot(old))
                 if self.docstatus == 2 and old.docstatus == 1:
                     context.setdefault("gl_before", {})[self.doctype + ":" + self.name] = _ledger(old, "GL Entry", is_cancelled=0)
@@ -995,9 +1068,29 @@ class ProcurementControllerBoundary:
         return self._procurement_call(super()._save, *args, **kwargs)
 
 
+def check_cancellation_facts(doc, old):
+    """Native cancel skips validation: only cancellation state may be supplied."""
+    from frappe.model.workflow import get_workflow_name
+    ignored = {"docstatus", "modified", "modified_by"}
+    workflow = get_workflow_name(doc.doctype)
+    workflow_field = frappe.get_cached_value("Workflow", workflow, "workflow_state_field") if workflow else None
+    def facts(source, *, root=False):
+        values = source.as_dict(convert_dates_to_str=True, no_private_properties=True)
+        for field in ignored | ({workflow_field} if root and workflow_field else set()):
+            values.pop(field, None)
+        for field in source.meta.get_table_fields():
+            values[field.fieldname] = [facts(row) for row in source.get(field.fieldname) or []]
+        return values
+    if facts(doc, root=True) != facts(old, root=True):
+        operation.reject("采购取消不能同时改写来源、金额或核销事实，请刷新后单独取消", "cancellation_business_facts_changed")
+
+
 def prepare_document(doc):
-    """Acquire the same PO -> PR -> PI source locks before native validation."""
+    """Acquire MR -> PO -> PR -> PI source locks before native validation."""
     orders, receipts, invoices = set(), set(), set()
+    native_sources = native_source_identities(doc)
+    requests = {name for doctype, name in native_sources if doctype == "Material Request"}
+    invoices.update(name for doctype, name in native_sources if doctype == "Purchase Invoice")
     for row in doc.get("items") or []:
         if row.get("purchase_order"):
             orders.add(row.purchase_order)
@@ -1021,7 +1114,7 @@ def prepare_document(doc):
         for name in sorted(orders):
             order = service._read("Purchase Order", name)
             receipts.update(row.parent for row in get_purchase_receipts_against_po_details([row.name for row in order.items]))
-    for doctype, names in (("Purchase Order", orders), ("Purchase Receipt", receipts), ("Purchase Invoice", invoices)):
+    for doctype, names in (("Material Request", requests), ("Purchase Order", orders), ("Purchase Receipt", receipts), ("Purchase Invoice", invoices)):
         for name in sorted(names):
             source = service._current(doctype, name)
             if billing_transition and doctype in ("Purchase Order", "Purchase Receipt"):
@@ -1033,5 +1126,36 @@ def prepare_document(doc):
                     preserved[key] = {"per_billed": source.per_billed, "items": {row.name: row.billed_amt for row in source.items}}
                 else:
                     preserved.pop(key, None)
+    if native_sources:
+        native_source_identities(doc, locked=True)  # revalidate current children under parent locks
     if doc.doctype in ("Purchase Receipt", "Purchase Invoice") and doc.get("docstatus") in (1, 2):
         _stage(doc, "Inventory / existing native stock reposts", lambda: check_pending_reposts(doc))
+
+
+def native_source_identities(doc, *, locked=False):
+    """Resolve actual native updater targets; do not reproduce its update math."""
+    identities = set()
+    for mapping in getattr(doc, "status_updater", []):
+        if (doc.doctype, mapping.get("target_parent_dt")) not in (("Purchase Order", "Material Request"),
+                ("Purchase Receipt", "Material Request"), ("Purchase Receipt", "Purchase Invoice")):
+            continue
+        for row in doc.get("items") or []:
+            parent, detail = row.get(mapping["percent_join_field"]), row.get(mapping["join_field"])
+            if not parent and not detail:
+                continue
+            if not parent or not detail:
+                operation.reject("采购原生关联来源父单据与明细身份不完整", "native_source_identity_missing")
+            source = (service._current if locked else service._read)(mapping["target_parent_dt"], parent)
+            service._require_fields(source.doctype, {"company", "items"})
+            service._require_fields(mapping["target_dt"], {"item_code", "stock_uom", mapping["target_field"]}, source.doctype)
+            target = next((item for item in source.get("items") or [] if item.name == detail), None)
+            if not target or target.doctype != mapping["target_dt"] or target.item_code != row.item_code or (
+                    target.get("stock_uom") != row.get("stock_uom")) or source.company != doc.company or source.docstatus != 1:
+                operation.reject("采购原生关联来源身份、公司或状态不一致", "native_source_identity_mismatch")
+            identities.add((source.doctype, source.name))
+    return identities
+
+
+def acknowledge_native_sources(doc):
+    for identity in sorted(native_source_identities(doc, locked=True)):
+        acknowledge_effect(service._current(*identity))
