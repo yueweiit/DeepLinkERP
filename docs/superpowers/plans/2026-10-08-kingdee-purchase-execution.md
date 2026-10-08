@@ -141,7 +141,7 @@
 
 **Files:** 既有 `services/purchase_consistency.py`、`services/purchase_operation.py`、`services/purchase_document_actions.py`、采购表单桥、对应测试及 `deploy/local/test_purchase_document_actions_qa.py`。不改 ERPNext 核心、不实施新异步能力。
 
-- [x] 冻结本轮五项补漏：合法零金额无 PLE；PO 真实 Bin 产物；MR/源 PI/履行关联及 Finance 真实产物；中国凭证日期/期间/反向关系；REST 取消通过删除旧采购引用逃出边界。随后追加 DN 销售关联识别，最新冻结 `b030f656`。
+- [x] 冻结本轮五项补漏：合法零金额无 PLE；PO 真实 Bin 产物；MR/源 PI/履行关联及 Finance 真实产物；中国凭证日期/期间/反向关系；REST 取消通过删除旧采购引用逃出边界。随后追加 DN 及内部交易 Sales 关联识别/预写旧身份检查，最新冻结 `ce985c3f`。
 - [x] 在实际 `frappe.in_test=False` 的隔离库重跑原生脚本，并核对精确 fixture 清理、RIV 与账簿计数。命令：`docker exec -w /home/frappe/frappe-bench/sites dlp-kingdee-purchase-qa-backend-1 /home/frappe/frappe-bench/env/bin/python /workspace/deploy/local/test_purchase_document_actions_qa.py`。预期全部案例成功且计数恢复；不得用旧结果替代新提交证据。
 - [ ] 对冻结 SHA 作规格复审；规格通过后才作独立质量审查。重要问题回到同一实现者修复，重新测试和复审。
 - [ ] 主线程独立重跑全部 Branding pytest、`node --test tests/*.test.js`、Python/JS 语法与 `git diff --check`。报告案例数、参数展开、跳过、现有告警，释放 QA 与 index 后进入 1B。
@@ -155,6 +155,19 @@
 主线程对 `b030f656` 独立重跑：原生完整脚本 **52 tests / 36.747s / OK / exit 0**；全部 Branding **616 passed、331 subtests passed / 52.67s / exit 0**；Node **479 passed、0 failed/skipped / 397.821ms / exit 0**；四个 Python 源/脚本编译、采购表单 JS 语法、冻结范围及工作树 diff 检查均通过。每项原生 fixture 的 36 类受控计数恢复，含新增 Item Price；运行后仅两个原有 gunicorn。测试脚本 SHA256 `36063d1503607db6effea0948bad842bfe62961b2f57aa32dcee2e5e58929385`。
 
 实现者此前一次原生方法全绿但 finally 报 `NameError: fra`、命令 exit 1，不计通过；host/container 文件与编译名核对后无修改重跑正常，原因未证实，未加 catch 掩盖。上述主线程独立运行也正常退出。新的正式规格复审进行中，其后独立质量复审尚未开始；不因 green 测试提前进入 1B、不部署局部提交。
+
+`b030` 规格复审随后确认 DN 和原五项补漏，但仍不通过：未识别 PO 的 `inter_company_order_reference`、PI 的 `inter_company_invoice_reference/sales_invoice_item`。原生取消 `unlink_inter_company_doc` 会清除自身和对应 SO/SI 表头，取消后 fresh document 可能丢失该来源身份；必须在原生写入前或根据持久旧事实检测，不能事后误报 N/A。mapper 与相容采购来源的合法路径已源码确认，真实组合单据 red 尚待执行。继续交回同一 writer 有限复现、复用现有 Sales guard 识别并拒绝，不新增 Sales 适配或处理历史；当前 1A 尚未完成，不进入 1B。
+
+**内部交易预写检查的新检查点：** 冻结 `ce985c3f670b9a7b1828dac333385c453240aba4`，4 文件 +153/-11，其中生产源 +12/-3；统一现有 PO/PR/PI Sales 字段映射，并通过现有 `_stage` 在原生写入前检查持久旧身份和 incoming 身份。实际 red 已证明：合法 SI→PI 加普通 PO 来源可保存并误报 Sales N/A；parent-only PO/PI 原生取消确实清除双方 SO/SI 表头。合成旧关联夹具仅在创建及 setup commit 时暂停应用 Sales guard，取消主体恢复真实 guard；native mapper、校验、unlink、Finance 不 mock。新增 3 个原生测试方法和 1 个单位边界方法，6 个新增参数展开；复用内部双方/价目夹具，没有新 Sales writer 或流程。
+
+主线程对 `ce985c3f` 独立运行并确认 exit 0：原生完整 **55 tests / 39.751s / OK**，全部 Branding **617 passed、337 subtests passed / 53.12s**，Node **479 passed、0 failed/skipped / 378.945708ms**，四文件 Python 编译、JS 语法、冻结范围和工作树 diff 检查通过。每项 37 类受控计数及原生采购/Sales/Finance artifact 恢复，运行后仅两个原有 gunicorn；脚本 SHA256 `c413003811440c24726fa6fca1c3a425247cffdf53c6f8067172197dcb17d2eb`。旧 QA 价目残留不删除。正式规格复审仍进行中，独立质量审查尚未开始，不将此测试检查点当作 1A 通过或完整发布候选。
+
+`ce985` 随后通过限定 Task1A 正式规格复审；其后的独立质量审查仍要求修复两项 Important，当前不能进入 1B：
+
+1. 现有 whitelisted `purchase_payment_service.create_payment_draft` 的 replay 只读取当前 PE/权限与投影，遗漏已有 `replay_artifacts(previous)`；原请求键在草稿已被合法编辑后仍可返回 reused，未遵守新的完整证据绑定。须复用该校验并测试同一路由 unchanged/changed draft。
+2. `purchase_consistency.savedocs/cancel` 包装器仅按 PI/PE doctype 判断，给非采购 PI、Customer/Operating PE 施加了采购后台提交限制/受理行为。须对 incoming 和 persisted old 都非采购的情形走原生 passthrough，不能因 incoming 清除旧采购引用就逃出保护；同时验证带/不带稳定键和原生 queue path。增加 UUID 参数本身不作为问题。
+
+两项均已由主线程核对实际入口源码，交回同一 writer 作有限 red→green，不扩大非采购业务改造；之后重跑独立验证、规格和质量复审。以上 green 结果不覆盖这两条新缺口。
 
 ### Task 1B：范围、元数据与跨 commit 锁协议（先不放开取消）
 
@@ -211,7 +224,7 @@ class ReversalScope:
 - [ ] 用原生 RIV class extension 覆盖 `restart_reposting`（内部 db_update）、`repost_now`、discard/cancel、删除及 `clear_old_logs`。bulk_restart 继续调用原生逐项方法，同一 guard；原生日志清理走 raw delete，必须保留 pending 操作依赖任务，不以 on_trash 代替。完成证据存 IR 后可按原生策略清理无依赖任务。
 - [ ] 本操作完成后永久禁止重新启动其已登记的 root/child generation；新业务创建新任务不受该终态保护影响。测试直接调用 Completed root 的 document method、mixed bulk_restart、当前权限被撤销和 old cached scheduler 候选，不只检查前端隐藏的按钮。
 - [ ] 测试控制 native repost 内 commit、去重后外层 commit、第二个 cached worker 和最终核对并发：完成状态提交后旧任务不再改 SLE/Bin/GL。模拟断开连接必须实际失败；未知驱动/原生能力关闭 async，不能仅设置未验证的 auto_reconnect 属性。
-- [ ] 发布启用前必须 drain 旧 worker、重启所有参与 web/queue/scheduler、核对同一候选资源和 hooks/controller 能力。旧代码已经运行的任务无法靠新钩子追溯隔离；未完成这一步保持 strict 取消限制。QA 也必须重启并测试实际 worker，不用内存 mock 当作部署门禁通过。
+- [ ] 发布启用前必须 drain 旧 worker、重启所有参与 web/queue/scheduler、核对同一候选资源和 hooks/controller 能力。这里的 drain 是停止旧进程接新任务、等待在途任务并可恢复地换代，**不是 purge 队列、删除未执行业务任务或清理历史 RIV**。旧代码已经运行的任务无法靠新钩子追溯隔离；未完成这一步保持 strict 取消限制。QA 也必须重启并测试实际 worker，不用内存 mock 当作部署门禁通过。
 - [ ] 保存 native 版本及相关入口的能力签名；升级变更在集成测试发现并失败关闭。冻结、专项/原生回归、规格审查、质量审查通过后才进入 1D。
 
 ### Task 1D：原子受理、持久阶段与最终核对
