@@ -292,17 +292,25 @@ class ReversalScope:
 
 **固定只读诊断：** `/tmp/dlp-b2-wip-provenance-final.log` 的 83 条为 31 FAILED + 52 SUBFAILED、37 个方法；六族为未绑定 DB/遗漏 finance assignment 夹具 34、native throw 消息状态 19、缺 response/message_log 16、GL 维度 metadata 5、直接构造站点 controller 5、四个未抛异常断言 4。前五族是日志已确认的无站点依赖缺口；主线程已核查 installed data.py SHA `d415013e661051e73a8d46fca9ce3b200f5dd6af0fabfb945f5a7f86db4373ae`：默认 policy 查询抛错时，flt 除 InvalidRoundingMethod 外返回零，能解释四个差异被抹平的断言，但仍需同 runtime 最小实测确认，不预断为 production bug 或已修复。当前 Docker 带 China Finance，workflow 只装 ERPNext/Branding，两个字符串 patch 还需用已有 optional-module seam 证明清洁环境可导入。
 
-- [ ] 先在未 frappe.init 的实际 bench 进程复现既有失败，保留真实 import 路径/hash；读取 installed flt/rounded，并用两种原生 rounding policy 证明精度断言，不替换金额算法。
-- [ ] 扩展现有类级 setup：先替换 frappe.db 属性后才 patch fake 方法；共享异常助手及请求 response/message_log 自动 cleanup；明确不存在的 finance assignment，不以 truthy Mock 冒充已安装模块。ordinary GL fixture 默认空 dimensions，专项保留真实维度和四列比较。
-- [ ] 真实 native child 对象语义继续使用原生 Document/BaseDocument，仅替换 controller/metadata 查找依赖；不改成 dict 后冒称覆盖原生子行。可选 China Finance 仅为测试作用域的 sys.modules collaborator，生产检查保持原样。
-- [ ] 保留来源 CAS、当前 ACL、重放篡改、retry 丢弃 artifacts、rollback 原错误、installer 无写入及 GL/auto-PI 覆盖断言。扩展既有 retry 案例，确认失败尝试写入的临时 response/message 不传入下一次尝试，不复制平行事务测试。
-- [ ] 四个相关模块与 reversal_scope 专项 GREEN 后，运行 workflow 的完整 `FRAPPE_STREAM_LOGGING=1 ./env/bin/python -m pytest -q "$GITHUB_WORKSPACE/deeplinkerp_branding/tests"`（不初始化）；清洁 optional-app 环境单独证明。随后 initialized/native 完整回归、语法/差异检查、规格/质量复审。日志基线子集只用于定位，不抵扣任何失败；GitHub 实际 CI 仍须最终候选通过。
+- [x] 先在未 frappe.init 的实际 bench 进程复现既有失败，保留真实 import 路径/hash；读取 installed flt/rounded，并用两种原生 rounding policy 证明精度断言，不替换金额算法。
+- [x] 扩展现有类级 setup：先替换 frappe.db 属性后才 patch fake 方法；共享异常助手及请求 response/message_log 自动 cleanup；明确不存在的 finance assignment，不以 truthy Mock 冒充已安装模块。ordinary GL fixture 默认空 dimensions，专项保留真实维度和四列比较。
+- [x] 真实 native child 对象语义继续使用原生 Document/BaseDocument，仅替换 controller/metadata 查找依赖；不改成 dict 后冒称覆盖原生子行。可选 China Finance 仅为测试作用域的 sys.modules collaborator，生产检查保持原样。
+- [x] 保留来源 CAS、当前 ACL、重放篡改、retry 丢弃 artifacts、rollback 原错误、installer 无写入及 GL/auto-PI 覆盖断言。扩展既有 retry 案例，确认失败尝试写入的临时 response/message 不传入下一次尝试，不复制平行事务测试。
+- [x] 四个相关模块与 reversal_scope 专项 GREEN 后，运行 workflow 的完整 `FRAPPE_STREAM_LOGGING=1 ./env/bin/python -m pytest -q "$GITHUB_WORKSPACE/deeplinkerp_branding/tests"`（不初始化）；清洁 optional-app 环境单独证明。随后 initialized/native 完整回归、语法/差异检查、规格/质量复审。日志基线子集只用于定位，不抵扣任何失败；GitHub 实际 CI 仍须最终候选通过。
+
+**1B2-CI 限定验收（2026-10-09）：** 冻结 `7dbea995dd58f2cd4c48bccc31dff4df9bc13aa4` 仅五个测试文件 +111/-35，新增一个 23 行共用夹具助手、修改四文件、无删除；原有独立方法 28/36/14/5 共83未增加，保留原断言并加强既有 retry 的请求状态恢复。生产源码和原 Native QA 与已验收 `292c2503` 字节相同。正式独立规格通过后，新独立质量审查通过，无剩余 Critical/Important/可行动 Minor。
+
+主线程对同一冻结实际串行独立执行，均记录真实 exit0：无站点 literal workflow（未关闭默认 cacheprovider）`/tmp/dlp-b2-root-7dbe-sitefree.log` **693/517/46.14s**；阻止 Finance/MES 根及子模块实际导入的 optional 环境 `...-optional.log` **693/517/46.39s**；精确 site/db/host 的 initialized FULL `...-initialized.log` **693/517/48.91s**；原 native 脚本 `...-native.log` **96 methods/225 subtests/115.756s**；Node **479、0 fail/skip/366.050458ms**；17文件编译、diff和源码一致性检查通过。optional及initialized进程结束时八个请求协作对象恢复；独立 setup/method/subtest 故障证明恢复八对象与可选 leaf，实际 native ValidationError/PermissionError 类及消息准确。不是把主动注入的 cleanup 故障计为业务失败。
+
+主线程 readonly before/after proof 的44类计数、User Permission3、六类真实列/完整索引/空指针、十二控制器MRO和scheduler事实逐字段 diff为零。没有MR第七指针，IR/RIV/SLE仍0；frappe.in_test=False、enable_scheduler0、inactive=True。QA/probe 全部退出，仅原 gunicorn90965/90993；Finance `3956eeb...`、MES `73cd5eb...`、native SQL `4ac73f...` 未变，工作树/index clean。交接摘要 `/tmp/dlp-b2-ci-handoff.md` SHA256 `a55b8061b43522cd305c94846983eeb2f0b912e6066c8c3c83a4f15ce03e9058`。据源码、两正式审查和 fresh 执行证据接受有限 CI 夹具步骤，允许进入C1；完整候选的GitHubCI、worker、异步取消、合并业务、界面/browser及Vultr部署均未完成，发布仍HOLD。
 
 ### Task 1C：原生 worker 的隔离适配和启用门禁
 
 **Files:** `services/purchase_repost_boundary.py`、`hooks.py`、上述单元/原生测试。扩展原生 RIV controller，不改原生文件。
 
 按顺序拆成可独立审查的窄步骤，不并行写入：**1C1** 核实固定 installed 源及 MES 既有 producer/executor 调用覆盖，必要 IR native-intent 的同事务登记、保护及原队列恢复；**1C2** 原生 RIV captured/scheduled executor、generation/终态/retention 的 shared lease 适配；**1C3** 真实 worker/RQ、跨 commit/断线/并发、恢复及全进程能力和发布 drain 门禁。每步先规格再质量审查，局部通过不开放 D；不能以设计候选或静态检查代替三步真实验收。
+
+C1执行前新增固定源核查（仅设计证据、未实施）：原MES producer在HTTP请求登记 `request.after_response`，原Frappe异常会rollback但该队列仍可能由ClosingIterator执行；因此必须在登记回调前、MR同事务登记intent，回调冻结真实身份，并在派发前读取已提交intent；rollback后的残留回调不得生成幽灵同步。原IR status/service为可空字符串，CI collation下 `status <> 'Completed'` 可能把未知大小写／尾空格值排除；真实索引与EXPLAIN需同时证明严格终态语义和有界读取，不能把未经证明的request_id新语义或全表JSON扫描当既定方案。原get_bin已有缓存/普通RR读及并发unique回退，MES在等待锁后汇总也可能沿用旧RR视图；必须沿真实调用点复用原数学并证明current-read，不只检查新指针。上述均纳入C1原有契约及真实RED，不另建流程或先开放D。
 
 只读核查基线为 native Frappe/ERPNext 16.23.0；主线程已独立核对文件 SHA256：RIV `c4449547d07c76fd316a5b2185d4c9b60bd42e8747767fe28aea28cbc2ceafe1`，background_jobs `7db969deeb19e4a49924c2a59bcdc15e470a3d24d718845ea790fffd94046f45`，ScheduledJobType `80fbb163946521e1413d4ffa6fc8b777d003ee822ba420b4af6b84a47e4875ac`。这些是本地设计核查证据，不代表已跑 worker 并发测试或线上已对齐；发布候选必须重新验证实际原生版本及能力。
 
