@@ -193,7 +193,8 @@ class DurableOperationTests(unittest.TestCase):
     def test_business_audit_cannot_be_deleted_or_renamed(self):
         with self.assertRaises(frappe.PermissionError):
             kernel.protect_audit(frappe._dict(integration_request_service=kernel.SERVICE))
-        kernel.protect_audit(frappe._dict(integration_request_service="other integration"))
+        with patch("deeplinkerp_branding.services.purchase_native_intent._service_identity", return_value=False):
+            kernel.protect_audit(frappe._dict(integration_request_service="other integration"))
 
     def test_cross_module_trace_survives_exception_without_private_text(self):
         self.assertTrue(callable(getattr(kernel, "trace", None)), "Per-module runtime trace is missing")

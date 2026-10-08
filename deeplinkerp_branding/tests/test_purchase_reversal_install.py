@@ -15,6 +15,11 @@ class ReversalInstallTests(unittest.TestCase):
         self.assertIsNotNone(importlib.util.find_spec(path), "Narrow reversal metadata installer is missing")
         self.install = __import__(path, fromlist=["install"])
         self.expected = {"Bin", "Purchase Order", "Purchase Receipt", "Purchase Invoice", "Payment Entry", "Repost Item Valuation"}
+        # These existing tests exercise six pointer definitions. The native
+        # generated-index contract is exercised against the actual QA engine.
+        for name, value in (("_native_intent_index_plan", (False, False)), ("install_native_intent_index", None)):
+            scoped = patch.object(self.install, name, return_value=value)
+            scoped.start(); self.addCleanup(scoped.stop)
 
     def test_only_six_pointer_fields_and_indexes_are_added_without_business_backfill(self):
         db = Mock(); db.exists.return_value = True

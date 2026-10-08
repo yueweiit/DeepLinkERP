@@ -340,6 +340,8 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         self.types += ("Product Bundle",)  # exact new native late-packed-items fixture
         self.types += ("Putaway Rule",)  # exact new late warehouse native fixture
         self.types += ("OA Purchase Request", "Comment")  # exact source recheck/write boundary fixture
+        self.types += ("MES Integration Log", "MES Material Request Task", "Error Log")  # native C1 side effects
+        self.types += ("DocShare", "DefaultValue")  # exact new User fixture side effects, never historical rows
         self.before = {doctype: frappe.db.count(doctype) for doctype in self.types}
         self.initial_names = {doctype: set(frappe.get_all(doctype, pluck="name", limit_page_length=0)) for doctype in self.types}
         self.committed_names = None
@@ -362,6 +364,8 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
                 for field in frappe.get_meta(doctype).get_table_fields():
                     frappe.db.delete(field.options, {"parenttype": doctype, "parent": ["in", sorted(names)]})
                 frappe.db.delete(doctype, {"name": ["in", sorted(names)]})
+                if doctype == "User" and names:
+                    frappe.db.delete("DefaultValue", {"parent": ["in", sorted(names)]})  # exact newly created users only
             frappe.db.commit()
         self.assertEqual(self.before, {doctype: frappe.db.count(doctype) for doctype in self.types})
 
@@ -1199,13 +1203,23 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         self.assertEqual(amended_source.meta.get_field("transaction_time").fieldtype, "Time")
         amended_source.transaction_time = "00:11:22.123456"
         amended_source.submit()
-        amended_source.cancel()
+        with patch.object(frappe, "log_error", wraps=frappe.log_error) as native_log:
+            amended_source.cancel()
+            self.assertEqual(native_log.call_args.kwargs["reference_doctype"], amended_source.doctype)
+            self.assertEqual(native_log.call_args.kwargs["reference_name"], amended_source.name)
+            errors = frappe.db.get_values("Error Log", {"reference_doctype": amended_source.doctype,
+                "reference_name": amended_source.name}, ["name", "reference_doctype", "reference_name", "method", "error"], as_dict=True)
+            self.assertEqual(len(errors), 1)
+            self.assertEqual(errors[0].method, "中国会计凭证冲销同步记录创建失败")
+            self.assertIn("in _ensure_cancellation_sync_issue", errors[0].error)
+            print("NATIVE_POINTER_FIXTURE_ERRORLOG=" + json.dumps(errors, default=str), flush=True)
         amended = frappe.copy_doc(amended_source, ignore_no_copy=False)
         amended.amended_from = amended_source.name
         amended.insert(ignore_permissions=True)
         self.assertNotEqual(amended.name, amended_source.name)
         self.assertFalse(amended.get(boundary.POINTER))
         self.assertEqual(frappe.db.get_value(amended_source.doctype, amended_source.name, "docstatus"), 2)
+        self.remember_new_names()  # native MyISAM Error Log survives the fixture's final rollback
 
     def test_real_rpc_old_source_and_warehouse_replacement_cannot_escape_pending(self):
         from deeplinkerp_branding.services import purchase_repost_boundary as boundary
@@ -1290,6 +1304,1416 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         right.commit()
         opaque.reload().save(ignore_permissions=True)
         mr.reload().save(ignore_permissions=True)
+
+    def test_mes_parent_commit_with_lost_callback_retains_native_intent(self):
+        from types import SimpleNamespace
+        from frappe.utils import CallbackManager
+        request = SimpleNamespace(after_response=CallbackManager())
+        with patch.object(frappe.local, "request", request, create=True):
+            mr = frappe.get_doc({"doctype": "Material Request", "company": COMPANY,
+                "material_request_type": "Purchase", "transaction_date": nowdate(),
+                "schedule_date": add_days(nowdate(), 1), "items": [{"item_code": self.item,
+                    "qty": 3, "warehouse": "Stores - QAB", "schedule_date": add_days(nowdate(), 1)}]})
+            mr.flags.mes_integration_request = True
+            mr.insert()
+            mr.submit()
+            request.after_response.reset()  # crash/lost callback after parent commit
+            frappe.db.commit()
+            self.remember_new_names()
+        rows = frappe.db.get_values("Integration Request", {
+            "integration_request_service": "DeepLinkERP native MES Bin intent",
+            "reference_doctype": "Material Request", "reference_docname": mr.name},
+            ["name", "request_id", "status", "data"], as_dict=True, for_update=True)
+        self.assertEqual(len(rows), 1, "Parent commit must independently retain native Bin intent")
+        facts = json.loads(rows[0].data)
+        self.assertEqual(facts["material_request_name"], mr.name)
+        self.assertEqual(facts["pairs"], [[self.item, "Stores - QAB"]])
+        self.assertEqual(facts["user"], "Administrator")
+        self.assertEqual(facts["site"], SITE)
+        self.assertEqual(facts["database"], "qa_procurement_5")
+        self.assertEqual(rows[0].status, "Queued")
+
+    def test_mes_parent_rollback_surviving_after_response_cannot_enqueue_phantom(self):
+        from types import SimpleNamespace
+        from frappe.utils import CallbackManager
+        import mes_integration.mes_integration.material_request as mes
+        request = SimpleNamespace(after_response=CallbackManager())
+        with patch.object(frappe.local, "request", request, create=True):
+            mr = frappe.get_doc({"doctype": "Material Request", "company": COMPANY,
+                "material_request_type": "Purchase", "transaction_date": nowdate(),
+                "schedule_date": add_days(nowdate(), 1), "items": [{"item_code": self.item,
+                    "qty": 3, "warehouse": "Stores - QAB", "schedule_date": add_days(nowdate(), 1)}]})
+            mr.flags.mes_integration_request = True
+            mr.insert()
+            mr.submit()
+            frozen_name = mr.name
+            frappe.db.rollback()
+            mr.name = "QA-ATOMIC-PHANTOM-" + uuid.uuid4().hex
+            with patch.object(mes, "enqueue_mes_material_request_bin_sync_job") as enqueue:
+                request.after_response.run()  # native HTTP closing iterator survives rollback
+            self.assertFalse(frappe.db.exists("Material Request", frozen_name))
+            enqueue.assert_not_called()
+
+    def test_native_intent_ir_paths_reject_current_and_proposed_forgery_before_commit(self):
+        from itertools import product
+        from frappe.model.rename_doc import rename_doc
+        for action, initial_status in product(("save", "db_set", "update_status", "success", "failure", "rename", "delete", "insert",
+                "incoming-prefix-insert", "incoming-prefix-rename", "db_insert", "db_update"), ("Queued", "Completed")):
+            with self.subTest(action=action, current_status=initial_status):
+                name = "DLP-MES-BIN-" + uuid.uuid4().hex
+                frappe.db.sql("INSERT INTO `tabIntegration Request` "
+                    "(name,creation,modified,owner,modified_by,integration_request_service,request_id,"
+                    "request_description,status,data) VALUES (%s,NOW(6),NOW(6),%s,%s,%s,%s,%s,%s,%s)",
+                    (name, "Administrator", "Administrator", "DeepLinkERP native MES Bin intent", uuid.uuid4().hex,
+                        "Native MES Bin sync acknowledged" if initial_status == "Completed" else "Native MES Bin sync pending",
+                        initial_status, json.dumps({"generation": name})))
+                frappe.db.commit()
+                self.remember_new_names()
+                doc = frappe.get_doc("Integration Request", name, for_update=True)
+                if action == "save":
+                    doc.integration_request_service = None
+                    doc.status = "Completed"
+                    doc.request_description = "Native MES Bin sync acknowledged"
+                    call = lambda: doc.save(ignore_permissions=True)
+                elif action == "db_set":
+                    call = lambda: doc.db_set({"integration_request_service": "ordinary", "status": "Completed"})
+                elif action == "update_status":
+                    call = lambda: doc.update_status({"generation": "forged"}, "Completed")
+                elif action == "success":
+                    call = lambda: doc.handle_success({"ack": True})
+                elif action == "failure":
+                    call = lambda: doc.handle_failure({"error": "forged"})
+                elif action == "rename":
+                    call = lambda: rename_doc("Integration Request", name, "QA-ATOMIC-RENAMED-" + uuid.uuid4().hex,
+                        ignore_permissions=True)
+                elif action == "delete":
+                    call = lambda: doc.delete(ignore_permissions=True)
+                elif action == "insert":
+                    doc = frappe.get_doc({"doctype": "Integration Request", "integration_request_service":
+                        "DeepLinkERP native MES Bin intent", "status": "Completed",
+                        "request_description": "Native MES Bin sync acknowledged", "data": "{}"})
+                    call = lambda: doc.insert(ignore_permissions=True)
+                elif action == "incoming-prefix-insert":
+                    doc = frappe.get_doc({"doctype": "Integration Request", "integration_request_service": "QA ordinary",
+                        "status": "Queued", "data": "{}"})
+                    call = lambda: doc.insert(ignore_permissions=True, set_name="DLP-MES-BIN-" + uuid.uuid4().hex)
+                elif action == "incoming-prefix-rename":
+                    doc = frappe.get_doc({"doctype": "Integration Request", "integration_request_service": "QA ordinary",
+                        "status": "Queued", "data": "{}"}).insert(ignore_permissions=True)
+                    frappe.db.commit()
+                    self.remember_new_names()
+                    call = lambda: rename_doc("Integration Request", doc.name, "DLP-MES-BIN-" + uuid.uuid4().hex,
+                        ignore_permissions=True)
+                elif action == "db_insert":
+                    doc = frappe.get_doc({"doctype": "Integration Request", "name": "DLP-MES-BIN-" + uuid.uuid4().hex,
+                        "integration_request_service": "QA ordinary", "status": "Queued", "data": "{}"})
+                    call = doc.db_insert
+                else:
+                    doc.integration_request_service = "QA ordinary"
+                    call = doc.db_update
+                try:
+                    with patch.object(frappe.db, "commit", wraps=frappe.db.commit) as commit:
+                        with self.assertRaises(frappe.PermissionError):
+                            call()
+                        commit.assert_not_called()
+                    self.assertEqual(frappe.db.get_value("Integration Request", name, "status", for_update=True), initial_status)
+                finally:
+                    self.remember_new_names()  # native update_status may have committed before RED failure
+                    frappe.db.rollback()
+        ordinary = frappe.get_doc({"doctype": "Integration Request", "integration_request_service": "QA ordinary",
+            "status": "Queued", "data": "{}"}).insert(ignore_permissions=True)
+        ordinary.data = "{\"ordinary\": true}"
+        ordinary.save(ignore_permissions=True)
+        ordinary.db_set("request_description", "QA ordinary phase")
+        ordinary.update_status({"result": "ordinary"}, "Completed")
+        self.remember_new_names()
+        ordinary.handle_failure({"error": "ordinary"})
+        self.remember_new_names()
+        ordinary.handle_success({"result": "ordinary"})
+        self.remember_new_names()
+        renamed = rename_doc("Integration Request", ordinary.name, "QA-ATOMIC-ORDINARY-" + uuid.uuid4().hex,
+            force=True, ignore_permissions=True)
+        self.remember_new_names()
+        frappe.get_doc("Integration Request", renamed).delete(ignore_permissions=True)
+
+    def test_native_intent_exact_generated_active_index_handles_unknown_terminal_variants(self):
+        column = "custom_purchase_native_intent_active"
+        rows = frappe.db.sql("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='tabIntegration Request' AND COLUMN_NAME=%s", (column,), as_dict=True)
+        self.assertEqual(len(rows), 1, "Native intent requires the exact prospective generated active index")
+        self.assertEqual(rows[0].COLUMN_TYPE, "tinyint(4)")
+        self.assertEqual(rows[0].EXTRA, "VIRTUAL GENERATED")
+        for service_value, status, phase, active in (
+                ("DeepLinkERP native MES Bin intent", "Completed", "Native MES Bin sync acknowledged", 0),
+                ("DeepLinkERP native MES Bin intent", "completed", "Native MES Bin sync acknowledged", 1),
+                ("DeepLinkERP native MES Bin intent", "Completed ", "Native MES Bin sync acknowledged", 1),
+                ("DeepLinkERP native MES Bin intent", None, "Native MES Bin sync acknowledged", 1),
+                ("DeepLinkERP native MES Bin intent", "", "Native MES Bin sync acknowledged", 1),
+                ("DeepLinkERP native MES Bin intent", "Failed", "Native MES Bin sync pending", 1),
+                ("DeepLinkERP native MES Bin intent", "alien", "Native MES Bin sync pending", 1),
+                ("DeepLinkERP native MES Bin intent", "Completed", None, 1),
+                ("DeepLinkERP native MES Bin intent", "Completed", "", 1),
+                ("DeepLinkERP native MES Bin intent", "Completed", "native mes bin sync acknowledged", 1),
+                ("DeepLinkERP native MES Bin intent", "Completed", "Native MES Bin sync acknowledged ", 1),
+                ("DeepLinkERP native MES Bin intent ", "Completed", "Native MES Bin sync acknowledged", 1),
+                ("deeplinkerp native mes bin intent", "Completed", "Native MES Bin sync acknowledged", 1)):
+            with self.subTest(service=service_value, status=status, phase=phase):
+                name = "DLP-MES-BIN-" + uuid.uuid4().hex
+                frappe.db.sql("INSERT INTO `tabIntegration Request` "
+                    "(name,integration_request_service,status,request_description) VALUES (%s,%s,%s,%s)",
+                    (name, service_value, status, phase))
+                actual = frappe.db.sql("SELECT custom_purchase_native_intent_active FROM `tabIntegration Request` "
+                    "WHERE name=%s FOR UPDATE", (name,))[0][0]
+                self.assertEqual(actual, active)
+
+    def test_native_intent_installer_conflicting_actual_metadata_rejects_before_any_ddl(self):
+        from copy import deepcopy
+        from deeplinkerp_branding import purchase_reversal_install as installer
+        from deeplinkerp_branding.services import purchase_native_intent as intent
+        native = frappe.db.sql
+        columns = native("SELECT COLUMN_NAME,COLUMN_TYPE,CHARACTER_SET_NAME,COLLATION_NAME,EXTRA,GENERATION_EXPRESSION "
+            "FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='tabIntegration Request'", as_dict=True)
+        indexes = native("SHOW INDEX FROM `tabIntegration Request`", as_dict=True)
+        for kind in ("column_type", "column_charset", "column_collation", "generated_type", "generated_stored",
+                "generated_case", "generated_service", "index_order", "index_prefix", "index_unique", "index_ignored", "index_missing"):
+            with self.subTest(conflict=kind):
+                actual_columns, actual_indexes = deepcopy(columns), deepcopy(indexes)
+                target = next(row for row in actual_columns if row.COLUMN_NAME == intent.ACTIVITY_COLUMN)
+                source = next(row for row in actual_columns if row.COLUMN_NAME == "integration_request_service")
+                index = next(row for row in actual_indexes if row.Key_name == intent.ACTIVITY_INDEX and row.Seq_in_index == 1)
+                if kind.startswith("column_"):
+                    source[{"column_type": "COLUMN_TYPE", "column_charset": "CHARACTER_SET_NAME", "column_collation": "COLLATION_NAME"}[kind]] = "unknown"
+                elif kind == "generated_type": target.COLUMN_TYPE = "int(11)"
+                elif kind == "generated_stored": target.EXTRA = "STORED GENERATED"
+                elif kind == "generated_case": target.GENERATION_EXPRESSION = target.GENERATION_EXPRESSION.replace("Completed", "completed")
+                elif kind == "generated_service": target.GENERATION_EXPRESSION = "CASE WHEN status='Completed' THEN 0 ELSE 1 END"
+                elif kind == "index_order": index.Column_name = "name"
+                elif kind == "index_prefix": index.Sub_part = 20
+                elif kind == "index_unique": index.Non_unique = 0
+                elif kind == "index_ignored": index.Ignored = "YES"
+                else: actual_indexes.remove(index)
+                def observed(query, *args, **kwargs):
+                    if "information_schema.COLUMNS" in str(query): return actual_columns
+                    if str(query).startswith("SHOW INDEX"): return actual_indexes
+                    return native(query, *args, **kwargs)
+                with patch.object(frappe.db, "sql", side_effect=observed), \
+                        patch.object(frappe.db, "sql_ddl", side_effect=AssertionError("No fixture DDL permitted")) as ddl, \
+                        patch.object(frappe.db, "add_index", side_effect=AssertionError("No fixture index write permitted")) as add, \
+                        patch.object(frappe.db, "commit", wraps=frappe.db.commit) as commit:
+                    with self.assertRaisesRegex(frappe.ValidationError, "冲突|定义未经"):
+                        installer.install_native_intent_index()
+                    ddl.assert_not_called(); add.assert_not_called(); commit.assert_not_called()
+
+    def test_native_intent_collation_namespace_rejects_accent_identity_and_service_escape(self):
+        from deeplinkerp_branding.services import purchase_native_intent as intent
+        service = "D\u00e9epLinkERP native MES Bin intent"
+        self.assertEqual(frappe.db.sql("SELECT CAST(%s AS CHAR CHARACTER SET utf8mb4) "
+            "COLLATE utf8mb4_unicode_ci = %s", (service, "DeepLinkERP native MES Bin intent"))[0][0], 1)
+        forged = frappe.get_doc({"doctype": "Integration Request", "integration_request_service": service,
+            "status": "Completed", "request_description": "Native MES Bin sync acknowledged", "data": "{}"})
+        try:
+            with self.assertRaises(frappe.PermissionError):
+                forged.insert(ignore_permissions=True)
+        finally:
+            frappe.db.rollback()
+        name = "QA-ATOMIC-IR-" + uuid.uuid4().hex
+        frappe.db.sql("INSERT INTO `tabIntegration Request` (name,integration_request_service,status,data) "
+            "VALUES (%s,%s,'Queued','{}')", (name, service))
+        doc = frappe.get_doc("Integration Request", name, for_update=True)
+        with self.assertRaises(frappe.PermissionError):
+            doc.db_set({"integration_request_service": "ordinary", "status": "Completed"})
+        frappe.db.rollback()
+        for action in ("insert", "save"):
+            with self.subTest(native_bytes=action):
+                service_bytes = intent.SERVICE.encode("utf-8")
+                self.assertEqual(frappe.db.sql("SELECT CAST(%s AS CHAR CHARACTER SET utf8mb4) "
+                    "COLLATE utf8mb4_unicode_ci = %s", (service_bytes, intent.SERVICE))[0][0], 1)
+                forged = frappe.get_doc({"doctype": "Integration Request", "integration_request_service":
+                    service_bytes if action == "insert" else "QA ordinary", "status": "Queued", "data": "{}"})
+                if action == "save":
+                    forged.insert(ignore_permissions=True)
+                forged.integration_request_service = service_bytes
+                forged.status, forged.request_description = "Completed", intent.ACKNOWLEDGED
+                try:
+                    with self.assertRaises(frappe.PermissionError):
+                        forged.insert(ignore_permissions=True) if action == "insert" else forged.save(ignore_permissions=True)
+                finally:
+                    if forged.name and frappe.db.exists("Integration Request", forged.name):
+                        persisted = frappe.db.get_value("Integration Request", forged.name,
+                            ["name", "integration_request_service", "status", "request_description", intent.ACTIVITY_COLUMN],
+                            as_dict=True, for_update=True)
+                        print("C1_BYTES_NAMESPACE_PERSISTED=" + json.dumps(dict(persisted), default=str, sort_keys=True), flush=True)
+                    frappe.db.rollback()  # exact synthetic rows remain uncommitted, never a historical repair
+        ordinary = frappe.get_doc({"doctype": "Integration Request", "integration_request_service": 0,
+            "status": "Queued", "data": "{}"}).insert(ignore_permissions=True)
+        ordinary.handle_success({"ordinary": True})
+        self.remember_new_names()
+        self.assertEqual(frappe.db.get_value("Integration Request", ordinary.name,
+            ["integration_request_service", "status"], for_update=True), ("0", "Completed"))
+        from MySQLdb import ProgrammingError
+        unsupported_name = (intent.PREFIX + uuid.uuid4().hex).encode("utf-8")
+        unsupported = frappe.get_doc({"doctype": "Integration Request", "name": unsupported_name,
+            "integration_request_service": "QA ordinary", "status": "Queued", "data": "{}"})
+        before = frappe.db.count("Integration Request")
+        with patch.object(frappe.db, "sql", wraps=frappe.db.sql) as sql:
+            with self.assertRaises(ProgrammingError):
+                unsupported.db_insert()  # existing QB current-name filter does not support bytes; no bypass/ACK
+            self.assertFalse(any(str(call.args[0]).lstrip().upper().startswith("INSERT") for call in sql.call_args_list))
+        self.assertEqual(frappe.db.count("Integration Request"), before)
+        self.assertEqual(frappe.db.sql("SELECT name FROM `tabIntegration Request` WHERE name=%s", (unsupported_name,)), ())
+
+    def test_native_ir_captured_retention_alias_preserves_protected_and_clears_ordinary(self):
+        from frappe.integrations.doctype.integration_request.integration_request import IntegrationRequest
+        captured = IntegrationRequest.clear_old_logs
+        protected, ordinary = "DLP-MES-BIN-" + uuid.uuid4().hex, "QA-ATOMIC-IR-" + uuid.uuid4().hex
+        for name, service in ((protected, None), (ordinary, "QA ordinary")):
+            frappe.db.sql("INSERT INTO `tabIntegration Request` (name,creation,integration_request_service,status,data) "
+                "VALUES (%s,NOW() - INTERVAL 60 DAY,%s,'Queued','{}')", (name, service))
+        captured(days=30)
+        self.assertTrue(frappe.db.exists("Integration Request", protected), "Captured native retention bypass must preserve identity")
+        self.assertFalse(frappe.db.exists("Integration Request", ordinary), "Ordinary native cutoff behavior must remain")
+
+    def test_native_ir_generic_compaction_alias_refuses_before_first_ddl_even_empty(self):
+        from frappe.core.doctype.log_settings.log_settings import clear_log_table
+        captured = clear_log_table
+        for phase in ("empty", "native-null-creation"):
+            with self.subTest(phase=phase):
+                if phase != "empty":
+                    frappe.db.sql("INSERT INTO `tabIntegration Request` (name,integration_request_service,status,data) "
+                        "VALUES (%s,%s,'Queued','{}')", ("DLP-MES-BIN-" + uuid.uuid4().hex,
+                            "DeepLinkERP native MES Bin intent"))
+                with patch.object(frappe.db, "sql_ddl", side_effect=AssertionError("QA prohibited any real compaction DDL")) as ddl, \
+                        patch.object(frappe.db, "commit", wraps=frappe.db.commit) as commit:
+                    with self.assertRaises(frappe.PermissionError):
+                        captured("Integration Request", days=30)
+                    ddl.assert_not_called()
+                    commit.assert_not_called()
+
+    def test_mes_loaded_producer_mutation_is_not_accepted_by_disk_hash_marker(self):
+        import mes_integration.mes_integration.material_request as mes
+        from deeplinkerp_branding.services import purchase_native_intent as intent
+        native = mes.enqueue_mes_material_request_bin_sync
+        original = native.__code__
+        def changed(material_request, mr_item_rows=None):
+            return None
+        try:
+            native.__code__ = changed.__code__
+            with self.assertRaisesRegex(frappe.ValidationError, "调用身份"):
+                intent.install()
+        finally:
+            native.__code__ = original
+
+    def test_mes_all_loaded_dependency_code_and_unknown_callable_shape_close_only_protected_capability(self):
+        import mes_integration.mes_integration.material_request as mes
+        from deeplinkerp_branding.services import purchase_native_intent as intent, purchase_repost_boundary as boundary
+        frappe.db.commit()
+        self.remember_new_names()
+        for name in ("enqueue_mes_material_request_bin_sync_job", "get_mes_material_request_item_warehouse_pairs",
+                "get_stock_item_warehouse_pairs", "normalize_mes_item_warehouse_pairs", "get_mes_indented_qty_map"):
+            with self.subTest(dependency=name):
+                native = getattr(mes, name)
+                saved = native.__code__
+                def unknown(items=None):
+                    return []
+                try:
+                    native.__code__ = unknown.__code__
+                    with self.assertRaisesRegex(frappe.ValidationError, "调用身份"):
+                        intent.install()
+                finally:
+                    native.__code__ = saved
+        saved = mes.sync_material_request_bins
+        try:
+            mes.sync_material_request_bins = object()
+            boundary.before_execution()  # unrelated ordinary request is compatible
+            with self.assertRaisesRegex(frappe.ValidationError, "调用身份"):
+                intent.install()
+        finally:
+            mes.sync_material_request_bins = saved
+        import rq.queue as rq_queue
+        import frappe.integrations.doctype.integration_request.integration_request as ir
+        import frappe.core.doctype.log_settings.log_settings as logs
+        callables = [(mes, mes, name, "_dlp_native_intent_original_" + suffix, suffix == "lock", False)
+            for name, suffix in (("enqueue_mes_material_request_bin_sync", "producer"), ("lock_mes_material_request_bins", "lock"),
+                ("sync_material_request_bins", "sync"), ("release_mes_material_request_locks", "release"))]
+        callables += [(rq_queue.Queue, rq_queue, "enqueue_call", "_dlp_native_intent_original_enqueue", False, False),
+            (ir.IntegrationRequest, ir, "clear_old_logs", "_dlp_purchase_retention_original", False, True),
+            (logs, logs, "clear_log_table", "_dlp_purchase_retention_original", False, False)]
+        for holder, module, name, attribute, context, static in callables:
+            outer = getattr(holder, name)
+            native = outer.__wrapped__ if context else outer
+            for change in ("defaults", "kwdefaults", "same-code-globals", "same-code-object"):
+                with self.subTest(adapted=name, change=change):
+                    from types import FunctionType
+                    self.assertTrue(intent.install())  # establish genuine supported state before the unknown mutation
+                    defaults, kwdefaults = native.__defaults__, native.__kwdefaults__
+                    try:
+                        if change == "defaults":
+                            native.__defaults__ = ("QA unknown default",)
+                        elif change == "kwdefaults":
+                            native.__kwdefaults__ = {"unknown": "QA"}
+                        else:
+                            replacement = FunctionType(native.__code__, dict(native.__globals__) if change == "same-code-globals"
+                                else native.__globals__, native.__name__, native.__defaults__)
+                            if context:
+                                outer.__wrapped__ = replacement
+                            else:
+                                setattr(holder, name, staticmethod(replacement) if static else replacement)
+                        boundary.before_execution()  # unsupported adapters must not break an ordinary request
+                        self.assertFalse(intent.install(strict=False))
+                        self.assertEqual(frappe.local.purchase_native_intent_capability, "unsupported")
+                        self.assertFalse(mes._dlp_native_intent_capability)
+                        with self.assertRaisesRegex(frappe.ValidationError, "调用身份"):
+                            intent.install()
+                    finally:
+                        native.__defaults__, native.__kwdefaults__ = defaults, kwdefaults
+                        if context:
+                            outer.__wrapped__ = native
+                        else:
+                            setattr(holder, name, staticmethod(outer) if static else outer)
+            original = getattr(module, attribute)
+            for change in ("globals", "object"):
+                with self.subTest(saved=name, change=change):
+                    from contextlib import contextmanager
+                    from types import FunctionType
+                    self.assertTrue(intent.install())
+                    function = original.__wrapped__ if context else original
+                    replacement = FunctionType(function.__code__, dict(function.__globals__) if change == "globals"
+                        else function.__globals__, function.__name__, function.__defaults__)
+                    with patch.object(module, attribute, contextmanager(replacement) if context else replacement):
+                        with self.assertRaisesRegex(frappe.ValidationError, "调用身份"):
+                            intent.install()
+        state = boundary.initialize()
+        native_sql, acquired = state.native_sql, []
+        def observe_acquisition(query, values=(), **kwargs):
+            if str(query).strip() == "SELECT GET_LOCK(%s, %s)":
+                acquired.append(values)
+            return native_sql(query, values, **kwargs)
+        for name, value in (("MES_BIN_LOCK_TIMEOUT_SECONDS", 181), ("MES_INWARD_MATERIAL_REQUEST_TYPES", ("Purchase",)),
+                ("flt", lambda value: 0)):
+            with self.subTest(linked_global=name), patch.object(mes, name, value), \
+                    patch.object(state, "native_sql", side_effect=observe_acquisition):
+                with self.assertRaisesRegex(frappe.ValidationError, "调用身份"):
+                    with mes.lock_mes_material_request_bins({"company": COMPANY,
+                            "items": [{"item_code": self.item, "warehouse": "Stores - QAB"}]}):
+                        pass
+                self.assertEqual(acquired, [], "Unknown linked globals must close capability before native acquisition")
+
+    def test_native_mes_same_source_new_generation_and_scoped_partial_producer(self):
+        from types import SimpleNamespace
+        from frappe.utils import CallbackManager
+        import mes_integration.mes_integration.material_request as mes
+        from deeplinkerp_branding.services import purchase_native_intent as intent
+        warehouse = frappe.get_doc({"doctype": "Warehouse", "warehouse_name": "QA-ATOMIC-" + uuid.uuid4().hex,
+            "company": COMPANY, "parent_warehouse": "All Warehouses - QAB"}).insert().name
+        mr, first = self.native_mes_intent((warehouse, "Stores - QAB"))
+        request = SimpleNamespace(after_response=CallbackManager())
+        with patch.object(frappe.local, "request", request, create=True):
+            mr = frappe.get_doc("Material Request", mr.name)
+            mr.flags.mes_integration_request = True
+            mr.update_requested_qty([mr.items[0].name])
+            request.after_response.reset()
+            frappe.db.commit()
+            self.remember_new_names()
+        records = intent.active_set()
+        self.assertEqual(len(records), 2)
+        later = next(record for record in records if record.name != first.name)
+        self.assertNotEqual(later.generation, first.request_id)
+        self.assertEqual(later.facts["new_pairs"], [[self.item, warehouse]])
+        self.assertEqual(len(later.facts["source_pairs"]), 2, "A scoped native call still freezes the full source identity")
+        from redis.exceptions import ConnectionError
+        with patch.object(frappe, "enqueue", side_effect=ConnectionError("QA exact Redis unavailable")):
+            intent.dispatch(later.name)
+        self.remember_new_names()
+        self.assertEqual(frappe.db.get_value("Integration Request", later.name, "status", for_update=True), "Completed")
+        self.assertEqual(frappe.db.get_value("Integration Request", first.name, "status", for_update=True), "Queued",
+            "A callback may only acknowledge its exact generation, not another pending generation")
+
+    def test_native_mes_explicit_same_actor_recovery_group_covers_warehouse_move_and_qty_generation(self):
+        from types import SimpleNamespace
+        from frappe.utils import CallbackManager
+        from redis.exceptions import ConnectionError
+        from deeplinkerp_branding.services import purchase_native_intent as intent
+        warehouse = frappe.get_doc({"doctype": "Warehouse", "warehouse_name": "QA-ATOMIC-" + uuid.uuid4().hex,
+            "company": COMPANY, "parent_warehouse": "All Warehouses - QAB"}).insert().name
+        mr, first = self.native_mes_intent()
+        child = frappe.get_doc("Material Request Item", mr.items[0].name)
+        child.db_set({"warehouse": warehouse, "qty": 7, "stock_qty": 7})
+        request = SimpleNamespace(after_response=CallbackManager())
+        with patch.object(frappe.local, "request", request, create=True):
+            current = frappe.get_doc("Material Request", mr.name)
+            current.flags.mes_integration_request = True
+            current.update_requested_qty()
+            request.after_response.reset()
+            frappe.db.commit()
+            self.remember_new_names()
+        records = intent.active_set()
+        self.assertEqual(len(records), 2)
+        later = next(record for record in records if record.name != first.name)
+        with patch.object(frappe, "enqueue", side_effect=ConnectionError("QA exact Redis unavailable")):
+            intent.dispatch(first.name)
+        self.remember_new_names()
+        self.assertEqual(frappe.db.get_value("Integration Request", first.name, "status", for_update=True), "Queued")
+        frappe.db.commit()  # native failure diagnostic only; the first generation remains unfinished
+        self.remember_new_names()
+        with patch.object(frappe, "enqueue", side_effect=ConnectionError("QA exact Redis unavailable")):
+            self.assertEqual(set(intent.recover()), {first.name, later.name})
+        self.remember_new_names()
+        for record in records:
+            actual = frappe.db.get_value("Integration Request", record.name, ["status", "output"], as_dict=True, for_update=True)
+            self.assertEqual(actual.status, "Completed")
+            receipt = json.loads(actual.output)
+            self.assertEqual({(row["item_code"], row["warehouse"]) for row in receipt["bins"]}, set(record.pairs))
+            self.assertEqual(receipt["claim_names"], sorted([first.name, later.name]))
+            intent.dispatch(record.name)  # each terminal receipt replays its own fixed subset
+        self.assertEqual(frappe.db.get_value("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"},
+            "indented_qty", for_update=True), 0)
+        self.assertEqual(frappe.db.get_value("Bin", {"item_code": self.item, "warehouse": warehouse},
+            "indented_qty", for_update=True), 7)
+
+    def test_unknown_mes_capability_preserves_ordinary_request_but_refuses_flagged_producer(self):
+        from deeplinkerp_branding.services import purchase_native_intent as intent, purchase_repost_boundary as boundary
+        mr = frappe.get_doc({"doctype": "Material Request", "company": COMPANY,
+            "material_request_type": "Purchase", "transaction_date": nowdate(),
+            "schedule_date": add_days(nowdate(), 1), "items": [{"item_code": self.item,
+                "qty": 3, "warehouse": "Stores - QAB", "schedule_date": add_days(nowdate(), 1)}]}).insert()
+        frappe.db.commit()
+        self.remember_new_names()
+        native_read = intent.Path.read_bytes
+        with patch.object(intent.Path, "read_bytes", lambda path: b"unknown native MES source"
+                if path.name == "material_request.py" else native_read(path)):
+            ordinary_error = None
+            try:
+                boundary.before_execution()
+                frappe.get_doc("Item", self.item)
+            except frappe.ValidationError as error:
+                ordinary_error = error
+            self.assertIsNone(ordinary_error, "Unknown MES capability must not disable unrelated ordinary requests")
+            mr.flags.mes_integration_request = True
+            with self.assertRaisesRegex(frappe.ValidationError, "版本未经核查"):
+                mr.submit()
+
+    def test_optional_mes_absence_is_explicit_and_preserves_unrelated_request(self):
+        from deeplinkerp_branding.services import purchase_native_intent as intent, purchase_repost_boundary as boundary
+        original = frappe.get_hooks
+        def optional_absent(key=None, *args, **kwargs):
+            value = original(key, *args, **kwargs)
+            if key == "extend_doctype_class":
+                value = dict(value)
+                value["Material Request"] = [hook for hook in value.get("Material Request", [])
+                    if not hook.startswith("mes_integration.")]
+            return value
+        with patch.object(frappe, "get_hooks", side_effect=optional_absent):
+            boundary.before_execution()
+            self.assertFalse(intent.install(strict=False))  # existing session need not reinstall every ordinary request
+            self.assertEqual(frappe.local.purchase_native_intent_capability, "optional_absent")
+            self.assertEqual(frappe.get_doc("Item", self.item).name, self.item)
+            with self.assertRaisesRegex(frappe.ValidationError, "未安装"):
+                intent.install()
+
+    def test_mes_late_server_flag_cannot_take_publication_fence_after_pair_lease(self):
+        mr = frappe.get_doc({"doctype": "Material Request", "company": COMPANY,
+            "material_request_type": "Purchase", "transaction_date": nowdate(),
+            "schedule_date": add_days(nowdate(), 1), "items": [{"item_code": self.item,
+                "qty": 3, "warehouse": "Stores - QAB", "schedule_date": add_days(nowdate(), 1)}]}).insert()
+        mr.flags.mes_integration_request = True
+        with self.assertRaisesRegex(frappe.ValidationError, "发布隔离顺序"):
+            mr.submit()
+
+    def native_mes_intent(self, warehouses=("Stores - QAB",)):
+        from types import SimpleNamespace
+        from frappe.utils import CallbackManager
+        request = SimpleNamespace(after_response=CallbackManager())
+        with patch.object(frappe.local, "request", request, create=True):
+            mr = frappe.get_doc({"doctype": "Material Request", "company": COMPANY,
+                "material_request_type": "Purchase", "transaction_date": nowdate(),
+                "schedule_date": add_days(nowdate(), 1), "items": [{"item_code": self.item,
+                    "qty": index + 3, "warehouse": warehouse, "schedule_date": add_days(nowdate(), 1)}
+                    for index, warehouse in enumerate(warehouses)]})
+            mr.flags.mes_integration_request = True
+            mr.insert().submit()
+            request.after_response.reset()
+            frappe.db.commit()
+            self.remember_new_names()
+        row = frappe.db.get_values("Integration Request", {"integration_request_service":
+            "DeepLinkERP native MES Bin intent", "reference_docname": mr.name}, "*", as_dict=True, for_update=True)[0]
+        frappe.db.rollback()  # only fixture evidence read locks, before the tested execution
+        return mr, row
+
+    def synthetic_intents(self, row, count, *, pairs=None, padding="", status="Queued", phase=None):
+        from deeplinkerp_branding.services import purchase_native_intent as intent
+        for index in range(count):
+            name, generation = intent.PREFIX + uuid.uuid4().hex, uuid.uuid4().hex
+            facts = json.loads(row.data)
+            facts["generation"] = generation
+            if pairs is not None:
+                pair = pairs(index)
+                facts.update(old_pairs=[], new_pairs=[pair], pairs=[pair], warehouse_companies={pair[1]: COMPANY})
+            if padding:
+                facts["padding"] = padding
+            frappe.db.sql("INSERT INTO `tabIntegration Request` "
+                "(name,integration_request_service,request_id,status,request_description,reference_doctype,reference_docname,data) "
+                "VALUES (%s,%s,%s,%s,%s,'Material Request',%s,%s)",
+                (name, intent.SERVICE, generation, status, intent.PENDING if phase is None else phase,
+                    row.reference_docname, json.dumps(facts, ensure_ascii=False)))
+
+    def native_mes_actor(self):
+        user = "qa-atomic-" + uuid.uuid4().hex[:12] + "@example.invalid"
+        with patch.object(frappe, "enqueue", return_value=None):  # User contact side job is outside this MR-only queue fixture
+            frappe.get_doc({"doctype": "User", "email": user, "first_name": "Atomic MES QA", "send_welcome_email": 0,
+                "roles": [{"role": role} for role in ("Purchase Manager", "Stock Manager", "Purchase User", "Stock User")]}).insert()
+        try:
+            frappe.db.commit()
+        finally:
+            self.remember_new_names()  # physical commit may precede an after_commit failure
+        self.addCleanup(lambda: frappe.clear_cache(user=user))
+        return user
+
+    def test_native_mes_real_rq_serializer_fixed_metadata_preserves_actor_and_native_dedup(self):
+        from types import SimpleNamespace
+        from frappe.utils import CallbackManager
+        from frappe.utils.background_jobs import create_job_id, get_queue, get_job
+        from rq.job import JobStatus
+        from rq.serializers import DefaultSerializer
+        from redis.exceptions import ConnectionError
+        import mes_integration.mes_integration.material_request as mes
+        from deeplinkerp_branding.services import purchase_native_intent as intent
+        actor = self.native_mes_actor()
+        frappe.set_user(actor)
+        try:
+            mr, row = self.native_mes_intent()
+            self.assertTrue(frappe.has_permission("Material Request", "submit", doc=mr))
+            queue, identifier = get_queue("short"), create_job_id("mes-material-request-bin-sync:" + mr.name)
+            self.assertIsNone(get_job("mes-material-request-bin-sync:" + mr.name), "Exact synthetic native job ID must be absent before creation")
+            self.assertNotIn(identifier, queue.job_ids)
+            try:
+                alias = mes.sync_material_request_bins
+                self.assertIs(DefaultSerializer.loads(DefaultSerializer.dumps(alias)), alias,
+                    "The actual captured adapted callable must retain native serializer identity")
+                intent.dispatch(row.name)
+                job = get_job("mes-material-request-bin-sync:" + mr.name)
+                self.assertIsNotNone(job)
+                print("C1_NATIVE_RQ", json.dumps({"id": job.id, "origin": job.origin,
+                    "serializer": job.serializer.__module__ + "." + job.serializer.__name__,
+                    "func": job.func_name, "user": job.kwargs.get("user"), "meta": job.meta}, sort_keys=True), flush=True)
+                self.assertEqual(job.id, identifier)
+                self.assertEqual(job.origin, queue.name)
+                self.assertEqual(job.func_name, "frappe.utils.background_jobs.execute_job")
+                self.assertEqual(job.kwargs["user"], actor)
+                self.assertEqual(job.kwargs["site"], SITE)
+                self.assertEqual(job.kwargs["method"], intent.METHOD)
+                self.assertEqual(set(job.kwargs["kwargs"]), {"material_request_name", "item_warehouse_pairs"})
+                fixed = job.meta["deeplinkerp_native_bin_intent"]
+                self.assertEqual(fixed["user"], actor)
+                self.assertEqual(fixed["records"][0][0:2], [row.name, row.request_id])
+                self.assertEqual(fixed["pairs"], [[self.item, "Stores - QAB"]])
+                before_kwargs, before_meta = DefaultSerializer.dumps(job.kwargs), DefaultSerializer.dumps(job.meta)
+                created = [row.name]
+                for status in (JobStatus.QUEUED, JobStatus.STARTED):
+                    with self.subTest(native_dedup_status=status):
+                        job.set_status(status)  # native Job status fixture, not an actual worker execution
+                        child = frappe.get_doc("Material Request Item", mr.items[0].name)
+                        child.db_set({"qty": len(created) + 6, "stock_qty": len(created) + 6})
+                        request = SimpleNamespace(after_response=CallbackManager())
+                        with patch.object(frappe.local, "request", request, create=True):
+                            current = frappe.get_doc("Material Request", mr.name)
+                            current.flags.mes_integration_request = True
+                            current.update_requested_qty()
+                            request.after_response.reset()
+                            frappe.db.commit()
+                            self.remember_new_names()
+                        latest = next(record for record in intent.active_set() if record.name not in created)
+                        created.append(latest.name)
+                        intent.dispatch(latest.name)
+                        unchanged = get_job("mes-material-request-bin-sync:" + mr.name)
+                        self.assertEqual(DefaultSerializer.dumps(unchanged.kwargs), before_kwargs)
+                        self.assertEqual(DefaultSerializer.dumps(unchanged.meta), before_meta)
+                        self.assertEqual(frappe.db.get_value("Integration Request", latest.name, "status", for_update=True), "Queued")
+                queue.remove(identifier)
+                job.delete()  # only the exact job created above; no queue/registry sweep
+                self.assertIsNone(get_job("mes-material-request-bin-sync:" + mr.name))
+                frappe.db.commit()  # finish current-read evidence before an independent SERVICE recovery
+                with patch.object(frappe, "enqueue", side_effect=ConnectionError("QA exact Redis unavailable")):
+                    self.assertEqual(set(intent.recover()), set(created))
+                self.remember_new_names()
+                for name in created:
+                    output = frappe.db.get_value("Integration Request", name, ["status", "output"], as_dict=True, for_update=True)
+                    self.assertEqual(output.status, "Completed")
+                    self.assertEqual(json.loads(output.output)["user"], actor)
+            finally:
+                remaining = get_job("mes-material-request-bin-sync:" + mr.name)
+                if remaining is not None:
+                    self.assertEqual(remaining.id, identifier)
+                    queue.remove(identifier)
+                    remaining.delete()
+                self.assertNotIn(identifier, queue.job_ids)
+        finally:
+            frappe.set_user("Administrator")
+
+    def test_native_mes_mixed_actor_recovery_group_holds_before_executor_write(self):
+        from types import SimpleNamespace
+        from frappe.utils import CallbackManager
+        from deeplinkerp_branding.services import purchase_native_intent as intent
+        actor = self.native_mes_actor()
+        mr, row = self.native_mes_intent()
+        request = SimpleNamespace(after_response=CallbackManager())
+        try:
+            frappe.set_user(actor)
+            with patch.object(frappe.local, "request", request, create=True):
+                current = frappe.get_doc("Material Request", mr.name)
+                current.flags.mes_integration_request = True
+                current.update_requested_qty()
+                request.after_response.reset()
+                frappe.db.commit()
+                self.remember_new_names()
+            with patch.object(frappe, "enqueue", side_effect=AssertionError("Mixed actor HOLD must precede helper enqueue")) as enqueue:
+                with self.assertRaisesRegex(frappe.ValidationError, "不同生产者执行人"):
+                    intent.recover()
+                enqueue.assert_not_called()
+            self.assertEqual(frappe.db.count("Bin", {"item_code": self.item}), 0)
+            self.assertEqual(set(frappe.get_all("Integration Request", filters={"reference_docname": mr.name}, pluck="status")), {"Queued"})
+        finally:
+            frappe.set_user("Administrator")
+
+    def test_native_intent_registration_must_not_overflow_existing_active_set(self):
+        from deeplinkerp_branding.services import purchase_native_intent as intent
+        warehouse = frappe.get_doc({"doctype": "Warehouse", "warehouse_name": "QA-ATOMIC-" + uuid.uuid4().hex,
+            "company": COMPANY, "parent_warehouse": "All Warehouses - QAB"}).insert().name
+        mr, row = self.native_mes_intent()
+        with patch.object(intent, "MAX_RECORDS", 1):
+            with self.assertRaisesRegex(frappe.ValidationError, "记录.*安全上限"):
+                other = frappe.get_doc({"doctype": "Material Request", "company": COMPANY,
+                    "material_request_type": "Purchase", "transaction_date": nowdate(),
+                    "schedule_date": add_days(nowdate(), 1), "items": [{"item_code": self.item,
+                        "qty": 2, "warehouse": "Stores - QAB", "schedule_date": add_days(nowdate(), 1)}]})
+                other.flags.mes_integration_request = True
+                other.insert().submit()
+        for resource in ("actual-5000-records", "actual-2500-union", "actual-data-output-total"):
+            with self.subTest(resource=resource):
+                if resource == "actual-5000-records":
+                    self.synthetic_intents(row, 4999)
+                    message = "记录.*安全上限"
+                elif resource == "actual-2500-union":
+                    self.synthetic_intents(row, 2499, pairs=lambda index: ["QA-BOUND-" + str(index), "Stores - QAB"])
+                    message = "联合范围.*安全上限"
+                else:
+                    self.synthetic_intents(row, 3, padding="x" * (intent.MAX_BODY_BYTES - len(row.data.encode()) - 100))
+                    headers = intent._headers()
+                    needed = intent.MAX_TOTAL_BYTES - sum(header.body_bytes for header in headers) - 100
+                    # Fill the remaining resource budget across actual outputs, each below 4 MiB.
+                    for header in headers:
+                        amount = min(needed, intent.MAX_BODY_BYTES)
+                        frappe.db.sql("UPDATE `tabIntegration Request` SET output=%s WHERE name=%s", ("x" * amount, header.name))
+                        needed -= amount
+                    self.assertEqual(needed, 0)
+                    message = "新增正文总字节.*安全上限"
+                with self.assertRaisesRegex(frappe.ValidationError, message):
+                    other = frappe.get_doc({"doctype": "Material Request", "company": COMPANY,
+                        "material_request_type": "Purchase", "transaction_date": nowdate(),
+                        "schedule_date": add_days(nowdate(), 1), "items": [{"item_code": self.item,
+                            "qty": 2, "warehouse": warehouse if resource == "actual-2500-union" else "Stores - QAB",
+                            "schedule_date": add_days(nowdate(), 1)}]})
+                    other.flags.mes_integration_request = True
+                    other.insert().submit()
+                self.assertEqual(frappe.db.count("Integration Request", {"integration_request_service": intent.SERVICE}), 1)
+                self.assertFalse(frappe.db.exists("Material Request", other.name))
+
+    def test_native_intent_active_selector_rejects_actual_record_pair_and_byte_limits_before_partial_proof(self):
+        from deeplinkerp_branding.services import purchase_native_intent as intent
+        mr, row = self.native_mes_intent()
+        cases = (("records", 5000, None, "", "记录"),
+            ("pairs", 2500, lambda index: ["QA-BOUND-" + str(index), "Stores - QAB"], "", "联合范围"),
+            ("single-bytes", 1, None, "\u6c49" * ((intent.MAX_BODY_BYTES // 3) + 1), "正文缺失或超过"),
+            ("total-bytes", 5, None, "x" * (3400 * 1024), "正文总字节"),
+            ("output-single-bytes", 0, None, "\u6c49" * ((intent.MAX_BODY_BYTES // 3) + 1), "输出.*安全上限"),
+            ("output-total-bytes", 5, None, "x" * (3400 * 1024), "正文总字节"))
+        for label, count, pairs, padding, message in cases:
+            with self.subTest(boundary=label):
+                frappe.db.savepoint("native_intent_budget_fixture")
+                self.synthetic_intents(row, count, pairs=pairs, padding="" if label.startswith("output-") else padding)
+                if label.startswith("output-"):
+                    frappe.db.sql("UPDATE `tabIntegration Request` SET output=%s WHERE integration_request_service=%s",
+                        (padding, intent.SERVICE))
+                with patch.object(frappe.db, "sql", wraps=frappe.db.sql) as sql:
+                    with self.assertRaisesRegex(frappe.ValidationError, message):
+                        intent.active_set()
+                    if label != "pairs":
+                        self.assertFalse(any(str(call.args[0]).startswith("SELECT name,data")
+                            for call in sql.call_args_list), "Header actual byte/count caps must precede body reads")
+                # The failed execution rolls back its entire synthetic fixture.
+                self.assertEqual(frappe.db.count("Integration Request"), 1)
+
+    def test_native_intent_ack_output_budgets_refuse_before_first_ack_and_rollback_native_bins(self):
+        from redis.exceptions import ConnectionError
+        from deeplinkerp_branding.services import purchase_native_intent as intent
+        for budget in ("single", "total"):
+            with self.subTest(budget=budget):
+                mr, row = self.native_mes_intent()
+                self.synthetic_intents(row, 30)
+                frappe.db.commit()
+                self.remember_new_names()
+                headers = intent._headers()
+                total = sum(header.body_bytes for header in headers)
+                body_limit = max(header.body_bytes for header in headers) + 100 if budget == "single" else intent.MAX_BODY_BYTES
+                frappe.db.commit()  # independent recovery starts after fixture evidence, not a refreshed executor
+                with patch.object(intent, "MAX_BODY_BYTES", body_limit), \
+                        patch.object(intent, "MAX_TOTAL_BYTES", total + 100 if budget == "total" else intent.MAX_TOTAL_BYTES), \
+                        patch.object(frappe.db, "set_value", wraps=frappe.db.set_value) as writes, \
+                        patch.object(frappe, "enqueue", side_effect=ConnectionError("QA exact Redis unavailable")):
+                    intent.recover()  # original native fallback can swallow the intentional resource refusal
+                    self.remember_new_names()  # immediately after the native commit, before any RED assertion
+                    ack_writes = [call for call in writes.call_args_list if call.args and
+                        call.args[0] == "Integration Request" and isinstance(call.args[2], dict) and
+                        call.args[2].get("status") == "Completed"]
+                    self.assertFalse(ack_writes, "Resource caps must reject before the first IR ACK write")
+                self.remember_new_names()
+                self.assertEqual(frappe.db.count("Bin", {"item_code": self.item}), 0,
+                    "Original native Bin writes must physically roll back with the rejected ACK")
+                self.assertEqual(set(frappe.get_all("Integration Request", filters={"integration_request_service": intent.SERVICE},
+                    pluck="status")), {"Queued"})
+
+    def test_native_intent_active_selector_reads_durable_independent_service(self):
+        from deeplinkerp_branding.services import purchase_native_intent as intent
+        mr, row = self.native_mes_intent()
+        selector = getattr(intent, "active_set", None)
+        self.assertTrue(callable(selector), "Committed native intent requires independent SERVICE recovery selector")
+        active = selector()
+        self.assertEqual([(entry.name, entry.generation, entry.material_request_name, entry.pairs) for entry in active],
+            [(row.name, row.request_id, mr.name, ((self.item, "Stores - QAB"),))])
+
+    def test_native_intent_history_growing_actual_explain_stays_on_bounded_active_index(self):
+        from deeplinkerp_branding.services import purchase_native_intent as intent
+        mr, row = self.native_mes_intent()
+        metadata = frappe.db.sql("SELECT COLUMN_NAME,COLUMN_TYPE,CHARACTER_SET_NAME,COLLATION_NAME,EXTRA "
+            "FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='tabIntegration Request' "
+            "AND COLUMN_NAME IN ('name','integration_request_service','status','request_description',%s)",
+            (intent.ACTIVITY_COLUMN,), as_dict=True)
+        print("C1_INDEX_COLUMN_METADATA=" + json.dumps(metadata, default=str, sort_keys=True), flush=True)
+        for size in (100, 20000):
+            with self.subTest(history=size):
+                self.synthetic_intents(row, size, status="Completed", phase=intent.ACKNOWLEDGED)
+                with patch.object(frappe.db, "sql", wraps=frappe.db.sql) as sql:
+                    headers = intent._headers()
+                    query, values = sql.call_args_list[0].args[:2]
+                self.assertEqual([header.name for header in headers], [row.name])
+                explain = frappe.db.sql("EXPLAIN " + query, values, as_dict=True)
+                actual = json.loads(frappe.db.sql("ANALYZE FORMAT=JSON " + query, values)[0][0])
+                table = actual["query_block"]["nested_loop"][0]["table"]
+                self.assertEqual(explain[0].key, intent.ACTIVITY_INDEX)
+                self.assertNotIn("filesort", explain[0].Extra.lower())
+                self.assertEqual(table["key"], intent.ACTIVITY_INDEX)
+                self.assertEqual(table["r_rows"], 1, "Inactive history must not become a body/header scan")
+                print("C1_ACTIVE_EXPLAIN=" + json.dumps({"history": size, "explain": explain, "actual": actual},
+                    default=str, sort_keys=True), flush=True)
+        accent = "D\u00e9epLinkERP native MES Bin intent"
+        frappe.db.sql("INSERT INTO `tabIntegration Request` (name,integration_request_service,status,request_description,data) "
+            "VALUES (%s,%s,'Completed',%s,'{}')", ("DLP-MES-BIN-" + uuid.uuid4().hex, accent, intent.ACKNOWLEDGED))
+        with self.assertRaisesRegex(frappe.ValidationError, "身份"):
+            intent.active_set()  # collation-equivalent noncanonical service remains visible and rejected
+
+    def test_native_intent_zero_active_selector_holds_publication_fence_until_physical_commit(self):
+        from deeplinkerp_branding.services import purchase_native_intent as intent, purchase_repost_boundary as boundary
+        frappe.db.commit()
+        self.remember_new_names()
+        self.assertEqual(intent.active_set(), ())
+        peer = self.boundary_database()
+        with self.assertRaisesRegex(frappe.ValidationError, "正在办理"):
+            with boundary.execution(db=peer), boundary.acquire((boundary.fence_key(),), db=peer):
+                pass
+        frappe.db.commit()
+        with boundary.execution(db=peer), boundary.acquire((boundary.fence_key(),), db=peer):
+            pass
+        peer.rollback()
+
+    def test_native_mes_producer_source_facts_match_real_persisted_controller(self):
+        import hashlib
+        from deeplinkerp_branding.services import purchase_operation as audit, purchase_native_intent as intent
+        mr, row = self.native_mes_intent()
+        actual = frappe.get_doc("Material Request", mr.name, for_update=True)
+        facts = json.loads(row.data)
+        self.assertEqual(facts["source_modified"], str(actual.modified))
+        self.assertEqual(facts["source_persisted_version"], hashlib.sha256(audit.encode(actual.as_dict()).encode()).hexdigest(),
+            "Real on_submit producer and reloaded persisted MR must have equivalent source evidence")
+        self.assertEqual(facts["source_version"], intent._source_identity(actual))
+
+    def test_native_mes_native_po_progression_does_not_strand_producer_intent(self):
+        from redis.exceptions import ConnectionError
+        from erpnext.stock.doctype.material_request.material_request import make_purchase_order
+        from deeplinkerp_branding.services import purchase_native_intent as intent
+        mr, row = self.native_mes_intent()
+        before = json.loads(row.data)
+        po = make_purchase_order(mr.name)
+        po.supplier = "QA Test Supplier"
+        po.items[0].qty = 1
+        po.items[0].rate = 10
+        po.insert(set_name="QA-ATOMIC-PO-" + uuid.uuid4().hex[:16]).submit()
+        frappe.db.commit()
+        self.remember_new_names()
+        current = frappe.get_doc("Material Request", mr.name, for_update=True)
+        self.assertEqual(current.items[0].ordered_qty, 1)
+        self.assertAlmostEqual(current.per_ordered, 100 / 3, places=5)
+        self.assertEqual(frappe.db.count("Integration Request", {"integration_request_service": intent.SERVICE,
+            "reference_docname": mr.name}), 1, "Native PO progression must not register a new deferred producer")
+        self.assertNotEqual(intent._source_version(current), before.get("source_persisted_version", before["source_version"]))
+        with patch.object(frappe, "enqueue", side_effect=ConnectionError("QA exact Redis unavailable")):
+            intent.dispatch(row.name)
+        self.remember_new_names()
+        actual = frappe.db.get_value("Integration Request", row.name, ["status", "output"], as_dict=True, for_update=True)
+        self.assertEqual(actual.status, "Completed")
+        receipt = json.loads(actual.output)
+        self.assertEqual(receipt["generation"], row.request_id)
+        self.assertEqual(receipt["bins"][0]["indented_qty"], "2.0")
+        self.assertEqual(frappe.db.get_value("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"},
+            "indented_qty", for_update=True), 2)
+
+    def test_native_mes_native_pr_progression_keeps_requested_identity_and_current_math(self):
+        from redis.exceptions import ConnectionError
+        from erpnext.stock.doctype.material_request.material_request import make_purchase_order
+        from deeplinkerp_branding.services import purchase_native_intent as intent
+        mr, row = self.native_mes_intent()
+        po = make_purchase_order(mr.name)
+        po.supplier = "QA Test Supplier"
+        po.items[0].qty, po.items[0].rate = 1, 10
+        po.insert(set_name="QA-ATOMIC-PO-" + uuid.uuid4().hex[:16]).submit()
+        pr = make_purchase_receipt(po.name).insert()
+        pr.submit()  # real native PR.update_prevdoc_status -> MRI.received_qty / MR.per_received
+        frappe.db.commit()
+        self.remember_new_names()
+        current = frappe.get_doc("Material Request", mr.name, for_update=True)
+        self.assertEqual((current.items[0].qty, current.items[0].stock_qty, current.items[0].ordered_qty,
+            current.items[0].received_qty), (3, 3, 1, 1))
+        self.assertAlmostEqual(current.per_received, 100 / 3, places=5)
+        self.assertEqual(frappe.db.count("Integration Request", {"integration_request_service": intent.SERVICE}), 1)
+        with patch.object(frappe, "enqueue", side_effect=ConnectionError("QA exact Redis unavailable")):
+            intent.dispatch(row.name)
+        self.remember_new_names()
+        actual = frappe.db.get_value("Integration Request", row.name, ["status", "output"], as_dict=True, for_update=True)
+        self.assertEqual(actual.status, "Completed")
+        witness = json.loads(actual.output)["source"]
+        self.assertEqual(witness["version"], intent._source_version(current))
+        self.assertNotEqual(witness["version"], json.loads(row.data)["source_persisted_version"])
+        self.assertEqual(frappe.db.get_value("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"},
+            ["actual_qty", "indented_qty"], for_update=True), (1, 2))
+
+    def test_native_mes_unregistered_current_source_qty_warehouse_or_row_removal_cannot_ack_old_generation(self):
+        from redis.exceptions import ConnectionError
+        from deeplinkerp_branding.services import purchase_native_intent as intent
+        warehouse = frappe.get_doc({"doctype": "Warehouse", "warehouse_name": "QA-ATOMIC-" + uuid.uuid4().hex,
+            "company": COMPANY, "parent_warehouse": "All Warehouses - QAB"}).insert().name
+        for action in ("qty", "stock_qty", "conversion", "warehouse", "rename", "remove", "stopped", "docstatus"):
+            with self.subTest(unregistered_change=action):
+                mr, row = self.native_mes_intent()
+                child = frappe.get_doc("Material Request Item", mr.items[0].name)
+                if action == "qty":
+                    child.db_set({"qty": 7, "stock_qty": 7})
+                elif action == "stock_qty":
+                    child.db_set("stock_qty", 7)
+                elif action == "conversion":
+                    child.db_set("conversion_factor", 2)
+                elif action == "warehouse":
+                    child.db_set("warehouse", warehouse)
+                elif action == "rename":
+                    from frappe.model.rename_doc import rename_doc
+                    rename_doc(child.doctype, child.name, "QA-ATOMIC-CHILD-" + uuid.uuid4().hex, force=True,
+                        ignore_permissions=True)
+                elif action in ("stopped", "docstatus"):
+                    mr.db_set("status", "Stopped") if action == "stopped" else mr.db_set("docstatus", 2)
+                else:
+                    child.delete(ignore_permissions=True)
+                frappe.db.commit()
+                self.remember_new_names()
+                with patch.object(frappe, "enqueue", side_effect=ConnectionError("QA exact Redis unavailable")):
+                    intent.dispatch(row.name)
+                self.remember_new_names()
+                actual = frappe.db.get_value("Integration Request", row.name, ["status", "output"], as_dict=True, for_update=True)
+                self.assertEqual(actual.status, "Queued",
+                    "An old fixed claim must not acknowledge a new unregistered source identity")
+                self.assertIsNone(actual.output)
+                self.assertEqual(frappe.db.count("Bin", {"item_code": self.item}), 0,
+                    "Unregistered source changes must be refused before the original executor's first Bin write")
+
+    def test_native_mes_redis_fallback_requires_same_commit_bin_ack(self):
+        from redis.exceptions import ConnectionError
+        from deeplinkerp_branding.services import purchase_native_intent as intent
+        import mes_integration.mes_integration.material_request as mes
+        mr, row = self.native_mes_intent()
+        with patch.object(frappe, "enqueue", side_effect=ConnectionError("QA exact Redis unavailable")):
+            intent.dispatch(row.name)
+        self.remember_new_names()
+        actual = frappe.db.get_values("Integration Request", {"name": row.name},
+            ["status", "request_description", "output"], as_dict=True, for_update=True)[0]
+        self.assertEqual(frappe.db.get_value("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"},
+            "indented_qty", for_update=True), mes.get_mes_indented_qty_map([(self.item, "Stores - QAB")])[(self.item, "Stores - QAB")])
+        self.assertEqual(actual.status, "Completed", "Only actual fixed-claim Bin ACK may complete native intent")
+        self.assertEqual(actual.request_description, "Native MES Bin sync acknowledged")
+        ack = json.loads(actual.output)
+        self.assertEqual(ack["generation"], row.request_id)
+        self.assertEqual(ack["user"], "Administrator")
+
+    def test_native_mes_old_rr_failure_retains_intent_for_independent_recovery(self):
+        from redis.exceptions import ConnectionError
+        from erpnext.stock.utils import get_bin
+        from deeplinkerp_branding.services import purchase_native_intent as intent
+        from deeplinkerp_branding.services import purchase_operation as audit
+        import mes_integration.mes_integration.material_request as mes
+        mr, row = self.native_mes_intent()
+        bin_name = get_bin(self.item, "Stores - QAB").name
+        frappe.db.commit()
+        self.remember_new_names()
+        frappe.db.rollback()  # fixture-only evidence epoch before tested RR snapshot
+        self.assertEqual(frappe.db.sql("SELECT actual_qty,reserved_qty FROM `tabBin` WHERE name=%s", (bin_name,))[0], (0, 0))
+        self.assertEqual(frappe.db.sql("SELECT stock_qty FROM `tabMaterial Request Item` WHERE name=%s", (mr.items[0].name,))[0][0], 3)
+        peer = self.boundary_database()
+        peer_state = intent.boundary.initialize(peer)  # physical authority before the peer's first business write
+        peer.sql("UPDATE `tabBin` SET actual_qty=9,reserved_qty=2 WHERE name=%s", (bin_name,))
+        peer.sql("UPDATE `tabMaterial Request Item` SET qty=7,stock_qty=7 WHERE name=%s", (mr.items[0].name,))
+        from types import SimpleNamespace
+        from frappe.utils import CallbackManager
+        request = SimpleNamespace(after_response=CallbackManager())
+        with patch.object(frappe.local, "db", peer), patch.object(frappe.local, "purchase_session", peer_state), \
+                patch.object(frappe.local, "request", request, create=True):
+            later_source = frappe.get_doc("Material Request", mr.name)
+            later_source.flags.mes_integration_request = True
+            later_source.update_requested_qty()
+            request.after_response.reset()
+            later_name = peer.sql("SELECT name FROM `tabIntegration Request` WHERE reference_docname=%s AND name<>%s",
+                (mr.name, row.name))[0][0]
+            peer.commit()  # source demand change + actual later producer intent in the same peer parent transaction
+        self.remember_new_names()
+        before_epoch = intent.boundary.initialize().epoch
+        failures, original = [], audit.runtime_log
+        read_points, adapter = [], intent.adapt_query
+        def observe_read(query, state):
+            result = adapter(query, state)
+            if "tabBin" in str(query) and str(query).lstrip().lower().startswith("select"):
+                read_points.append((state.depth, len(state.locks), str(query), str(result)))
+            return result
+        def observe_failure(context, result, error, *args):
+            failures.append((type(error).__name__, str(error)))
+            return original(context, result, error, *args)
+        with patch.object(frappe, "enqueue", side_effect=ConnectionError("QA exact Redis unavailable")), \
+                patch.object(audit, "runtime_log", side_effect=observe_failure):
+            with patch.object(intent, "adapt_query", side_effect=observe_read):
+                intent.dispatch(row.name)
+        self.remember_new_names()
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0][0], "QueryDeadlockError")
+        self.assertIn("1020", failures[0][1])
+        self.assertGreater(intent.boundary.initialize().epoch, before_epoch,
+            "Actual stale-view failure must use the shared full physical rollback")
+        unfinished = frappe.db.get_values("Integration Request", {"name": row.name},
+            ["status", "request_description", "output"], as_dict=True, for_update=True)[0]
+        self.assertEqual((unfinished.status, unfinished.request_description, unfinished.output),
+            ("Queued", intent.PENDING, None))
+        self.assertEqual(frappe.db.sql("SELECT actual_qty,reserved_qty,indented_qty FROM `tabBin` "
+            "WHERE name=%s FOR UPDATE", (bin_name,))[0], (9, 2, 0))
+        # End the failed callback's native Error Log transaction. The previous
+        # Bin work must already be rolled back; this is not a read-view refresh.
+        frappe.db.commit()
+        self.remember_new_names()
+        with patch.object(frappe, "enqueue", side_effect=ConnectionError("QA exact Redis unavailable")):
+            self.assertEqual(set(intent.recover()), {row.name, later_name})
+        self.remember_new_names()
+        receipt = frappe.db.get_values("Integration Request", {"name": row.name},
+            ["status", "request_description", "output"], as_dict=True, for_update=True)[0]
+        self.assertEqual((receipt.status, receipt.request_description), ("Completed", intent.ACKNOWLEDGED))
+        ack = json.loads(receipt.output)
+        self.assertEqual((ack["generation"], ack["user"]), (row.request_id, "Administrator"))
+        self.assertEqual(ack["bins"][0]["indented_qty"], "7.0")
+        self.assertEqual(ack["claim_names"], sorted([row.name, later_name]))
+        self.assertEqual(frappe.db.get_value("Integration Request", later_name, "status", for_update=True), "Completed")
+        actual = frappe.db.sql("SELECT actual_qty,reserved_qty,indented_qty FROM `tabBin` WHERE name=%s FOR UPDATE", (bin_name,))[0]
+        self.assertEqual(actual, (9, 2, 7), "Independent recovery transaction must commit current native Bin/demand and exact ACK")
+
+    def test_native_bin_peer_creation_rr_refusal_captured_aliases_and_unique_fallback_current_fields(self):
+        from erpnext.stock import utils, stock_balance, stock_ledger
+        from erpnext.buying.doctype.purchase_order import purchase_order
+        from erpnext.stock.doctype.stock_entry import stock_entry
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        self.assertIs(purchase_order.get_bin, utils.get_bin)
+        self.assertIs(stock_entry.get_bin, utils.get_bin)
+        self.assertIs(stock_ledger.get_or_make_bin, utils.get_or_make_bin)
+        frappe.db.commit()
+        self.remember_new_names()
+        self.assertEqual(frappe.db.sql("SELECT name FROM `tabBin` WHERE item_code=%s AND warehouse=%s",
+            (self.item, "Stores - QAB")), ())  # established real RR view with absent Bin
+        peer = self.boundary_database()
+        state = boundary.initialize(peer)
+        with patch.object(frappe.local, "db", peer), patch.object(frappe.local, "purchase_session", state):
+            bin_doc = utils.get_bin(self.item, "Stores - QAB")  # actual native concurrent creator, not SQL fixture insert
+            bin_doc.db_set({"actual_qty": 9, "reserved_qty": 2})
+            peer.commit()
+        self.remember_new_names()
+        keys = (boundary.fence_key(), boundary.lock_key("pair", COMPANY, self.item, "Stores - QAB"))
+        with self.assertRaises(frappe.QueryDeadlockError) as caught:
+            with boundary.execution(), boundary.acquire(keys):
+                purchase_order.get_bin(self.item, "Stores - QAB")
+        self.assertIn("1020", str(caught.exception))
+        # A separate fresh transaction uses the original imported aliases and math.
+        with boundary.execution(), boundary.acquire(keys):
+            for alias in (utils.get_bin, purchase_order.get_bin, stock_entry.get_bin):
+                doc = alias(self.item, "Stores - QAB")
+                self.assertEqual((doc.name, doc.actual_qty, doc.reserved_qty), (bin_doc.name, 9, 2))
+            self.assertEqual(stock_ledger.get_or_make_bin(self.item, "Stores - QAB"), bin_doc.name)
+            with patch.object(frappe, "get_last_doc", wraps=frappe.get_last_doc) as last_doc:
+                fallback = utils._create_bin(self.item, "Stores - QAB")  # actual native unique-key collision path
+                last_doc.assert_called_once_with("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"})
+                self.assertEqual((fallback.name, fallback.actual_qty, fallback.reserved_qty), (bin_doc.name, 9, 2))
+            stock_balance.update_bin_qty(self.item, "Stores - QAB", {"indented_qty": 3})
+        frappe.db.commit()
+        self.remember_new_names()
+        self.assertEqual(frappe.db.get_value("Bin", bin_doc.name, ["actual_qty", "reserved_qty", "indented_qty"], for_update=True),
+            (9, 2, 3), "Original full db_update must preserve the current native fields, not a stale snapshot")
+
+    def test_native_mes_all_nonstock_requires_explicit_current_noop_ack(self):
+        from types import SimpleNamespace
+        from redis.exceptions import ConnectionError
+        from deeplinkerp_branding.services import purchase_native_intent as intent
+        item = frappe.get_doc("Item", self.item)
+        item.is_stock_item = 0
+        item.save()
+        mr, row = self.native_mes_intent()
+        import mes_integration.mes_integration.material_request as mes
+        with patch.dict(frappe.local.flags, {"mes_integration_request": True}), \
+                patch.object(frappe.local, "job", SimpleNamespace(meta={intent.CLAIM_META: {"records": [row.name]}}), create=True):
+            self.assertIsNone(mes.sync_material_request_bins(mr.name, [(self.item, "Stores - QAB")]))
+        self.assertEqual(frappe.db.get_value("Integration Request", row.name, ["status", "output"], for_update=True), ("Queued", None),
+            "Ordinary flags/local job metadata/empty native return must not grant a private ACK claim")
+        with patch.object(frappe, "enqueue", side_effect=ConnectionError("QA exact Redis unavailable")):
+            intent.dispatch(row.name)
+        self.remember_new_names()
+        actual = frappe.db.get_values("Integration Request", {"name": row.name},
+            ["status", "request_description", "output"], as_dict=True, for_update=True)[0]
+        self.assertEqual((actual.status, actual.request_description), ("Completed", intent.ACKNOWLEDGED),
+            "Empty native stock result alone is not an ACK; fixed current no-op proof is required")
+        ack = json.loads(actual.output)
+        self.assertEqual(ack["bins"], [])
+        self.assertEqual([(pair["item_code"], pair["warehouse"], pair["is_stock_item"])
+            for pair in ack["nonstock_pairs"]], [(self.item, "Stores - QAB", 0)])
+        self.assertEqual(ack["nonstock_pairs"][0]["item_modified"], str(item.modified))
+        self.assertFalse(frappe.db.exists("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"}))
+
+    def test_native_mes_mixed_nonstock_proof_and_stock_to_nonstock_residue_are_distinct(self):
+        from redis.exceptions import ConnectionError
+        from types import SimpleNamespace
+        from frappe.utils import CallbackManager
+        from erpnext.stock.utils import get_bin
+        from deeplinkerp_branding.services import purchase_native_intent as intent
+        nonstock = "QA-ATOMIC-" + uuid.uuid4().hex[:10]
+        frappe.get_doc({"doctype": "Item", "item_code": nonstock, "item_name": nonstock, "item_group": "All Item Groups",
+            "stock_uom": "Nos", "is_stock_item": 0}).insert()
+        request = SimpleNamespace(after_response=CallbackManager())
+        with patch.object(frappe.local, "request", request, create=True):
+            mr = frappe.get_doc({"doctype": "Material Request", "company": COMPANY, "material_request_type": "Purchase",
+                "transaction_date": nowdate(), "schedule_date": add_days(nowdate(), 1), "items": [
+                    {"item_code": item, "qty": 3, "warehouse": "Stores - QAB", "schedule_date": add_days(nowdate(), 1)}
+                    for item in (self.item, nonstock)]})
+            mr.flags.mes_integration_request = True
+            mr.insert().submit()
+            request.after_response.reset()
+            frappe.db.commit()
+            self.remember_new_names()
+        row = frappe.db.get_value("Integration Request", {"integration_request_service": intent.SERVICE, "reference_docname": mr.name},
+            ["name", "request_id"], as_dict=True, for_update=True)
+        with patch.object(frappe, "enqueue", side_effect=ConnectionError("QA exact Redis unavailable")):
+            intent.dispatch(row.name)
+        self.remember_new_names()
+        ack = json.loads(frappe.db.get_value("Integration Request", row.name, "output", for_update=True))
+        self.assertEqual([entry["item_code"] for entry in ack["bins"]], [self.item])
+        self.assertEqual([entry["item_code"] for entry in ack["nonstock_pairs"]], [nonstock])
+        self.assertEqual(frappe.db.get_value("Bin", {"item_code": self.item}, "indented_qty", for_update=True), 3)
+        self.assertFalse(frappe.db.exists("Bin", {"item_code": nonstock}))
+        # A separately produced genuine stock claim must not silently exclude its residual Bin.
+        other, pending = self.native_mes_intent()
+        self.assertTrue(frappe.db.exists("Bin", {"item_code": self.item}))
+        frappe.get_doc("Item", self.item).db_set("is_stock_item", 0)
+        frappe.db.commit()
+        self.remember_new_names()
+        with patch.object(frappe, "enqueue", side_effect=ConnectionError("QA exact Redis unavailable")):
+            intent.dispatch(pending.name)
+        self.remember_new_names()
+        self.assertEqual(frappe.db.get_value("Integration Request", pending.name, ["status", "output"], for_update=True), ("Queued", None))
+        self.assertEqual(frappe.db.get_value("Bin", {"item_code": self.item}, "indented_qty", for_update=True), 3)
+
+    def test_native_mes_late_ack_dispatch_is_verified_no_write_replay(self):
+        from redis.exceptions import ConnectionError
+        from deeplinkerp_branding.services import purchase_native_intent as intent
+        mr, row = self.native_mes_intent()
+        with patch.object(frappe, "enqueue", side_effect=ConnectionError("QA exact Redis unavailable")):
+            intent.dispatch(row.name)
+        self.remember_new_names()
+        with patch.object(frappe, "enqueue", side_effect=AssertionError("ACK replay must not enqueue")) as enqueue, \
+                patch.object(frappe.db, "set_value", wraps=frappe.db.set_value) as writes:
+            intent.dispatch(row.name)
+            enqueue.assert_not_called()
+            writes.assert_not_called()
+
+    def test_native_mes_partial_fallback_preserves_first_error_when_runtime_logger_fails(self):
+        from redis.exceptions import ConnectionError
+        from deeplinkerp_branding.services import purchase_native_intent as intent, purchase_operation as audit
+        from erpnext.stock import stock_balance
+        warehouse = frappe.get_doc({"doctype": "Warehouse", "warehouse_name": "QA-ATOMIC-" + uuid.uuid4().hex,
+            "company": COMPANY, "parent_warehouse": "All Warehouses - QAB"}).insert().name
+        mr, row = self.native_mes_intent((warehouse, "Stores - QAB"))
+        original, calls = stock_balance.update_bin_qty, []
+        def fail_second(item_code, warehouse, qty_dict=None):
+            calls.append((item_code, warehouse))
+            if len(calls) == 2:
+                raise RuntimeError("QA first native second-pair failure")
+            return original(item_code, warehouse, qty_dict)
+        with patch.object(frappe, "enqueue", side_effect=ConnectionError("QA exact Redis unavailable")), \
+                patch.object(stock_balance, "update_bin_qty", side_effect=fail_second), \
+                patch.object(audit, "runtime_log", side_effect=OSError("QA diagnostic logger unavailable")), \
+                patch.object(frappe, "log_error", wraps=frappe.log_error) as native_errors:
+            intent.dispatch(row.name)
+        self.remember_new_names()
+        self.assertEqual(len(calls), 2)
+        message = native_errors.call_args.kwargs["message"]
+        self.assertIn("QA first native second-pair failure", message)
+        self.assertNotIn("QA diagnostic logger unavailable", message,
+            "Best-effort diagnostic failure must not replace the first native exception")
+        self.assertEqual(frappe.db.get_value("Integration Request", row.name, "status", for_update=True), "Queued")
+        self.assertFalse(frappe.db.get_values("Bin", {"item_code": self.item, "warehouse": ["in", [warehouse, "Stores - QAB"]]}, "name"))
+        frappe.db.commit()  # the native Error Log only; no failed Bin/ACK effect
+        self.remember_new_names()
+        with patch.object(frappe, "enqueue", side_effect=ConnectionError("QA exact Redis unavailable")):
+            self.assertEqual(intent.recover(), (row.name,))
+        self.remember_new_names()
+        self.assertEqual(frappe.db.get_value("Integration Request", row.name, "status", for_update=True), "Completed")
+
+    def test_native_mes_successful_get_locks_survive_callback_reset_until_physical_cleanup(self):
+        import mes_integration.mes_integration.material_request as mes
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        names, native_sql = [], frappe.db.sql
+        def observe_sql(query, values=(), **kwargs):
+            result = native_sql(query, values, **kwargs)
+            if str(query).strip() == "SELECT GET_LOCK(%s, %s)" and result[0][0] == 1:
+                names.append(values[0])
+            return result
+        try:
+            with patch.object(frappe.db, "sql", side_effect=observe_sql):
+                with mes.lock_mes_material_request_bins({"company": COMPANY,
+                        "items": [{"item_code": self.item, "warehouse": "Stores - QAB"}]}):
+                    self.assertEqual(len(names), 1)
+            self.assertIn(names[0], boundary.initialize().locks,
+                "Actual original successful MES GET_LOCK must belong to the same physical Session")
+            frappe.db.after_commit.reset()
+            frappe.db.after_rollback.reset()
+            frappe.db.commit()
+            self.remember_new_names()
+            self.assertIsNone(frappe.db.sql("SELECT IS_USED_LOCK(%s)", (names[0],))[0][0])
+        finally:
+            for name in names:
+                if frappe.db.sql("SELECT IS_USED_LOCK(%s)", (name,))[0][0] == frappe.db.sql("SELECT CONNECTION_ID()")[0][0]:
+                    frappe.db.sql("SELECT RELEASE_LOCK(%s)", (name,))  # exact synthetic lock from original acquisition
+
+    def test_native_mes_tracked_lock_savepoint_nested_rollback_callback_close_and_kill_matrix(self):
+        import mes_integration.mes_integration.material_request as mes
+        from erpnext.stock.utils import get_bin
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        get_bin(self.item, "Stores - QAB")
+        frappe.db.commit()
+        self.remember_new_names()
+        data = {"company": COMPANY, "items": [{"item_code": self.item, "warehouse": "Stores - QAB"}]}
+        for phase in ("savepoint", "nested", "rollback", "early-callback-failure", "close", "kill"):
+            with self.subTest(phase=phase):
+                left, right = self.boundary_database(), self.boundary_database()
+                state = boundary.initialize(left)
+                with patch.object(frappe.local, "db", left), patch.object(frappe.local, "purchase_session", state):
+                    with mes.lock_mes_material_request_bins(data):
+                        if phase == "nested":
+                            with mes.lock_mes_material_request_bins(data):
+                                self.assertEqual(len(state.native_acquisitions), 2)
+                    names = {name for name, epoch in state.native_acquisitions.values()}
+                    self.assertEqual(len(names), 1)
+                    for name in names:
+                        self.assertEqual(right.sql("SELECT IS_USED_LOCK(%s)", (name,))[0][0], state.connection_id)
+                    if phase == "savepoint":
+                        left.savepoint("native_owned_lock")
+                        left.rollback(save_point="native_owned_lock")
+                        self.assertEqual(len(state.native_acquisitions), 1)
+                        self.assertEqual(right.sql("SELECT IS_USED_LOCK(%s)", (next(iter(names)),))[0][0], state.connection_id)
+                        left.commit()
+                    elif phase == "early-callback-failure":
+                        first = RuntimeError("QA first before physical commit")
+                        left.before_commit.add(lambda: (_ for _ in ()).throw(first))
+                        with self.assertRaises(RuntimeError) as caught:
+                            left.commit()
+                        self.assertIs(caught.exception, first)
+                    elif phase == "close":
+                        left.close()
+                        self.assertTrue(state.poisoned)
+                    elif phase == "kill":
+                        right.sql("KILL CONNECTION %s", (state.connection_id,))
+                        with self.assertRaises(Exception):
+                            left.sql("SELECT CONNECTION_ID()")
+                        self.assertTrue(state.poisoned)
+                        with self.assertRaises(frappe.ValidationError):
+                            boundary.initialize(left)
+                    else:
+                        left.rollback()
+                    for name in names:
+                        self.assertIsNone(right.sql("SELECT IS_USED_LOCK(%s)", (name,))[0][0])
+                    self.assertEqual(state.native_acquisitions, {})
+
+    def test_native_mes_late_original_callback_cannot_release_new_same_name_acquisition(self):
+        import mes_integration.mes_integration.material_request as mes
+        data = {"company": COMPANY, "items": [{"item_code": self.item, "warehouse": "Stores - QAB"}]}
+        with mes.lock_mes_material_request_bins(data):
+            pass
+        old_callback = frappe.db.after_commit._functions[-1]
+        frappe.db.commit()
+        self.remember_new_names()
+        names, native_sql = [], frappe.db.sql
+        def observe_sql(query, values=(), **kwargs):
+            result = native_sql(query, values, **kwargs)
+            if str(query).strip() == "SELECT GET_LOCK(%s, %s)" and result[0][0] == 1:
+                names.append(values[0])
+            return result
+        with patch.object(frappe.db, "sql", side_effect=observe_sql):
+            with mes.lock_mes_material_request_bins(data):
+                pass
+        try:
+            old_callback()
+            self.assertEqual(frappe.db.sql("SELECT IS_USED_LOCK(%s)", (names[0],))[0][0],
+                frappe.db.sql("SELECT CONNECTION_ID()")[0][0], "Old epoch callback must never consume new original native lock")
+        finally:
+            frappe.db.rollback()
+
+    def test_native_mes_body_cannot_forge_successful_acquisition_or_finally_callback_witness(self):
+        from types import FunctionType
+        import mes_integration.mes_integration.material_request as mes
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        frappe.db.commit()
+        self.remember_new_names()
+        data = {"company": COMPANY, "items": [{"item_code": self.item, "warehouse": "Stores - QAB"}]}
+        unknown = "mes_mr_bin_" + uuid.uuid4().hex * 2
+        state = boundary.initialize()
+        reached, original = [], state.native_sql
+        def observe_native(query, values=(), **kwargs):
+            if isinstance(values, (list, tuple)) and values and values[0] == unknown:
+                reached.append(str(query))
+            return original(query, values, **kwargs)
+        with patch.object(state, "native_sql", side_effect=observe_native):
+            for action in ("acquire", "callback"):
+                with self.subTest(action=action):
+                    with mes.lock_mes_material_request_bins(data):
+                        if action == "acquire":
+                            with self.assertRaisesRegex(frappe.ValidationError, "调用点"):
+                                frappe.db.sql("SELECT GET_LOCK(%s, %s)", (unknown, 180))
+                            self.assertEqual(reached, [], "Unknown body GET_LOCK must be rejected before actual acquisition")
+                        else:
+                            names = tuple(name for name, _ in reversed(tuple(state.native_acquisitions.values())))
+                            cell = (lambda value: lambda: value)(names).__closure__
+                            forged = FunctionType(mes._dlp_native_intent_lock_callback, mes.__dict__, closure=cell)
+                            with self.assertRaisesRegex(frappe.ValidationError, "调用点"):
+                                frappe.db.after_commit.add(forged)
+
+    def test_native_mes_first_exception_survives_partial_or_body_error_and_callback_add_failure(self):
+        import mes_integration.mes_integration.material_request as mes
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        warehouse = frappe.get_doc({"doctype": "Warehouse", "warehouse_name": "QA-ATOMIC-" + uuid.uuid4().hex,
+            "company": COMPANY, "parent_warehouse": "All Warehouses - QAB"}).insert().name
+        from erpnext.stock.utils import get_bin
+        for name in (warehouse, "Stores - QAB"):
+            get_bin(self.item, name)
+        frappe.db.commit()
+        self.remember_new_names()
+        data = {"company": COMPANY, "items": [{"item_code": self.item, "warehouse": name}
+            for name in (warehouse, "Stores - QAB")]}
+        for failure in ("partial", "body"):
+            for manager_name in ("after_commit", "after_rollback"):
+                with self.subTest(first_failure=failure, callback=manager_name):
+                    primary = RuntimeError("QA first native " + failure + " failure")
+                    reached_body = []
+                    calls, native_sql = [], frappe.db.sql
+                    def fail_second(query, values=(), **kwargs):
+                        if str(query).strip() == "SELECT GET_LOCK(%s, %s)":
+                            calls.append(values[0])
+                            if failure == "partial" and len(calls) == 2:
+                                raise primary
+                        return native_sql(query, values, **kwargs)
+                    caught = None
+                    try:
+                        with patch.object(frappe.db, "sql", side_effect=fail_second), \
+                                patch.object(getattr(frappe.db, manager_name), "add",
+                                    side_effect=RuntimeError("QA callback add failure")):
+                            with mes.lock_mes_material_request_bins(data):
+                                reached_body.append(True)
+                                raise primary
+                    except Exception as error:
+                        caught = error
+                    self.assertEqual(bool(reached_body), failure == "body", "The intended native failure point must be exercised")
+                    self.assertIs(caught, primary, "Native finally registration must not replace the first exception object")
+                    self.assertFalse(boundary.initialize().native_acquisitions)
+
+    def test_native_mes_unknown_release_all_or_commented_release_is_rejected_before_execution(self):
+        import mes_integration.mes_integration.material_request as mes
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        frappe.db.commit()
+        self.remember_new_names()
+        for query, shape in (("SELECT RELEASE_ALL_LOCKS()", "canonical"),
+                ("SELECT RELEASE_LOCK /* ordinary comment */ (%s)", "canonical"),
+                ("SELECT RELEASE_LOCK(%s)", "bytes"), ("SELECT RELEASE_LOCK(%s)", "upper")):
+            with self.subTest(query=query, bound_shape=shape):
+                peer = self.boundary_database()
+                peer_state = boundary.initialize(peer)
+                with patch.object(frappe.local, "db", peer), \
+                        patch.object(frappe.local, "purchase_session", peer_state):
+                    state = boundary.initialize()
+                    with mes.lock_mes_material_request_bins({"company": COMPANY,
+                            "items": [{"item_code": self.item, "warehouse": "Stores - QAB"}]}):
+                        names = tuple(name for name, _ in state.native_acquisitions.values())
+                        value = names[0].encode("ascii") if shape == "bytes" else names[0].upper() if shape == "upper" else names[0]
+                        used = peer.sql("SELECT IS_USED_LOCK(%s)", (value,))[0][0]
+                        print("NATIVE_LOCK_BOUND_EQUIVALENCE=" + json.dumps({"shape": shape,
+                            "same_physical_owner": used == state.connection_id, "operation": "release"}), flush=True)
+                        if used != state.connection_id:
+                            self.assertIsNone(peer.sql(query, (value,))[0][0])  # native distinct/untracked name stays native
+                        else:
+                            try:
+                                with self.assertRaisesRegex(frappe.ValidationError, "释放"):
+                                    peer.sql(query, (value,) if "%s" in query else ())
+                                self.assertEqual(peer.sql("SELECT IS_USED_LOCK(%s)", (names[0],))[0][0], state.connection_id)
+                            finally:
+                                # Exact fixture lock only: retain one original count if RED released it.
+                                if state.raw("SELECT IS_USED_LOCK(%s)", (names[0],))[0][0] != state.connection_id:
+                                    self.assertEqual(state.raw("SELECT GET_LOCK(%s, %s)", (names[0], 0))[0][0], 1)
+                    peer.rollback()
+
+    def test_native_mes_dormant_tracked_name_reentry_is_rejected_but_unrelated_lock_remains_native(self):
+        import mes_integration.mes_integration.material_request as mes
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        with mes.lock_mes_material_request_bins({"company": COMPANY,
+                "items": [{"item_code": self.item, "warehouse": "Stores - QAB"}]}):
+            pass
+        state = boundary.initialize()
+        name = next(iter(state.native_acquisitions.values()))[0]
+        reached, native_sql = [], state.native_sql
+        def observe(query, values=(), **kwargs):
+            if str(query).strip() == "SELECT GET_LOCK(%s, %s)":
+                reached.append(values[0])
+            return native_sql(query, values, **kwargs)
+        with patch.object(state, "native_sql", side_effect=observe):
+            for shape, value in (("canonical", name), ("bytes", name.encode("ascii")), ("upper", name.upper())):
+                with self.subTest(bound_shape=shape):
+                    reached.clear()
+                    used = frappe.db.sql("SELECT IS_USED_LOCK(%s)", (value,))[0][0]
+                    print("NATIVE_LOCK_BOUND_EQUIVALENCE=" + json.dumps({"shape": shape,
+                        "same_physical_owner": used == state.connection_id, "operation": "reentry"}), flush=True)
+                    if used != state.connection_id:
+                        self.assertEqual(frappe.db.sql("SELECT GET_LOCK(%s, %s)", (value, 0))[0][0], 1)
+                        self.assertEqual(frappe.db.sql("SELECT RELEASE_LOCK(%s)", (value,))[0][0], 1)
+                    else:
+                        try:
+                            with self.assertRaisesRegex(frappe.ValidationError, "调用点"):
+                                frappe.db.sql("SELECT GET_LOCK(%s, %s)", (value, 0))
+                            self.assertEqual(reached, [])
+                        finally:
+                            if reached:  # release only the exact extra native count actually acquired by RED
+                                self.assertEqual(state.raw("SELECT RELEASE_LOCK(%s)", (value,))[0][0], 1)
+            ordinary = "QA-UNRELATED-" + uuid.uuid4().hex
+            self.assertEqual(frappe.db.sql("SELECT GET_LOCK(%s, %s)", (ordinary, 0))[0][0], 1)
+            self.assertEqual(frappe.db.sql("SELECT RELEASE_LOCK(%s)", (ordinary,))[0][0], 1)
 
     def test_native_bundle_late_packed_pairs_and_real_mes_source_use_fence_absence_gate(self):
         from deeplinkerp_branding.services import purchase_repost_boundary as boundary
@@ -3333,6 +4757,8 @@ def boundary_peer(payload):
 
 if __name__ == "__main__":
     frappe.init(site=SITE, sites_path="/home/frappe/frappe-bench/sites")
+    if frappe.local.site != SITE or frappe.conf.db_name != "qa_procurement_5" or frappe.conf.db_host != "db":
+        raise RuntimeError("Isolated synthetic procurement database only, before connection")
     frappe.connect()
     try:
         # The legacy single-transaction harness predates whole-request rollback.

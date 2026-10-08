@@ -54,6 +54,7 @@ class Session:
     epoch: int = 0
     locks: dict[str, int] = field(default_factory=dict)
     references: dict[str, int] = field(default_factory=dict)
+    native_acquisitions: dict[str, tuple[str, int]] = field(default_factory=dict)
     transaction_calls: list[dict] = field(default_factory=list)
     begin_expected: bool = False
 
@@ -75,7 +76,7 @@ class Session:
                 self.connection.close()  # server releases all session locks
             except Exception:
                 self.log("physical_close_failed")
-            self.locks.clear(); self.references.clear()
+            self.locks.clear(); self.references.clear(); self.native_acquisitions.clear()
 
     def verify(self):
         # BEFORE any SQL can trigger Frappe's lazy connect. Native unbuffered
@@ -127,10 +128,42 @@ class Session:
     def release(self, keys):
         self.verify()
         for key in sorted(keys, reverse=True):
+            tokens = tuple(token for token, (name, _) in self.native_acquisitions.items() if name == key)
+            if tokens:
+                self.release_native(tokens)
+                continue
             if self.raw("SELECT RELEASE_LOCK(%s)", (key,))[0][0] != 1:
                 self.poison("lease_release_failed")
                 _reject("库存保护租约释放失败，请重新发起请求")
             self.locks.pop(key, None); self.references.pop(key, None)
+
+    def adopt_native(self, key):
+        """One actual original GET_LOCK success, in this same physical epoch."""
+        self.verify()
+        token = uuid.uuid4().hex
+        self.native_acquisitions[token] = (key, self.epoch)
+        self.locks.setdefault(key, self.epoch)
+        return token
+
+    def release_native(self, tokens):
+        self.authority()
+        for token in tokens:
+            acquisition = self.native_acquisitions.get(token)
+            if acquisition is None:
+                continue  # consumed old callback cannot touch a newer same-name token
+            key, epoch = acquisition
+            if key not in self.locks or epoch > self.epoch:
+                self.poison("native_lease_identity_changed")
+                _reject("原生库存租约认领身份已改变")
+            if self.raw("SELECT RELEASE_LOCK(%s)", (key,))[0][0] != 1:
+                self.poison("native_lease_release_failed")
+                _reject("原生库存租约释放失败")
+            self.native_acquisitions.pop(token)
+            remaining = [held_epoch for name, held_epoch in self.native_acquisitions.values() if name == key]
+            if remaining:
+                self.locks[key] = min(remaining)
+            else:
+                self.locks.pop(key, None); self.references.pop(key, None)
 
     def physical_rollback(self):
         try:
@@ -168,7 +201,7 @@ class Session:
                         self.connection.close()
                     except Exception:
                         self.log("physical_close_failed")
-                self.locks.clear(); self.references.clear()
+                self.locks.clear(); self.references.clear(); self.native_acquisitions.clear()
         self.db.close = close
 
     def install(self):
@@ -195,6 +228,18 @@ class Session:
             return observed
         self.db.before_commit = observe_before(self.db.before_commit, "commit")
         self.db.before_rollback = observe_before(self.db.before_rollback, "rollback")
+        def observe_after(manager):
+            from frappe.utils import CallbackManager
+            state = self
+            class ObservedAfter(CallbackManager):
+                def add(self, callback):
+                    from .purchase_native_intent import freeze_native_callback
+                    return super().add(freeze_native_callback(callback, state))
+            observed = ObservedAfter()
+            observed._functions = manager._functions  # preserve native queue/reset/aliases
+            return observed
+        self.db.after_commit = observe_after(self.db.after_commit)
+        self.db.after_rollback = observe_after(self.db.after_rollback)
 
         def native_sql(query, *args, **kwargs):
             try:
@@ -232,7 +277,12 @@ class Session:
                     _reject("未经核查的原生事务结束方式")
             if not ending:
                 self.begin_expected = False
+            from .purchase_native_intent import adapt_query, observe_native_lock, protect_native_acquisition, protect_native_release
+            protect_native_acquisition(query, arguments.arguments["values"], self)
+            protect_native_release(query, arguments.arguments["values"], self)
+            query = adapt_query(query, self)
             result = native_sql(query, *args, **kwargs)
+            observe_native_lock(query, arguments.arguments["values"], result, self)
             if ending:
                 # A nested/raw boundary inside before_* is not this native
                 # method's SQL boundary. It may then create new pending writes
@@ -275,6 +325,9 @@ def initialize(db=None):
     previous = getattr(db, "_purchase_session", None)
     if previous is not None:
         previous.authority()
+        if business:
+            from .purchase_native_intent import install
+            install(strict=False)
         return previous
     if db.transaction_writes:
         _reject("连接未在业务写入前初始化，请重试独立请求")
@@ -298,6 +351,9 @@ def initialize(db=None):
         if db.sql("SELECT CONNECTION_ID()")[0][0] != state.connection_id:
             _reject("数据库会话身份不一致")
         state.install()
+        if business:
+            from .purchase_native_intent import install
+            install(strict=False)
     except Exception:
         state.poison("session_initialization_failed")
         raise
@@ -676,6 +732,13 @@ def _documents_boundary(documents, *, force_opaque=False, creating=False):
     """One complete sorted lease and UNION budget for the actual native batch."""
     from . import purchase_payment_service as service
     with execution():
+        for doc in documents:
+            if doc.doctype == "Material Request" and doc.flags.get("mes_integration_request"):
+                from .purchase_native_intent import install
+                install()  # supported native asynchronous producer only
+                state = initialize()
+                if state.locks and fence_key() not in state.locks:
+                    _reject("原生库存同步发布隔离顺序无效，请重试独立请求")
         # Exactly native pure in-memory defaults: no naming, item calculation,
         # company/warehouse guessing or substitute source identities.
         roots = []
@@ -900,6 +963,9 @@ def before_execution(*args, **kwargs):
     db = getattr(frappe.local, "db", None)  # actual instance, not LocalProxy type
     if _known_database(db) and not db.transaction_writes:
         initialize()
+        from .purchase_native_intent import METHOD, install
+        if kwargs.get("method") == METHOD:
+            install()  # captured native callable is resolved before before_job
 
 
 def procurement_entry(method):

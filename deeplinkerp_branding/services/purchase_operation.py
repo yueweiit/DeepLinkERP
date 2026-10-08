@@ -238,19 +238,65 @@ def run(request_id, payload, operation, replay, *, digest=None, acknowledge_vali
             _active.reset(token)
 
 
-def protect_audit(doc, method=None):
+def protect_audit(doc, method=None, *args, **kwargs):
     if doc.get("integration_request_service") == SERVICE:
         frappe.throw("采购操作审计需永久保留，不能删除或改写", frappe.PermissionError)
+    from .purchase_native_intent import guard
+    guard(doc, proposed={"name": args[1]} if method == "before_rename" and len(args) >= 2 else None)
 
 
 class ProcurementAuditRetention:
+    def insert(self, *args, **kwargs):
+        from .purchase_native_intent import guard
+        # Fixed native Document.insert signature: set_name is its fifth argument.
+        guard(self, proposed={"name": kwargs.get("set_name", args[4] if len(args) > 4 else self.name)})
+        return super().insert(*args, **kwargs)
+
+    def db_insert(self, *args, **kwargs):
+        from .purchase_native_intent import guard
+        guard(self)
+        return super().db_insert(*args, **kwargs)
+
+    def db_update(self, *args, **kwargs):
+        from .purchase_native_intent import guard
+        guard(self)
+        return super().db_update(*args, **kwargs)
+
+    def _save(self, *args, **kwargs):
+        from .purchase_native_intent import guard
+        guard(self)
+        return super()._save(*args, **kwargs)
+
+    def db_set(self, fieldname, *args, **kwargs):
+        from .purchase_native_intent import guard
+        proposed = fieldname if isinstance(fieldname, dict) else {fieldname: args[0] if args else kwargs.get("value")}
+        guard(self, proposed=proposed)
+        return super().db_set(fieldname, *args, **kwargs)
+
+    def update_status(self, params, status):
+        from .purchase_native_intent import guard
+        guard(self, proposed={"status": status})
+        return super().update_status(params, status)
+
+    def handle_success(self, response):
+        from .purchase_native_intent import guard
+        guard(self, proposed={"status": "Completed"})
+        return super().handle_success(response)
+
+    def handle_failure(self, response):
+        from .purchase_native_intent import guard
+        guard(self, proposed={"status": "Failed"})
+        return super().handle_failure(response)
+
     @staticmethod
     def clear_old_logs(days=30):
         # Native cleanup uses the resolved controller, so exclude this service
         # while retaining ordinary Integration Request cleanup behavior.
         from frappe.query_builder import Interval
         from frappe.query_builder.functions import Now
+        from .purchase_native_intent import SERVICE as native_service, PREFIX
 
         table = frappe.qb.DocType("Integration Request")
         frappe.db.delete(table, filters=(table.creation < (Now() - Interval(days=days))) &
-            ((table.integration_request_service != SERVICE) | table.integration_request_service.isnull()))
+            ((table.integration_request_service.notin((SERVICE, native_service))) | table.integration_request_service.isnull()) &
+            ~table.name.like(PREFIX + "%"))

@@ -332,7 +332,8 @@ class RepostBoundarySessionTests(unittest.TestCase):
 
     def test_known_global_hook_initializes_before_queries_and_never_repeats_ping(self):
         with patch.object(frappe, "db", self.db), patch.object(frappe, "local", SimpleNamespace(db=self.db)), patch.object(
-                self.boundary, "_known_database", return_value=True):
+                self.boundary, "_known_database", return_value=True), patch(
+                "deeplinkerp_branding.services.purchase_native_intent.install", return_value=False):
             self.boundary.before_execution()
             self.boundary.before_execution()
         self.assertEqual(self.db._conn.pings, [False])
