@@ -395,6 +395,78 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         frappe.db.before_commit.run()  # exercise final form hooks, without committing test data
         self.assertEqual(frappe.db.get_value("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"}, "actual_qty"), 2)
 
+    def test_future_native_payment_invoice_receipt_cancellations_reverse_each_snapshot(self):
+        """Real future cancellations, not a historical snapshot repair or mocked ledger."""
+        from collections import defaultdict
+        from decimal import Decimal
+        from deeplinkerp_branding.services import purchase_document_actions as actions
+        from deeplinkerp_branding.services import purchase_consistency as guard
+        from frappe.client import cancel
+
+        po = self.order()
+        pr = self.receipt(po)
+        pi = make_purchase_invoice(pr.name).insert()
+        pi.submit()
+        paid = actions.record_payment(source_doctype="Purchase Receipt", source_name=pr.name,
+            purchase_invoice=pi.name, amount_to_pay=10, bank_account="Cash - QAB", request_id=str(uuid.uuid4()))
+        self.assertFalse(paid.get("failed"), paid)
+        pe = frappe.get_doc("Payment Entry", paid["document"]["name"])
+        full_balance = pi.grand_total
+        self.commit_fixture()
+
+        def amounts(snapshot):
+            result = defaultdict(lambda: [Decimal(0)] * 4)
+            for row in snapshot.entries:
+                key = tuple(row.get(field) or "" for field in ("account", "account_currency", "party_type",
+                    "party", "cost_center", "project", "finance_book", "against_voucher_type", "against_voucher")) + (
+                    json.dumps(json.loads(row.get("dimensions_json") or "{}"), sort_keys=True),)
+                for index, field in enumerate(("debit", "credit", "debit_in_account_currency", "credit_in_account_currency")):
+                    result[key][index] += Decimal(str(row.get(field) or 0))
+            return dict(result)
+
+        for source in (pe, pi, pr):
+            with self.subTest(doctype=source.doctype):
+                posting_name = frappe.db.get_value("China Accounting Voucher",
+                    {"source_key": f"Posting|{source.doctype}|{source.name}", "docstatus": 1}, "name")
+                self.assertTrue(posting_name, "Real posting must exist before cancellation")
+                before = frappe.get_doc("China Accounting Voucher", posting_name)
+                before_amounts = amounts(before)
+                self.assertTrue(any(any(values) for values in before_amounts.values()))
+                cancel(source.doctype, source.name)
+                guard.check_registered()
+                # Evaluate the final controller/finance hook chain without committing QA business rows.
+                frappe.db.before_commit.run()
+                self.assertEqual(frappe.db.get_value(source.doctype, source.name, "docstatus"), 2)
+                reversal_name = frappe.db.get_value("China Accounting Voucher",
+                    {"source_key": f"Cancellation|{source.doctype}|{source.name}"}, "name")
+                reversal = frappe.get_doc("China Accounting Voucher", reversal_name)
+                self.assertEqual(reversal.docstatus, 1)
+                self.assertEqual(reversal.reversal_of, posting_name)
+                self.assertEqual(amounts(reversal), {key: [values[1], values[0], values[3], values[2]]
+                    for key, values in before_amounts.items()})
+                before.reload()
+                self.assertEqual((before.status, before.reversed_by), ("Reversed", reversal.name))
+                self.assertEqual(amounts(before), before_amounts, "Original posted entries are immutable")
+                # ERPNext retains BOTH original and reverse GL as is_cancelled=1;
+                # the China snapshot must reverse only the original, never their combined net zero.
+                self.assertTrue(frappe.db.count("GL Entry",
+                    {"voucher_type": source.doctype, "voucher_no": source.name, "is_cancelled": 1}))
+                self.assertFalse(frappe.db.count("GL Entry",
+                    {"voucher_type": source.doctype, "voucher_no": source.name, "is_cancelled": 0}))
+                if source.doctype == "Payment Entry":
+                    self.assertEqual(frappe.db.get_value("Purchase Invoice", pi.name, "outstanding_amount"), full_balance)
+                    self.assertFalse(frappe.db.count("Payment Ledger Entry",
+                        {"voucher_type": "Payment Entry", "voucher_no": pe.name, "delinked": 0}))
+                elif source.doctype == "Purchase Invoice":
+                    self.assertFalse(frappe.db.count("Payment Ledger Entry",
+                        {"voucher_type": "Purchase Invoice", "voucher_no": pi.name, "delinked": 0}))
+                    self.assertEqual(frappe.db.get_value("Bin",
+                        {"item_code": self.item, "warehouse": "Stores - QAB"}, "actual_qty"), 2)
+                else:
+                    self.assertEqual(frappe.db.get_value("Bin",
+                        {"item_code": self.item, "warehouse": "Stores - QAB"}, "actual_qty"), 0)
+                    self.assertEqual(frappe.db.get_value("Purchase Order Item", po.items[0].name, "received_qty"), 0)
+
     def test_native_form_stock_corruption_rolls_back_complete_transaction(self):
         from deeplinkerp_branding.services import purchase_consistency as guard
         po = self.order()
