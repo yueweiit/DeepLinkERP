@@ -1,7 +1,7 @@
 import hashlib
 import json
 from contextlib import contextmanager
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 import frappe
 from frappe import _
@@ -471,6 +471,57 @@ def _record_sync_failure(issue_name, exc):
 	)
 
 
+def _get_cancellation_posting(doc):
+	"""Return only a submitted, matching original snapshot under the source lock."""
+	company = get_company(doc)
+	name = frappe.db.get_value(
+		"China Accounting Voucher",
+		{
+			"source_key": f"Posting|{doc.doctype}|{doc.name}", "docstatus": 1,
+			"company": company, "source_doctype": doc.doctype, "source_name": doc.name,
+			"source_event": "Posting",
+		},
+		"name", for_update=True,
+	)
+	if not name:
+		return None
+	posting = frappe.get_doc("China Accounting Voucher", name, for_update=True)
+	if (
+		posting.status not in ("Posted", "Reversed") or posting.reversal_of
+		or posting.currency != frappe.get_cached_value("Company", company, "default_currency")
+	):
+		return None
+	return posting
+
+
+def _voucher_entries_by_accounting_key(entries):
+	"""Compare all four native-loaded amount columns without display rounding or netting."""
+	key_fields = (
+		"account", "account_currency", "party_type", "party", "cost_center", "project",
+		"finance_book", "against_voucher_type", "against_voucher",
+	)
+	amount_fields = ("debit", "credit", "debit_in_account_currency", "credit_in_account_currency")
+	result = {}
+	for row in entries:
+		if not row.get("account") or not row.get("account_currency"):
+			return None
+		try:
+			dimensions = json.loads(row.get("dimensions_json") or "{}")
+			if not isinstance(dimensions, dict):
+				return None
+			dimensions_key = json.dumps(dimensions, sort_keys=True, ensure_ascii=False, allow_nan=False)
+			amounts = [Decimal(str(row.get(field) or 0)) for field in amount_fields]
+		except (InvalidOperation, ValueError, TypeError):
+			return None
+		if not all(amount.is_finite() for amount in amounts):
+			return None
+		key = (*[row.get(field) or "" for field in key_fields], dimensions_key)
+		totals = result.setdefault(key, [Decimal(0) for field in amount_fields])
+		for index, amount in enumerate(amounts):
+			totals[index] += amount
+	return result or None
+
+
 def _cancellation_audit_complete(doc, voucher_name):
 	if not voucher_name or doc.docstatus != 2:
 		return False
@@ -479,16 +530,21 @@ def _cancellation_audit_complete(doc, voucher_name):
 		"source_doctype": doc.doctype, "source_name": doc.name,
 		"source_event": "Cancellation", "source_key": _cancellation_issue_key(doc),
 	}
-	cancellation = frappe.db.get_value("China Accounting Voucher", filters, ["name", "reversal_of"], for_update=True)
-	if not cancellation:
+	name = frappe.db.get_value("China Accounting Voucher", filters, "name", for_update=True)
+	if not name:
 		return False
-	posting = frappe.db.get_value(
-		"China Accounting Voucher", {"source_key": f"Posting|{doc.doctype}|{doc.name}", "docstatus": 1},
-		["name", "status", "reversed_by"], for_update=True,
-	)
-	if posting and (cancellation[1] != posting[0] or tuple(posting[1:]) != ("Reversed", voucher_name)):
+	cancellation = frappe.get_doc("China Accounting Voucher", name, for_update=True)
+	posting = _get_cancellation_posting(doc)
+	if not posting or (
+		cancellation.reversal_of != posting.name or cancellation.currency != posting.currency
+		or cancellation.status != "Posted"
+		or (posting.status, posting.reversed_by) != ("Reversed", voucher_name)
+		or cancellation.total_debit != posting.total_credit
+		or cancellation.total_credit != posting.total_debit
+	):
 		return False
-	if not posting and cancellation[1]:
+	expected = _voucher_entries_by_accounting_key(reverse_voucher_entries(posting.name))
+	if not expected or _voucher_entries_by_accounting_key(cancellation.entries) != expected:
 		return False
 	return not frappe.db.get_value(
 		"China Cash Flow Assignment",
@@ -717,17 +773,23 @@ def create_voucher_from_source(doc, source_event="Posting", force=False):
 	if existing:
 		return existing
 
-	entries = get_gl_entries(doc.doctype, doc.name, cancelled=source_event == "Cancellation")
-	entries = restore_negative_journal_entry_debits(doc, entries, source_event)
 	reversal_of = None
 	if source_event == "Cancellation":
-		reversal_of = frappe.db.get_value(
-			"China Accounting Voucher",
-			{"source_key": f"Posting|{doc.doctype}|{doc.name}", "docstatus": 1},
-			"name",
-		)
-		if not entries and reversal_of:
-			entries = reverse_voucher_entries(reversal_of)
+		if doc.docstatus != 2 or frappe.db.get_value(doc.doctype, doc.name, "docstatus", for_update=True) != 2:
+			frappe.throw(_("来源单据尚未取消，不能生成冲销审计快照"))
+		posting = _get_cancellation_posting(doc)
+		if not posting or posting.status != "Posted" or posting.reversed_by:
+			frappe.throw(_("未找到可信的原始已提交 Posting 快照，不能生成冲销审计快照"))
+		# Native cancellation marks both the original and its swapped reversal
+		# GL rows cancelled. Reading all cancelled GL would cancel out the audit
+		# itself; only the original immutable Posting snapshot is authoritative.
+		reversal_of = posting.name
+		entries = reverse_voucher_entries(reversal_of)
+		if not _voucher_entries_by_accounting_key(entries):
+			frappe.throw(_("原始已提交 Posting 快照分录或会计维度无效，不能生成冲销审计快照"))
+	else:
+		entries = get_gl_entries(doc.doctype, doc.name)
+		entries = restore_negative_journal_entry_debits(doc, entries, source_event)
 	if not entries:
 		return None
 
@@ -918,7 +980,7 @@ def to_voucher_entry(row):
 
 
 def reverse_voucher_entries(voucher_name):
-	doc = frappe.get_doc("China Accounting Voucher", voucher_name)
+	doc = frappe.get_doc("China Accounting Voucher", voucher_name, for_update=True)
 	return [
 		{
 			"account": row.account,
