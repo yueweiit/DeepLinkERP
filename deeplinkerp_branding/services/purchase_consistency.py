@@ -983,9 +983,14 @@ def check_sales_dependencies(doc):
     for row in doc.get("references") or []:
         if row.reference_doctype in ("Purchase Invoice", "Purchase Order"):
             documents.append(service._current(row.reference_doctype, row.reference_name))
+    receipts = {row.get("purchase_receipt") for source in documents for row in source.get("items") or [] if row.get("purchase_receipt")}
+    documents.extend(service._current("Purchase Receipt", name) for name in sorted(receipts))
     orders = {row.get("purchase_order") for source in documents for row in source.get("items") or [] if row.get("purchase_order")}
     documents.extend(service._current("Purchase Order", name) for name in sorted(orders))
     for source in documents:
+        if source.doctype == "Purchase Receipt" and (source.get("inter_company_reference") or
+                any(row.get("delivery_note_item") for row in source.get("items") or [])):
+            operation.reject("采购存在原生销售发货单关联，尚无完整同步适配，操作已停止", "sales_dependency_unsupported")
         for row in source.get("items") or []:
             if not any(row.get(field) for field in ("sales_order", "sales_order_item", "sales_order_packed_item")):
                 continue

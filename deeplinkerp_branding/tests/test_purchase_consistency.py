@@ -251,13 +251,41 @@ class ConsistencyTests(unittest.TestCase):
                     self.guard.check_draft(self.doc(docstatus=0))
 
     def test_native_sales_row_association_cannot_be_reported_as_not_applicable(self):
-        for field in ("sales_order_item", "sales_order_packed_item"):
-            with self.subTest(field=field):
-                doc = self.doc("Purchase Order", items=[frappe._dict(sales_order="SO", **{field: "SO-ROW"})])
+        cases = [("Purchase Order", {"items": [frappe._dict(sales_order="SO", **{field: "SO-ROW"})]})
+            for field in ("sales_order_item", "sales_order_packed_item")]
+        cases += [("Purchase Receipt", {"items": [frappe._dict(delivery_note_item="DN-ROW")]}),
+            ("Purchase Receipt", {"inter_company_reference": "DN"})]
+        for doctype, values in cases:
+            with self.subTest(doctype=doctype, values=values):
+                doc = self.doc(doctype, **values)
                 with patch.object(frappe, "db", SimpleNamespace(get_value=lambda *args: "SO", exists=lambda *args: False)):
                     with self.assertRaises(frappe.ValidationError) as caught:
                         self.guard.invalidate_reviews(doc)
                 self.assertEqual(caught.exception.purchase_error_id, "sales_dependency_unsupported")
+
+    def test_native_sales_delivery_receipt_source_is_read_authorized_through_invoice_and_payment(self):
+        receipt = self.doc(inter_company_reference="DN", items=[frappe._dict(delivery_note_item="DN-ROW")])
+        invoice = self.doc("Purchase Invoice", name="PI", items=[frappe._dict(purchase_receipt="PR")])
+        payment = self.doc("Payment Entry", references=[frappe._dict(reference_doctype="Purchase Invoice", reference_name="PI")])
+        for doc in (invoice, payment):
+            for permitted in (True, False):
+                with self.subTest(doctype=doc.doctype, permitted=permitted):
+                    def source(doctype, name):
+                        if doctype == "Purchase Receipt":
+                            self.assertEqual(name, "PR")
+                            if not permitted:
+                                raise frappe.PermissionError
+                            return receipt
+                        self.assertEqual((doctype, name), ("Purchase Invoice", "PI"))
+                        return invoice
+                    with patch.object(self.guard.service, "_current", side_effect=source) as current, \
+                            patch.object(frappe, "db", SimpleNamespace(exists=lambda *args: False)):
+                        expected = frappe.ValidationError if permitted else frappe.PermissionError
+                        with self.assertRaises(expected) as caught:
+                            self.guard.check_sales_dependencies(doc)
+                        current.assert_any_call("Purchase Receipt", "PR")
+                        if permitted:
+                            self.assertEqual(caught.exception.purchase_error_id, "sales_dependency_unsupported")
 
     def test_cancel_requires_advance_payment_ledger_to_be_delinked_too(self):
         doc = self.doc("Payment Entry", docstatus=2)

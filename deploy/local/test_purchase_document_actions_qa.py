@@ -328,7 +328,7 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
             "ToDo", "Version", "Notification Log", "China Cash Flow Assignment", "User", "Warehouse",
             "Workflow", "Workflow State", "Workflow Action Master", "Custom Field", "Advance Payment Ledger Entry", "Account", "Supplier")
         self.types += ("Sales Order", "Stock Reservation Entry", "Submission Queue", "Repost Item Valuation",
-            "Material Request", "Purchase Fulfilment Link", "China Cash Equivalent Scope")
+            "Material Request", "Purchase Fulfilment Link", "China Cash Equivalent Scope", "Delivery Note", "Customer", "Price List", "Item Price")
         self.before = {doctype: frappe.db.count(doctype) for doctype in self.types}
         self.initial_names = {doctype: set(frappe.get_all(doctype, pluck="name", limit_page_length=0)) for doctype in self.types}
         self.committed_names = None
@@ -354,13 +354,13 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
             frappe.db.commit()
         self.assertEqual(self.before, {doctype: frappe.db.count(doctype) for doctype in self.types})
 
-    def commit_fixture(self):
+    def commit_fixture(self, primary_doctype="Purchase Order", name_prefix="QA-ATOMIC-PO-"):
         frappe.db.after_commit.reset()  # test fixture must not dispatch notifications/jobs
         frappe.db.commit()
         self.committed_names = {doctype: set(frappe.get_all(doctype, pluck="name", limit_page_length=0)) - self.initial_names[doctype]
             for doctype in self.types}
-        self.assertTrue(self.committed_names["Purchase Order"])
-        self.assertTrue(all(name.startswith("QA-ATOMIC-PO-") for name in self.committed_names["Purchase Order"]))
+        self.assertTrue(self.committed_names[primary_doctype])
+        self.assertTrue(all(name.startswith(name_prefix) for name in self.committed_names[primary_doctype]))
 
     def order(self, currency="CNY", conversion_rate=1, supplier="QA Test Supplier", transaction_date=None, qty=10, rate=12.345):
         po = frappe.get_doc({"doctype": "Purchase Order", "company": COMPANY,
@@ -831,6 +831,47 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
             po.insert(set_name="QA-ATOMIC-PO-" + uuid.uuid4().hex[:16])
         self.assertEqual(caught.exception.purchase_error_id, "sales_dependency_unsupported")
         self.assertFalse(frappe.db.exists("Purchase Order", po.name))
+
+    def test_real_native_delivery_note_receipt_dependency_fails_closed(self):
+        from deeplinkerp_branding.services import purchase_consistency as guard
+        from erpnext.stock.doctype.delivery_note.delivery_note import make_inter_company_purchase_receipt
+        selling_company = "Yuewei"
+        self.assertEqual(frappe.db.get_value("Company", selling_company, "default_currency"), "CNY")
+        frappe.db.set_value("Item", self.item, "is_stock_item", 0)
+        customer = frappe.get_doc({"doctype": "Customer", "customer_name": "QA-ATOMIC-CUSTOMER-" + uuid.uuid4().hex[:10],
+            "customer_type": "Company", "customer_group": "Government", "territory": "Rest Of The World",
+            "is_internal_customer": 1, "represents_company": COMPANY, "companies": [{"company": selling_company}]}).insert()
+        frappe.get_doc({"doctype": "Supplier", "supplier_name": "QA-ATOMIC-SUPPLIER-" + uuid.uuid4().hex[:10],
+            "supplier_group": "All Supplier Groups", "supplier_type": "Company", "is_internal_supplier": 1,
+            "represents_company": selling_company, "companies": [{"company": COMPANY}]}).insert()
+        price_list = frappe.get_doc({"doctype": "Price List", "price_list_name": "QA-ATOMIC-PRICE-" + uuid.uuid4().hex[:10],
+            "enabled": 1, "buying": 1, "selling": 1, "currency": "CNY"}).insert()
+        dn = frappe.get_doc({"doctype": "Delivery Note", "company": selling_company, "customer": customer.name,
+            "currency": "CNY", "conversion_rate": 1, "selling_price_list": price_list.name,
+            "items": [{"item_code": self.item, "qty": 2, "rate": 20}]}).insert(
+                set_name="QA-ATOMIC-DN-" + uuid.uuid4().hex[:16])
+        dn.submit()
+        self.commit_fixture("Delivery Note", "QA-ATOMIC-DN-")
+        original = guard.artifact_evidence(frappe.get_doc("Delivery Note", dn.name))
+        counts = {doctype: frappe.db.count(doctype) for doctype in self.types}
+        self.assertEqual(frappe.db.get_value("Delivery Note Item", dn.items[0].name, "received_qty"), 0)
+        pr = make_inter_company_purchase_receipt(dn.name)
+        self.assertEqual(pr.inter_company_reference, dn.name)
+        self.assertEqual(pr.items[0].delivery_note_item, dn.items[0].name)
+        self.assertFalse(any(row.get(field) for row in pr.items for field in (
+            "purchase_order", "purchase_order_item", "material_request", "material_request_item", "purchase_invoice", "purchase_invoice_item")))
+        try:
+            pr.insert()
+            pr.submit()
+        except frappe.ValidationError as caught:
+            self.assertEqual(caught.purchase_error_id, "sales_dependency_unsupported")
+        else:
+            self.assertEqual(frappe.db.get_value("Purchase Receipt", pr.name, "docstatus"), 1)
+            self.assertEqual(frappe.db.get_value("Delivery Note Item", dn.items[0].name, "received_qty"), 2)
+            self.fail("Native standalone DN -> PR submitted and changed DN received_qty without the Sales dependency guard")
+        self.assertFalse(frappe.db.exists("Purchase Receipt", pr.name))
+        self.assertEqual(guard.artifact_evidence(frappe.get_doc("Delivery Note", dn.name)), original)
+        self.assertEqual({doctype: frappe.db.count(doctype) for doctype in self.types}, counts)
 
     def test_native_savedocs_queue_is_stopped_before_dispatch(self):
         from deeplinkerp_branding.services import purchase_consistency as guard
