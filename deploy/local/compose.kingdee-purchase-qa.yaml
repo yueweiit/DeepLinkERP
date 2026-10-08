@@ -1,0 +1,49 @@
+# Independent synthetic database. Never shares production or other QA volumes.
+services:
+  db:
+    image: mariadb:11.8
+    environment:
+      MARIADB_ROOT_PASSWORD: kingdee-purchase-local-only
+    command: [--character-set-server=utf8mb4, --collation-server=utf8mb4_unicode_ci]
+    volumes:
+      - kingdee-db:/var/lib/mysql
+    healthcheck:
+      test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
+      interval: 3s
+      retries: 40
+  redis:
+    image: redis:8-alpine
+  backend:
+    # Frozen local runtime includes production Finance 4f019f91 and QA test dependencies.
+    image: deeplinkerp-local:kingdee-purchase-qa-20261008
+    environment:
+      SITES_PATH: /home/frappe/frappe-bench/sites
+    command: [/home/frappe/frappe-bench/env/bin/gunicorn, --chdir, /home/frappe/frappe-bench/sites, --bind, "0.0.0.0:8000", --workers, "1", --threads, "2", --timeout, "120", frappe.app:application]
+    working_dir: /home/frappe/frappe-bench
+    volumes:
+      - kingdee-sites:/home/frappe/frappe-bench/sites
+      - ../../deeplinkerp_branding:/home/frappe/frappe-bench/apps/deeplinkerp_branding/deeplinkerp_branding
+      - ../..:/workspace:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+  frontend:
+    image: deeplinkerp-local:kingdee-purchase-qa-20261008
+    command: [nginx-entrypoint.sh]
+    environment:
+      BACKEND: backend:8000
+      SOCKETIO: backend:9000
+      FRAPPE_SITE_NAME_HEADER: po-grid-qa.localhost
+      PROXY_READ_TIMEOUT: "120"
+    ports:
+      - 127.0.0.1:64248:8080
+    volumes:
+      - kingdee-sites:/home/frappe/frappe-bench/sites
+      - ../../deeplinkerp_branding:/home/frappe/frappe-bench/apps/deeplinkerp_branding/deeplinkerp_branding:ro
+    depends_on:
+      - backend
+volumes:
+  kingdee-sites:
+  kingdee-db:
