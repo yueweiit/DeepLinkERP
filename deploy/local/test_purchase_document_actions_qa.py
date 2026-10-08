@@ -1515,8 +1515,10 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
                 elif kind == "index_ignored": index.Ignored = "YES"
                 else: actual_indexes.remove(index)
                 def observed(query, *args, **kwargs):
-                    if "information_schema.COLUMNS" in str(query): return actual_columns
-                    if str(query).startswith("SHOW INDEX"): return actual_indexes
+                    if "information_schema.COLUMNS" in str(query):
+                        return [row for row in actual_columns if row.COLUMN_NAME == args[0][0]] if "COLUMN_NAME=%s" in str(query) else actual_columns
+                    if str(query).startswith("SHOW INDEX"):
+                        return [row for row in actual_indexes if row.Key_name == args[0][0]] if "WHERE Key_name=%s" in str(query) else actual_indexes
                     return native(query, *args, **kwargs)
                 with patch.object(frappe.db, "sql", side_effect=observed), \
                         patch.object(frappe.db, "sql_ddl", side_effect=AssertionError("No fixture DDL permitted")) as ddl, \
@@ -1525,6 +1527,75 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
                     with self.assertRaisesRegex(frappe.ValidationError, "冲突|定义未经"):
                         installer.install_native_intent_index()
                     ddl.assert_not_called(); add.assert_not_called(); commit.assert_not_called()
+        self.commit_fixture(primary_doctype="Item", name_prefix="QA-ATOMIC-")
+        for kind in ("index_upper_missing_generated", "index_upper_conflict", "column_upper_conflict",
+                "column_upper_expression_conflict", "compatible_upper_alias", "compatible_all_upper_columns"):
+            with self.subTest(native_identifier=kind):
+                table = "tabQA_C1_IDENT_" + uuid.uuid4().hex[:12]
+                self.assertFalse(native("SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() "
+                    "AND TABLE_NAME=%s", (table,)))
+                fields = ("name", "integration_request_service", "status", "request_description")
+                physical = tuple(name.upper() for name in fields) if kind == "compatible_all_upper_columns" else fields
+                definition = ",".join("`" + name + "` VARCHAR(140)" for name in physical)
+                generated = intent.ACTIVITY_COLUMN if kind == "index_upper_conflict" else intent.ACTIVITY_COLUMN.upper()
+                if kind != "index_upper_missing_generated":
+                    expression = intent.ACTIVITY_EXPRESSION.replace("Completed", "completed") if kind == "column_upper_expression_conflict" else intent.ACTIVITY_EXPRESSION
+                    definition += ",`" + generated + "` " + ("INT" if kind == "column_upper_conflict" else
+                        "TINYINT AS (" + expression + ") VIRTUAL")
+                if kind.startswith("index_upper") or kind.startswith("compatible"):
+                    index_fields = (physical[0],) if kind.startswith("index_upper") else (physical[1], generated, physical[0])
+                    definition += ",INDEX `" + intent.ACTIVITY_INDEX.upper() + "`(" + ",".join("`" + name + "`" for name in index_fields) + ")"
+                native("CREATE TABLE `" + table + "` (" + definition + ") ENGINE=InnoDB ROW_FORMAT=DYNAMIC "
+                    "DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+                try:
+                    actual = native("SELECT COLUMN_NAME,COLUMN_TYPE,CHARACTER_SET_NAME,COLLATION_NAME,EXTRA,GENERATION_EXPRESSION "
+                        "FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s", (table,), as_dict=True)
+                    found = native("SHOW INDEX FROM `" + table + "` WHERE Key_name=%s", (intent.ACTIVITY_INDEX,), as_dict=True)
+                    if kind.startswith("index_upper") or kind.startswith("compatible"):
+                        self.assertTrue(frappe.db.has_index(table, intent.ACTIVITY_INDEX), "Actual pinned has_index must recognize the uppercase alias")
+                        self.assertTrue(found)
+                    if kind != "index_upper_missing_generated":
+                        self.assertEqual(len(native("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() "
+                            "AND TABLE_NAME=%s AND COLUMN_NAME=%s", (table, intent.ACTIVITY_COLUMN))), 1)
+                        native("SELECT COUNT(`" + intent.ACTIVITY_COLUMN + "`) FROM `" + table + "`")  # actual identifier resolution, not Python comparison
+                    first_ddl = []
+                    def synthetic_metadata(query, *args, **kwargs):
+                        if str(query).lstrip().startswith("ALTER TABLE"):
+                            first_ddl.append(str(query))
+                            raise AssertionError("C1 first business DDL intercepted; real IR remains unchanged")
+                        if "information_schema.COLUMNS" in str(query) or str(query).startswith("SHOW INDEX"):
+                            query = str(query).replace("tabIntegration Request", table)
+                        return native(query, *args, **kwargs)
+                    with patch.object(frappe.db, "sql", side_effect=synthetic_metadata), \
+                            patch.object(frappe.db, "add_index", wraps=frappe.db.add_index) as add, \
+                            patch.object(frappe.db, "sql_ddl", side_effect=AssertionError("No business sql_ddl permitted")) as ddl, \
+                            patch.object(frappe.db, "commit", wraps=frappe.db.commit) as commit:
+                        error = None
+                        try:
+                            installer.install_native_intent_index()
+                        except Exception as caught:
+                            error = caught
+                        print("C1_QUALITY_NATIVE_IDENTIFIER=" + json.dumps({"case": kind, "fixture_table": table,
+                            "actual_columns": [dict(row) for row in actual], "actual_filtered_index": [dict(row) for row in found],
+                            "intercepted_first_business_ddl": first_ddl, "native_add_index_calls": add.call_count,
+                            "error_type": type(error).__name__ if error else None}, default=str, sort_keys=True), flush=True)
+                        if kind.startswith("compatible"):
+                            self.assertIsNone(error, "Compatible native case aliases must be idempotent")
+                        else:
+                            self.assertIsInstance(error, frappe.ValidationError)
+                            self.assertRegex(str(error), "冲突|未经核查")
+                        self.assertEqual(first_ddl, [], "All identifier-equivalent definitions must be checked before first DDL")
+                        ddl.assert_not_called(); add.assert_not_called(); commit.assert_not_called()
+                finally:
+                    # Exact newly created metadata fixture only, never the IR schema/history.
+                    self.assertTrue(table.startswith("tabQA_C1_IDENT_"))
+                    native("DROP TABLE `" + table + "`")
+                    self.assertFalse(native("SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() "
+                        "AND TABLE_NAME=%s", (table,)))
+                    print("C1_IDENTIFIER_TABLE_REMOVED=" + table, flush=True)
+        self.assertEqual(native("SELECT COLUMN_NAME,COLUMN_TYPE,CHARACTER_SET_NAME,COLLATION_NAME,EXTRA,GENERATION_EXPRESSION "
+            "FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='tabIntegration Request'", as_dict=True), columns)
+        self.assertEqual(native("SHOW INDEX FROM `tabIntegration Request`", as_dict=True), indexes)
 
     def test_native_intent_collation_namespace_rejects_accent_identity_and_service_escape(self):
         from deeplinkerp_branding.services import purchase_native_intent as intent
@@ -2710,6 +2781,36 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         from deeplinkerp_branding.services import purchase_repost_boundary as boundary
         frappe.db.commit()
         self.remember_new_names()
+        captured_release = mes.release_mes_material_request_locks
+        peer = self.boundary_database()
+        state = boundary.initialize()
+        for shape in ("generator", "list", "tuple"):
+            with self.subTest(ordinary_release=shape):
+                names = tuple("QA-ATOMIC-ORDINARY-RELEASE-" + uuid.uuid4().hex for _ in range(2))
+                values = (name for name in names) if shape == "generator" else list(names) if shape == "list" else names
+                try:
+                    for name in names:
+                        self.assertEqual(frappe.db.sql("SELECT GET_LOCK(%s, %s)", (name, 0))[0][0], 1)
+                        self.assertNotIn(name, state.locks)
+                        self.assertEqual(peer.sql("SELECT IS_USED_LOCK(%s)", (name,))[0][0], state.connection_id)
+                    captured_release(values)
+                    held = [peer.sql("SELECT IS_USED_LOCK(%s)", (name,))[0][0] for name in names]
+                    print("C1_QUALITY_ORDINARY_RELEASE=" + json.dumps({"shape": shape, "remaining_physical_owners": held}), flush=True)
+                    self.assertEqual(held, [None, None], "Ordinary one-shot iterables must reach the original native release loop")
+                finally:
+                    for name in names:
+                        if peer.sql("SELECT IS_USED_LOCK(%s)", (name,))[0][0] == state.connection_id:
+                            state.raw("SELECT RELEASE_LOCK(%s)", (name,))  # exact own untracked fixture locks, including RED leftovers
+        with mes.lock_mes_material_request_bins({"company": COMPANY,
+                "items": [{"item_code": self.item, "warehouse": "Stores - QAB"}]}):
+            names = tuple(name for name, _ in state.native_acquisitions.values())
+            for shape in ("generator", "list", "tuple"):
+                with self.subTest(tracked_release=shape):
+                    values = (name for name in names) if shape == "generator" else list(names) if shape == "list" else names
+                    with self.assertRaisesRegex(frappe.ValidationError, "释放"):
+                        captured_release(values)
+                    self.assertTrue(all(peer.sql("SELECT IS_USED_LOCK(%s)", (name,))[0][0] == state.connection_id for name in names))
+        frappe.db.rollback()  # native frozen callbacks / physical Session release, before the next separate lock fixture
         for query, shape in (("SELECT RELEASE_ALL_LOCKS()", "canonical"),
                 ("SELECT RELEASE_LOCK /* ordinary comment */ (%s)", "canonical"),
                 ("SELECT RELEASE_LOCK(%s)", "bytes"), ("SELECT RELEASE_LOCK(%s)", "upper")):

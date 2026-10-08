@@ -24,10 +24,15 @@ def _native_intent_index_plan():
     import frappe
     from .services.purchase_native_intent import ACTIVITY_COLUMN, ACTIVITY_EXPRESSION, ACTIVITY_INDEX
 
-    columns = frappe.db.sql("SELECT COLUMN_NAME,COLUMN_TYPE,CHARACTER_SET_NAME,COLLATION_NAME,EXTRA,"
-        "GENERATION_EXPRESSION FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() "
-        "AND TABLE_NAME='tabIntegration Request'", as_dict=True)
-    by_name = {row.COLUMN_NAME: row for row in columns}
+    by_name = {}
+    for name in ("name", "integration_request_service", "status", "request_description", ACTIVITY_COLUMN):
+        rows = frappe.db.sql("SELECT COLUMN_NAME,COLUMN_TYPE,CHARACTER_SET_NAME,COLLATION_NAME,EXTRA,"
+            "GENERATION_EXPRESSION FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() "
+            "AND TABLE_NAME='tabIntegration Request' AND COLUMN_NAME=%s", (name,), as_dict=True)
+        if len(rows) > 1:
+            frappe.throw("原生库存同步索引列名称定义冲突，未修改现有定义", frappe.ValidationError)
+        if rows:
+            by_name[name] = rows[0]
     for name in ("name", "integration_request_service", "status", "request_description"):
         row = by_name.get(name)
         if not row or (row.COLUMN_TYPE, row.CHARACTER_SET_NAME, row.COLLATION_NAME) != (
@@ -37,10 +42,11 @@ def _native_intent_index_plan():
     if generated and (generated.COLUMN_TYPE != "tinyint(4)" or generated.EXTRA != "VIRTUAL GENERATED" or
             _generated_expression(generated.GENERATION_EXPRESSION) != _generated_expression(ACTIVITY_EXPRESSION)):
         frappe.throw("原生库存同步生成索引定义冲突，未修改现有定义", frappe.ValidationError)
-    indexes = frappe.db.sql("SHOW INDEX FROM `tabIntegration Request`", as_dict=True)
-    existing = sorted((row for row in indexes if row.Key_name == ACTIVITY_INDEX), key=lambda row: row.Seq_in_index)
+    indexes = frappe.db.sql("SHOW INDEX FROM `tabIntegration Request` WHERE Key_name=%s", (ACTIVITY_INDEX,), as_dict=True)
+    existing = sorted(indexes, key=lambda row: row.Seq_in_index)
     if existing and (len(existing) != 3 or [row.Column_name for row in existing] != [
-            "integration_request_service", ACTIVITY_COLUMN, "name"] or any(row.Non_unique != 1 or
+            by_name["integration_request_service"].COLUMN_NAME, generated.COLUMN_NAME if generated else ACTIVITY_COLUMN,
+            by_name["name"].COLUMN_NAME] or any(row.Non_unique != 1 or
             row.Sub_part is not None or row.Index_type != "BTREE" or row.Ignored != "NO" for row in existing)):
         frappe.throw("原生库存同步复合索引定义冲突，未修改现有定义", frappe.ValidationError)
     if existing and not generated:

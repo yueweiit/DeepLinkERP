@@ -311,10 +311,11 @@ def freeze_native_callback(callback, state):
 
 def _release(lock_names):
     import mes_integration.mes_integration.material_request as mes
+    lock_names = tuple(lock_names)
     claim = _release_claim.get()
     if claim is not None:
         state, tokens, names = claim
-        if tuple(lock_names) != names:
+        if lock_names != names:
             _reject("原生租约释放认领范围已改变")
         return state.release_native(tokens)
     state = boundary.initialize()
