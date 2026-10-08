@@ -1,12 +1,15 @@
 """Procurement checks run after native controller and China Finance hooks."""
 import importlib.util
 import json
+import sys
 import unittest
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import frappe
+
+from deeplinkerp_branding.tests._purchase_test_support import install_native_throw, install_request_state
 
 
 class ConsistencyTests(unittest.TestCase):
@@ -18,8 +21,16 @@ class ConsistencyTests(unittest.TestCase):
             guard = patch("deeplinkerp_branding.services.purchase_repost_boundary." + method,
                 return_value=nullcontext() if method == "execution" else None)
             guard.start(); self.addCleanup(guard.stop)
-        flags = patch.object(frappe, "flags", frappe._dict())
-        flags.start(); self.addCleanup(flags.stop)
+        install_request_state(self)
+        install_native_throw(self)
+        # Replace the module proxy before any method-level patch.object(db, ...).
+        db = patch.object(frappe, "db", SimpleNamespace(exists=lambda *args: False))
+        db.start(); self.addCleanup(db.stop)
+        # Native flt/rounded reads this setting even before its fallback policy.
+        rounding = patch.object(frappe, "get_system_settings", return_value="Banker's Rounding")
+        rounding.start(); self.addCleanup(rounding.stop)
+        dimensions = patch("erpnext.accounts.doctype.accounting_dimension.accounting_dimension.get_accounting_dimensions", return_value=[])
+        dimensions.start(); self.addCleanup(dimensions.stop)
         session = patch.object(frappe, "session", SimpleNamespace(user="QA"))
         session.start(); self.addCleanup(session.stop)
 
@@ -32,6 +43,10 @@ class ConsistencyTests(unittest.TestCase):
         doc.get = lambda field, default=None: getattr(doc, field, default)
         doc.get_doc_before_save = lambda: None
         doc.precision = lambda field: 3
+        doc.flags = getattr(doc, "flags", frappe._dict())
+        doc.is_new = lambda: not bool(doc.name)
+        doc.as_dict = lambda **kwargs: {key: value for key, value in vars(doc).items()
+            if key not in {"meta", "flags"} and not callable(value)}
         return doc
 
     def test_native_submit_defers_checks_until_whole_hook_chain_finishes(self):
@@ -48,9 +63,8 @@ class ConsistencyTests(unittest.TestCase):
             check.assert_called_once()
 
     def test_business_precision_is_used_instead_of_two_display_decimals(self):
-        with patch.object(frappe, "throw", side_effect=frappe.ValidationError):
-            with self.assertRaises(frappe.ValidationError):
-                self.guard.equal(self.doc(), "grand_total", "10.001", "10.002", "native amount")
+        with self.assertRaises(frappe.ValidationError):
+            self.guard.equal(self.doc(), "grand_total", "10.001", "10.002", "native amount")
         self.guard.equal(self.doc(), "grand_total", "10.0011", "10.0012", "native amount")
 
     def test_cancellation_time_facts_use_native_duration_only_for_time_metadata(self):
@@ -80,8 +94,7 @@ class ConsistencyTests(unittest.TestCase):
         for child in (False, True):
             for label, fieldtype, incoming, previous, allowed in cases:
                 with self.subTest(location="child" if child else "header", case=label), patch(
-                        "frappe.model.workflow.get_workflow_name", return_value=None), patch.object(
-                        frappe, "throw", side_effect=frappe.ValidationError):
+                        "frappe.model.workflow.get_workflow_name", return_value=None):
                     proposed, stored = record(incoming, fieldtype, child=child), record(previous, fieldtype, child=child)
                     proposed.docstatus = 2
                     if allowed:
@@ -91,17 +104,14 @@ class ConsistencyTests(unittest.TestCase):
                             self.guard.check_cancellation_facts(proposed, stored)
 
     def test_native_old_subcontract_po_supplied_bin_is_bound_without_sle(self):
-        order = frappe.get_doc({"doctype": "Purchase Order", "name": "PO", "is_old_subcontracting_flow": 1,
-            "items": [], "supplied_items": [{"rm_item_code": "RM", "reserve_warehouse": "Supplier WH"}]})
+        order = self.doc("Purchase Order", name="PO", is_old_subcontracting_flow=1,
+            items=[], supplied_items=[frappe._dict(rm_item_code="RM", reserve_warehouse="Supplier WH")])
         quantities = {"reserved_qty_for_sub_contract": 4}
-        native_values = frappe.db.get_values
         def bins(doctype, filters, *args, **kwargs):
-            if doctype != "Bin":
-                return native_values(doctype, filters, *args, **kwargs)
             self.assertEqual((doctype, filters), ("Bin", {"item_code": "RM", "warehouse": "Supplier WH"}))
             return [frappe._dict(quantities)]
         with patch.object(self.guard, "_ledger", return_value=[]), \
-                patch.object(frappe.db, "get_values", side_effect=bins):
+                patch.object(frappe, "db", SimpleNamespace(get_values=bins)):
             before = self.guard.artifact_evidence(order)
             quantities["reserved_qty_for_sub_contract"] += 1
             self.assertNotEqual(self.guard.artifact_evidence(order), before)
@@ -152,8 +162,7 @@ class ConsistencyTests(unittest.TestCase):
 
     def test_account_currency_precision_is_separate_from_company_currency(self):
         key = ("A", "", "", "USD", "", "", "", "", "")
-        with patch.object(self.guard, "_gl_precision", side_effect=[2, 2, 4, 4]), \
-             patch.object(frappe, "throw", side_effect=frappe.ValidationError):
+        with patch.object(self.guard, "_gl_precision", side_effect=[2, 2, 4, 4]):
             with self.assertRaises(frappe.ValidationError):
                 self.guard._compare_gl(self.doc(), {key: [10, 0, "1.0001", 0]}, {key: [10, 0, "1.0002", 0]}, "currency")
 
@@ -175,10 +184,23 @@ class ConsistencyTests(unittest.TestCase):
             self.guard._compare_gl(self.doc(), self.guard._gl_map([reverse]), self.guard._gl_map([original]), "native reversal", reverse=True)
 
     def test_gl_allocation_accepts_native_mapping_and_voucher_child_documents(self):
+        from frappe.model.base_document import BaseDocument
         values = dict(account="A", account_currency="USD", debit=10, credit=0,
             debit_in_account_currency=2, credit_in_account_currency=0)
-        voucher = frappe.get_doc({"doctype": "China Accounting Voucher"})
-        child = voucher.append("entries", values)
+        parent_meta = SimpleNamespace(_table_doctypes={"entries": "China Accounting Voucher Entry"})
+        child_meta = SimpleNamespace(_table_doctypes={}, _fields={}, get_valid_fields=lambda: list(values))
+        # Keep native child construction/as_dict; only site metadata/controller
+        # lookup is a collaborator, so this also works without the Finance app.
+        with patch.object(frappe, "get_meta", side_effect=lambda dt: parent_meta
+                if dt == "China Accounting Voucher" else child_meta), \
+                patch("frappe.model.base_document.get_controller", return_value=BaseDocument):
+            voucher = BaseDocument.__new__(BaseDocument)
+            voucher.flags = frappe._dict()
+            voucher.__init__({"doctype": "China Accounting Voucher", "name": "V"})
+            child = voucher.append("entries", values)
+            self.assertIs(child.meta, child_meta)
+        self.assertIsInstance(child, BaseDocument)
+        self.assertEqual((child.parent, child.parenttype, child.parentfield), ("V", voucher.doctype, "entries"))
         key = ("A", "", "", "USD", "", "", "", "", "", "{}")
         for row in (frappe._dict(values), child):
             with self.subTest(row_type=type(row).__name__):
@@ -201,7 +223,9 @@ class ConsistencyTests(unittest.TestCase):
             original = frappe._dict(company="C", account="A", account_currency="CNY", amount=10,
                 amount_in_account_currency=10, qa_department="A")
             changed = frappe._dict(original, qa_department="B")
-            with patch.object(frappe, "get_cached_value", return_value="CNY"), self.assertRaises(frappe.ValidationError):
+            meta = SimpleNamespace(get_field=lambda field: frappe._dict(fieldname=field, fieldtype="Currency", precision=2))
+            with patch.object(frappe, "get_cached_value", return_value="CNY"), \
+                    patch.object(frappe, "get_meta", return_value=meta), self.assertRaises(frappe.ValidationError):
                 self.guard._compare_payment_ledger(self.doc(), "Payment Ledger Entry", [changed], [original], "native dimension")
 
     def test_customer_and_unrelated_operating_payments_are_outside_procurement(self):
@@ -240,8 +264,7 @@ class ConsistencyTests(unittest.TestCase):
 
     def test_pending_finance_cancellation_rejects_native_commit(self):
         finance = SimpleNamespace(process_cancellation_snapshot=Mock(return_value={"status": "pending", "error": "private"}))
-        with patch.object(self.guard, "finance_service", return_value=finance), \
-             patch.object(frappe, "throw", side_effect=frappe.ValidationError):
+        with patch.object(self.guard, "finance_service", return_value=finance):
             with self.assertRaises(frappe.ValidationError):
                 self.guard.check_cancellation(self.doc(docstatus=2), [frappe._dict(debit=1, credit=1)])
         finance.process_cancellation_snapshot.assert_called_once_with("Purchase Receipt", "PR")
@@ -252,6 +275,8 @@ class ConsistencyTests(unittest.TestCase):
         source = self.doc("Purchase Invoice", get_gl_entries=lambda: [], company="C")
         finance = SimpleNamespace(create_voucher_from_source=lambda *args: "V")
         with patch.object(self.guard, "_balanced"), patch.object(self.guard, "_compare_gl"), \
+             patch.object(frappe, "get_cached_value", return_value="CNY"), \
+             patch.dict(sys.modules, {"china_finance.services.voucher": SimpleNamespace(get_posting_date=lambda doc: doc.posting_date)}), \
              patch.object(self.guard, "finance_service", return_value=finance), patch.object(frappe, "get_doc", return_value=voucher):
             with self.assertRaises(frappe.ValidationError):
                 self.guard.check_finance(source, [frappe._dict(debit=10, credit=10)])
@@ -262,7 +287,7 @@ class ConsistencyTests(unittest.TestCase):
         db = SimpleNamespace(exists=lambda *args: True, get_value=lambda *args: 0,
             get_values=lambda *args, **kwargs: [frappe._dict(parent="PI", docstatus=0)])
         with patch.object(frappe, "db", db), patch.object(frappe, "get_doc", return_value=invoice), \
-             patch("china_finance.services.auto_invoice._enabled", return_value=True), \
+             patch.dict(sys.modules, {"china_finance.services.auto_invoice": SimpleNamespace(_enabled=lambda *args: True)}), \
              patch.object(frappe, "has_permission", side_effect=lambda doctype, ptype="read", **kw: ptype != "submit"):
             self.assertTrue(callable(getattr(self.guard, "prepare_auto_invoice", None)), "Automatic invoice permission preflight missing")
             with self.assertRaises(frappe.PermissionError):
@@ -275,7 +300,7 @@ class ConsistencyTests(unittest.TestCase):
             items=[frappe._dict(pr_detail="R", purchase_receipt="PR", qty=1, item_code="I", stock_uom="Nos")])
         with patch.object(frappe, "db", SimpleNamespace(exists=lambda *args: True,
                 get_values=lambda *args, **kwargs: [frappe._dict(parent="PI", docstatus=1)], get_single_value=lambda *args: 0)), \
-             patch("china_finance.services.auto_invoice._enabled", return_value=True), \
+             patch.dict(sys.modules, {"china_finance.services.auto_invoice": SimpleNamespace(_enabled=lambda *args: True)}), \
              patch("erpnext.stock.doctype.purchase_receipt.purchase_receipt.get_returned_qty_map", return_value={}), \
              patch.object(frappe, "get_doc", return_value=invoice), patch.object(frappe, "has_permission", return_value=True):
             self.assertTrue(callable(getattr(self.guard, "check_auto_invoice", None)), "Automatic invoice completeness missing")
@@ -294,10 +319,10 @@ class ConsistencyTests(unittest.TestCase):
             entries=[frappe._dict(account="A", credit=100), frappe._dict(account="B", debit=100)])
         reversal.name = "RV"
         with patch.object(self.guard, "finance_service", return_value=finance), \
+             patch.dict(sys.modules, {"china_finance.services.voucher": SimpleNamespace(get_posting_date=lambda doc: doc.posting_date)}), \
              patch.object(frappe, "get_doc", side_effect=[reversal, original]), \
              patch.object(frappe, "get_cached_value", return_value="CNY"), \
-             patch.object(self.guard, "_gl_precision", return_value=3), \
-             patch.object(frappe, "throw", side_effect=frappe.ValidationError):
+             patch.object(self.guard, "_gl_precision", return_value=3):
             with self.assertRaises(frappe.ValidationError) as caught:
                 self.guard.check_cancellation(self.doc(docstatus=2), original.entries)
         self.assertEqual(caught.exception.purchase_invariant, "冲销凭证与原凭证反向金额")
@@ -305,8 +330,7 @@ class ConsistencyTests(unittest.TestCase):
     def test_drafts_cannot_have_native_stock_or_financial_ledgers(self):
         for ledger in ("Stock Ledger Entry", "GL Entry", "Payment Ledger Entry", "Advance Payment Ledger Entry"):
             with self.subTest(ledger=ledger), patch.object(frappe, "db", SimpleNamespace(
-                exists=lambda doctype, filters: doctype == ledger)), \
-                patch.object(frappe, "throw", side_effect=frappe.ValidationError):
+                exists=lambda doctype, filters: doctype == ledger)):
                 with self.assertRaises(frappe.ValidationError):
                     self.guard.check_draft(self.doc(docstatus=0))
 
@@ -353,10 +377,10 @@ class ConsistencyTests(unittest.TestCase):
     def test_native_controller_checks_persisted_and_proposed_sales_identity_before_write(self):
         for old_link, new_link in (("SO", None), (None, "SO"), (None, None)):
             with self.subTest(old_link=old_link, new_link=new_link):
-                old = frappe.get_doc({"doctype": "Purchase Order", "name": "PO", "company": "C", "docstatus": 0,
-                    "inter_company_order_reference": old_link})
-                incoming = frappe.get_doc({"doctype": "Purchase Order", "name": "PO", "company": "C", "docstatus": 0,
-                    "inter_company_order_reference": new_link})
+                old = self.doc("Purchase Order", name="PO", company="C", docstatus=0,
+                    inter_company_order_reference=old_link)
+                incoming = self.doc("Purchase Order", name="PO", company="C", docstatus=0,
+                    inter_company_order_reference=new_link)
                 writes = []
                 def _save():
                     writes.append(True)
@@ -378,6 +402,7 @@ class ConsistencyTests(unittest.TestCase):
         context = {"gl_before": {"Payment Entry:PR": []}, "payment_before": {"Payment Entry:PR": {
             "Payment Ledger Entry": [], "Advance Payment Ledger Entry": []}}}
         with patch.object(self.guard.operation, "current", return_value=context), \
+             patch.object(frappe, "get_single_value", return_value=0), \
              patch.object(self.guard, "_payment_gl_plan", return_value=[]), \
              patch.object(self.guard, "_ledger", side_effect=lambda doc, doctype, **kw:
                 [frappe._dict(delinked=0)] if doctype == "Advance Payment Ledger Entry" else []):

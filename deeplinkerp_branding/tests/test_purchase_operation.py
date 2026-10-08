@@ -10,6 +10,7 @@ import frappe
 
 from deeplinkerp_branding.services import purchase_document_actions as actions
 from deeplinkerp_branding.services import purchase_operation as kernel
+from deeplinkerp_branding.tests._purchase_test_support import install_native_throw, install_request_state
 
 
 class AuditDatabase:
@@ -38,6 +39,8 @@ class AuditDatabase:
 
 class DurableOperationTests(unittest.TestCase):
     def setUp(self):
+        install_request_state(self)
+        install_native_throw(self)
         self.db = AuditDatabase()
         # Audit storage is intentionally in-memory; do not infer physical
         # session evidence from it. Dedicated session/native tests own that.
@@ -52,13 +55,12 @@ class DurableOperationTests(unittest.TestCase):
         self.doc.check_permission = Mock()
         self.result = {"document": {"doctype": "Payment Entry", "name": "PE", "docstatus": 0, "amount": 10, "currency": "CNY"}}
         self.stack = [patch.object(frappe, "session", SimpleNamespace(user="QA")),
-            patch.object(frappe, "flags", frappe._dict()), patch.object(frappe, "db", self.db),
+            patch.object(frappe, "db", self.db),
             patch.object(frappe, "cache", return_value=self.cache),
             patch.object(frappe, "get_doc", side_effect=self.db.audit),
             patch.object(frappe, "logger", return_value=Mock()),
             patch.object(actions, "_locked", return_value=self.doc),
-            patch.object(actions, "_payment", side_effect=lambda doc: dict(self.result)),
-            patch.object(frappe, "throw", side_effect=lambda message, exc=frappe.ValidationError: (_ for _ in ()).throw(exc(message)))]
+            patch.object(actions, "_payment", side_effect=lambda doc: dict(self.result))]
         for item in self.stack:
             item.start(); self.addCleanup(item.stop)
         self.key = "12345678-1234-1234-1234-123456789abc"
@@ -89,14 +91,21 @@ class DurableOperationTests(unittest.TestCase):
 
     def test_deadlock_retries_at_most_three_whole_transactions(self):
         calls = []
+        frappe.response.update(docs=[{"name": "ORIGINAL"}], marker="before")
+        frappe.message_log.append("original message")
         def write():
             context = kernel.current()
             self.assertFalse(context["documents"], "Rolled-back artifacts must not survive a retry")
             self.assertFalse(context["after"])
+            self.assertEqual(frappe.response, {"docs": [{"name": "ORIGINAL"}], "marker": "before"})
+            self.assertEqual(frappe.message_log, ["original message"])
             calls.append(context)
             if len(calls) < 3:
                 context["documents"].append({"doctype": "Payment Entry", "name": "ROLLED-BACK"})
                 context["after"]["Payment Entry:ROLLED-BACK"] = {"docstatus": 0}
+                frappe.response["docs"].append({"name": "ROLLED-BACK"})
+                frappe.response["marker"] = "phantom success"
+                frappe.message_log.append("phantom success")
                 raise (frappe.QueryDeadlockError(Exception(1213, "deadlock")) if len(calls) == 1 else
                     frappe.QueryTimeoutError(Exception(1205, "lock timeout")))
             return self.result

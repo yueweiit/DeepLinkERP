@@ -5,9 +5,12 @@ from unittest.mock import Mock, patch
 
 import frappe
 
+from deeplinkerp_branding.tests._purchase_test_support import install_native_throw
+
 
 class ReversalInstallTests(unittest.TestCase):
     def setUp(self):
+        install_native_throw(self)
         path = "deeplinkerp_branding.purchase_reversal_install"
         self.assertIsNotNone(importlib.util.find_spec(path), "Narrow reversal metadata installer is missing")
         self.install = __import__(path, fromlist=["install"])

@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 import frappe
 
 from deeplinkerp_branding.services import purchase_document_actions as actions
+from deeplinkerp_branding.tests._purchase_test_support import install_request_state, native_throw
 
 
 def document(doctype, name="PO", **values):
@@ -18,6 +19,9 @@ def document(doctype, name="PO", **values):
     doc.get = lambda field, default=None: getattr(doc, field, default)
     doc.set = lambda field, value: setattr(doc, field, value)
     doc.is_new = lambda: not bool(doc.name)
+    doc.flags = frappe._dict()
+    doc.as_dict = lambda **kwargs: {key: value for key, value in vars(doc).items()
+        if key != "flags" and not callable(value)}
     doc.has_permission = lambda permission: True
     doc.check_permission = Mock()
     return doc
@@ -109,6 +113,7 @@ class QuantityCapTests(unittest.TestCase):
 
 class OrderInvoiceMappingTests(unittest.TestCase):
     def setUp(self):
+        install_request_state(self)
         for method in ("execution", "initialize"):
             guard = patch("deeplinkerp_branding.services.purchase_repost_boundary." + method,
                 return_value=nullcontext() if method == "execution" else None)
@@ -221,22 +226,32 @@ class OrderInvoiceMappingTests(unittest.TestCase):
     def test_new_order_invoice_requires_source_version_before_mapping(self):
         source = document("Purchase Order")
         cache = SimpleNamespace(lock=lambda *args, **kwargs: nullcontext(), get_value=lambda key: None)
+        rollback = Mock()
         with patch.object(frappe, "session", SimpleNamespace(user="QA")), patch.object(frappe, "cache", return_value=cache), \
+             patch.object(frappe, "db", SimpleNamespace(rollback=rollback)), patch.object(frappe, "logger", return_value=Mock()), \
+             patch.object(actions.purchase_operation, "_existing", return_value=None), \
+             patch.object(actions.purchase_operation, "_reserve") as reserve, \
              patch.object(actions, "_locked_source", return_value=source), patch.object(actions, "_source", return_value=(source, {})), \
-             patch.object(actions, "_native") as mapper, patch.object(frappe, "throw", side_effect=frappe.ValidationError):
+             patch.object(actions, "_native") as mapper, patch.object(frappe, "throw", side_effect=native_throw):
             with self.assertRaises(frappe.ValidationError):
                 actions.save_document_draft("Purchase Order", "PO", "Purchase Invoice", {}, "12345678-1234-1234")
         mapper.assert_not_called()
+        reserve.assert_called_once(); rollback.assert_called_once_with()
 
     def test_stale_source_version_is_rejected_before_mapping(self):
         source = document("Purchase Order")
         cache = SimpleNamespace(lock=lambda *args, **kwargs: nullcontext(), get_value=lambda key: None)
+        rollback = Mock()
         with patch.object(frappe, "session", SimpleNamespace(user="QA")), patch.object(frappe, "cache", return_value=cache), \
+             patch.object(frappe, "db", SimpleNamespace(rollback=rollback)), patch.object(frappe, "logger", return_value=Mock()), \
+             patch.object(actions.purchase_operation, "_existing", return_value=None), \
+             patch.object(actions.purchase_operation, "_reserve") as reserve, \
              patch.object(actions, "_locked_source", return_value=source), patch.object(actions, "_source", return_value=(source, {})), \
-             patch.object(actions, "_native") as mapper, patch.object(frappe, "throw", side_effect=frappe.ValidationError):
+             patch.object(actions, "_native") as mapper, patch.object(frappe, "throw", side_effect=native_throw):
             with self.assertRaises(frappe.ValidationError):
                 actions.save_document_draft("Purchase Order", "PO", "Purchase Invoice", {}, "12345678-1234-1234", expected_source_modified="old")
         mapper.assert_not_called()
+        reserve.assert_called_once(); rollback.assert_called_once_with()
 
     def test_legacy_retry_digest_is_unchanged_when_source_token_absent(self):
         source = document("Purchase Receipt", "PR")
@@ -371,6 +386,7 @@ class NativeQueryTests(unittest.TestCase):
 
 class PaymentCompletionTests(unittest.TestCase):
     def setUp(self):
+        install_request_state(self)
         guard = patch("deeplinkerp_branding.services.purchase_repost_boundary.execution", return_value=nullcontext())
         guard.start(); self.addCleanup(guard.stop)
 
