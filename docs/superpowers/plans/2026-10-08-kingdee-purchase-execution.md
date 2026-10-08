@@ -312,6 +312,42 @@ class ReversalScope:
 
 C1执行前新增固定源核查（仅设计证据、未实施）：原MES producer在HTTP请求登记 `request.after_response`，原Frappe异常会rollback但该队列仍可能由ClosingIterator执行；因此必须在登记回调前、MR同事务登记intent，回调冻结真实身份，并在派发前读取已提交intent；rollback后的残留回调不得生成幽灵同步。原IR status/service为可空字符串，CI collation下 `status <> 'Completed'` 可能把未知大小写／尾空格值排除；真实索引与EXPLAIN需同时证明严格终态语义和有界读取，不能把未经证明的request_id新语义或全表JSON扫描当既定方案。原get_bin已有缓存/普通RR读及并发unique回退，MES在等待锁后汇总也可能沿用旧RR视图；必须沿真实调用点复用原数学并证明current-read，不只检查新指针。上述均纳入C1原有契约及真实RED，不另建流程或先开放D。
 
+#### C1 冻结候选与限定验收边界（2026-10-09）
+
+实现者已释放全部源码/index/schema/QA/Redis 所有权，冻结 `b327d5e55359547ce0246c212359a5d40fd431a5`，基线 `3aee71852fb3dd7223228e4aa2caf8621d25577e`。主线程已核对实际 commit、干净工作树、八文件 diff 和源码 SHA；正式 fresh SPEC→QUALITY 和主线程独立运行尚未完成。这是 C1 候选，不是完整采购或发布验收。
+
+- 一个 focused `purchase_native_intent.py` 复用同一物理 Session/fence、原 MES 队列/锁/数量计算和现有 IR/审计保留；不新增库存账、DocType、每 pair 锚记录、MR 第七指针、scanner、调度器或重算执行器。真实 MR parent 事务先登记再注册 callback；rollback 残留 callback 不派发，callback 丢失仍留持久 intent。
+- **批准的两层来源身份：** 完整 persisted `as_dict` SHA/modified 保留为登记、执行、ACK/replay 证据；producer 身份只排除原生派生/审计字段：MR `modified/modified_by/per_ordered/per_received/transfer_status`，MRI `modified/modified_by/ordered_qty/received_qty`。原生 `status_map` 的普通展示进度归为 eligible，Stopped/Cancelled 保留为不同的因果事实，未经新 producer 登记的资格变化拒绝，未知状态拒绝；正常停用／取消的新 generation 仍委托原生需求清零逻辑，而非绝对禁止执行。未知字段、请求数量/stock_qty/换算、child/item/warehouse/company/type/docstatus 都保留。真实 PO→PR mapper/submit 形成的 ordered/received 进度不得误判成未登记的业务变更，未登记请求事实改变仍拒绝。
+- 每次真实 flagged producer 都有新 UUID，包含完整来源及 scoped old/new pairs；同 MR 恢复仅认冻结的 same-actor group，各 generation 只保存自己的 pair 子集和完整 claim 身份。旧 callback 不吸收新 generation；mixed-actor 拒绝，不猜 Administrator 或“最新用户”。
+- SERVICE 为 `DeepLinkERP native MES Bin intent`，仅实际 fixed-claim current Bin/nonstock 核对与规范 Completed/ACK 同物理 commit 才确认。入队返回、MES Task Success、RQ finished、空返回或普通 flag 都不是 ACK；新 Job 用真实 Queue.enqueue_call meta/DefaultSerializer，旧 Queued/Started payload 不修改。
+- 单个 virtual tinyint `custom_purchase_native_intent_active` 与完整 `(integration_request_service, active, name)` 索引只是有界 selector；BINARY 精确 SERVICE+Completed+ACK 才为 inactive，其余 NULL/未知/大小写/尾空格仍 active。CI service、active=1、FORCE INDEX、ORDER BY name、LIMIT 5001、FOR UPDATE 和零集合均在 fence 下；实际 data+output 长度先于正文读取，保留 5000 records/2500 pair/4 MiB 单条/16 MiB 总量。ACK output 全批预算在首笔 ACK 写入前核对，超限整体回滚 Bin/ACK，不截断。
+- 原 MES producer/lock generator/sync/release 采用保留 Function identity 的适配，实际磁盘和 loaded code/globals/defaults/closure/固定对象及依赖一并核查；真实原生 GET_LOCK 每次成功获得 Session/epoch token，旧 finally callback 不能释放后来同名锁。实际 mysqlclient bytes 锁名按已验证 ASCII bytes 等价处理，native 大写异名不 casefold。原 get_bin/unique fallback 和需求聚合在持锁时 current locking read，snapshot=1/RR 不改；旧 RR 冲突 1020 整体回滚后只能用新事务恢复。
+- IR native 文档写入/命名/状态/rename/delete 与 routine retention 按持久+proposed 身份保护；creation-only LogSettings IR compaction 在第一笔 DDL/commit 前拒绝。普通其他 SERVICE/doctype 委托原生。不声称任意 raw SQL 或未知 hook-skipping 路径已保护。
+
+实现者最终运行证据：site-free/optional-absence/initialized 各 **693 methods/517 subtests/exit0**，native **137 methods/370 subtests/316.225s/exit0**，Node **479 passed/0 failed/0 skipped**，19 文件 compile、diff 和夹具异常清理检查 exit0；这是实现者结果，尚未由主线程重新执行。主线程只读核对两份 before/after 日志 byte-identical：44 主计数、六空指针、12 MRO 与 scheduler 未变；辅助 DefaultValue229/DocShare137/HasRole869/UserPermission3/ErrorLog296/MES0/0 的完整行摘要一致；仅原 gunicorn90965/90993。helper SHA `485ad67b642ca384929970f2824f85ca9f508ed293d0c3e86a81e95f4e1e59b1`，native harness SHA `9c5fe18734c582c5645aa973994cfb7a81046d77adfc99b1abfb4b486c9abd47`；交接 `/tmp/dlp-c1-freeze-handoff.md`，日志及八源码 SHA manifest 同目录保留。
+
+原生 RED、夹具失败与最终 pass 分开保留：真实 PO 派生进度、RQ meta、bytes SERVICE/锁、output budget/callable 失败不得改称首次 green。首次完整 native **137/365/exit1** 唯一失败是 MyISAM Error Log 的精确 own artifact 清理，不是事务 rollback 能恢复 MyISAM；后续同一测试仅补 own-ref 记名，未改 Finance/logger。无 pre-C1 DocShare 基线，八条有直接归属证据的 fixture share 经批准清理，四条仅时间关联的候选保留在137行，不声称已恢复 pre-C1 全量。
+
+变更为八文件 **+2618/-7，净+2611**：新 helper1007行；installer +59/-0、operation +48/-2、boundary +68/-2、三 unit fixture 共 +9/-2，原生脚本 +1427/-1。无删除文件、原生/Finance/UI 改动或复制队列/数学；native96/225→137/370，新增41方法与145参数展开，不把参数当独立业务流程。兼容退出仍以原生提供等价持久身份、锁/当前读和真实调用迁移为条件，不虚构日期。
+
+**继续 HOLD：** C3 真 worker/fork/recursive retry 的有效 actor 尚未证明；mixed-actor group、超 output 预算 group 的有界批处理、生产11.8.6 matched-engine DDL 与未知 hook-skipping 路径尚未接受。5000 是 selector 上限，不保证5000条同 MR group 的 claim 重复输出都能容纳16 MiB。C2/C3/D/E/合并/来源/UI/browser/GitHub CI/Vultr 尚未验收，不因本候选允许实际异步取消。
+
+**C1 fresh SPEC 不通过（同日，尚未进入 QUALITY）：** 主线程独立核对实际源码后，将两项 Important 交回同一 writer 做真实 RED→GREEN：① `protected()` 对 name 使用 Python 精确 startswith，但 native name/retention 为 CI namespace；新建或 rename 普通 SERVICE 到大小写/重音等价的预留前缀可被准入，既有 canonical SERVICE 记录仍受 stored guard 保护，不能把该缺口说成已证实覆盖原审计。② late-flag gate 只在 document boundary，普通 MR insert 已持有非 fence 租约后，直接 `update_requested_qty()` 会走固定 MES mixin→register，绕过 submit/save gate 再取 fence；必须把同一出版顺序不变量放到 producer 登记前，不中途释放锁或重排事务。现有绿色日志没有这两条真实场景，保持待修，不启用 C2/C3/D 或部署。active-read 的 data+output 预算与终态 ACK output 预算的区别已明确，不增加未经批准的 persisted terminal-group 预算或 enqueue 前来源校验要求。
+
+两项整改冻结为 `59df601cabc91cffd93b3f8e9c64206e11c364c8`，同一 namespace comparator 复用 native CI equality/prefix，同一 publication-order gate 同时供 document 与 register 使用；四文件 +92/-26、净66，不增加协议或兼容别名。真实前缀 RED44参数、late producer RED2路径和首次 fixture 错误分别留档；实现者最终 unit 三环境693/517、native137/417、Node479、19文件compile与夹具异常恢复通过，主线程已核对来源／实际日志但**尚未独立运行**。C1整体基线→整改为八文件 +2684/-7，native独立方法仍137，370→417仅现有两个矩阵参数展开。
+
+整改后的 fresh SPEC **PASS**；fresh QUALITY **WITH FIXES**，无 Critical，但发现一 Important：installer 对 `Key_name`／生成列 `COLUMN_NAME` 使用 Python 精确身份，漏掉实际 native 大小写等价元数据，可能在最终拒绝之前已执行第一笔 ADD COLUMN。另有一 Minor：ordinary release 先 `any()` 消耗 untracked generator，再传给原生 for-loop导致不释放；实际 frozen callback tuple 安全。主线程只读核对固定 mysqlclient.has_index/add_index 与 release helper 确认因果；两项仍是源码发现，不声称线上已发生或已跑实际 DDL。重新交同一 sole writer 做限定 RED→GREEN，复用已有元数据冲突和原生锁矩阵，所有冲突应在第一笔 DDL 前拒绝，不改写既有元数据。整改、复审和主线程独立 QA 完成前不接受 C1、不进入 C2/C3/D 或部署。
+
+**C1 正式限定验收（2026-10-09）：** 上述 QUALITY 两项经真实 RED→GREEN 后冻结 `ef088833470edb85b5407a8da04e45251d0d3a2d`。同一 installer 使用服务端过滤的列／索引元数据并核对完整定义和实际物理列名，冲突在 DDL 前拒绝；兼容大小写别名幂等，不扩大为 native `has_column` 的全面兼容声明。同一 release adapter 只物化一次 iterable，校验及原生委托复用该 tuple，原名称、顺序和 acquisition token 不变。六个元数据与六个 iterable 参数复用既有矩阵，无新增平行测试／协议。真实 RED 七项失败保留，第一笔业务 IR DDL 被拦截而未执行；GREEN 四方法成功。随后 fresh 独立 SPEC→QUALITY 均 **PASS**，无剩余 Critical／Important／可行动 Minor。
+
+主线程对同一冻结独立串行执行，实际 exit0：`/tmp/dlp-c1-root-ef088-sitefree.log` **693/517/46.93s**、`...-optional.log` **693/517/47.60s**、`...-initialized.log` **693/517/50.35s**；`...-native.log` **137 methods/429 subtests/320.600s**，SHA256 `b83b6efc6716bd751f51108c9ef5475bc8b8cd766fb7897d6df5fc8ee265f640`；Node **479 pass/0 fail/0 skip/364.111208ms**，19文件编译和真实夹具 setup/method/subtest 故障 cleanup 通过。原生脚本保持顶层 `frappe.in_test=False`；optional/initialized 八个请求协作对象恢复，实际 native 异常类及消息保持。实现者日志与主线程复验分别保留，不冒称首次 GREEN 或 GitHub CI 已通过。
+
+主线程 `...-proof-{before,after}.log` 的44类计数、User Permission3、六列／完整索引／空指针、十二MRO、scheduler事实 byte-identical；`...-extra-{before,after}.log` 的辅助完整行摘要、IR schema/index、native源SHA与本站MR RQ keys也 byte-identical。三份 proof/source diff 和 compile/diff/index-check 日志均空且 exit0，仅原 gunicorn90965/90993，没有 worker/scheduler/QA/probe 遗留。本窗口无人工清理；既有四条归属不明 DocShare 继续保留，不声称恢复 pre-C1 全量数据。测试前后八源码 SHA 相同，root DOC 在业务冻结范围外。
+
+实际基线 `3aee7185`→`ef088833` 为八文件 **+2792/-7，净+2785**：手写业务 **+1196/-4**，测试 **+1596/-3**；新 helper1010行，其余复用既有 installer/operation/boundary/测试。无删除文件、原生文件／Finance／UI改动、第二库存账／队列／计算器。native96/225→137/429，增加41独立方法、204参数检查；unit693/517不变。最后一次整改仅三文件 **+118/-10**，不能把逐次替换的 numstat 相加冒充整体新增。旧原生调用者仍使用原 Function identity 和原数学／队列；只有原生提供等价持久身份、物理锁／当前读和真实调用迁移验证后才退出适配，不虚构截止日期。
+
+据上述源码、两阶段审查及主线程 fresh 执行接受**有限 C1**，允许进入下面单 voucher 的 C2A；不是接受实际异步取消。C3 worker/actor/drain、mixed-actor恢复、预算超限批处理、生产 MariaDB11.8.6同引擎 DDL、未知 hook-skipping、D/E、合并／来源／UI/browser／GitHub CI／联合 Vultr 发布仍 HOLD，历史数据不处理。
+
 只读核查基线为 native Frappe/ERPNext 16.23.0；主线程已独立核对文件 SHA256：RIV `c4449547d07c76fd316a5b2185d4c9b60bd42e8747767fe28aea28cbc2ceafe1`，background_jobs `7db969deeb19e4a49924c2a59bcdc15e470a3d24d718845ea790fffd94046f45`，ScheduledJobType `80fbb163946521e1413d4ffa6fc8b777d003ee822ba420b4af6b84a47e4875ac`。这些是本地设计核查证据，不代表已跑 worker 并发测试或线上已对齐；发布候选必须重新验证实际原生版本及能力。
 
 - [ ] 先写直接并行 RQ 与 Scheduled Job 两条真实入口的失败测试。Frappe `execute_job` 在 before_job 前已解析直接 callable；before_job 必须为该 captured 原生 executor 取得 lease。ScheduledJobType 在调用自身 method 时才解析函数，before_job 安装一次 process-local `execute_reposting_entry` 包装器，为原生循环逐项取锁。包装器仅调用保存的原函数，不改调度策略、时间窗或算法。
@@ -335,6 +371,19 @@ C1执行前新增固定源核查（仅设计证据、未实施）：原MES produ
 - [ ] 原生 ready-for-migration 的 any_job_pending 只看队列 ID 和 started registry，并使用会触发 registry cleanup 的默认查询；不涵盖 intermediate、deferred/scheduled/created/stopped、回调及全部实际进程，不作为唯一 drain 证据。沿已核查 RQ 2.6.1 的只读原始队列/registry/execution/worker 身份核对完整范围，保留 orphan/缺 hash 的不确定性；不调用 purge、cleanup、重排队来制造空队列，也不将 pickle job_name 或 worker 的 RQ package version 当应用候选 SHA。
 - [ ] C3 HOST 预审与主线程固定源码复核：原 RQ prepare_execution 创建 Worker.execution，fork 继承该对象但只导出 RQ_WORKER_ID/RQ_JOB_ID，不存在可直接相信的 RQ_EXECUTION_ID。实际 pinned perform_job 与 Frappe execute_job frame 的有界只读 witness 可作为候选，但不改运行中的 frame locals、不取注册表“最新一条”冒充实际执行。before_job 在 native try 外，前置 after_job 抛错可跳过 destroy；租约必须有原 execute_job 的完整外层 owner 或实证等价 fork 生命周期清理，单加 after_job 不够。这些尚未实现或跑 fresh worker，不作为 C3 通过证据。
 - [ ] 保存 native 版本及相关入口的能力签名；升级变更在集成测试发现并失败关闭。冻结、专项/原生回归、规格审查、质量审查通过后才进入 1D。
+
+#### C2/C3 固定原生审计的后续实现精度（仍未实现）
+
+- C2 不只扩展 RIV class：`process_sle` 的真实 SLE/related 输出与 FIFO queue、stock checkpoint commit **早于** progress 写入、GL commit **早于** gl index 更新。复用同一 Session 的物理 COMMIT seam，在原 before_commit callbacks 后、物理 commit 前写同事务 chunk receipt；rollback 清除本 epoch 证据，未知 commit 响应须查持久结果。捕获真实 future SLE ID/最早 anchor 与完整 expected GL 计划，包括 unchanged/empty 覆盖，不用构造函数返回或 RIV Completed 代替。
+- 复用现有 ScopeCollector 的 SLE/anchors，不复制闭包。可信 lease 覆盖 native RIV rollback→error/status→finally commit、deduplicate 和 Frappe outer commit。普通原生 stock input、PR/PI 的 valuation/SVD 路径需核对实际 projection/multiset 与锁定当前事实；原生 class wrapper 单独不能覆盖 captured aliases 与内部 chunks。
+- checkpoint 沿原 `create_json_gz_file(file_name=None)` 候选，保留旧文件直到新 pointer+receipt commit；复用原 File 删除，实际 File/generation 而非“首个 attachment”是身份。raw overwrite/预提交物理删除不可冒称 DB 可回滚；共享 blob/hash/thumbnail、callback 丢失、删除后 ACK 前 crash 和 storage byte 上限要真实验收。
+- C3 沿实际 RQ `prepare_execution→fork→perform_job→Job.perform→execute_job` 的 execution/进程/site/原 method/serializer witness，不把环境 jobID、latest registry 或本地 flag 当实际身份。native recursive retry 丢 user，必须在真实 worker 内保留原 actor 与 C1 meta；不修改运行 frame locals。before_job/after_job 在 native try 边界外可失败，`os._exit` 可绕过 finally；须证明物理连接已消失、peer lease 已释放。Simple/Spawn/未知 worker 不自动视为支持。
+
+**C2A 的最小后续切片（C1 已限定接受，本切片未实施）：** 扩展同一 Session COMMIT seam 的 epoch receipt substrate，并用一个新合成、owned、Transaction GL-only RIV 跑真实控制器；限单 voucher、无旧 attachment/checkpoint、无 recreate/rerate，不设置 **reversal IR／应用最终 Completed/ACK**、不清指针。保留原生 RIV 自身 Completed/finally commit，但它不是冲销完成证据。IR 同一受理记录保留 immutable task/generation/actor/site/db/scope/native参数与 bounded partial receipt，区分 control-only commit 和真实 GL 效果；不调用会覆盖 data/output 并标 Completed 的同步 `complete_audit`，也不进入会覆盖 acceptance data 的普通 `operation.run/bind_operation/finish_native_audit` context。仅 private prospective ownership，逐项锁定实际 IR/RIV 身份，复用 publication fence 与来源／pair leases；普通 RPC/flags/pointer/docstatus 单独不能获得 authority，C3/D 不开放。callback reset、raw/nested commit、savepoint/full rollback、receipt-write failure、commit 响应未知及 GL commit→progress 更新失败先有实际 RED。stock constructor 即使少于2000行也会写 checkpoint，不能借“小批 stock”假装没有物理文件问题。
+
+原生 GL 的 per-voucher witness 候选是 `accounts_utils.repost_gle_for_stock_vouchers` 中 `toggle_debit_credit_if_negative` 的**直接调用返回**，早于比较/删除/记账，包含 expected-empty/existing-empty 分支；只适配 compare 或在外层返回观察都漏证据。主线程已只读取得并核对 QA 实际 `general_ledger.py`，HOST/container SHA均为 `c2228231802b3d979043bc91f0819b7d9e884c72c32051659456cbbe32f91b84`；helper365–406签名仅 `gl_map`、无 defaults/closure、原对象原顺序返回，实际金额处理含 base/account/transaction 三对字段。loaded-object/runtime 核查尚未执行；须复用同一 in-place auditor 保留 aliases，核查直接 caller edge 而非任意 ancestor frame，原返回对象/顺序不改，冻结完整有界拷贝及实际 voucher/chunk/precision/existingGL。嵌套 `get_gl_entries`／`process_gl_map` 内 toggle 仍透传；异常、空 input 或 resume index 跳过全部凭证不能冒称 coverage。这个 witness 只是 **pre-posting expected map**：后续 `process_gl_map` 分配成本中心／合并，`save_entries` 还处理差额／维度／提交，不能冒称已与最终 GL 相等。初期保留单 voucher 与 partial 限制，后续多 voucher chunk 在逐项 witness 真正验收后才放开。此段是 HOST 源支持的切片建议，不是 native/QA/规格/质量通过证据。
+
+C2A 输入证据须比较 native 实际 projected multiset／scalar 与同租约当前锁定事实，保留重复与原选择语义；app `current_reads` 仅替换本应用 reader，C1 query adapter 仅覆盖 Bin／MES，均不证明 native GL/SLE/PR/PI／缓存输入已 current。保存实际 native `get_field_precision(GL.debit) or 2`，不代换成币种／展示精度；existingGL 八列 projection 不冒称完整账务证据。真实旧 RR、peer GL/SLE/parent变化、重复投影／缓存过期须先 RED；无法证明的 native 分支保持 HOLD，不通过重跑写入算法造证据。GL-only 仍可原生删除／创建 PLE，须记录实际 PLE footprint 或实证 fixture 无 PLE，不扩大为应付／资金最终验收。
 
 ### Task 1D：原子受理、持久阶段与最终核对
 
@@ -363,6 +412,8 @@ C1执行前新增固定源核查（仅设计证据、未实施）：原MES produ
 - [ ] 覆盖响应丢失、重复点击、Redis 丢失、重启、两连接并发、native recoverable/permanent error、遗漏 child、Skipped after failure、审计篡改/retention 和 rollback 日志留存；顶层 `frappe.in_test=False`。
 - [ ] 专项/完整/原生/语法回归后冻结，先规格后质量审查；未完成该任务不开放生产 async。
 
+D 的只读完成校验必须由**实际 native input/branch 与 chunk receipt**验证真实输出，不能仅核对一套内部自洽但过时的数字。future frontier 保留实际 SLE IDs/anchors，不按全局日期扩到所有 footprint pair；reconciliation/serial/batch/negative stock 按真实分支，不套通用 qty×rate 或 queue sum。FIFO/LIFO 顺序也是未来估值输入，native GL expected 四列/维度/重复行须完整比较。缺 receipt/input/branch/future coverage 保持 HOLD；readonly verifier 不调用写入 executor。受理前遇 C1 active intersection 就拒绝，不先取消再互等；最终当前来源/Bin 指针清除和 Completed 同事务，RIV generation 终态关系永久保留，失败不重新 cancel 或开第二队列。
+
 ### Task 1E：统一进度显示，复用列表、抽屉和标准表单
 
 **Files:** 既有 `purchase_payment_service.py`、`purchase_document_actions.py`、`public/js/purchase_payments.js`、`purchase_payment_form.js`、`compact_list.js`，以及它们的现有 tests。
@@ -383,3 +434,4 @@ C1执行前新增固定源核查（仅设计证据、未实施）：原MES produ
 - [ ] 由既定唯一负责人 drain/部署/清缓存/重启并核查 Vultr SHA 和所有 worker 能力，再在线只读检查真实页面及 preview/cancel。线上真实提交/取消不得作为验收测试。所有影响页面尚未验收时不报告完整完成。
 - [ ] 发布脚本现有 narrow metadata scope 尚未包含六类 reversal 指针和 native scheduler 适配，需在最终候选扩展同一审计/窄安装/恢复工具；不能靠全局 migrate 顺便安装。现有 `quiesce_release_workers` 的 compose stop 不单独构成在途任务已 drain 的证明；记录真实 job/进程退出及恢复策略，保留队列和历史 RIV，完成门禁后才启用新异步取消。
 - [ ] 联合发布的不可自动回退边界必须早于任何原生 queue/scheduler/web producer 重新接写。当前脚本先启动这些服务，健康检查后才撤 EXIT 回退 trap；host source-sync mutex 不覆盖原生任务，不能将其解锁当唯一写入起点。接写前可以按精确 receipt 恢复，接写后出错应维护/HOLD并核对真实记录，不自动删字段、回旧镜像或声称业务已回滚。Finance 候选须同时进入精确源码 allowlist、approved_sources_after 和同一联合 receipt identity 校验；仅解除 overlay 禁令不足以实现联合发布。
+- [ ] 固定发布脚本的**最早接写**是 candidate backend/frontend/websocket 启动，不是随后 maintenance off/source mutex unlock。窄 metadata/cache/完整 after-audit 必须先在 command-only runner 完成；新旧 serving/producers 与在途 web/RQ/source 的实际只读 quiescence 证明先于备份。复用 `DDLReceipt._save` 的文件+目录 fsync，在第一条 web/RQ/scheduler/source resume 命令前持久写不可逆 resume-intent。恢复函数读取 marker 必须早于旧 compose/image/schema rollback；marker 存在或不可读均 maintenance/HOLD、留证据、前向恢复。pre-resume rollback 也保持 command-only，验证后其首次旧 writer resume 同样先登记；覆盖 marker 前/后、web/worker/maintenance/health/source handoff/SIGKILL，不能通过 purge/registry cleanup 伪造 drain。唯一发布负责人已确认此边界，尚无 runtime/deploy 验收。
