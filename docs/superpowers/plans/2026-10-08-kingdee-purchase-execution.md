@@ -141,12 +141,20 @@
 
 **Files:** 既有 `services/purchase_consistency.py`、`services/purchase_operation.py`、`services/purchase_document_actions.py`、采购表单桥、对应测试及 `deploy/local/test_purchase_document_actions_qa.py`。不改 ERPNext 核心、不实施新异步能力。
 
-- [ ] 冻结本轮五项补漏：合法零金额无 PLE；PO 真实 Bin 产物；MR/源 PI/履行关联及 Finance 真实产物；中国凭证日期/期间/反向关系；REST 取消通过删除旧采购引用逃出边界。
-- [ ] 在实际 `frappe.in_test=False` 的隔离库重跑原生脚本，并核对精确 fixture 清理、RIV 与账簿计数。命令：`docker exec -w /home/frappe/frappe-bench/sites dlp-kingdee-purchase-qa-backend-1 /home/frappe/frappe-bench/env/bin/python /workspace/deploy/local/test_purchase_document_actions_qa.py`。预期全部案例成功且计数恢复；不得用旧结果替代新提交证据。
+- [x] 冻结本轮五项补漏：合法零金额无 PLE；PO 真实 Bin 产物；MR/源 PI/履行关联及 Finance 真实产物；中国凭证日期/期间/反向关系；REST 取消通过删除旧采购引用逃出边界。随后追加 DN 销售关联识别，最新冻结 `b030f656`。
+- [x] 在实际 `frappe.in_test=False` 的隔离库重跑原生脚本，并核对精确 fixture 清理、RIV 与账簿计数。命令：`docker exec -w /home/frappe/frappe-bench/sites dlp-kingdee-purchase-qa-backend-1 /home/frappe/frappe-bench/env/bin/python /workspace/deploy/local/test_purchase_document_actions_qa.py`。预期全部案例成功且计数恢复；不得用旧结果替代新提交证据。
 - [ ] 对冻结 SHA 作规格复审；规格通过后才作独立质量审查。重要问题回到同一实现者修复，重新测试和复审。
 - [ ] 主线程独立重跑全部 Branding pytest、`node --test tests/*.test.js`、Python/JS 语法与 `git diff --check`。报告案例数、参数展开、跳过、现有告警，释放 QA 与 index 后进入 1B。
 
 2026-10-08 当前冻结补漏为 `eb02a1107ca411135fd6d61b37614fd64b25e4d8`，4 文件 +486/-17（业务源、单测、原生脚本、局部规格），不包括本执行计划。主线程独立实际复验：native 完整脚本 51 tests / 39.223s / OK；Branding 615 passed、325 subtests passed / 53.26s；Node 479 passed、0 failed/skipped；Python 编译、JS 语法及 diff 检查成功。原生脚本保持顶层 `frappe.in_test=False`，每个 fixture 清理后原计数恢复，重跑后容器只剩两个原有 gunicorn。规格复审与其后的质量审查仍未完成，不将这些 green 结果认定为安全阶段或完整采购候选验收。旧委外 supplied Bin 的新增案例是 native-shaped 单测，不是旧委外全业务原生验收。零 GL 取消留下 Finance Pending issue 仍失败关闭，作为当前限制明确保留。
+
+`eb02` 正式规格复审随后确认上述五项补漏，但仍为不通过：原生 inter-company Delivery Note→PR mapper 带入 `inter_company_reference/delivery_note_item`，PR 原生 updater 会改 DN Item.received_qty；现有 Sales 检查只检测 SO/Packed/reservation，遗漏该真实未适配来源并可能误报 N/A。源代码合法路径已确认，运行时成功提交尚未验证。交回原实现者独占 QA 做真实 red→green，最小识别并拒绝此未支持 Sales 来源，不扩展 Sales 同步或历史处理；修复后重复独立验证和规格复审，再进入质量审查。发布负责人已收到继续 HOLD 和未来旧 worker drain 门禁通知。
+
+**DN 补漏后的新检查点（仍不是 Task 1A 验收）：** 冻结 `b030f656f73e784f4c1c34d36b812f6984c9d694`，4 文件 +82/-8；生产 guard 只新增 5 行，复用现有 source read/lock 与 Sales fail-closed，不新增 Sales writer。合法跨公司非库存 DN→PR 原生 mapper 的真实 red 已观察到 PR 提交且 DN Item.received_qty 从 0→2；新 guard 拒绝该真实未适配关系，并检查 PI/PE 经 PR 的同一来源 ACL。测试脚本前向加入 Item Price 的同次精确身份/计数清理，既有历史 QA 残留未删。
+
+主线程对 `b030f656` 独立重跑：原生完整脚本 **52 tests / 36.747s / OK / exit 0**；全部 Branding **616 passed、331 subtests passed / 52.67s / exit 0**；Node **479 passed、0 failed/skipped / 397.821ms / exit 0**；四个 Python 源/脚本编译、采购表单 JS 语法、冻结范围及工作树 diff 检查均通过。每项原生 fixture 的 36 类受控计数恢复，含新增 Item Price；运行后仅两个原有 gunicorn。测试脚本 SHA256 `36063d1503607db6effea0948bad842bfe62961b2f57aa32dcee2e5e58929385`。
+
+实现者此前一次原生方法全绿但 finally 报 `NameError: fra`、命令 exit 1，不计通过；host/container 文件与编译名核对后无修改重跑正常，原因未证实，未加 catch 掩盖。上述主线程独立运行也正常退出。新的正式规格复审进行中，其后独立质量复审尚未开始；不因 green 测试提前进入 1B、不部署局部提交。
 
 ### Task 1B：范围、元数据与跨 commit 锁协议（先不放开取消）
 
