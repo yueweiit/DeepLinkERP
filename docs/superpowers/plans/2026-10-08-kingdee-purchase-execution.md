@@ -34,3 +34,24 @@
 - 全应用 migrate 在原有 Overseas workspace 的 `Overseas Cost ERP Settings` 链接处失败；未修改该无关模块。Branding/Finance 相关 schema 与三个安装钩子单独完成。发布必须沿用现有窄范围元数据工具，不能把这个 migrate 记为通过。
 - 全 Python 基线最初缺 pytest；补齐后曾因 QA 服务工作目录调整而被中断，尚未计入通过。最终需完整重跑。
 - `bench build --app deeplinkerp_branding` 完成，带既有 Browserslist 数据过期提示；后续前端变更仍需重新构建与真实页面验收。
+
+## 当前阻断：Finance 取消快照并非正确反向金额
+
+已保存本地安全边界提交 `bcfe1ce3d7c0ca03d717b3b0a24bd2d12baa9af1`（9 个文件，新增 1,259 行、删除 104 行）。统一 Integration Request 操作边界替代三个入口的 Redis-only 幂等；新增标准控制器源锁、原生库存/财务及逐键中国冲销检查、独立运行日志。尚未完成该阶段的规格/质量审查，也未实现剩余批量、自动草稿或金蝶式列表任务，因此不作为发布候选。
+
+主线程对该提交独立复验：
+
+- 初始化隔离 Frappe 后 `pytest .../deeplinkerp_branding/tests -q -p no:cacheprovider`：`597 passed, 314 subtests passed in 52.06s`。
+- `test_purchase_document_actions_qa.py` 新原子案例默认入口：8 项原生测试通过，3.548 秒；每项运行后核对恢复原记录计数。覆盖真实提交、库存/账务故障回滚、跨事务幂等、财务失败以及错误取消被拒绝；**不代表正确取消 happy path 已通过**。
+- `git diff --check` 通过。原生 ERPNext 带既有 V16 弃用提示。未执行新界面验收、集成发布 CI 或本轮生产部署。
+
+在对齐线上 Finance `4f019f91` 后，新增逐键冲销校验揭示原有服务问题：
+
+- `china_finance/services/voucher.py:720` 创建 Cancellation 时调用 `get_gl_entries(cancelled=True)`。
+- `:778–792` 仅过滤 `is_cancelled=1`，同时取到 ERPNext 标记取消的原 GL 和反向 GL。
+- `:729–730` 只有无 GL 时才使用已有 `reverse_voucher_entries`，有原+反向 GL 时不会走正确的原凭证反向。
+- 合成原生 PE 取消中，应付科目 Posting 净额为 `+10 CNY`，现金科目为 `-10 CNY`；取消快照两科目净额均为 `0`（本位币和科目币种相同），而不是 `-10 / +10`。来源链接、借贷平衡和服务返回 `resolved` 均不能证明正确冲销。
+
+原先只验平衡/状态的取消 happy path 不再计为通过。新的采购边界保持逐键金额检查并整体回滚，不能在 Branding 内重建或改写中国凭证掩盖缺陷。正确取消的集成验收须先修中国财务服务；该源码不在本工作树。
+
+已向唯一发布对话询问，对方确认没有 Finance 修复候选。对方另一个已批准的运营版本计划串行发布 Branding `00fee003b9cdbe8b43ee314406afa62487fc3b59`，仍保留 Finance `4f019f91`，该运营范围不提交/取消 PE、不产生 GL；并未包含本次采购改造。当前采购改造不部署，后续批量/同步/界面任务暂停，等待明确跨仓修复方向。
