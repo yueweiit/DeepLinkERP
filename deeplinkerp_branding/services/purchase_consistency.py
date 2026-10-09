@@ -10,6 +10,7 @@ import uuid
 import hashlib
 import json
 from copy import deepcopy
+from contextvars import ContextVar
 from decimal import Decimal
 
 import frappe
@@ -17,6 +18,9 @@ from frappe.utils import flt, getdate, get_timedelta
 
 from . import purchase_operation as operation
 from . import purchase_payment_service as service
+
+PI_HOLD_FIELDS = frozenset({"on_hold", "hold_comment", "release_date"})
+_native_hold = ContextVar("purchase_invoice_native_hold", default=None)
 
 
 def is_procurement(doc):
@@ -50,6 +54,7 @@ def snapshot(doc):
     return {"doctype": doc.doctype, "name": doc.name, "docstatus": doc.docstatus, "status": doc.get("status"),
         "modified": str(doc.get("modified") or ""), "amount": doc.get("paid_amount") if doc.doctype == "Payment Entry" else doc.get("grand_total"),
         "currency": doc.get("paid_from_account_currency") if doc.doctype == "Payment Entry" else doc.get("currency"),
+        **({"on_hold": doc.get("on_hold"), "release_date": str(doc.get("release_date") or "")} if doc.doctype == "Purchase Invoice" else {}),
         "items": [{"key": row.get("name"), "qty": row.get("qty"), "rate": row.get("rate"),
             "warehouse": row.get("warehouse")} for row in doc.get("items") or []]}
 
@@ -68,8 +73,10 @@ def business_payload(value):
     return value
 
 
-def artifact_evidence(doc):
+def artifact_evidence(doc, *, ignored_fields=()):
     facts = {"document": business_payload(doc.as_dict())}
+    for field in ignored_fields:
+        facts["document"].pop(field, None)
     facts["ledgers"] = {doctype: sorted(_ledger(doc, doctype), key=lambda row: row.name) for doctype in
         ("GL Entry", "Stock Ledger Entry", "Payment Ledger Entry", "Advance Payment Ledger Entry") if doc.doctype in
         ("Purchase Order", "Purchase Receipt", "Purchase Invoice", "Payment Entry")}
@@ -91,6 +98,33 @@ def artifact_evidence(doc):
         facts["bins"] = [frappe.db.get_values("Bin", {"item_code": item, "warehouse": warehouse}, "*", as_dict=True, for_update=True)
             for item, warehouse in sorted(bin_keys)]
     return hashlib.sha256(operation.encode(facts).encode()).hexdigest()
+
+
+def hold_evidence(doc):
+    """Only persisted facts: native hold must not alter money, sources or finance."""
+    identities, _ = resolve_source_documents(doc, reader=service._current)
+    identities.add((doc.doctype, doc.name))
+    documents = {identity: service._current(*identity) for identity in sorted(identities)}
+    for doctype in ("China Accounting Voucher", "China Voucher Sync Issue", "China Cash Flow Assignment"):
+        if not frappe.db.exists("DocType", doctype):
+            continue
+        for source_type, name in sorted(identities):
+            names = frappe.db.get_values(doctype, {"source_doctype": source_type, "source_name": name},
+                "name", for_update=True)
+            for (name,) in names:
+                documents[doctype, name] = frappe.get_doc(doctype, name, for_update=True)
+    return {identity: artifact_evidence(native, ignored_fields=PI_HOLD_FIELDS | {"modified", "modified_by"}
+            if identity == (doc.doctype, doc.name) else ()) for identity, native in documents.items()}
+
+
+def check_hold(doc, before):
+    evidence = hold_evidence(doc)
+    if evidence != before:
+        operation.reject("原生冻结操作改变了金额、来源或财务事实，操作已回滚", "invoice_hold_business_facts_changed")
+    for identity in sorted(evidence):
+        if identity != (doc.doctype, doc.name):
+            acknowledge_effect(frappe.get_doc(*identity, for_update=True), system_effect=identity[0].startswith("China "))
+    return [{"module": "native invoice hold / unchanged procurement and finance", "result": "verified"}]
 
 
 def acknowledge_effect(doc, *, system_effect=False):
@@ -209,6 +243,7 @@ def register_document(doc, method=None):
         frappe.db.before_commit.add(lambda: _before_commit(state))
         frappe.db.after_rollback.add(lambda: setattr(frappe.local, "purchase_consistency", None))
     key = (doc.doctype, doc.name)
+    state.get("hold_checks", {}).pop(key, None)  # a later real save requires the full business postcheck
     state["documents"][key] = doc
     context = state["context"]
     state["before_documents"].setdefault(key, old)
@@ -268,7 +303,9 @@ def check_registered(state=None):
         old = state["before_documents"][key]
         doc = frappe.get_doc(*key, for_update=True)
         doc._doc_before_save = old
-        modules.extend(check_document(doc))
+        hold_before = state.get("hold_checks", {}).get(key)
+        modules.extend(_stage(doc, "native invoice hold / unchanged facts", lambda: check_hold(doc, hold_before))
+            if hold_before is not None else check_document(doc))
         state["context"]["after"][doc.doctype + ":" + doc.name] = snapshot(doc)
     state["context"]["modules"].extend(modules)
 
@@ -1156,20 +1193,52 @@ class ProcurementControllerBoundary:
         with document_boundary(self):
             return self._procurement_call(super()._save, *args, **kwargs)
 
+    def _procurement_hold_call(self, native, payload, fields=PI_HOLD_FIELDS):
+        from .purchase_repost_boundary import _native_documents_action, execution
+        with execution():
+            persisted = service._read(self.doctype, self.name) if self.name and not self.is_new() else None
+            if not is_procurement(self) and not (persisted and is_procurement(persisted)):
+                return native()
+            def preflight(actual):
+                from .purchase_source_service import _write_fields
+                actual.check_permission("write")
+                _write_fields(actual.doctype, fields)
+            def write():
+                token = _native_hold.set(self)
+                try:
+                    return native()
+                finally:
+                    _native_hold.reset(token)
+            return _native_documents_action((self,), write, payload, preflight=preflight, hold_only=True)
+
+    def block_invoice(self, hold_comment=None, release_date=None):
+        native = super().block_invoice
+        return self._procurement_hold_call(lambda: native(hold_comment=hold_comment, release_date=release_date),
+            {"action": "block_invoice", "hold_comment": hold_comment, "release_date": release_date})
+
+    def unblock_invoice(self):
+        return self._procurement_hold_call(super().unblock_invoice, {"action": "unblock_invoice"}, {"on_hold", "release_date"})
+
     def db_set(self, fieldname, *args, **kwargs):
-        from .purchase_repost_boundary import POINTER, document_boundary, execution
+        from .purchase_repost_boundary import POINTER, execution
         if fieldname == POINTER or isinstance(fieldname, dict) and POINTER in fieldname:
             frappe.throw("库存保护指针不能由普通单据写入、清除或替换", frappe.PermissionError)
         fields = set(fieldname) if isinstance(fieldname, dict) else {fieldname}
-        if self.doctype == "Purchase Invoice" and fields & {"on_hold", "hold_comment", "release_date"}:
+        if self.doctype == "Purchase Invoice" and fields & PI_HOLD_FIELDS:
+            early_commit = kwargs.get("commit") or len(args) > 3 and args[3]
+            if _native_hold.get() is self and fields <= PI_HOLD_FIELDS and not early_commit:
+                return super().db_set(fieldname, *args, **kwargs)
             with execution():
                 persisted = service._read(self.doctype, self.name) if self.name and not self.is_new() else None
                 if is_procurement(self) or persisted and is_procurement(persisted):
-                    from .purchase_source_service import _write_fields
-                    self.check_permission("write")
-                    _write_fields(self.doctype, fields)
-                    with document_boundary(self):
-                        return super().db_set(fieldname, *args, **kwargs)
+                    if not fields <= PI_HOLD_FIELDS:
+                        operation.reject("冻结操作不能同时修改其他采购业务字段，请通过原生保存核对", "invoice_hold_mixed_fields")
+                    if early_commit:
+                        operation.reject("冻结操作不能在原生写入中提前提交，需完整核对后提交", "invoice_hold_early_commit")
+                    native = super().db_set
+                    return self._procurement_hold_call(lambda: native(fieldname, *args, **kwargs),
+                        {"action": "change_release_date" if fields == {"release_date"} else "db_set_hold",
+                            "fields": fieldname, "values": args, "options": kwargs}, fields)
         return super().db_set(fieldname, *args, **kwargs)
 
 

@@ -17,7 +17,7 @@ from .purchase_repost_boundary import procurement_entry
 
 SOURCES = {"Purchase Receipt", "Purchase Order"}
 PI_FIELDS = {"company", "supplier", "currency", "party_account_currency", "grand_total", "base_grand_total",
-             "rounded_total", "base_rounded_total", "disable_rounded_total", "outstanding_amount", "items", "is_return"}
+             "rounded_total", "base_rounded_total", "disable_rounded_total", "outstanding_amount", "items", "is_return", "on_hold"}
 
 _record_reader = ContextVar("purchase_payment_record_reader", default=None)
 
@@ -245,6 +245,11 @@ def _advance_reason(order):
     return ""
 
 
+def invoice_payment_eligible(doc):
+    """Match native PE's final on_hold refusal; release dates never auto-unhold."""
+    return doc.docstatus == 1 and not doc.is_return and not doc.get("on_hold")
+
+
 def payment_target(source_doctype, source_name, purchase_invoice=None):
     source = _source(source_doctype, source_name)
     chain = get_purchase_chain(source_doctype, source_name, include_payments=False)
@@ -262,7 +267,7 @@ def payment_target(source_doctype, source_name, purchase_invoice=None):
             frappe.throw("应付单与当前采购单据没有明确关联")
         if target.company != source.company or target.supplier != source.supplier:
             frappe.throw("付款公司和供应商必须与来源一致")
-        if target.docstatus != 1 or target.is_return or target.invoice_is_blocked():
+        if not invoice_payment_eligible(target):
             frappe.throw("应付单未提交、为退货或已暂停付款")
         return source, target, invoice_balance(target)
     if source_doctype != "Purchase Order":
@@ -509,10 +514,10 @@ def _invoice_row(doc, source_type, source_name):
     field = "purchase_receipt" if source_type == "Purchase Receipt" else "purchase_order"
     shared = any(row.get(field) != source_name for row in doc.items)
     balance = invoice_balance(doc) if doc.docstatus == 1 else {}
-    blocked = doc.invoice_is_blocked() if doc.docstatus == 1 else False
+    blocked = bool(doc.get("on_hold")) if doc.docstatus == 1 else False
     return {"name": doc.name, "docstatus": doc.docstatus, "is_return": bool(doc.is_return),
             "shared": shared, "scope_label": "共享应付整单余额" if shared else "关联应付余额",
-            "can_pay": bool(doc.docstatus == 1 and not doc.is_return and not blocked and balance.get("outstanding", 0) > 0),
+            "can_pay": bool(invoice_payment_eligible(doc) and balance.get("outstanding", 0) > 0),
             "blocked": bool(blocked), **balance}
 
 

@@ -1766,7 +1766,7 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
             deletion.assert_not_called()
 
     def test_native_purchase_invoice_hold_db_set_pending_refuses_entire_block_and_clear_works(self):
-        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary, purchase_consistency as guard, purchase_operation as kernel
         from erpnext.accounts.doctype.purchase_invoice.purchase_invoice import block_invoice, unblock_invoice, change_release_date
         po = self.order()
         pi = make_purchase_invoice(self.receipt(po).name).insert()
@@ -1781,15 +1781,60 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
             self.assertEqual(frappe.db.get_value(pi.doctype, pi.name, ["on_hold", "hold_comment", "release_date"]), before)
         frappe.db.set_value(pi.doctype, pi.name, boundary.POINTER, None, update_modified=False)
         self.commit_fixture()
-        block_invoice(pi.name, add_days(nowdate(), 2), "QA hold")
-        self.assertEqual(frappe.db.get_value(pi.doctype, pi.name, ["on_hold", "hold_comment"]), (1, "QA hold"))
-        self.commit_fixture()
-        change_release_date(pi.name, add_days(nowdate(), 3))
-        self.assertEqual(str(frappe.db.get_value(pi.doctype, pi.name, "release_date")), add_days(nowdate(), 3))
-        unblock_invoice(pi.name)
-        self.assertEqual(frappe.db.get_value(pi.doctype, pi.name, ["on_hold", "release_date"]), (0, None))
+        for submitted in (False, True):
+            if submitted:
+                pi.reload().submit(); self.commit_fixture()
+            for action, call, expected in (
+                    ("block", lambda: block_invoice(pi.name, add_days(nowdate(), 2), "QA hold"), (1, add_days(nowdate(), 2))),
+                    ("change-release", lambda: change_release_date(pi.name, add_days(nowdate(), 3)), (1, add_days(nowdate(), 3))),
+                    ("unblock", lambda: unblock_invoice(pi.name), (0, None))):
+                with self.subTest(submitted=submitted, action=action):
+                    from frappe import permissions
+                    native_permission = permissions.has_permission
+                    def write_only(doctype, ptype="read", *args, **kwargs):
+                        return False if doctype == pi.doctype and ptype == "submit" else native_permission(doctype, ptype, *args, **kwargs)
+                    self.remember_effects()
+                    self.fixture_effects.pop((pi.doctype, pi.name))
+                    old = frappe.get_doc(pi.doctype, pi.name).as_dict()
+                    audits = set(frappe.get_all("Integration Request", pluck="name"))
+                    with patch.object(guard, "check_finance", side_effect=AssertionError("Hold must not calculate or repair finance")), \
+                         patch.object(permissions, "has_permission", side_effect=write_only):
+                        self.assertIsNone(call())
+                        self.commit_fixture()
+                    new = set(frappe.get_all("Integration Request", pluck="name")) - audits
+                    self.assertEqual(len(new), 1, "One audit for the complete native hold action")
+                    audit = frappe.get_doc("Integration Request", next(iter(new)))
+                    facts, receipt = json.loads(audit.data), json.loads(audit.output)
+                    self.assertEqual(receipt["permission"], "write")
+                    self.assertEqual(next(row for row in receipt["artifacts"] if row["name"] == pi.name)["permission"], "write")
+                    self.assertEqual(facts["after"][pi.doctype + ":" + pi.name]["on_hold"], expected[0])
+                    self.assertEqual(str(frappe.db.get_value(pi.doctype, pi.name, "release_date")) if expected[1] else None, expected[1])
+                    current = frappe.get_doc(pi.doctype, pi.name).as_dict()
+                    for field in ("on_hold", "hold_comment", "release_date", "modified", "modified_by"):
+                        old.pop(field, None); current.pop(field, None)
+                    self.assertEqual(current, old)
+                    self.assert_effects_unchanged()
+                    # A hold action and its replay require write, even for a submitted PI.
+                    with patch.object(permissions, "has_permission", side_effect=write_only):
+                        kernel.replay_artifacts(receipt)
+                        guard._form_replay(receipt)
+            if submitted:
+                from frappe.client import set_value
+                with self.assertRaises(frappe.ValidationError):
+                    set_value(pi.doctype, pi.name, {"on_hold": 1})  # native allow_on_submit remains authoritative
+                with self.assertRaises(frappe.ValidationError):
+                    frappe.get_doc(pi.doctype, pi.name).db_set({"on_hold": 1, "grand_total": pi.grand_total + 1})
+                self.assertEqual(frappe.db.get_value(pi.doctype, pi.name, "on_hold"), 0)
+                with self.assertRaises(frappe.ValidationError):
+                    frappe.get_doc(pi.doctype, pi.name).db_set("on_hold", 1, commit=True)
+                with patch.object(permissions, "has_permission", side_effect=lambda doctype, ptype="read", *a, **kw:
+                        False if doctype == pi.doctype and ptype == "write" else native_permission(doctype, ptype, *a, **kw)):
+                    with self.assertRaises(frappe.PermissionError): block_invoice(pi.name, None, "QA denied")
+                    with self.assertRaises(frappe.PermissionError): kernel.replay_artifacts(receipt)
+                self.assertEqual(frappe.db.get_value(pi.doctype, pi.name, "on_hold"), 0)
 
     def test_native_purchase_invoice_partial_hold_failure_rolls_back_prior_real_fields(self):
+        from deeplinkerp_branding.services import purchase_consistency as guard, purchase_operation as kernel
         from erpnext.accounts.doctype.purchase_invoice.purchase_invoice import block_invoice, unblock_invoice, change_release_date
         po = self.order()
         pi = make_purchase_invoice(self.receipt(po).name).insert()
@@ -1840,6 +1885,68 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
                 self.assertEqual(frappe.db.get_value(pi.doctype, pi.name, fields), before)
                 self.assertEqual({doctype: frappe.db.count(doctype) for doctype in self.types}, counts)
                 self.assert_effects_unchanged()
+        pi.reload().submit(); self.commit_fixture()
+        for failure in ("postcheck", "audit"):
+            with self.subTest(failure=failure):
+                self.remember_effects()
+                fields_before = frappe.db.get_value(pi.doctype, pi.name, fields)
+                counts = {doctype: frappe.db.count(doctype) for doctype in self.types}
+                first_error = RuntimeError("QA hold " + failure + " failure")
+                target = patch.object(guard, "check_registered", side_effect=first_error) if failure == "postcheck" else patch.object(kernel, "complete_audit", side_effect=first_error)
+                with target, patch.object(kernel, "runtime_log", wraps=kernel.runtime_log) as logged, self.assertRaises(RuntimeError) as caught:
+                    block_invoice(pi.name, add_days(nowdate(), 4), "QA hold fail")
+                self.assertIs(caught.exception, first_error)
+                self.assertEqual(logged.call_args.args[1], "rolled_back")
+                self.assertEqual(frappe.db.get_value(pi.doctype, pi.name, fields), fields_before)
+                self.assertEqual({doctype: frappe.db.count(doctype) for doctype in self.types}, counts)
+                self.assert_effects_unchanged()
+        self.remember_effects()
+        counts = {doctype: frappe.db.count(doctype) for doctype in self.types}
+        native_set = frappe.db.set_value
+        corrupted = []
+        def corrupt_after_hold(doctype, name, fieldname, *args, **kwargs):
+            result = native_set(doctype, name, fieldname, *args, **kwargs)
+            if (doctype, name, fieldname) == (pi.doctype, pi.name, "release_date"):
+                native_set(pi.doctype, pi.name, "grand_total", pi.grand_total + 1)
+                native_set(po.doctype, po.name, "per_billed", 13)
+                corrupted.append(True)
+            return result
+        with patch.object(frappe.db, "set_value", side_effect=corrupt_after_hold), self.assertRaises(frappe.ValidationError) as caught:
+            block_invoice(pi.name, add_days(nowdate(), 4), "QA corrupt native hook")
+        self.assertEqual(caught.exception.purchase_error_id, "invoice_hold_business_facts_changed")
+        self.assertEqual(corrupted, [True])
+        self.assertEqual({doctype: frappe.db.count(doctype) for doctype in self.types}, counts)
+        self.assert_effects_unchanged()
+
+    def test_native_purchase_invoice_due_release_requires_explicit_unblock_for_payment(self):
+        from deeplinkerp_branding.services import purchase_document_actions as actions
+        from erpnext.accounts.doctype.purchase_invoice.purchase_invoice import block_invoice, unblock_invoice
+        po = self.order(qty=3, rate=10)
+        pr = self.receipt(po)
+        pi = make_purchase_invoice(pr.name).insert().submit()
+        self.commit_fixture()
+        draft = actions.record_payment(source_doctype="Purchase Receipt", source_name=pr.name, purchase_invoice=pi.name,
+            amount_to_pay=10, bank_account="Cash - QAB", request_id=str(uuid.uuid4()), confirm=0)["document"]
+        self.commit_fixture()
+        block_invoice(pi.name, add_days(nowdate(), -1), "QA due release still on hold")
+        self.commit_fixture()
+        self.assertFalse(pi.reload().invoice_is_blocked(), "Keep the native reached-date method unchanged")
+        chain = service.get_purchase_chain(pr.doctype, pr.name, include_payments=False)
+        row = next(row for row in chain["invoices"] if row["name"] == pi.name)
+        self.assertTrue(row["blocked"]); self.assertFalse(row["can_pay"])
+        for label, call in (("target", lambda: service.payment_target(pr.doctype, pr.name, pi.name)),
+                ("batch preparation", lambda: service.preview_payment_batch(pr.doctype, [{"name": pr.name}])),
+                ("draft preparation", lambda: service.create_payment_draft(pr.doctype, pr.name, pi.name,
+                    amount_to_pay=10, bank_account="Cash - QAB", request_id=str(uuid.uuid4()))),
+                ("saved PE confirmation", lambda: actions.submit_document("Payment Entry", draft["name"], draft["modified"]))):
+            with self.subTest(action=label), self.assertRaises(frappe.ValidationError): call()
+            self.assertEqual(frappe.db.get_value(pi.doctype, pi.name, "on_hold"), 1)
+            self.assertEqual(frappe.db.get_value("Payment Entry", draft["name"], "docstatus"), 0)
+        unblock_invoice(pi.name); self.commit_fixture()
+        self.assertTrue(next(row for row in service.get_purchase_chain(pr.doctype, pr.name, include_payments=False)["invoices"]
+            if row["name"] == pi.name)["can_pay"])
+        paid = actions.submit_document("Payment Entry", draft["name"], draft["modified"])["document"]
+        self.assertEqual(paid["docstatus"], 1)
 
     def test_material_request_backlink_requires_actual_detail_and_shared_union_budget(self):
         from deeplinkerp_branding.services import purchase_reversal_scope as scope

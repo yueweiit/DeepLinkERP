@@ -593,7 +593,7 @@ def _payment_balance(doc, validate_allocations=True):
             frappe.throw(ADVANCED)
         invoice = _locked("Purchase Invoice", row.reference_name)
         service._require_fields("Purchase Invoice", service.PI_FIELDS)
-        if invoice.company != doc.company or invoice.supplier != doc.party or invoice.docstatus != 1 or invoice.is_return or invoice.invoice_is_blocked():
+        if invoice.company != doc.company or invoice.supplier != doc.party or not service.invoice_payment_eligible(invoice):
             frappe.throw("应付来源状态、公司或供应商已改变")
         for source_type, linkfield in (("Purchase Order", "purchase_order"), ("Purchase Receipt", "purchase_receipt")):
             service._require_fields("Purchase Invoice Item", {linkfield}, "Purchase Invoice")

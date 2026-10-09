@@ -115,9 +115,11 @@ def complete_audit(context, output):
     receipts = []
     for document in documents:
         document = document.get("document", document)
+        action_permission = next((row.get("permission") for row in context["documents"]
+            if (row["doctype"], row["name"]) == (document.get("doctype", "Payment Entry"), document.get("name"))), None)
         receipt = {"doctype": document.get("doctype", "Payment Entry"), "name": document.get("name"),
             "needs_review": bool(output.get("needs_review")), "permission": "read" if output.get("needs_review") else
-                "submit" if document.get("docstatus") == 1 else "cancel" if document.get("docstatus") == 2 else "write"}
+                action_permission or ("submit" if document.get("docstatus") == 1 else "cancel" if document.get("docstatus") == 2 else "write")}
         receipts.append(receipt)
         identity = {key: receipt[key] for key in ("doctype", "name")}
         if not any((row["doctype"], row["name"]) == (identity["doctype"], identity["name"]) for row in context["documents"]):

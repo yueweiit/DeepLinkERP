@@ -948,7 +948,7 @@ def _status_documents(documents, native, *, status):
     return _native_documents_action(documents, native, payload)
 
 
-def _native_documents_action(documents, native, payload, *, force_opaque=False, preflight=None):
+def _native_documents_action(documents, native, payload, *, force_opaque=False, preflight=None, hold_only=False):
     """Thin native action adapter; reuse source preparation/postchecks/audit."""
     from . import purchase_consistency as consistency, purchase_payment_service as service
     documents = tuple(documents)
@@ -974,11 +974,20 @@ def _native_documents_action(documents, native, payload, *, force_opaque=False, 
                 consistency.check_operating_dependencies(doc)
             state = consistency._state()
             prior = set(state["before_documents"]) if state else set()
+            holds = state.get("hold_checks", {}) if state else {}
+            if hold_only and any((doc.doctype, doc.name) in prior and (doc.doctype, doc.name) not in holds for doc in documents):
+                _reject("冻结操作需独立核对，不能替代同次采购业务保存")
+            held_before = {key: holds.get(key) or consistency.hold_evidence(old[key]) for key in old} if hold_only else {}
             result["native"] = native()
             for doc in documents:
                 actual = service._read(doc.doctype, doc.name)
                 actual._doc_before_save = old[(doc.doctype, doc.name)]
                 consistency.register_document(actual)
+                if hold_only:
+                    consistency._state().setdefault("hold_checks", {})[doc.doctype, doc.name] = held_before[doc.doctype, doc.name]
+                    identity = next(row for row in consistency._state()["context"]["documents"]
+                        if (row["doctype"], row["name"]) == (doc.doctype, doc.name))
+                    identity["permission"] = "write"
                 if (doc.doctype, doc.name) not in prior:
                     # update_child_qty_rate writes children before parent.save;
                     # that later save's old snapshot is not this action's old
