@@ -487,6 +487,8 @@ def verify_cancellation(doc, cancelled_gl, *, result=None, assignments=None, ack
     """Pure verification shared by synchronous cancellation and final recovery."""
     if result is None:
         if not cancelled_gl or not finance_service(doc):
+            if not frappe.db.exists("DocType", "China Accounting Voucher"):
+                return {"module": "China Finance cancellation", "result": "N/A", "reason": "China Accounting Voucher is not installed"}
             posted = frappe.db.exists("China Accounting Voucher", {"source_doctype": doc.doctype,
                 "source_name": doc.name, "source_event": "Posting", "docstatus": 1})
             if posted:

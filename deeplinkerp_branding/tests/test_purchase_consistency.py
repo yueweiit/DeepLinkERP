@@ -269,6 +269,72 @@ class ConsistencyTests(unittest.TestCase):
                 self.guard.check_cancellation(self.doc(docstatus=2), [frappe._dict(debit=1, credit=1)])
         finance.process_cancellation_snapshot.assert_called_once_with("Purchase Receipt", "PR")
 
+    def test_cancellation_verification_skips_absent_vouchers_but_rejects_inactive_posting(self):
+        for installed, posted in ((False, False), (True, False), (True, True)):
+            with self.subTest(installed=installed, posted=posted):
+                def exists(doctype, key):
+                    if doctype == "DocType":
+                        self.assertEqual(key, "China Accounting Voucher")
+                        return installed
+                    self.assertEqual(doctype, "China Accounting Voucher")
+                    self.assertTrue(installed, "The absent optional voucher table must not be queried")
+                    return "V" if posted else None
+                db = SimpleNamespace(exists=Mock(side_effect=exists))
+                with patch.object(frappe, "db", db), patch.object(self.guard, "finance_service", return_value=None):
+                    if posted:
+                        with self.assertRaises(frappe.ValidationError) as caught:
+                            self.guard.verify_cancellation(self.doc(docstatus=2), [frappe._dict(debit=1, credit=1)])
+                        self.assertEqual(caught.exception.purchase_error_id, "finance_cancellation_settings_inactive")
+                    else:
+                        result = self.guard.verify_cancellation(self.doc(docstatus=2), [frappe._dict(debit=1, credit=1)])
+                        self.assertEqual(result["result"], "verified" if installed else "N/A")
+                    if not installed:
+                        db.exists.assert_called_once_with("DocType", "China Accounting Voucher")
+
+    def test_reposted_gl_verification_skips_absent_vouchers_and_keeps_native_proof(self):
+        from deeplinkerp_branding.services import purchase_native_repost as repost
+        plan = [frappe._dict(account="A", account_currency="CNY", debit=10, credit=0,
+                    debit_in_account_currency=10, credit_in_account_currency=0),
+                frappe._dict(account="B", account_currency="CNY", debit=0, credit=10,
+                    debit_in_account_currency=0, credit_in_account_currency=10)]
+        source = self.doc("Purchase Invoice", name="PI")
+        voucher = self.doc("China Accounting Voucher", name="V", status="Posted", currency="CNY",
+            source_doctype=source.doctype, source_name=source.name, source_event="Posting",
+            source_key="Posting|Purchase Invoice|PI", total_debit=10, total_credit=10, entries=plan)
+        stock = {"count": 0, "sha256": "stock-proof"}
+        context = {"reversal": {}}
+        for installed, mismatch in ((False, None), (True, None), (False, "gl"), (False, "stock")):
+            with self.subTest(installed=installed, mismatch=mismatch):
+                output = {"receipts": [{"stock": stock if mismatch != "stock" else {}}], "tasks": {"ROOT": {
+                    "expected": [[source.doctype, source.name]], "last_receipt": "RECEIPT",
+                    "coverage": {"PI": {"voucher": [source.doctype, source.name], "expected": plan}}}}}
+                actual = [frappe._dict(row) for row in plan]
+                if mismatch == "gl":
+                    actual[0].debit = 11
+                def values(doctype, *args, **kwargs):
+                    self.assertEqual(doctype, "China Accounting Voucher")
+                    self.assertTrue(installed, "The absent optional voucher table must not be queried")
+                    return [(voucher.name,)]
+                db = SimpleNamespace(exists=Mock(return_value=installed), get_values=Mock(side_effect=values))
+                with patch.object(frappe, "db", db), patch.object(repost, "stock_evidence", return_value=stock), \
+                        patch.object(frappe, "get_doc", side_effect=lambda dt, *args, **kwargs: source if dt == source.doctype else voucher), \
+                        patch("erpnext.accounts.general_ledger.process_gl_map", side_effect=lambda rows: rows), \
+                        patch.object(self.guard, "_ledger", return_value=actual), patch.object(self.guard, "_gl_precision", return_value=3), \
+                        patch.object(frappe, "get_cached_value", return_value="CNY"), \
+                        patch.dict(sys.modules, {"china_finance.services.voucher": SimpleNamespace(get_posting_date=lambda doc: doc.posting_date)}):
+                    if mismatch:
+                        with self.assertRaises(frappe.ValidationError) as caught:
+                            repost.verify_gl_coverage(context, output)
+                        self.assertEqual(caught.exception.purchase_error_id, "gl_allocation_mismatch" if mismatch == "gl" else "purchase_reversal_stock_receipt_mismatch")
+                        db.get_values.assert_not_called()
+                    else:
+                        self.assertEqual(repost.verify_gl_coverage(context, output), {(source.doctype, source.name): plan})
+                        if not installed:
+                            db.get_values.assert_not_called()
+                        else:
+                            db.get_values.assert_called_once_with("China Accounting Voucher", {"source_doctype": source.doctype,
+                                "source_name": source.name, "source_event": "Posting", "docstatus": 1}, "name", for_update=True)
+
     def test_posting_voucher_must_match_the_exact_source_event(self):
         voucher = self.doc("China Accounting Voucher", total_debit=10, total_credit=10,
             source_doctype="Purchase Receipt", source_name="OTHER", source_event="Posting", entries=[])

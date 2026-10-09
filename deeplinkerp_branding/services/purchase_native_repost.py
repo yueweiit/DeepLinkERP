@@ -548,6 +548,8 @@ def verify_gl_coverage(context, output):
         consistency._compare_gl(doc, consistency._gl_map(actual), consistency._gl_map(plan), "重算后的原生总账计划")
         if doc.doctype == "Purchase Invoice":
             invoice_plans[identity] = plan
+        if not frappe.db.exists("DocType", "China Accounting Voucher"):
+            continue
         posted = frappe.db.get_values("China Accounting Voucher", {"source_doctype": doc.doctype,
             "source_name": doc.name, "source_event": "Posting", "docstatus": 1}, "name", for_update=True)
         for name, in posted:
