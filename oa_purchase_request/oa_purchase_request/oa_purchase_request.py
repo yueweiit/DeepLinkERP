@@ -429,58 +429,6 @@ def has_meaningful_item_row(row):
 	return row.get("item_code") or row.get("item_name")
 
 
-def auto_create_purchase_receipt(doc, method=None):
-	if doc.docstatus != 1 or doc.get("status") in ("Closed", "On Hold"):
-		return
-
-	if has_purchase_receipt(doc.name) or not has_receivable_items(doc):
-		return
-
-	try:
-		from erpnext.buying.doctype.purchase_order.purchase_order import make_purchase_receipt
-
-		purchase_receipt = make_purchase_receipt(doc.name)
-		if not purchase_receipt.get("items"):
-			return
-
-		purchase_receipt.insert(ignore_permissions=True)
-		frappe.msgprint(f"已自动生成采购入库单 {purchase_receipt.name}")
-	except Exception:
-		frappe.log_error(
-			title=f"Auto create Purchase Receipt failed: {doc.name}",
-			message=frappe.get_traceback(),
-		)
-		frappe.throw("自动生成采购入库单失败，请检查采购订单明细后手动创建采购入库单")
-
-
-def has_purchase_receipt(purchase_order):
-	return bool(
-		frappe.db.sql(
-			"""
-			select pri.parent
-			from `tabPurchase Receipt Item` pri
-			inner join `tabPurchase Receipt` pr on pr.name = pri.parent
-			where pri.purchase_order = %s
-				and pr.docstatus < 2
-			limit 1
-			""",
-			(purchase_order,),
-		)
-	)
-
-
-def has_receivable_items(doc):
-	has_unit_price_items = cint(doc.get("has_unit_price_items"))
-	for row in doc.get("items"):
-		if row.get("delivered_by_supplier"):
-			continue
-		if has_unit_price_items and flt(row.get("qty")) == 0:
-			return True
-		if abs(flt(row.get("received_qty"))) < abs(flt(row.get("qty"))):
-			return True
-	return False
-
-
 def get_existing_item(row):
 	item_code = (row.get("item_code") or "").strip()
 	if not item_code:
