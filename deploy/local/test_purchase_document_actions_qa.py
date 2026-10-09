@@ -2266,14 +2266,23 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         for doc in docs:
             frappe.db.set_value(doc.doctype, doc.name, boundary.POINTER, owner.name, update_modified=False)
         self.commit_fixture()
-        # Existing same-identity RIV saves keep generation ownership; a genuine
-        # native no-copy draft gets its own identity without that ownership.
+        # Accepted same-identity RIV tasks reject ordinary saves without
+        # changing their facts. no_copy does not authorize a new pending-pair task.
         original = frappe.get_doc(riv.doctype, riv.name)
-        original.save(ignore_permissions=True)
-        copied = frappe.copy_doc(original, ignore_no_copy=False).insert(ignore_permissions=True)
-        self.assertNotEqual(copied.name, original.name)
+        original_facts = original.as_dict()
+        with self.assertRaisesRegex(frappe.PermissionError, "已受理采购冲销的原生任务"):
+            original.save(ignore_permissions=True)
+        self.assertEqual(frappe.get_doc(original.doctype, original.name).as_dict(), original_facts)
+        self.commit_fixture()  # End the refused request before the independent copy's publication lease.
+        riv_names = set(frappe.get_all(riv.doctype, pluck="name", limit_page_length=0))
+        copied = frappe.copy_doc(original, ignore_no_copy=False)
         self.assertFalse(copied.get(boundary.POINTER))
+        with self.assertRaisesRegex(frappe.ValidationError, "相关库存范围待完成"):
+            copied.insert(ignore_permissions=True)
+        self.assertEqual(set(frappe.get_all(riv.doctype, pluck="name", limit_page_length=0)), riv_names)
+        self.assertEqual(frappe.get_doc(original.doctype, original.name).as_dict(), original_facts)
         self.assertEqual(frappe.db.get_value(original.doctype, original.name, boundary.POINTER), owner.name)
+        self.commit_fixture()  # The unrelated amendment is another independent native request.
         # Actual ordinary amendment on a distinct unfrozen stock pair still
         # uses native no-copy/naming/validation; no old identity is rewritten.
         code = self.scope_item()
@@ -5035,9 +5044,18 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
     def test_auto_invoice_success_records_all_native_and_finance_effects(self):
         from deeplinkerp_branding.services import purchase_document_actions as actions
         from deeplinkerp_branding.services import purchase_operation as kernel
+        original_submit = frappe.db.get_value("China Finance Settings", COMPANY, "auto_submit_purchase_invoice")
+        def restore_setting():
+            frappe.db.rollback()
+            self.remember_new_names()
+            frappe.db.set_value("China Finance Settings", COMPANY, "auto_submit_purchase_invoice",
+                original_submit, update_modified=False)
+            frappe.clear_document_cache("China Finance Settings", COMPANY)
+            frappe.db.commit()
+        self.addCleanup(restore_setting)  # Runs before clean; only restoration is committed here.
         po = self.order()
         self.commit_fixture()
-        frappe.db.set_value("China Finance Settings", COMPANY, "auto_submit_purchase_invoice", 1)
+        frappe.db.set_value("China Finance Settings", COMPANY, "auto_submit_purchase_invoice", 1, update_modified=False)
         key = str(uuid.uuid4())
         changes = {"items": [{"key": po.items[0].name, "qty": 2, "warehouse": "Stores - QAB"}]}
         target = frappe.db.get_value("Purchase Receipt Item", {"purchase_order": po.name, "docstatus": 0}, "parent")
