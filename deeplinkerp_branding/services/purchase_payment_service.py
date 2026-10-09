@@ -150,11 +150,12 @@ def current_reads():
         _record_reader.reset(token)
 
 
-def order_execution_reason(order):
+def order_execution_reason(order, *, allow_completed_invoice_payment=False):
     """PO-authorized source-state check; never expose the OA payload or financial settings."""
     if order.docstatus != 1:
         return "请先核对并提交采购订单，再办理付款或入库"
-    if order.status in ("Closed", "Cancelled", "On Hold", "Completed"):
+    if order.status in ("Closed", "Cancelled", "On Hold") or (
+            order.status == "Completed" and not allow_completed_invoice_payment):
         return "采购订单已关闭、取消、暂停或完成，请先核对订单状态"
     name = order.get("custom_oa_purchase_expense")
     if not name:
@@ -856,17 +857,22 @@ def get_purchase_chain(source_doctype, source_name, include_payments=True):
         orders = _source_links(doc, "Purchase Order", "purchase_order", warnings)
     else:
         orders = [doc.name]
-    execution_reason = order_execution_reason(doc) if source_doctype == "Purchase Order" else ""
-    if not execution_reason and source_doctype == "Purchase Receipt":
-        for order_name in orders:
-            order = _related("Purchase Order", order_name, warnings, SOURCE_FIELDS, doc.company, doc.supplier)
-            if order:
-                execution_reason = order_execution_reason(order)
-                if execution_reason:
-                    break
-    if execution_reason:
+    execution_reason = payment_execution_reason = ""
+    for order_name in orders:
+        order = doc if source_doctype == "Purchase Order" else _related(
+            "Purchase Order", order_name, warnings, SOURCE_FIELDS, doc.company, doc.supplier)
+        if not order:
+            continue
+        order_reason = order_execution_reason(order)
+        execution_reason = execution_reason or order_reason
+        payment_execution_reason = payment_execution_reason or (
+            order_execution_reason(order, allow_completed_invoice_payment=True)
+            if eligible and order.status == "Completed" else order_reason)
+        if execution_reason and payment_execution_reason:
+            break
+    if payment_execution_reason:
         can_create = False
-        reason = execution_reason
+        reason = payment_execution_reason
     progress = _order_progress(orders, warnings)
     incomplete = LINK_WARNING in warnings
     if incomplete:

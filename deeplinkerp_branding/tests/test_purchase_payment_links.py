@@ -228,18 +228,32 @@ class CrossborderInvoiceChainTests(unittest.TestCase):
         self.assertEqual(row["scope_label"], "共享应付整单余额")
         self.assertNotIn("receipt_paid", row)
 
-    def test_closed_order_disables_invoice_payment_upfront(self):
-        order = native("Purchase Order", "PO", status="Closed")
+    def test_completed_order_allows_existing_invoice_payment_but_closed_order_does_not(self):
         invoice = native("Purchase Invoice", "PI")
-        invoice_row = {"name": "PI", "docstatus": 1, "is_return": False, "shared": False, "can_pay": True,
-                       "currency": "CNY", "total": 100, "settled": 0, "outstanding": 100}
-        with patch.object(service, "_source", return_value=order), patch.object(service, "_invoice_names", return_value=["PI"]), \
-             patch.object(service, "_related", return_value=invoice), patch.object(service, "_invoice_row", return_value=invoice_row), \
-             patch.object(service, "_source_links", return_value=[]), patch.object(service, "_order_progress", return_value=[]), \
-             patch.object(actions, "_mapping_fields"), patch.object(frappe, "has_permission", return_value=True):
-            chain = service.get_purchase_chain("Purchase Order", "PO", include_payments=False)
-        self.assertFalse(chain["can_create"])
-        self.assertIn("关闭", chain["reason"])
+        invoice_row = {"name": "PI", "docstatus": 1, "is_return": False, "shared": True, "can_pay": True,
+                       "currency": "CNY", "total": 70, "settled": 25, "outstanding": 45}
+        for status in ("Closed", "Completed"):
+            order = native("Purchase Order", "PO", status=status, per_billed=100)
+            for source_type in ("Purchase Order", "Purchase Receipt"):
+                source = order if source_type == "Purchase Order" else native("Purchase Receipt", "PR")
+                with self.subTest(status=status, source_type=source_type), \
+                     patch.object(service, "_source", return_value=source), patch.object(service, "_invoice_names", return_value=["PI"]), \
+                     patch.object(service, "_related", side_effect=lambda dt, *args: order if dt == "Purchase Order" else invoice), \
+                     patch.object(service, "_invoice_row", return_value=invoice_row), \
+                     patch.object(service, "_source_links", side_effect=lambda doc, *args: ["PO"] if doc.doctype == "Purchase Receipt" else []), \
+                     patch.object(service, "_order_progress", return_value=[]), \
+                     patch.object(actions, "_mapping_fields"), patch.object(frappe, "has_permission", return_value=True):
+                    chain = service.get_purchase_chain(source_type, source.name, include_payments=False)
+                    self.assertEqual(chain["can_create"], status == "Completed")
+                    self.assertEqual(chain["balances"], [{"currency": "CNY", "total": 70, "settled": 25, "outstanding": 45}])
+                    self.assertFalse(chain["can_create_invoice"])
+                    self.assertFalse(chain["can_prepay"])
+                    self.assertTrue(service.order_execution_reason(order))
+                    if status == "Completed":
+                        self.assertEqual(chain["reason"], "")
+                        self.assertIn("完成", chain["invoice_reason"])
+                    else:
+                        self.assertIn("关闭", chain["reason"])
 
     def test_receipt_payment_filter_includes_invoice_refs_to_its_verified_order(self):
         receipt = native("Purchase Receipt", "PR")
