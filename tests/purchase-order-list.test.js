@@ -199,6 +199,21 @@ test("installation chains native settings and only mounts a native Purchase Orde
 	}
 });
 
+test("installed route callbacks are safe before a Purchase Order controller mounts", () => {
+	const { list, env } = bareList(), routes = [], cancelled = [];
+	env.frappe.router.on = (_, callback) => routes.push(callback);
+	env.DeepLinkERPPurchasePayments = { cancelCrossborderForList: owner => cancelled.push(owner) };
+	production("install")(env);
+	assert.equal(routes.length, 1);
+	for (const route of [["List", "Purchase Order", "List"], ["Form", "Supplier", "S-1"]]) {
+		env.frappe.get_route = () => route;
+		assert.doesNotThrow(() => routes[0]());
+	}
+	env.cur_list = list;
+	assert.doesNotThrow(() => routes[0](), "an unmounted cached list is safe on route exit");
+	assert.deepEqual(cancelled, [], "no unmounted drawer owner is forwarded");
+});
+
 test("page responses replace rows, retain offset after native reset, and reset to zero on filter changes", () => {
 	const { list, env } = bareList();
 	const controller = production("mount")(list, env);
@@ -793,8 +808,17 @@ test("purchase physical table CSS preserves table layout, rowspans and sticky sc
  assert.doesNotMatch(css, /\.dlp-purchase-expand\s*\{/);
 });
 
-function mountedPurchase() {
-	const fixture = bareList(), { list, env } = fixture, handlers = new Map(), controls = [], calls = [];
+function mountedPurchase(beforeMount) {
+	const fixture = bareList(), { list, env } = fixture, handlers = new Map(), controls = [], calls = [], changes = [];
+	const captures = new Set(), resultNode = {
+		addEventListener(type, handler, capture) { assert.equal(type, "change"); assert.equal(capture, true); captures.add(handler); },
+		removeEventListener(type, handler, capture) { assert.equal(type, "change"); assert.equal(capture, true); captures.delete(handler); },
+		dispatchChange(target) {
+			const event = { target, currentTarget: target };
+			for (const handler of captures) handler(event);
+			for (const { selector, handler } of changes) if (target.matches(selector)) handler(event);
+		},
+	};
 	class Surface {
 		constructor() { this.length = 1; this.value = ""; }
 		find() { return new Surface(); } first() { return this; } parent() { return this; }
@@ -802,18 +826,60 @@ function mountedPurchase() {
 		addClass() { return this; } removeClass() { return this; } toggleClass() { return this; } toggle() { return this; } show() { return this; } hide() { return this; } remove() { return this; }
 		append(value) { this.value += value; return this; } html(value) { this.value = value; return this; } text(value) { if (value === undefined) return this.value; this.value = value; return this; }
 		val() { return this; } prop() { return this; } each() { return this; } attr(name, value) { if (value !== undefined) return this; return this.attributes?.[name]; } off() { return this; }
-		on(events, selector, handler) { if (typeof selector === "string") handlers.set(selector, handler); return this; }
+		on(events, selector, handler) { if (typeof selector === "string") { handlers.set(selector, handler); if (this === list.$result && events.startsWith("change")) changes.push({ selector, handler }); } return this; }
 	}
 	env.$ = target => target instanceof Surface ? target : new Surface(); env.document = { body: { classList: { toggle() {} } } }; env.cur_list = list;
 	env.frappe.model.can_export = () => false;
 	env.frappe.ui = { form: { make_control({ df }) { controls.push(df); let value; return { df, $wrapper: new Surface(), $input: new Surface(), get_value: () => value, async set_value(next) { value = next; await df.change(); } }; } } };
 	env.frappe.call = request => new Promise((resolve, reject) => { calls.push({ request, resolve, reject }); if (!request.args.include_items) resolve({ message: {} }); });
-	list.$frappe_list = new Surface(); list.$result = new Surface(); list.$paging_area = new Surface(); list.page = { wrapper: new Surface() };
+	list.$frappe_list = new Surface(); list.$result = new Surface(); list.$result[0] = resultNode; list.$paging_area = new Surface(); list.page = { wrapper: new Surface() };
+	beforeMount?.({ list, env });
 	const controller = production("mount")(list, env);
 	function payload(doc) { const call = dispatch(list), response = { message: { rows: [doc], total_count: 1 } }; call.callback(response); list.prepare_data(response); }
 	function click(name) { const target = new Surface(); target.attributes = { "data-name": name }; return handlers.get(".dlp-purchase-expand")({ currentTarget: target, preventDefault() {}, stopPropagation() {} }); }
-	return { ...fixture, controller, calls, controls, handlers, payload, click };
+	return { ...fixture, controller, calls, controls, handlers, payload, click, resultNode, captures };
 }
+
+test("one header checkbox selects current-page orders before the native forwarding and header rewrite", () => {
+	const header = { checked: false, indeterminate: false, matches: selector => selector.includes(".list-check-all") || selector === "input[type=checkbox]" };
+	const rows = [{ name: "PO-1", checked: false }, { name: "PO-2", checked: false }];
+	const { controller: c, list, env, resultNode, captures } = mountedPurchase(({ list, env }) => {
+		list.get_checked_items = names => rows.filter(row => row.checked).map(row => names ? row.name : { name: row.name });
+		const empty = { prop() { return this; }, trigger() { return this; } };
+		const headerSurface = { show() {}, find() { return { prop(key, value) { header[key] = value; return this; } }; } }, actions = { hide() {} };
+		const originalFind = list.$result.find.bind(list.$result);
+		list.$result.find = selector => selector === ".checkbox-actions .list-check-all" ? empty : selector === ".list-header-subject" ? headerSurface : selector === ".checkbox-actions" ? actions : selector === ".list-row-checkbox" ? { prop(key, value) { rows.forEach(row => row[key] = value); return this; } } : originalFind(selector);
+		list.$list_head_subject = headerSurface; list.$checkbox_actions = actions;
+		list.on_row_checked = () => { list.$checks = rows.filter(row => row.checked); if (!list.$checks.length) header.checked = false; };
+		const originalDollar = env.$;
+		env.$ = target => target === header ? { is: selector => selector === ".list-header-subject .list-check-all", prop: key => header[key], attr() {} } : originalDollar(target);
+		// Registered before purchase mount, as in native setup_check_events:
+		// forwarding to the absent hidden checkbox still rewrites header state.
+		list.$result.on("change", "input[type=checkbox]", e => {
+			const $target = env.$(e.currentTarget);
+			if ($target.is(".list-header-subject .list-check-all")) {
+				const $check = list.$result.find(".checkbox-actions .list-check-all");
+				$check.prop("checked", $target.prop("checked")); $check.trigger("change");
+			}
+			list.on_row_checked();
+		});
+	});
+	c.providerRows = list.data = rows.map(row => ({ name: row.name, row_type: "purchase_order" }));
+	for (const [before, clicked, expected] of [[[false, false], true, ["PO-1", "PO-2"]], [[true, true], false, []], [[true, false], true, ["PO-1", "PO-2"]], [[true, false], false, []]]) {
+		rows.forEach((row, index) => row.checked = before[index]); list.on_row_checked();
+		assert.equal(header.indeterminate, before[0] !== before[1]);
+		header.checked = clicked; resultNode.dispatchChange(header);
+		assert.deepEqual(c.getSelectedPurchaseOrders().map(doc => doc.name), expected);
+		assert.equal(header.checked, clicked); assert.equal(header.indeterminate, false);
+	}
+	assert.equal(captures.size, 1, "one capture listener belongs to this result element");
+	const routes = []; env.frappe.router.on = (_, callback) => routes.push(callback); production("install")(env);
+	env.frappe.get_route = () => ["Form", "Purchase Order", "PO-1"]; routes[0]();
+	assert.equal(captures.size, 0, "route exit removes the scoped listener");
+	list.render_list(); assert.equal(captures.size, 0, "an inactive render cannot reattach the listener");
+	env.frappe.get_route = () => ["List", "Purchase Order", "List"]; routes[0](); routes[0]();
+	assert.equal(captures.size, 1, "cached-list reentry attaches once");
+});
 
 test("physical detail rows use actual item IDs and one whole-order checkbox with real rowspans", () => {
 	const { list, env } = bareList(); production("mount")(list, env);
@@ -848,12 +914,6 @@ test("whole-order selection and same-page tabs clear state and constrain actions
 	env.DeepLinkERPPurchasePayments = { orderReceiptAction: () => 'dlp-order-pay dlp-order-receipt', pay: (...args) => calls.push(["pay", ...args]), documentDrawer: (...args) => calls.push(["receipt", ...args]) };
 	assert.equal(c.providerScope, "orders");
 	payload({ name: "PO-1", row_type: "purchase_order", modified: "v1", order_progress: { items: [{ name: "I1" }, { name: "I2" }] } });
-	const find=list.$result.find.bind(list.$result);
-	list.$result.find=selector=>selector==='.list-row-checkbox'?{prop(key,value){if(value)for(const doc of list.data)checked.add(doc.name);else checked.clear();return this;}}:find(selector);
-	assert.equal(typeof handlers.get('.list-check-all'), 'function');
-	handlers.get('.list-check-all')({currentTarget:{checked:true}});
-	assert.deepEqual([...checked], ['PO-1'], 'header select-all selects current-page orders once, regardless of item count');
-	handlers.get('.list-check-all')({currentTarget:{checked:false}});assert.equal(checked.size,0);
 	checked.add("PO-1"); checked.add("OA-UNRELATED"); list.on_row_checked();
 	assert.deepEqual(c.getSelectedPurchaseOrders(), [{ name: "PO-1", modified: "v1" }]);
 	await c.runPurchaseAction("receipt"); await c.runPurchaseAction("payment");

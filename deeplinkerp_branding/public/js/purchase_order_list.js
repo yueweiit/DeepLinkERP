@@ -12,10 +12,13 @@
  const t = value => (root.__ || (x=>x))(value);
  const numeric = value => value==null || value==='' || typeof value==='boolean' || !Number.isFinite(Number(value)) ? '—' : Number(value).toLocaleString(undefined,{maximumFractionDigits:2});
  const itemFields = new Set(['warehouse','item_code','item_name','qty','uom','rate','amount','received_qty']);
- const payments = c => c.root.DeepLinkERPPurchasePayments || root.DeepLinkERPPurchasePayments;
+ const payments = c => c?.root?.DeepLinkERPPurchasePayments || root.DeepLinkERPPurchasePayments;
  const isOA = c => c.providerScope==='oa';
  function cancelPending(c) { payments(c)?.cancelCrossborderForList?.(c); }
- function fit(c,active=true) {
+ function fit(c,active) {
+  if(!c)return;
+  if(active!==undefined)c._setPurchaseSelectionActive?.(active);
+  active ??= true;
   if(!active)cancelPending(c);
   return engine.fitViewport(c,{active,root:c.root,scrollElement:c.list.$result?.parent?.('.result-container')?.[0],layoutTailElement:c.list.$frappe_list?.[0],property:'--dlp-purchase-result-max-height',headerSelector:'.dlp-po-grid-header',rowSelector:'.dlp-po-grid-row',observeTargets:[c.$filters?.[0]?.parentElement,c.$toolbar?.[0],c.$summary?.[0],c.$paging?.[0]]});
  }
@@ -82,11 +85,17 @@
   c.$purchaseActions?.toggle(!isOA(c));
  }
  function mount(c) {
-  // Native headers forward to a second hidden check-all; this table has one.
-  c.list.$result.on('change.dlpPurchaseSelect','.list-check-all',event=>{
-   c.list.$result.find('.list-row-checkbox').prop('checked',event.currentTarget.checked);
-   c.list.on_row_checked?.();
-  });
+  const result=c.list.$result?.[0];let listening=false;
+  // Set page rows before native forwarding/on_row_checked rewrites the sole header.
+  const selectPage=event=>{
+   if(isOA(c) || !event.target?.matches?.('.dlp-purchase-table .list-header-subject .list-check-all'))return;
+   c.list.$result.find('.list-row-checkbox').prop('checked',event.target.checked);
+  };
+  c._setPurchaseSelectionActive=active=>{
+   if(!result?.addEventListener || listening===active)return;
+   result[active?'addEventListener':'removeEventListener']('change',selectPage,true);listening=active;
+  };
+  c._setPurchaseSelectionActive(true);
   // Stable whole-order selection projection for the later batch-operation task.
   c.getSelectedPurchaseOrders=()=> {
    if(isOA(c))return [];
