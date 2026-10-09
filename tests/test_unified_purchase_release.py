@@ -680,10 +680,13 @@ printf '%s|%s|%s|%s' "$crm_sha" "$finance_sha" "$current_finance" "$current_oa"
 			self.assertIn("select count(*) from `tabOA Purchase Request` where `custom_purchase_company_confirmed` is null or `custom_purchase_company_confirmed` <> 0", queried)
 			new_oa["nonnull"] = 1
 			self.assertEqual(capture(oa_columns=["name"])["oa_new_columns"], {"custom_purchase_company_confirmed": 1})
-			fake.conf = {"purchase_source_sync_enabled": True}
+			fake.conf = {"purchase_source_sync_enabled": True, "maintenance_mode": 1}
 			with patch.dict(sys.modules, {"joint_release_guards": types.SimpleNamespace(verified_quiescence=lambda: True)}):
 				self.assertTrue(capture()["release_quiescent"])
 			with patch.dict(sys.modules, {"joint_release_guards": types.SimpleNamespace(verified_quiescence=lambda: False)}):
+				self.assertFalse(capture()["release_quiescent"])
+			fake.conf["maintenance_mode"] = 0
+			with patch.dict(sys.modules, {"joint_release_guards": types.SimpleNamespace(verified_quiescence=lambda: self.fail("Live audit must not claim quiescence"))}):
 				self.assertFalse(capture()["release_quiescent"])
 			fake.conf = {}
 			new_oa["present"] = False

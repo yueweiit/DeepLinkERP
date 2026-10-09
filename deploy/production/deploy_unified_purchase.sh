@@ -527,6 +527,7 @@ for site in sites:
 stats=build.stat();files={str(p.relative_to(build)):hashlib.sha256(p.read_bytes()).hexdigest() for p in build.rglob('*') if p.is_file()}
 owned={'path':str(build),'identity':[stats.st_dev,stats.st_ino,stats.st_uid],'candidate_sha':sys.argv[3],'image_id':sys.argv[4],'files':files,'max_bytes':sum(p.stat().st_size for p in build.rglob('*') if p.is_file()),'manifest_sha256':files['release-source-manifest.json'],'guard_sha256':files['deploy/production/joint_release_guards.py'],'raw_assets':{ '/assets/deeplinkerp_branding/js/inventory_detail.bundle.js?v=0.0.4':files['deeplinkerp_branding/public/js/inventory_detail.bundle.js'],'/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.26':files['deeplinkerp_branding/public/js/purchase_payments.js']}}
 owned['rollback_image_id']=sys.argv[5]
+owned['directories']=sorted(str(p.relative_to(build)) for p in build.rglob('*') if p.is_dir())
 (root/'build-ownership.json').write_text(json.dumps(owned,sort_keys=True))
 print('Complete bounded metadata/business/source audit passed before first resume')
 PY

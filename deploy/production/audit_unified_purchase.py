@@ -253,7 +253,7 @@ def capture_audit(*, je_columns=None, oa_columns=None, native_columns=None):
 	result["maintenance_mode"] = maintenance_mode
 	if result["purchase_source_sync_enabled"]:
 		from joint_release_guards import verified_quiescence
-		result["release_quiescent"] = maintenance_mode == 1 and verified_quiescence()
+		result["release_quiescent"] = maintenance_mode == 1 and frappe.conf.get("maintenance_mode") == 1 and verified_quiescence()
 	assets = BENCH / "sites/assets/assets.json"
 	result["assets_manifest_sha256"] = hashlib.sha256(assets.read_bytes()).hexdigest()
 	return result

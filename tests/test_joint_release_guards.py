@@ -1002,7 +1002,9 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 				columns[key] = module._source_column(fields[key], len(columns))
 			elif " ADD UNIQUE INDEX " in query: indexes["custom_purchase_source_id"] = module._source_index()
 			elif " DROP COLUMN " in query:
-				key = query.rsplit("`", 2)[1]; columns.pop(key)
+				key = query.rsplit("`", 2)[1]
+				self.assertEqual(columns[key]["position"], max(value.get("position", 0) for value in columns.values()), "Reverse native append order prevents ordinal drift")
+				columns.pop(key)
 				if key == "custom_purchase_source_id": indexes.pop(key, None)
 			else: self.fail("DDL escaped narrow OA scope: " + query)
 			if " ADD " in query:
@@ -1041,6 +1043,8 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 			self.assertTrue(module.apply_joint_metadata("a" * 40, path)["unchanged"])
 			self.assertEqual(events, [])
 			self.assertEqual(path.read_bytes(), first)
+			self.assertTrue(module.restore_joint_metadata(path)["restored"])
+			self.assertEqual(current, before)
 
 	def test_each_interrupted_oa_autocommit_rolls_back_only_new_null_columns_and_job(self):
 		for crash in range(1, len(self.metadata_module().SOURCE_FIELD_ORDER) + 2):
@@ -1267,34 +1271,40 @@ class CombinedReleaseContractTests(unittest.TestCase):
 
 	def test_owned_build_cleanup_rejects_drift_shared_mount_or_asset_without_deleting(self):
 		guard = self.module()
-		for scenario in ("exact", "extra-file", "changed-file", "shared-mount", "asset-url", "asset-body", "post-health"):
+		for scenario in ("exact", "extra-file", "changed-file", "extra-directory", "hardlink", "special", "shared-mount", "asset-url", "asset-origin", "asset-body", "redis-pre", "redis-post", "post-health"):
 			with self.subTest(scenario=scenario), tempfile.TemporaryDirectory(prefix="unified-purchase-build.", dir="/tmp") as build_name, tempfile.TemporaryDirectory() as evidence_name:
 				build, evidence = Path(build_name), Path(evidence_name)
 				(build / "release-source-manifest.json").write_bytes(b"{}")
 				(build / "raw.js").write_bytes(b"raw")
 				files = {item.name: hashlib.sha256(item.read_bytes()).hexdigest() for item in build.iterdir()}
 				stats = build.stat(); image = "sha256:" + "b" * 64
-				owned = {"path": str(build), "identity": [stats.st_dev, stats.st_ino, stats.st_uid], "files": files, "manifest_sha256": files["release-source-manifest.json"], "max_bytes": 100, "candidate_sha": "a" * 40, "image_id": image, "rollback_image_id": "sha256:" + "c" * 64, "raw_assets": {"/assets/raw.js?v=1": files["raw.js"]}}
+				owned = {"path": str(build), "identity": [stats.st_dev, stats.st_ino, stats.st_uid], "files": files, "directories": [], "manifest_sha256": files["release-source-manifest.json"], "max_bytes": 100, "candidate_sha": "a" * 40, "image_id": image, "rollback_image_id": "sha256:" + "c" * 64, "raw_assets": {"/assets/raw.js?v=1": files["raw.js"]}}
 				(evidence / "build-ownership.json").write_text(json.dumps(owned))
 				accepted = {"browser_accepted": True, "candidate_sha": owned["candidate_sha"], "image_id": image, "loaded_assets": [{"url": "https://deeplinkerp.com/assets/raw.js?v=" + ("0" if scenario == "asset-url" else "1"), "body_sha256": "d" * 64 if scenario == "asset-body" else files["raw.js"]}]}
+				if scenario == "asset-origin": accepted["loaded_assets"][0]["url"] = "http://localhost/assets/raw.js?v=1"
 				(evidence / "acceptance.json").write_text(json.dumps(accepted))
 				if scenario == "extra-file": (build / "not-this-release.txt").write_text("keep")
 				if scenario == "changed-file": (build / "raw.js").write_text("new")
+				if scenario == "extra-directory": (build / "unowned").mkdir()
+				if scenario == "hardlink": os.link(build / "raw.js", evidence / "shared.js")
+				if scenario == "special": os.mkfifo(build / "unowned-pipe")
 				calls = []
 				def host_call(args):
 					calls.append(args)
 					if args == ["docker", "ps", "-aq"]: return "container-id"
 					if args[:2] == ["docker", "inspect"]: return json.dumps([{"Mounts": [{"Source": str(build.resolve())}]}] if scenario == "shared-mount" else [{"Mounts": []}])
 					if args[:3] == ["docker", "image", "inspect"]: return json.dumps([{"Id": args[-1]}])
+					if args[:2] == ["docker", "run"]: return json.dumps({"redis_ping": not (scenario == "redis-pre" or scenario == "redis-post" and not build.exists()), "queues": {"bench:short": ["preserved"]}, "workers": {}, "executions": {}, "jobs": {}, "registries": {}})
 					return "pong"
 				def inspect(service):
-					return {"Image": image, "State": {"Running": not (scenario == "post-health" and not build.exists())}}
+					return {"Image": image, "State": {"Running": not (scenario == "post-health" and not build.exists())}, "Mounts": [{"Destination": "/home/frappe/frappe-bench/sites", "Type": "volume", "Name": "sites"}], "HostConfig": {"NetworkMode": "release-net"}}
 				with patch.object(guard, "_host_call", side_effect=host_call), patch.object(guard, "_container_inspect", side_effect=inspect), patch.object(guard.subprocess, "run", return_value=types.SimpleNamespace(stdout=b"raw")):
 					if scenario == "exact":
 						result = guard.cleanup_owned_build(evidence, evidence / "acceptance.json")
 						self.assertEqual(result["removed_bytes"], 5)
+						self.assertEqual(result["redis_rq"]["queues"], {"bench:short": ["preserved"]})
 						self.assertFalse(build.exists())
-					elif scenario == "post-health":
+					elif scenario in {"post-health", "redis-post"}:
 						with self.assertRaisesRegex(AssertionError, "forward HOLD"): guard.cleanup_owned_build(evidence, evidence / "acceptance.json")
 						self.assertFalse(build.exists())
 						self.assertEqual(guard.DDLReceipt.load(evidence / "cache-cleanup.json").state["status"], "applying")

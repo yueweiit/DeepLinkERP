@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import tempfile
 import subprocess
 import time
@@ -359,6 +360,14 @@ def _container_read(service, tool, action):
 	return json.loads(_host_call(["docker", "exec", "frappe_docker-" + service + "-1", "/home/frappe/frappe-bench/env/bin/python", "/tmp/joint_release_guards.py", action]))
 
 
+def _command_rq_snapshot(backend, tool):
+	"""Reuse the read-only probe with the inspected image/network/sites identity."""
+	sites_mounts = [item for item in backend["Mounts"] if item["Destination"] == "/home/frappe/frappe-bench/sites"]
+	assert len(sites_mounts) == 1 and sites_mounts[0]["Type"] in {"bind", "volume"}, "Unknown shared sites mount"
+	site_source = sites_mounts[0].get("Name") if sites_mounts[0]["Type"] == "volume" else sites_mounts[0]["Source"]
+	return json.loads(_host_call(["docker", "run", "--rm", "--network", backend["HostConfig"]["NetworkMode"], "--mount", "type=bind,source=" + str(Path(tool).resolve()) + ",target=/tmp/joint_release_guards.py,readonly", "-v", site_source + ":/home/frappe/frappe-bench/sites:ro", "--entrypoint", "/home/frappe/frappe-bench/env/bin/python", backend["Image"], "/tmp/joint_release_guards.py", "--rq-snapshot"]))
+
+
 def drain_release(path, tool, candidate_sha, *, timeout=360):
 	"""One native TERM per fixed identity, bounded natural completion, no cleanup."""
 	assert not Path(path).exists(), "Prior/unknown drain receipt exists; HOLD, do not signal twice"
@@ -423,11 +432,8 @@ def drain_release(path, tool, candidate_sha, *, timeout=360):
 	# Inspect Redis through a command-only old-image process after Gunicorn exits.
 	# The helper is mounted read-only, sites/configs use the already-verified volume.
 	backend = _container_inspect("backend")
-	sites_mounts = [item for item in backend["Mounts"] if item["Destination"] == "/home/frappe/frappe-bench/sites"]
-	assert len(sites_mounts) == 1 and sites_mounts[0]["Type"] in {"bind", "volume"}, "Unknown shared sites mount"
-	site_source = sites_mounts[0].get("Name") if sites_mounts[0]["Type"] == "volume" else sites_mounts[0]["Source"]
 	def stopped_snapshot():
-		return json.loads(_host_call(["docker", "run", "--rm", "--network", backend["HostConfig"]["NetworkMode"], "--mount", "type=bind,source=" + str(Path(tool).resolve()) + ",target=/tmp/joint_release_guards.py,readonly", "-v", site_source + ":/home/frappe/frappe-bench/sites:ro", "--entrypoint", "/home/frappe/frappe-bench/env/bin/python", backend["Image"], "/tmp/joint_release_guards.py", "--rq-snapshot"]))
+		return _command_rq_snapshot(backend, tool)
 	while time.time() - start < timeout:
 		last_rq = stopped_snapshot()
 		observe(last_rq)
@@ -546,18 +552,21 @@ def cleanup_owned_build(evidence, acceptance):
 	assert accepted.get("browser_accepted") is True and accepted["candidate_sha"] == owned["candidate_sha"] and accepted["image_id"] == owned["image_id"], "Actual online browser acceptance for this frozen release required"
 	assert isinstance(accepted.get("loaded_assets"), list) and accepted["loaded_assets"], "Actual browser-loaded URLs/body SHA required"
 	assert all(asset.get("url") and re.fullmatch(r"[0-9a-f]{64}", asset.get("body_sha256", "")) for asset in accepted["loaded_assets"])
-	from urllib.parse import urlsplit
-	loaded = {urlsplit(asset["url"]).path + ("?" + urlsplit(asset["url"]).query if urlsplit(asset["url"]).query else ""): asset["body_sha256"] for asset in accepted["loaded_assets"]}
-	assert all(loaded.get(url) == digest for url, digest in owned["raw_assets"].items()), "Browser URL/body differs from frozen raw asset delivery; HOLD"
+	loaded = {asset["url"]: asset["body_sha256"] for asset in accepted["loaded_assets"]}
+	assert all(loaded.get("https://deeplinkerp.com" + url) == digest for url, digest in owned["raw_assets"].items()), "Online browser origin/URL/body differs from frozen raw asset delivery; HOLD"
 	path = Path(owned["path"])
 	assert path.parent == Path("/tmp") and path.name.startswith("unified-purchase-build.") and not path.is_symlink()
 	stats = path.stat()
 	assert [stats.st_dev, stats.st_ino, stats.st_uid] == owned["identity"] and stats.st_uid == os.getuid(), "Build ownership/identity changed; HOLD"
+	items = list(path.rglob("*"))
+	for item in items:
+		mode = item.lstat()
+		assert stat.S_ISDIR(mode.st_mode) or stat.S_ISREG(mode.st_mode) and mode.st_nlink == 1, "Shared/linked/special extraction contents; HOLD"
+	assert sorted(str(item.relative_to(path)) for item in items if item.is_dir()) == owned["directories"], "Build directory inventory changed; HOLD"
 	assert (path / "release-source-manifest.json").is_file() and hashlib.sha256((path / "release-source-manifest.json").read_bytes()).hexdigest() == owned["manifest_sha256"]
-	assert all(not item.is_symlink() for item in path.rglob("*")), "Shared/linked extraction contents; HOLD"
-	files = {str(item.relative_to(path)): hashlib.sha256(item.read_bytes()).hexdigest() for item in path.rglob("*") if item.is_file()}
+	files = {str(item.relative_to(path)): hashlib.sha256(item.read_bytes()).hexdigest() for item in items if item.is_file()}
 	assert files == owned["files"], "Build tree no longer contains only this release's exact regenerable files; HOLD"
-	size = sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+	size = sum(item.stat().st_size for item in items if item.is_file())
 	assert 0 < size <= owned["max_bytes"], "Unknown/unbounded extraction contents; HOLD"
 	# Include stopped and unrelated containers: cache must be unused/unshared.
 	container_ids = _host_call(["docker", "ps", "-aq"]).split()
@@ -569,26 +578,31 @@ def cleanup_owned_build(evidence, acceptance):
 			source = Path(mount["Source"]).resolve()
 			assert not (source == canonical or source in canonical.parents or canonical in source.parents), "Build tree in-use/shared by a container; HOLD"
 	def health():
+		backend = None
 		for service in RELEASE_SERVICES:
 			value = _container_inspect(service)
 			assert value["Image"] == owned["image_id"] and value["State"]["Running"] and not value["State"].get("OOMKilled"), "Release health/image changed; forward HOLD"
+			if service == "backend": backend = value
 		for site in SHARED_SITES: _host_call(["curl", "-fsS", "--max-time", "10", "https://" + site + "/api/method/ping"])
 		for url, digest in owned["raw_assets"].items():
 			body = subprocess.run(["curl", "-fsS", "--max-time", "10", "https://deeplinkerp.com" + url], check=True, capture_output=True, timeout=15).stdout
 			assert hashlib.sha256(body).hexdigest() == digest, "Current raw asset body differs; forward HOLD"
 		for image_id in (owned["image_id"], owned["rollback_image_id"]):
 			assert json.loads(_host_call(["docker", "image", "inspect", image_id]))[0]["Id"] == image_id, "Current/rollback image retention unconfirmed; forward HOLD"
-	health()
+		rq = _command_rq_snapshot(backend, Path(__file__))
+		assert rq.get("redis_ping") is True and {"queues", "workers", "executions", "jobs", "registries"} <= set(rq), "Redis/RQ health unconfirmed; forward HOLD"
+		return rq  # Running writers may naturally advance; record, never mutate/empty.
+	before_rq = health()
 	before = os.statvfs(path.parent)
 	receipt_path = root / "cache-cleanup.json"
 	identity = {"candidate_sha": owned["candidate_sha"], "contract_sha256": hashlib.sha256(serialized(owned)).hexdigest()}
-	receipt = DDLReceipt.create(receipt_path, identity, {"available_bytes": before.f_bavail * before.f_frsize}, owned)
+	receipt = DDLReceipt.create(receipt_path, identity, {"available_bytes": before.f_bavail * before.f_frsize, "redis_rq": before_rq}, owned)
 	receipt.plan("owned-build-cache", {"path": str(path), "exists": True, "bytes": size}, {"path": str(path), "exists": False}, kind="cache-cleanup")
 	shutil.rmtree(path)  # exact validated owned artifact, never a Docker/image/volume prune
 	receipt.complete("owned-build-cache", {"path": str(path), "exists": False})
 	after = os.statvfs(path.parent)
-	health()
-	receipt.finish({"removed_bytes": size, "available_bytes": after.f_bavail * after.f_frsize, "health": "verified", "retained_images": [owned["image_id"], owned["rollback_image_id"]]})
+	after_rq = health()
+	receipt.finish({"removed_bytes": size, "available_bytes": after.f_bavail * after.f_frsize, "health": "verified", "redis_rq": after_rq, "retained_images": [owned["image_id"], owned["rollback_image_id"]]})
 	return receipt.state["after"]
 
 
@@ -710,7 +724,10 @@ def main():
 		import rq
 		assert rq.__version__ == "2.6.1", "RQ native source version unknown; HOLD"
 		config = json.loads(Path("/home/frappe/frappe-bench/sites/common_site_config.json").read_bytes())
-		result = raw_rq_snapshot(redis.Redis.from_url(config["redis_queue"]))
+		client = redis.Redis.from_url(config["redis_queue"], socket_connect_timeout=5, socket_timeout=5)
+		assert client.ping() is True, "Redis health unconfirmed; HOLD"
+		result = raw_rq_snapshot(client)
+		result["redis_ping"] = True
 	elif args.processes: result = native_processes()
 	elif args.runtime_proof: result = native_runtime_proof()
 	elif args.tenant_preflight: result = tenant_preflight(args.erpnext_version)

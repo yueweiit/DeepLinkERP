@@ -893,8 +893,9 @@ def _assert_joint_invariants(receipt, current, *, scope=None, source_phase="afte
 	assert set(current["models"]) == set(before["models"])
 	assert all(model["rows"] == before["models"][name]["rows"] for name, model in current["models"].items()), "Operating model bytes changed; rollback refused"
 	additions = {"columns": {}, "indexes": {}}
-	new_column_names = [key for key in contract["custom_fields"] if key not in before["je"]["schema"]["columns"]]
-	for key in contract["custom_fields"]:
+	new_column_names = [key for key in CUSTOM_FIELD_ORDER if key in contract["custom_fields"] and key not in before["je"]["schema"]["columns"]]
+	for key in CUSTOM_FIELD_ORDER:
+		if key not in contract["custom_fields"]: continue
 		if key not in before["je"]["schema"]["columns"]:
 			additions["columns"][key] = _je_column(len(before["je"]["schema"]["columns"]) + new_column_names.index(key))
 	if "custom_operating_event_key" in contract["custom_fields"] and "custom_operating_event_key" not in before["je"]["schema"]["indexes"]:
@@ -985,7 +986,7 @@ def apply_joint_metadata(candidate_sha, receipt_path, *, before_audit=None, nati
 	metas = []
 	# One inspected native autocommit per nullable column, then the unique index.
 	desired_meta = copy.deepcopy(frappe.get_meta("Journal Entry", cached=False))
-	new_columns = [key for key in contract["custom_fields"] if key not in before["je"]["schema"]["columns"]]
+	new_columns = [key for key in CUSTOM_FIELD_ORDER if key in contract["custom_fields"] and key not in before["je"]["schema"]["columns"]]
 	new_fields = {field.fieldname: field for field in desired_meta.fields if field.fieldname in new_columns}
 	for count, key in enumerate(new_columns, 1):
 		meta = copy.deepcopy(desired_meta)
@@ -1238,9 +1239,9 @@ def restore_joint_metadata(receipt_path, *, candidate_sha=None, source_phase="af
 					_assert_recorded_rollback_state(receipt, after)
 					receipt.complete(step_id, table_schema(dt))
 	# One newly NULL column per native autocommit; dropping its new index is bounded too.
-	columns = [("Journal Entry", key, "custom_operating_event_key") for key in reversed(tuple(contract["custom_fields"]))]
+	columns = [("Journal Entry", key, "custom_operating_event_key") for key in reversed(CUSTOM_FIELD_ORDER) if key in contract["custom_fields"]]
 	if before.get("oa"):
-		columns = [(OA_DOCTYPE, key, "custom_purchase_source_id") for key in reversed(tuple(contract.get("source_custom_fields", {})))] + columns
+		columns = [(OA_DOCTYPE, key, "custom_purchase_source_id") for key in reversed(SOURCE_FIELD_ORDER) if key in contract.get("source_custom_fields", {})] + columns
 	for doctype, key, unique_key in columns:
 		original = before["je"] if doctype == "Journal Entry" else before["oa"]
 		actual = table_schema(doctype)
