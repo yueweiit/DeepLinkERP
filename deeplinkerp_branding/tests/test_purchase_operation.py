@@ -83,11 +83,45 @@ class DurableOperationTests(unittest.TestCase):
 
     def test_same_durable_key_rejects_changed_payload_after_cache_loss(self):
         actions._native_request(self.key, ["PE"], Mock(return_value=self.result))
+        self.db.rollback.side_effect = None  # the original acknowledged transaction is committed
+        original = next(iter(self.db.rows.values())).copy()
         self.cache_values.clear()
         changed = Mock(return_value=self.result)
-        with self.assertRaises(frappe.ValidationError):
-            actions._native_request(self.key, ["different"], changed)
+        result = actions._native_request(self.key, ["different"], changed)
+        self.assertTrue(result["failed"])
+        self.assertEqual(next(iter(self.db.rows.values())), original)
         changed.assert_not_called()
+
+    def test_completed_replay_rejection_is_acknowledged_but_queued_remains_unknown(self):
+        kernel.run(self.key, [], lambda: {"documents":[]}, lambda receipt: receipt)
+        self.db.rollback.side_effect = None
+        audit = next(iter(self.db.rows.values()))
+        original = audit.copy()
+        denied = Mock(side_effect=frappe.ValidationError("Current source changed; recheck"))
+        result = kernel.run(self.key, [], Mock(), denied, acknowledge_validation=True)
+        self.assertTrue(result["failed"])
+        self.assertEqual(audit, original)
+        audit.status = "Queued"
+        denied.reset_mock()
+        with self.assertRaisesRegex(frappe.ValidationError,"尚未完成"):
+            kernel.run(self.key, [], Mock(), denied, acknowledge_validation=True)
+        denied.assert_not_called()
+        self.assertEqual(audit.status,"Queued")
+
+    def test_zero_or_many_document_receipts_keep_primitive_result_and_source_acknowledgements(self):
+        for documents in ([], [{"doctype": "Purchase Order", "name": "PO-1", "docstatus": 0},
+                               {"doctype": "Purchase Order", "name": "PO-2", "docstatus": 0}]):
+            with self.subTest(count=len(documents)):
+                self.db.rows.clear()
+                result = {"documents": documents, "result": {"created": len(documents), "pending": 1, "until": "snapshot"},
+                    "acknowledgements": [{"doctype": "OA Purchase Request", "name": "OA", "version": "v1"}]}
+                kernel.run(self.key, [], lambda: result, lambda receipt: receipt)
+                receipt = json.loads(next(iter(self.db.rows.values())).output)
+                self.assertEqual(receipt["result"], result["result"])
+                self.assertEqual(receipt["acknowledgements"], result["acknowledgements"])
+                self.assertEqual([row["name"] for row in receipt["documents"]], [row["name"] for row in documents])
+                if not documents:
+                    self.assertIsNone(next(iter(self.db.rows.values())).reference_doctype)
 
     def test_deadlock_retries_at_most_three_whole_transactions(self):
         calls = []

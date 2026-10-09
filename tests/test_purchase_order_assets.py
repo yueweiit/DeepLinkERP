@@ -44,13 +44,13 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 	def test_unified_adapter_loads_after_cache_busted_shared_engine(self):
 		scripts = hooks.app_include_js
 		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.22"
-		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.10"
+		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.11"
 		self.assertIn(engine, scripts)
 		self.assertIn(adapter, scripts)
 		self.assertLess(scripts.index(engine), scripts.index(adapter))
 		payments = next(path for path in scripts if path.startswith("/assets/deeplinkerp_branding/js/purchase_payments.js?v="))
 		self.assertLess(scripts.index(engine), scripts.index(payments))
-		source = "/assets/deeplinkerp_branding/js/purchase_source.js?v=0.0.1"
+		source = "/assets/deeplinkerp_branding/js/purchase_source.js?v=0.0.2"
 		self.assertLess(scripts.index(payments), scripts.index(source))
 		self.assertLess(scripts.index(source), scripts.index(adapter))
 
@@ -62,7 +62,7 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		self.assertIn(crossborder, scripts)
 		self.assertEqual(sum("/crossborder_procurement.js" in path for path in scripts), 1)
 		self.assertLess(scripts.index(payments), scripts.index(crossborder))
-		self.assertLess(scripts.index(crossborder), scripts.index("/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.10"))
+		self.assertLess(scripts.index(crossborder), scripts.index("/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.11"))
 		self.assertIn("/assets/deeplinkerp_branding/css/purchase_payments.css?v=0.0.9", hooks.app_include_css)
 		self.assertNotIn("crossborder_procurement", str(getattr(hooks, "web_include_js", None)))
 

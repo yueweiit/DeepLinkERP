@@ -126,6 +126,22 @@ class PurchaseSourceContractTest(unittest.TestCase):
         row = source(); row["form_component_values"][4]["value"][0]["金额"] = "0"
         self.assertEqual(self.module.normalize(row)["detail_total_amount"], "0")
 
+    def test_mapper_price_currency_supplier_and_explicit_buyer_survive_without_zero_fallback(self):
+        row = source()
+        row["form_component_values"].extend([
+            {"name": "采购公司", "value": "Buyer"}, {"name": "供应商", "value": "Supplier"}])
+        for rate in (None, "0", "50", "待确认"):
+            with self.subTest(rate=rate):
+                item = self.module.normalize(row, detail_rows=[{"material_code": "ITEM", "quantity": "2",
+                    "unit": "Nos", "unit_price": rate, "goods_value": "100", "purchase_currency": "CNY", "supplier": "Supplier"}])
+                self.assertEqual(item["items"][0].get("rate"), None if rate == "待确认" else rate)
+                self.assertEqual(bool(item["items"][0].get("rate_invalid")),rate == "待确认")
+                self.assertEqual(item["items"][0].get("currency"), "CNY")
+                self.assertEqual(item["items"][0].get("supplier"), "Supplier")
+                self.assertEqual(item.get("purchasing_company"), "Buyer")
+                self.assertEqual(item.get("purchasing_company_status"), "unique")
+                self.assertEqual(item.get("supplier"), "Supplier")
+
     def test_duplicate_field_is_ambiguous_and_no_qty_one_fallback(self):
         row = source(); row["form_component_values"].append(copy.deepcopy(row["form_component_values"][0]))
         self.assertFalse(self.module.in_scope(row))
@@ -253,6 +269,11 @@ class PurchaseSourceContractTest(unittest.TestCase):
     def test_normalized_unit_is_not_confused_with_unit_price(self):
         item=self.module.normalize(source(),detail_rows=[{"material_code":"ITEM","product_name":"A","quantity":"2","unit":"Nos","unit_price":"50","goods_value":"100"}])
         self.assertEqual(item["items"][0]["uom"],"Nos")
+
+    def test_new_blank_buyer_supplier_facts_do_not_change_bound_fingerprint(self):
+        row=source(); original=self.module.normalize(row)
+        row["form_component_values"].extend([{"name":"采购公司","value":None},{"name":"供应商","value":" "}])
+        self.assertEqual(self.module.normalize(row),original)
 
     def test_selection_requires_explicit_values_and_reason_for_corrections(self):
         original = self.module.normalize(source())

@@ -18,11 +18,15 @@ services:
     image: deeplinkerp-local:kingdee-purchase-qa-20261008
     environment:
       SITES_PATH: /home/frappe/frappe-bench/sites
+      PYTHONDONTWRITEBYTECODE: "1"
     command: [/home/frappe/frappe-bench/env/bin/gunicorn, --chdir, /home/frappe/frappe-bench/sites, --bind, "0.0.0.0:8000", --workers, "1", --threads, "2", --timeout, "120", frappe.app:application]
     working_dir: /home/frappe/frappe-bench
     volumes:
       - kingdee-sites:/home/frappe/frappe-bench/sites
       - ../../deeplinkerp_branding:/home/frappe/frappe-bench/apps/deeplinkerp_branding/deeplinkerp_branding
+      # Isolated local OA candidate only; never a production mount.
+      - /Users/smk/.codex/worktrees/explicit-purchase-receipts/DeepLinkERP/oa_purchase_request:/home/frappe/frappe-bench/apps/oa_purchase_request/oa_purchase_request:ro
+      - /Users/smk/.codex/worktrees/finance-reversal/DeepLinkERP/china_finance/services/voucher.py:/home/frappe/frappe-bench/apps/china_finance/china_finance/services/voucher.py:ro
       - ../..:/workspace:ro
     depends_on:
       db:

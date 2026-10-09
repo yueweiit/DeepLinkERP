@@ -198,7 +198,7 @@
 		if (root.frappe.session?.user === "Administrator" || root.frappe.user_roles?.includes("System Manager")) $("<button type='button' class='btn btn-default btn-sm dlp-source-sync'>同步钉钉</button>").appendTo(controller.$providerControls).on("click.dlpUnified", async event => {
 			const button = $(event.currentTarget).prop("disabled", true);
 			try {
-				if (!root.deeplinkerp?.purchaseSource?.sync) await root.frappe.require("/assets/deeplinkerp_branding/js/purchase_source.js");
+				if (!root.deeplinkerp?.purchaseSource?.sync) await root.frappe.require("/assets/deeplinkerp_branding/js/purchase_source.js?v=0.0.2");
 				await root.deeplinkerp.purchaseSource.sync(); await controller.refresh();
 			} catch (error) { root.frappe.msgprint({ message: error.message || "采购来源同步失败，请核对系统提示。", indicator: "red" }); }
 			finally { button.prop("disabled", false); }

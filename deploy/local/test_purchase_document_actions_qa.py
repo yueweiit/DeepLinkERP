@@ -4,6 +4,8 @@ import subprocess
 import sys
 import uuid
 import unittest
+from contextlib import contextmanager
+from types import SimpleNamespace
 from functools import wraps
 from unittest.mock import patch
 
@@ -342,6 +344,7 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         self.types += ("OA Purchase Request", "Comment")  # exact source recheck/write boundary fixture
         self.types += ("MES Integration Log", "MES Material Request Task", "Error Log")  # native C1 side effects
         self.types += ("DocShare", "DefaultValue")  # exact new User fixture side effects, never historical rows
+        self.types += ("Purchase Taxes and Charges Template",)
         self.before = {doctype: frappe.db.count(doctype) for doctype in self.types}
         self.initial_names = {doctype: set(frappe.get_all(doctype, pluck="name", limit_page_length=0)) for doctype in self.types}
         self.committed_names = None
@@ -352,7 +355,7 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
 
     def clean(self):
         frappe.db.rollback()
-        for doctype in ("Accounts Settings", "Buying Settings", "System Settings", "Stock Reposting Settings"):
+        for doctype in ("Accounts Settings", "Buying Settings", "System Settings", "Stock Settings", "Stock Reposting Settings"):
             frappe.clear_document_cache(doctype, doctype)
         frappe.clear_document_cache("Company", COMPANY)
         if self.committed_names:
@@ -393,13 +396,208 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
             po.submit()
         return po
 
+    def purchase_source_row(self, *, native_price=True, native_rate=50, **values):
+        from test_purchase_sources_native_qa import fixture
+        item = frappe.get_doc("Item",values.get("item_code",self.item))
+        if not any(row.company == COMPANY for row in item.get("item_defaults") or []):
+            item.append("item_defaults",{"company":COMPANY,"default_warehouse":"Stores - QAB"})
+            item.save()
+        if native_price:
+            price_list=frappe.new_doc("Purchase Order").buying_price_list
+            if not frappe.db.exists("Item Price",{"item_code":item.name,"price_list":price_list,"uom":"Nos"}):
+                frappe.get_doc({"doctype":"Item Price","item_code":item.name,"price_list":price_list,"currency":"CNY",
+                    "uom":"Nos","price_list_rate":native_rate,"valid_from":"2026-01-01"}).insert()
+        options = {"item_code":self.item,"purchasing_company":COMPANY,"supplier":"QA Test Supplier","rate":"50",
+            "schedule_date":"2026-02-02","raw":True,**values}
+        return fixture("QA-AUTO-" + uuid.uuid4().hex, "QA-DT-AUTO-" + uuid.uuid4().hex, **options)
+
+    @contextmanager
+    def source_snapshot(self, rows):
+        from deeplinkerp_branding.services import operating_expenses, purchase_source_service as sources
+        def read(connection, limit, until, **kwargs):
+            identity=kwargs.get("identity")
+            return ([row for row in rows if all(row.get(key)==value for key,value in identity.items())],None) if identity else (rows,None)
+        def resolve(path, data):
+            return {"items": [{**value, "status":"unknown"} for value in data["applicants"]]}
+        with patch.object(operating_expenses,"_oa_connection",return_value=SimpleNamespace(_connection=object())), \
+             patch.object(operating_expenses,"_request",side_effect=resolve), \
+             patch.object(sources,"_cashier_snapshot",return_value=[]), patch.object(sources.oa,"read_page",side_effect=read):
+            yield sources
+
+    def test_source_sync_complete_pending_invalid_and_durable_replay(self):
+        from deeplinkerp_branding.services import purchase_operation
+        complete = self.purchase_source_row()
+        missing = self.purchase_source_row(); missing["form_component_values"] = [v for v in missing["form_component_values"] if v["name"] != "采购公司"]
+        invalid = self.purchase_source_row(); invalid["result"] = "refuse"
+        running = self.purchase_source_row(); running["status"] = "RUNNING"
+        self.commit_fixture("Item", "QA-ATOMIC-")
+        before = {dt:frappe.db.count(dt) for dt in self.types}
+        key = str(uuid.uuid4())
+        with self.source_snapshot([complete,missing,invalid,running]) as sources:
+            result = sources.sync_purchase_sources(request_id=key)
+            self.assertEqual((result["created"],result["pending"]),(1,1),
+                [frappe.db.get_value(sources.DOCTYPE,row["name"],sources.PENDING_FIELD) for row in result["acknowledgements"]])
+            po = frappe.get_doc("Purchase Order",result["documents"][0]["name"])
+            self.assertEqual((po.docstatus,str(po.transaction_date),str(po.schedule_date)),(0,"2026-01-01","2026-02-02"))
+            self.assertEqual((po.items[0].qty,po.items[0].rate,po.grand_total),(2,50,100))
+            source = frappe.get_doc(sources.DOCTYPE,po.custom_oa_purchase_expense)
+            self.assertEqual(source.purchase_order,po.name)
+            pending = sources._cached_doc(sources._normalize(missing))
+            self.assertIn("采购公司",pending.get(sources.PENDING_FIELD))
+            self.assertEqual(pending.source_pending,0)
+            self.assertEqual(sources._cached_doc(sources._normalize(running)).source_pending,1)
+            for dt in ("Purchase Receipt","Purchase Invoice","Payment Entry","Stock Ledger Entry","GL Entry"):
+                self.assertEqual(frappe.db.count(dt),before[dt])
+            frappe.db.commit(); self.remember_new_names()
+            with patch.object(sources,"_cashier_snapshot",side_effect=AssertionError("Replay must use acknowledged result")):
+                replay = sources.sync_purchase_sources(request_id=key)
+            self.assertTrue(replay["reused"])
+            self.assertEqual(replay["created"],1)
+            self.assertEqual(replay["documents"],result["documents"])
+            # A new run preserves linked native manual edits and never creates a duplicate.
+            po = frappe.get_doc("Purchase Order",po.name); po.items[0].rate=55; po.save()
+            again = sources.sync_purchase_sources(request_id=str(uuid.uuid4()))
+            self.assertEqual((again["created"],again["already_linked"]),(0,1))
+            self.assertEqual(frappe.db.get_value("Purchase Order Item",po.items[0].name,"rate"),55)
+            frappe.db.commit(); self.remember_new_names()
+            original_receipt=frappe.db.get_value("Integration Request",purchase_operation.identity("Administrator",key),"output")
+            rejected=sources.sync_purchase_sources(request_id=key)
+            self.assertTrue(rejected["failed"])
+            self.assertEqual(frappe.db.get_value("Integration Request",purchase_operation.identity("Administrator",key),"output"),original_receipt)
+            self.assertEqual(frappe.db.get_value("Purchase Order Item",po.items[0].name,"rate"),55)
+        receipt = json.loads(frappe.db.get_value("Integration Request",purchase_operation.identity("Administrator",key),"output"))
+        self.assertEqual(receipt["result"]["created"],1)
+        self.assertTrue(receipt["acknowledgements"])
+
+    def test_source_sync_second_native_insert_failure_rolls_back_cache_orders_and_receipt(self):
+        from erpnext.buying.doctype.purchase_order.purchase_order import PurchaseOrder
+        self.commit_fixture("Item", "QA-ATOMIC-")
+        before = {dt:frappe.db.count(dt) for dt in self.types}
+        original = PurchaseOrder.insert
+        inserted = []
+        def fail_second(doc, *args, **kwargs):
+            result = original(doc,*args,**kwargs); inserted.append(doc.name)
+            if len(inserted)==2:
+                raise RuntimeError("QA late second native PO insert")
+            return result
+        with self.source_snapshot([self.purchase_source_row(),self.purchase_source_row()]) as sources, \
+             patch.object(PurchaseOrder,"insert",fail_second):
+            with self.assertRaisesRegex(RuntimeError,"late second native PO"):
+                sources.sync_purchase_sources(request_id=str(uuid.uuid4()))
+        self.assertEqual(len(inserted),2)
+        self.assertEqual(before,{dt:frappe.db.count(dt) for dt in self.types})
+
+    def test_source_sync_known_zero_native_rounding_and_missing_or_inconsistent_lines(self):
+        zero_item="QA-ATOMIC-"+uuid.uuid4().hex[:10]
+        frappe.get_doc({"doctype":"Item","item_code":zero_item,"item_name":zero_item,"item_group":"All Item Groups",
+            "stock_uom":"Nos","is_stock_item":1}).insert()
+        zero = self.purchase_source_row(rate="0",item_code=zero_item,native_rate=0)
+        rounded = self.purchase_source_row(rate="49.9999")
+        derived = self.purchase_source_row(rate=None)
+        impossible = self.purchase_source_row(rate=None)
+        missing = self.purchase_source_row()
+        inconsistent = self.purchase_source_row(rate="0")
+        invalid_price = self.purchase_source_row(rate="待确认")
+        invalid_date = self.purchase_source_row(schedule_date="2026-02-31")
+        for row, replacements in ((zero,{"总金额Monto Total":"0"}),(impossible,{"数量Cantidad":"3"}),(missing,{"数量Cantidad":None})):
+            for component in row["form_component_values"]:
+                if component.get("componentType") == "TableField":
+                    table=json.loads(component["value"])
+                    for cell in table[0]:
+                        if cell["name"] in replacements: cell["value"]=replacements[cell["name"]]
+                    component["value"]=json.dumps(table)
+                elif row is zero and component["name"] == "金额importe": component["value"]="0"
+        self.commit_fixture("Item", "QA-ATOMIC-")
+        with self.source_snapshot([zero,rounded,derived,impossible,missing,inconsistent,invalid_price,invalid_date]) as sources:
+            result=sources.sync_purchase_sources(request_id=str(uuid.uuid4()))
+            self.assertEqual((result["created"],result["pending"]),(3,5),
+                [frappe.db.get_value(sources.DOCTYPE,row["name"],sources.PENDING_FIELD) for row in result["acknowledgements"]])
+            orders=[frappe.get_doc("Purchase Order",row["name"]) for row in result["documents"]]
+            self.assertEqual(sorted(po.grand_total for po in orders),[0,100,100])
+            self.assertTrue(all(po.docstatus==0 for po in orders))
+            self.assertFalse(frappe.db.exists("Stock Ledger Entry",{"voucher_no":["in",[po.name for po in orders]]}))
+
+    def test_source_sync_default_native_tax_mismatch_stays_pending_with_zero_document_receipt(self):
+        row=self.purchase_source_row()
+        self.commit_fixture("Item", "QA-ATOMIC-")
+        frappe.get_doc({"doctype":"Purchase Taxes and Charges Template","title":"QA-AUTO-TAX-"+uuid.uuid4().hex,
+            "company":COMPANY,"is_default":1,"taxes":[{"charge_type":"On Net Total","account_head":"Stock Received But Not Billed - QAB",
+                "description":"QA native default tax","rate":10,"category":"Total","add_deduct_tax":"Add"}]}).insert()
+        with self.source_snapshot([row]) as sources:
+            key=str(uuid.uuid4()); result=sources.sync_purchase_sources(request_id=key)
+            self.assertEqual((result["created"],result["pending"],result["documents"]),(0,1,[]))
+            self.assertIn("税费",sources._cached_doc(sources._normalize(row)).get(sources.PENDING_FIELD))
+            replay=sources.sync_purchase_sources(request_id=key)
+            self.assertEqual(replay["documents"],[]); self.assertEqual(replay["pending"],1)
+
+    def test_source_sync_native_price_maintenance_never_creates_or_overwrites_master_prices(self):
+        price_list=frappe.new_doc("Purchase Order").buying_price_list
+        self.assertEqual(frappe.db.get_value("Price List",price_list,"currency"),"CNY")
+        frappe.db.set_single_value("Stock Settings",{"auto_insert_price_list_rate_if_missing":1,"update_existing_price_list_rate":0})
+        frappe.clear_document_cache("Stock Settings","Stock Settings")
+        rows=[self.purchase_source_row(native_price=False) for _ in range(3)]
+        with self.source_snapshot(rows) as sources:
+            count=frappe.db.count("Item Price")
+            result=sources.sync_purchase_sources(request_id=str(uuid.uuid4()))
+            self.assertEqual((result["created"],result["pending"]),(0,3))
+            self.assertEqual(frappe.db.count("Item Price"),count)
+            self.assertIn("价格表",sources._cached_doc(sources._normalize(rows[0])).get(sources.PENDING_FIELD))
+            price=frappe.get_doc({"doctype":"Item Price","item_code":self.item,"price_list":price_list,
+                "currency":"CNY","uom":"Nos","price_list_rate":50,"valid_from":"2026-01-01"}).insert()
+            result=sources.sync_purchase_sources(request_id=str(uuid.uuid4()))
+            self.assertEqual((result["created"],result["pending"]),(3,0),
+                [frappe.db.get_value(sources.DOCTYPE,row["name"],sources.PENDING_FIELD) for row in result["acknowledgements"]])
+            self.assertEqual(frappe.db.count("Item Price"),count+1)
+            frappe.db.set_value("Item Price",price.name,"price_list_rate",45)
+            frappe.db.set_single_value("Stock Settings","update_existing_price_list_rate",1)
+            frappe.clear_document_cache("Stock Settings","Stock Settings")
+        with self.source_snapshot([self.purchase_source_row(native_price=False)]) as sources:
+            result=sources.sync_purchase_sources(request_id=str(uuid.uuid4()))
+            self.assertEqual((result["created"],result["pending"]),(0,1))
+            self.assertEqual(frappe.db.get_value("Item Price",price.name,"price_list_rate"),45)
+            self.assertEqual(frappe.db.count("Item Price"),count+1)
+
+    def test_source_sync_late_reconciliation_failure_never_writes_partial_business_results(self):
+        old,new=self.purchase_source_row(),self.purchase_source_row()
+        with self.source_snapshot([new]) as sources:
+            source=sources._normalize(old)
+            sources._cache_source(source,sources.contract.payment_evidence(source,[]))
+            self.commit_fixture("OA Purchase Request","DT-PUR-")
+            before={dt:frappe.db.count(dt) for dt in self.types}
+            def late(connection,limit,until,**kwargs):
+                if kwargs.get("identity"): raise RuntimeError("QA late reconciliation read")
+                return [new],None
+            with patch.object(sources.oa,"read_page",side_effect=late),self.assertRaisesRegex(RuntimeError,"late reconciliation"):
+                sources.sync_purchase_sources(request_id=str(uuid.uuid4()))
+            self.assertEqual(before,{dt:frappe.db.count(dt) for dt in self.types})
+
+    def test_source_sync_then_actual_audit_waits_for_explicit_merged_native_receipt(self):
+        from deeplinkerp_branding.services import purchase_document_actions as actions
+        rows=[self.purchase_source_row(),self.purchase_source_row()]
+        self.commit_fixture("Item","QA-ATOMIC-")
+        with self.source_snapshot(rows) as sources:
+            result=sources.sync_purchase_sources(request_id=str(uuid.uuid4()))
+            self.assertEqual(result["created"],2)
+            self.commit_fixture(name_prefix="PUR-ORD-2026-")
+            orders=[frappe.get_doc("Purchase Order",row["name"]) for row in result["documents"]]
+            for order in orders: order.submit()
+            self.assertFalse(frappe.db.exists("Purchase Receipt Item",{"purchase_order":["in",[po.name for po in orders]]}))
+            self.commit_fixture(name_prefix="PUR-ORD-2026-")
+            receipt=actions.record_document_batch([{"name":po.name,"modified":str(po.modified)} for po in orders],
+                [{}],str(uuid.uuid4()),merge=1,confirm=1)
+            self.assertEqual(len(receipt["documents"]),1)
+            native=frappe.get_doc("Purchase Receipt",receipt["documents"][0]["document"]["name"])
+            self.assertEqual(native.docstatus,1)
+            self.assertEqual({row.purchase_order for row in native.items},{po.name for po in orders})
+
     def test_batch_receipts_individual_merged_partial_and_durable_replay(self):
         from deeplinkerp_branding.services import purchase_document_actions as actions
         self.assertTrue(callable(getattr(actions, "record_document_batch", None)), "Explicit native receipt batch is missing")
         for merge in (0, 1):
             with self.subTest(merge=merge):
-                with patch("oa_purchase_request.oa_purchase_request.oa_purchase_request.auto_create_purchase_receipt"):
-                    orders = [self.order(qty=5, rate=10), self.order(qty=6, rate=10)]
+                orders = [self.order(qty=5, rate=10), self.order(qty=6, rate=10)]
+                self.assertFalse(frappe.db.exists("Purchase Receipt Item", {"purchase_order": ["in", [po.name for po in orders]]}),
+                    "New submitted orders must wait for the user's receipt selection")
                 self.commit_fixture()
                 sources = [{"name": po.name, "modified": str(po.modified)} for po in orders]
                 preview = actions.preview_document_batch(sources, merge=merge)
@@ -418,14 +616,13 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
                 replay = actions.record_document_batch(sources, edits, request, merge=merge, confirm=1)
                 self.assertTrue(replay["reused"])
                 self.assertEqual([row["document"]["name"] for row in replay["documents"]], names)
-                with self.assertRaises(frappe.ValidationError):
-                    actions.record_document_batch(sources, [{}], request, merge=merge, confirm=1)
+                rejected=actions.record_document_batch(sources, [{}], request, merge=merge, confirm=1)
+                self.assertTrue(rejected["failed"])
 
     def test_batch_second_native_receipt_failure_rolls_back_whole_confirmation(self):
         from deeplinkerp_branding.services import purchase_document_actions as actions
         self.assertTrue(callable(getattr(actions, "record_document_batch", None)), "Explicit native receipt batch is missing")
-        with patch("oa_purchase_request.oa_purchase_request.oa_purchase_request.auto_create_purchase_receipt"):
-            orders = [self.order(qty=5), self.order(qty=5)]
+        orders = [self.order(qty=5), self.order(qty=5)]
         self.commit_fixture()
         sources = [{"name": po.name, "modified": str(po.modified)} for po in orders]
         before = {dt: frappe.db.count(dt) for dt in self.types}
@@ -448,8 +645,7 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
     def test_batch_merged_receipt_invoice_and_partial_payment_exact_shared_reference(self):
         from deeplinkerp_branding.services import purchase_document_actions as actions
         self.assertTrue(callable(getattr(actions, "record_document_batch", None)), "Explicit native receipt batch is missing")
-        with patch("oa_purchase_request.oa_purchase_request.oa_purchase_request.auto_create_purchase_receipt"):
-            orders = [self.order(qty=3, rate=10), self.order(qty=4, rate=10)]
+        orders = [self.order(qty=3, rate=10), self.order(qty=4, rate=10)]
         self.commit_fixture()
         result = actions.record_document_batch([{"name": po.name, "modified": str(po.modified)} for po in orders],
             [{}], str(uuid.uuid4()), merge=1, confirm=1)
@@ -475,8 +671,7 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
     def test_batch_payment_gl_failure_retains_prior_payables_and_balances(self):
         from deeplinkerp_branding.services import purchase_document_actions as actions
         self.assertTrue(callable(getattr(actions, "record_document_batch", None)), "Explicit native receipt batch is missing")
-        with patch("oa_purchase_request.oa_purchase_request.oa_purchase_request.auto_create_purchase_receipt"):
-            orders = [self.order(qty=3, rate=10), self.order(qty=4, rate=10)]
+        orders = [self.order(qty=3, rate=10), self.order(qty=4, rate=10)]
         self.commit_fixture()
         receipts = actions.record_document_batch([{"name": po.name, "modified": str(po.modified)} for po in orders],
             [{}, {}], str(uuid.uuid4()), confirm=1)["documents"]
@@ -500,13 +695,12 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
             "outstanding_after": {name: frappe.db.get_value("Purchase Invoice", name, "outstanding_amount") for name in outstanding},
             "before": before, "after": {dt: frappe.db.count(dt) for dt in self.types}}))
 
-    def test_batch_existing_automatic_receipt_drafts_preserve_manual_values(self):
+    def test_batch_existing_historical_receipt_drafts_preserve_manual_values(self):
         from deeplinkerp_branding.services import purchase_document_actions as actions
         orders = [self.order(qty=3, rate=10), self.order(qty=4, rate=10)]
         drafts = []
         for po in orders:
-            name = frappe.db.get_value("Purchase Receipt Item", {"purchase_order": po.name, "docstatus": 0}, "parent")
-            draft = frappe.get_doc("Purchase Receipt", name)
+            draft = make_purchase_receipt(po.name).insert()
             draft.items[0].qty = 1
             draft.items[0].received_qty = 0
             draft.items[0].warehouse = "Work In Progress - QAB"
@@ -532,8 +726,7 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
 
     def test_batch_receipt_rejects_changed_quantity_invalid_warehouse_and_merge_headers(self):
         from deeplinkerp_branding.services import purchase_document_actions as actions
-        with patch("oa_purchase_request.oa_purchase_request.oa_purchase_request.auto_create_purchase_receipt"):
-            orders = [self.order(qty=3, rate=10), self.order(qty=4, rate=10)]
+        orders = [self.order(qty=3, rate=10), self.order(qty=4, rate=10)]
         self.commit_fixture()
         sources = [{"name": po.name, "modified": str(po.modified)} for po in orders]
         before = {dt: frappe.db.count(dt) for dt in self.types}
@@ -567,8 +760,7 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
 
     def test_batch_payment_existing_draft_fresh_outstanding_hold_and_replay(self):
         from deeplinkerp_branding.services import purchase_document_actions as actions
-        with patch("oa_purchase_request.oa_purchase_request.oa_purchase_request.auto_create_purchase_receipt"):
-            orders = [self.order(qty=3, rate=10), self.order(qty=4, rate=10)]
+        orders = [self.order(qty=3, rate=10), self.order(qty=4, rate=10)]
         self.commit_fixture()
         receipts = actions.record_document_batch([{"name": po.name, "modified": str(po.modified)} for po in orders],
             [{}, {}], str(uuid.uuid4()), confirm=1)["documents"]
@@ -4638,7 +4830,8 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         frappe.get_doc({"doctype": "User", "email": user, "first_name": "Atomic QA", "send_welcome_email": 0,
             "roles": [{"role": "Purchase User"}, {"role": "Accounts User"}]}).insert()
         self.commit_fixture()
-        frappe.db.set_value("China Finance Settings", COMPANY, "auto_submit_purchase_invoice", 1)
+        original_submit=frappe.db.get_value("China Finance Settings",COMPANY,"auto_submit_purchase_invoice")
+        frappe.db.set_value("China Finance Settings", COMPANY, "auto_submit_purchase_invoice", 1,update_modified=False)
         target = frappe.db.get_value("Purchase Receipt Item", {"purchase_order": po.name, "docstatus": 0}, "parent")
         args = {"target_name": target, "expected_modified": frappe.db.get_value("Purchase Receipt", target, "modified")} if target else {}
         key = str(uuid.uuid4())
@@ -4647,15 +4840,19 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         try:
             result = actions.record_receipt(po.name, changes, key, **args)
             self.assertFalse(result.get("failed"), result)
+            frappe.db.set_value("China Finance Settings",COMPANY,"auto_submit_purchase_invoice",original_submit,update_modified=False)
+            self.commit_fixture()
             frappe.db.delete("Has Role", {"parent": user, "role": "Accounts User"})
             frappe.clear_cache(user=user)
             frappe.set_user("Administrator"); frappe.set_user(user)
             self.assertTrue(frappe.has_permission("Purchase Invoice", "read"))
             self.assertFalse(frappe.has_permission("Purchase Invoice", "submit"))
-            with self.assertRaises(frappe.PermissionError):
-                actions.record_receipt(po.name, changes, key, **args)
+            rejected=actions.record_receipt(po.name, changes, key, **args)
+            self.assertTrue(rejected["failed"])
         finally:
             frappe.set_user("Administrator")
+            frappe.db.set_value("China Finance Settings",COMPANY,"auto_submit_purchase_invoice",original_submit,update_modified=False)
+            frappe.clear_document_cache("China Finance Settings",COMPANY)
             frappe.clear_cache(user=user)
 
     def test_native_direct_stock_invoice_and_return_preserve_received_and_billed(self):
@@ -5379,11 +5576,11 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         self.assertEqual(invoice_effects[0]["permission"], "read")
         replay = actions.record_payment(**args)
         self.assertTrue(replay["reused"])
+        self.commit_fixture()
         outstanding = frappe.db.get_value(pi.doctype, pi.name, "outstanding_amount")
         frappe.db.set_value(pi.doctype, pi.name, "outstanding_amount", outstanding + 1, update_modified=False)
-        with self.assertRaises(frappe.ValidationError) as caught:
-            actions.record_payment(**args)
-        self.assertEqual(caught.exception.purchase_error_id, "replay_evidence_changed")
+        rejected=actions.record_payment(**args)
+        self.assertTrue(rejected["failed"])
 
     def test_direct_payment_draft_replay_rechecks_acknowledged_evidence_and_write_acl(self):
         from deeplinkerp_branding.services import purchase_consistency as guard
@@ -5645,7 +5842,10 @@ if __name__ == "__main__":
         if len(sys.argv) == 3 and sys.argv[1] == "--boundary-peer":
             boundary_peer(json.loads(sys.argv[2]))
         else:
-            result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(NativeAtomicPurchaseTests))
+            suite = (unittest.TestSuite(NativeAtomicPurchaseTests(name) for name in sys.argv[2:])
+                if len(sys.argv) > 2 and sys.argv[1] == "--tests" else
+                unittest.defaultTestLoader.loadTestsFromTestCase(NativeAtomicPurchaseTests))
+            result = unittest.TextTestRunner(verbosity=2).run(suite)
             raise SystemExit(not result.wasSuccessful())
     finally:
         frappe.destroy()

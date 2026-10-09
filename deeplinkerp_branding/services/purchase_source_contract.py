@@ -20,6 +20,8 @@ ALIASES = {
     "processors": ("加工商明细",), "detail_total": ("明细汇总金额",),
     "description": ("规格明细需求说明", "其他采购说明"),
     "schedule_date": ("交付日期",), "department": ("申请部门/组织", "申请部门", "所属BU"),
+    "purchasing_company": ("采购公司", "采购主体", "付款公司", "Purchasing company"),
+    "supplier": ("供应商", "Supplier"),
     "beneficiary_company": ("归属子公司", "所属子公司", "子公司", "受益公司", "最终用户公司", "业务主体",
                             "Empresa beneficiaria", "Empresa filial", "Subsidiaria", "Entidad comercial"),
     "project": ("项目归属", "归属项目", "项目Proyecto", "项目", "Proyecto", "Project"), "order_no": ("订单Pedido",),
@@ -33,6 +35,9 @@ ITEM_ALIASES = {
     "item_name": ("item_name", "product_name", "物品名称", "物料名称", "名称"),
     "qty": ("qty", "quantity", "数量", "cantidad"), "uom": ("uom", "unit", "单位", "unidad"),
     "amount": ("amount", "goods_value", "金额", "总金额", "importe", "monto"),
+    "rate": ("rate", "unit_price", "单价", "采购单价"),
+    "currency": ("currency", "purchase_currency", "采购币种", "币种"),
+    "supplier": ("supplier", "供应商"),
     "specification": ("specification", "spec_model", "规格", "description", "说明"),
 }
 
@@ -54,6 +59,8 @@ def _field_occurrences(row):
         name = re.sub(r"\s+", "", str(component.get("name") or component.get("label") or "")).casefold()
         for key, aliases in _FIELD_ALIASES:
             if any(name.startswith(alias) for alias in aliases):
+                if key in ("purchasing_company","supplier") and not _populated([component.get("value")]):
+                    break  # newly recognized blank controls are not new source facts
                 result.setdefault(key, []).append(component.get("value"))
                 break
     return result
@@ -114,8 +121,15 @@ def item_rows(value, parser=None):
         if not isinstance(raw, dict):
             continue
         item = {k: _value(raw, aliases) for k, aliases in ITEM_ALIASES.items()}
-        for key in ("qty", "amount"):
+        raw_rate = item.get("rate")
+        for key in ("qty", "amount", "rate"):
             item[key] = oa.exact_amount(item[key])
+        if raw_rate is not None and str(raw_rate).strip() and item["rate"] is None:
+            item["rate_invalid"] = True
+        # Do not change old bound fingerprints merely by introducing empty facts.
+        for key in ("rate", "currency", "supplier"):
+            if item[key] is None:
+                item.pop(key)
         rows.append(item)
     return rows
 
@@ -134,6 +148,8 @@ def normalize(row, parser=None, *, detail_rows=None, occurrences=None):
     form = fields(row, occurrences=occurrences)
     beneficiary, beneficiary_status = _role_value(occurrences, "beneficiary_company")
     project, project_status = _role_value(occurrences, "project")
+    buyer, buyer_status = _role_value(occurrences, "purchasing_company")
+    supplier, supplier_status = _role_value(occurrences, "supplier")
     items = item_rows(form.get("items") if detail_rows is None else detail_rows, parser)
     total = (str(sum((Decimal(item["amount"]) for item in items), Decimal(0)))
              if items and all(item["amount"] is not None for item in items) else oa.exact_amount(form.get("detail_total")))
@@ -165,6 +181,9 @@ def normalize(row, parser=None, *, detail_rows=None, occurrences=None):
         "updated_at": str(row.get("updated_at") or row["create_time"]),
         "original_fields": copy.deepcopy({key: values[0] if len(values) == 1 else values
                                           for key, values in occurrences.items()})}
+    for key, value, status in (("purchasing_company", buyer, buyer_status), ("supplier", supplier, supplier_status)):
+        if key in occurrences:
+            result.update({key: value, key + "_status": status})
     # Approval evidence can change independently of product facts.
     result["version"] = digest(result)
     return result

@@ -107,7 +107,7 @@ def _reserve(context):
 
 
 def complete_audit(context, output):
-    documents = output.get("documents") or [output.get("document", output)]
+    documents = output["documents"] if "documents" in output else [output.get("document", output)]
     receipts = []
     for document in documents:
         document = document.get("document", document)
@@ -118,7 +118,7 @@ def complete_audit(context, output):
         identity = {key: receipt[key] for key in ("doctype", "name")}
         if not any((row["doctype"], row["name"]) == (identity["doctype"], identity["name"]) for row in context["documents"]):
             context["documents"].append(identity)
-    document = documents[0].get("document", documents[0])
+    document = documents[0].get("document", documents[0]) if documents else {}
     artifacts = []
     from .purchase_consistency import artifact_evidence
     for identity in context["documents"]:
@@ -131,13 +131,16 @@ def complete_audit(context, output):
             "permission": permission, "evidence": artifact_evidence(native)})
     receipt = {"documents": receipts} if "documents" in output else receipts[0]
     receipt.update(artifacts=artifacts)
+    for key in ("result", "acknowledgements"):
+        if key in output:
+            receipt[key] = output[key]
     if output.get("localname"):
         receipt["localname"] = output["localname"]
     context.update(amount=document.get("amount", document.get("grand_total")), currency=document.get("currency"),
         quantity=[{"key": row.get("key"), "qty": row.get("qty")} for row in document.get("items", [])])
     frappe.db.set_value("Integration Request", context["operation_id"], {
         "status": "Completed", "data": encode(context), "output": encode(receipt),
-        "reference_doctype": document.get("doctype", "Payment Entry"), "reference_docname": document.get("name")},
+        "reference_doctype": document.get("doctype", "Payment Entry") if documents else None, "reference_docname": document.get("name")},
         update_modified=False)
 
 
@@ -229,7 +232,7 @@ def run(request_id, payload, operation, replay, *, digest=None, acknowledge_vali
                 retry = True
             if retry and attempt < 2 and (audit_collision or not isinstance(error, (frappe.ValidationError, frappe.PermissionError))):
                 continue  # Frappe rollback starts a new transaction.
-            if previous is None and acknowledge_validation and isinstance(error, (frappe.ValidationError, frappe.PermissionError)):
+            if (previous is None or previous.status == "Completed") and acknowledge_validation and isinstance(error, (frappe.ValidationError, frappe.PermissionError)):
                 if isinstance(error, frappe.PermissionError):
                     return {"failed": True, "error": "采购操作权限不足，请联系管理员核对", "error_id": getattr(error, "purchase_error_id", "native_permission_denied")}
                 return {"failed": True, "error": str(error)}

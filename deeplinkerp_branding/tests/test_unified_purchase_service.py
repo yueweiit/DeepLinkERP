@@ -93,7 +93,7 @@ def test_inaccessible_linked_order_keeps_oa_without_leaking_order_name():
 
 
 def test_managed_source_keeps_zero_and_separates_request_cashier_and_erp():
-	request=oa(currency="USD",custom_purchase_source_json=json.dumps({"eligible":True,"version":"v1","currency":"CNY","requested_amount":"999","detail_total_amount":"0","issues":[]}),
+	request=oa(currency="USD",custom_purchase_pending_reason="原生默认税费待核对",custom_purchase_source_json=json.dumps({"eligible":True,"version":"v1","currency":"CNY","requested_amount":"999","detail_total_amount":"0","issues":[]}),
 		custom_cashier_payment_evidence=json.dumps({"paid_amount":"20","currency":"CNY","payment_evidence_status":"recorded"}))
 	row=backend().build_unified_purchase_payload([po(custom_oa_purchase_expense="OA-1",grand_total=100,advance_paid=5)],[request])["rows"][0]
 	assert row["oa_amount"] == "0"
@@ -102,6 +102,7 @@ def test_managed_source_keeps_zero_and_separates_request_cashier_and_erp():
 	assert row["cashier_paid_amount"] == "20"
 	assert row["grand_total"] == 100 and row["advance_paid"] == 5
 	assert row["source_version"] == "v1" and row["source_eligible"] is True
+	assert "原生默认税费待核对" in row["oa_warning"]
 
 
 def test_quick_order_status_and_advance_status_are_not_ignored():

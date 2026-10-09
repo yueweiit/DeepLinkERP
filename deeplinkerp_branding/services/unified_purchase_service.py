@@ -48,7 +48,7 @@ OA_QUERY_FIELDS = (
 	"approval_status", "sync_status", "process_instance_id", "owner", "order_no",
 	"custom_purchase_source_json", "custom_cashier_payment_evidence", "custom_purchase_source_id",
 	"custom_purchase_beneficiary_company", "custom_purchase_company_proposal", "custom_purchase_project",
-	"custom_purchase_company_confirmed", "backfill_imported", "project",
+	"custom_purchase_company_confirmed", "backfill_imported", "project", "custom_purchase_pending_reason",
 )
 AMOUNT_FIELDS = (
 	("detail_total_amount", "采购明细合计"),
@@ -307,6 +307,8 @@ def _oa_metadata(request: dict, currency_codes: set[str]) -> dict:
 	proof = request["_proof"]
 	currency = _currency(managed.get("currency") if managed else request.get("currency"), currency_codes)
 	warnings = [amount_warning] if amount_warning else []
+	if request.get("custom_purchase_pending_reason"):
+		warnings.append(request["custom_purchase_pending_reason"])
 	if not currency:
 		warnings.append("OA 币种未知，未计入合计")
 	request["_metadata"] = {

@@ -241,6 +241,13 @@ class PurchaseSourceServiceTests(unittest.TestCase):
         self.assertFalse(service.cashier_payment_reason({"paid_amount":"0","payment_evidence_status":"recorded"},None))
         self.assertFalse(service.cashier_payment_reason({"paid_amount":"20","payment_evidence_status":"recorded"},{"verified":True}))
 
+    def test_zero_document_sync_replay_rechecks_source_acl_and_current_version(self):
+        receipt={"documents":[],"result":{"pending":1},"acknowledgements":[{"name":"OA","version":"old","purchase_order":None}]}
+        with patch.object(service,"_source",side_effect=frappe.PermissionError("current source ACL")):
+            with self.assertRaises(frappe.PermissionError): service._sync_replay(receipt)
+        with patch.object(service,"_source",return_value=self.doc):
+            with self.assertRaisesRegex(frappe.ValidationError,"已变化"): service._sync_replay(receipt)
+
     def test_cashier_snapshot_accepts_equivalent_timezone_serializations(self):
         from deeplinkerp_branding.services import operating_expenses
         until = "2026-10-06T09:00:00.123456+00:00"
@@ -317,13 +324,35 @@ class PurchaseSourceServiceTests(unittest.TestCase):
              patch.object(service.contract,"payment_evidence",return_value={}), \
              patch.object(service,"_cache_source") as save, \
              patch.object(service,"_reconcile_cached_sources") as reconcile:
-            result = service.sync_purchase_sources()
-        self.assertEqual(result["count"], 201)
-        self.assertEqual([call.args[0]["source_id"] for call in save.call_args_list], [row["source_id"] for row in rows])
+            snapshots,count = service._read_sync_snapshot("2026-10-06T00:00:00Z")
+        self.assertEqual(count, 201)
+        self.assertEqual([source["source_id"] for source,_,_ in snapshots], [row["source_id"] for row in rows])
+        save.assert_not_called()
         self.assertEqual([call.args[1] for call in read.call_args_list], [100, 100, 100])
         self.assertEqual([call.kwargs["cursor"] for call in read.call_args_list], [None, "100", "200"])
         self.assertEqual(reconcile.call_args.args[2], {row["source_id"] for row in rows})
         self.db.commit.assert_not_called()
+
+    def test_last_upstream_page_failure_never_writes_partial_cache(self):
+        from deeplinkerp_branding.services import operating_expenses
+        row = {"corp_id":"corp", "process_instance_id":"instance", "process_code":service.contract.PROCESS_CODES[0],
+            "create_time":"2026-01-01T00:00:00Z", "status":"COMPLETED", "result":"agree",
+            "form_component_values":[{"name":"执行地区", "value":"中国China"}]}
+        applicant = {"user_id":"u", "employee_name":"Synthetic"}
+        with patch.object(frappe,"cache",Mock(lock=Mock(return_value=MagicMock()))), \
+             patch.object(frappe,"local",SimpleNamespace(site="synthetic-source-test")), \
+             patch.object(frappe,"get_meta",return_value=SimpleNamespace(has_field=lambda _:True)), \
+             patch.object(frappe,"get_all",return_value=[]), patch.object(operating_expenses,"_manager"), \
+             patch.object(operating_expenses,"_oa_connection",return_value=SimpleNamespace(_connection=object())), \
+             patch.object(operating_expenses,"_request",return_value={"items":[{**applicant,"status":"unknown"}]}), \
+             patch.object(service,"_cashier_snapshot",return_value=[]), \
+             patch.object(service.oa,"read_page",side_effect=[([row],"next"),RuntimeError("late upstream failure")]), \
+             patch.object(service.oa,"resolution_applicant",return_value=applicant), \
+             patch.object(service,"_normalize",side_effect=lambda row,**kw:service.contract.normalize(row,**kw)), \
+             patch.object(service,"_cache_source") as save:
+            with self.assertRaisesRegex(RuntimeError,"late upstream failure"):
+                service._read_sync_snapshot("2026-10-06T00:00:00Z")
+        save.assert_not_called()
 
     def test_sync_normalizes_once_per_row_and_resolves_company_bridge_once_for_the_run(self):
         from deeplinkerp_branding.services import operating_expenses
@@ -347,13 +376,14 @@ class PurchaseSourceServiceTests(unittest.TestCase):
              patch.object(service.contract,"_field_occurrences",wraps=service.contract._field_occurrences) as occurrences, \
              patch.object(service,"_cache_source") as save, \
              patch.object(service,"_reconcile_cached_sources"):
-            result=service.sync_purchase_sources()
-        self.assertEqual(result["count"],3)
+            snapshots,count=service._read_sync_snapshot("2026-10-06T00:00:00Z")
+        self.assertEqual(count,3)
         self.assertEqual(occurrences.call_count,3)
         companies.assert_called_once()
         self.assertEqual(companies.call_args.args[0],"Company")
-        self.assertEqual({call.args[2] for call in save.call_args_list},{"拉丁购国际电子商务（东莞）有限公司"})
-        self.assertTrue(all(call.args[0]["region"]=="墨西哥Mexico" for call in save.call_args_list))
+        self.assertEqual({proposal for _,_,proposal in snapshots},{"拉丁购国际电子商务（东莞）有限公司"})
+        self.assertTrue(all(source["region"]=="墨西哥Mexico" for source,_,_ in snapshots))
+        save.assert_not_called()
 
     def test_small_page_sync_keeps_original_twenty_thousand_source_bound(self):
         from deeplinkerp_branding.services import operating_expenses
@@ -367,7 +397,7 @@ class PurchaseSourceServiceTests(unittest.TestCase):
              patch.object(service.oa,"read_page",side_effect=lambda *args,**kwargs: ([], str(int(kwargs.get("cursor") or 0) + args[1]))) as read, \
              patch.object(service,"_reconcile_cached_sources") as reconcile:
             with self.assertRaisesRegex(frappe.ValidationError, "超过本次同步上限"):
-                service.sync_purchase_sources()
+                service._read_sync_snapshot("2026-10-06T00:00:00Z")
         self.assertEqual(len(read.call_args_list), 200)
         self.assertEqual({call.args[1] for call in read.call_args_list}, {100})
         self.assertEqual(len(read.call_args_list) * read.call_args.args[1], 20000)
@@ -546,11 +576,12 @@ class PurchaseSourceServiceTests(unittest.TestCase):
         cached={**self.source,"source_id":"source-1","oa_identity":{"corp_id":"corp","process_instance_id":"instance"},"status":"COMPLETED"}
         row=frappe._dict(name="OA",custom_purchase_source_json=json.dumps(cached))
         with patch.object(frappe,"get_all",return_value=[row]),patch.object(service.oa,"read_page",return_value=([],None)),patch.object(service,"_cache_source") as save:
-            service._reconcile_cached_sources(Mock(),"2026-10-06T00:00:00Z",set(),[])
-            invalid=save.call_args.args[0]
+            snapshots=service._reconcile_cached_sources(Mock(),"2026-10-06T00:00:00Z",set(),[])
+            invalid=snapshots[0][0]
             self.assertFalse(invalid["eligible"])
             self.assertEqual(invalid["items"],cached["items"])
             self.assertIn("不存在", "；".join(invalid["issues"]))
+            save.assert_not_called()
 
     def test_duplicate_local_legacy_instances_never_choose_arbitrary_binding(self):
         source={**self.source,"source_id":"source-1","oa_identity":{"corp_id":"corp","process_instance_id":"instance"},"instance_count":1}
