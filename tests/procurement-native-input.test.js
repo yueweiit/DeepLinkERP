@@ -130,6 +130,32 @@ test('merged payment confirms each native invoice amount with fresh source versi
  assert.equal(request.args.allocations.length,2);assert.equal(request.args.allocations[0].name,'PI-SHARED');assert.equal(request.args.allocations[0].amount,30);
 });
 
+for(const invalid of ['-5','not-a-number','Infinity'])test(`merged payment rejects native allocation ${invalid} without dropping input or dispatching`,async()=>{
+ const h=harness(),nativeCall=h.host.frappe.call,nativeDocfield=h.host.frappe.meta.get_docfield;
+ h.host.frappe.meta.get_docfield=(doctype,field)=>({...nativeDocfield(doctype,field),...(field==='allocated_amount'?{fieldtype:'Currency',options:'currency',precision:4}:{})});
+ h.host.frappe.call=async request=>{if(request.method.endsWith('.preview_payment_batch')){h.requests.push(request);return {message:{company:'C',supplier:'S',currency:'USD',sources:[{name:'PR',modified:'fresh'}],invoices:[{name:'PI-A',outstanding:30,currency:'USD'},{name:'PI-B',outstanding:10,currency:'USD'}]}};}return nativeCall(request);};
+ await h.api.batchPay('Purchase Receipt',[{name:'PR'}]);
+ const amount=h.controls.find(control=>control.df.fieldname==='allocated_amount');await amount.$input.emit('input',invalid);
+ await h.click('dlp-create');
+ assert.equal(h.requests.filter(request=>request.method.endsWith('.record_payment')).length,0);
+ assert.equal(amount.$input.val(),invalid);assert.match(h.html(),/有效.*非负/);
+ await amount.$input.emit('input','0');await h.click('dlp-create');
+ const write=h.requests.find(request=>request.method.endsWith('.record_payment'));
+ assert.equal(write.args.allocations.length,1);assert.equal(write.args.allocations[0].name,'PI-B');assert.equal(write.args.allocations[0].amount,10);
+});
+
+test('merged payment filters only real zero and retains native positive partial allocations',async()=>{
+ const h=harness(),nativeCall=h.host.frappe.call,nativeDocfield=h.host.frappe.meta.get_docfield;
+ h.host.frappe.meta.get_docfield=(doctype,field)=>({...nativeDocfield(doctype,field),...(field==='allocated_amount'?{fieldtype:'Currency',options:'currency',precision:4}:{})});
+ h.host.frappe.call=async request=>{if(request.method.endsWith('.preview_payment_batch')){h.requests.push(request);return {message:{company:'C',supplier:'S',currency:'USD',sources:[{name:'PR',modified:'fresh'}],invoices:['PI-A','PI-B','PI-C'].map(name=>({name,outstanding:30,currency:'USD'}))}};}return nativeCall(request);};
+ await h.api.batchPay('Purchase Receipt',[{name:'PR'}]);
+ const amounts=h.controls.filter(control=>control.df.fieldname==='allocated_amount');
+ for(const [index,value] of ['0','10','2,3456'].entries())await amounts[index].$input.emit('input',value);
+ await h.click('dlp-create');
+ const write=h.requests.find(request=>request.method.endsWith('.record_payment'));
+ assert.equal(JSON.stringify(write.args.allocations),JSON.stringify([{name:'PI-B',amount:10},{name:'PI-C',amount:2.3456}]));
+});
+
 test('submitted receipt next step replaces the singleton drawer and previews AP without writing',async()=>{
  const p=projection('Purchase Receipt');p.document.name='PR';p.document.docstatus=1;p.editable_item_fields=[];
  const h=harness({document:p});
