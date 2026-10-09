@@ -343,6 +343,12 @@ class OrderInvoiceMappingTests(unittest.TestCase):
 
 
 class WorkflowActionTests(unittest.TestCase):
+    def test_new_batch_invoice_confirmation_uses_native_submit_capability_and_workflow(self):
+        doc = SimpleNamespace(doctype="Purchase Invoice", docstatus=0, is_new=lambda: True, has_permission=lambda permission: True)
+        for workflow, expected in (("", ["Submit"]), ("Approval", [])):
+            with self.subTest(workflow=workflow), patch("frappe.model.workflow.get_workflow_name", return_value=workflow):
+                self.assertEqual(actions._workflow_actions(doc), expected)
+
     def test_purchase_receipt_uses_only_native_permitted_workflow_transitions(self):
         doc = SimpleNamespace(doctype="Purchase Receipt", docstatus=0, is_new=lambda: False)
         with patch("frappe.model.workflow.get_workflow_name", return_value="Active"), patch("frappe.model.workflow.get_workflow", return_value=SimpleNamespace(workflow_state_field="workflow_state")), patch.object(actions, "_fields"), patch("frappe.model.workflow.get_transitions", return_value=[]) as transitions:

@@ -906,12 +906,12 @@ test("purchase detail invalidation cancels earlier page data after a source writ
 	assert.doesNotMatch(list.get_list_row_html(c.providerRows[0]),/STALE WRITE/);
 });
 
-test("whole-order selection and same-page tabs clear state and constrain actions to existing single-order flows", async () => {
+test("whole-order selection clears with page and tabs and opens the native batch drawer", async () => {
 	const { controller: c, list, env, handlers, payload } = mountedPurchase();
 	const checked = new Set(), calls = [];
 	c.originals.get_checked_items = names => [...checked].map(name => names ? name : { name });
 	list.clear_checked_items = () => { checked.clear(); list.$checks = []; };
-	env.DeepLinkERPPurchasePayments = { orderReceiptAction: () => 'dlp-order-pay dlp-order-receipt', pay: (...args) => calls.push(["pay", ...args]), documentDrawer: (...args) => calls.push(["receipt", ...args]) };
+	env.DeepLinkERPPurchasePayments = { orderReceiptAction: () => 'dlp-order-pay dlp-order-receipt', pay: (...args) => calls.push(["pay", ...args]), documentDrawer: (...args) => calls.push(["receipt", ...args]), batchDocumentDrawer: (...args) => calls.push(["batch-receipt", ...args]), batchPay: (...args) => calls.push(["batch-pay", ...args]) };
 	assert.equal(c.providerScope, "orders");
 	payload({ name: "PO-1", row_type: "purchase_order", modified: "v1", order_progress: { items: [{ name: "I1" }, { name: "I2" }] } });
 	checked.add("PO-1"); checked.add("OA-UNRELATED"); list.on_row_checked();
@@ -932,7 +932,8 @@ test("whole-order selection and same-page tabs clear state and constrain actions
 	c.providerRows = list.data = [{ name: "PO-1", row_type: "purchase_order" }, { name: "PO-2", row_type: "purchase_order" }];
 	checked.add("PO-1"); checked.add("PO-2");
 	env.frappe.msgprint = options => calls.push(["notice", options.message]);
-	await c.runPurchaseAction("receipt"); assert.equal(calls.length, 3); assert.match(calls[2][1], /批量.*尚未接入/);
+	await c.runPurchaseAction("receipt"); await c.runPurchaseAction("payment");
+	assert.deepEqual(calls.slice(2), [["batch-receipt", "Purchase Order", [{name:"PO-1",modified:undefined},{name:"PO-2",modified:undefined}], "Purchase Receipt"], ["batch-pay", "Purchase Order", [{name:"PO-1",modified:undefined},{name:"PO-2",modified:undefined}]]]);
 });
 
 

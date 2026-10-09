@@ -62,6 +62,53 @@ function harness({document=projection(), drafts=[], precision, floatPrecision=3,
  return {api:host.DeepLinkERPPurchasePayments,host,controls,requests,loaded,surfaces,confirms,uploaders,documentEvents,metadataReads,delegatedClick,click,html,confirm:()=>confirms.shift()(),routeClose:()=>listeners.change()};
 }
 
+test('batch receipt preview is read only and explicit draft preserves exact source row edits',async()=>{
+ const p=projection('Purchase Receipt');p.editable_item_fields=['qty','warehouse'];p.document.sources=[{name:'PO-A',modified:'v1'}];
+ const batch={documents:[p],sources:[{name:'PO-A',modified:'v1'},{name:'PO-B',modified:'v2'}]};
+ const h=harness({document:batch});
+ assert.equal(typeof h.api.batchDocumentDrawer,'function');
+ await h.api.batchDocumentDrawer('Purchase Order',batch.sources,'Purchase Receipt');
+ assert.ok(h.requests.some(row=>row.method.endsWith('.preview_document_batch')));
+ assert.equal(h.requests.filter(row=>/record_document_batch|submit_document/.test(row.method)).length,0);
+ await h.controls.find(c=>c.df.fieldname==='qty').$input.emit('input','2,345');
+ await h.click('dlp-batch-save');
+ const write=h.requests.find(row=>row.method.endsWith('.record_document_batch'));
+ assert.equal(write.args.confirm,0);assert.equal(write.args.changes[0].items[0].key,'ITEM');assert.equal(write.args.changes[0].items[0].qty,2.345);
+});
+
+test('merged payment confirms each native invoice amount with fresh source versions',async()=>{
+ const h=harness({record:async()=>({document:{doctype:'Payment Entry',name:'PE',docstatus:1,amount:30,currency:'USD'}})});
+ const nativeCall=h.host.frappe.call;
+ h.host.frappe.call=async request=>{if(request.method.endsWith('.preview_payment_batch')){h.requests.push(request);return {message:{company:'C',supplier:'S',currency:'USD',sources:[{name:'PR-A',modified:'fresh-a'},{name:'PR-B',modified:'fresh-b'}],invoices:[{name:'PI-SHARED',outstanding:30,currency:'USD'},{name:'PI-B',outstanding:10,currency:'USD'}]}};}return nativeCall(request);};
+ assert.equal(typeof h.api.batchPay,'function');
+ await h.api.batchPay('Purchase Receipt',[{name:'PR-A'},{name:'PR-B'}]);
+ assert.equal(h.requests.filter(request=>request.method.endsWith('.record_payment')).length,0);
+ await h.click('dlp-create');
+ const request=h.requests.find(row=>row.method.endsWith('.record_payment'));
+ assert.equal(request.args.confirm,0);assert.equal(request.args.sources[0].modified,'fresh-a');assert.equal(request.args.sources[1].modified,'fresh-b');
+ assert.equal(request.args.allocations.length,2);assert.equal(request.args.allocations[0].name,'PI-SHARED');assert.equal(request.args.allocations[0].amount,30);
+});
+
+test('submitted receipt next step replaces the singleton drawer and previews AP without writing',async()=>{
+ const p=projection('Purchase Receipt');p.document.name='PR';p.document.docstatus=1;p.editable_item_fields=[];
+ const h=harness({document:p});
+ const nativeCall=h.host.frappe.call;
+ h.host.frappe.call=async request=>{if(request.method.endsWith('.preview_document_batch')){h.requests.push(request);return {message:{documents:[projection()],sources:[{name:'PR',modified:'v1'}]}};}return nativeCall(request);};
+ await h.api.documentDrawer('Purchase Order','PO','Purchase Receipt','PR');
+ await h.click('dlp-next-ap');
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.ok(h.requests.some(row=>row.method.endsWith('.preview_document_batch')));
+ assert.equal(h.requests.filter(row=>row.method.endsWith('.record_document_batch')).length,0);
+});
+
+test('automatic submitted AP is shown in the same workflow without creating a second invoice',async()=>{
+ const h=harness({chain:{can_create_invoice:false,invoices:[{name:'PI-AUTO',docstatus:1}],draft_invoices:[]}});
+ await h.api.batchDocumentDrawer('Purchase Receipt',[{name:'PR'}],'Purchase Invoice');
+ assert.match(h.html(),/PI-AUTO/);
+ assert.equal(h.requests.filter(row=>/preview_document_batch|record_document_batch/.test(row.method)).length,0);
+ assert.ok(h.surfaces.some(row=>String(row.value).includes('dlp-next-pay')));
+});
+
 test('one native parent with multiple PO item joins resumes its unique receipt draft',async()=>{
  const h=harness({document:projection('Purchase Receipt'),drafts:[{name:'PR-ONE',modified:'v2'},{name:'PR-ONE',modified:'v2'}]});
  await h.api.documentDrawer('Purchase Order','PO','Purchase Receipt');

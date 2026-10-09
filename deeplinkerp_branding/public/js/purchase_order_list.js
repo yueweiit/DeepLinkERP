@@ -68,11 +68,11 @@
  function table(c,rows) { return `<div class="list-row-container dlp-purchase-table-wrap"><table class="dlp-purchase-table">${header(c)}${rows.map(doc=>row(c,doc)).join('')}</table><div class="checkbox-actions" style="display:none"></div></div>`; }
  function selectionChanged(c) {
   if(!c.getSelectedPurchaseOrders)return;
-  const selected=c.getSelectedPurchaseOrders(),one=selected.length===1,doc=one?c.providerRows.find(row=>row.name===selected[0].name):null;
-  const allowed=doc?payments(c)?.orderReceiptAction(doc) || '':'';
+  const selected=c.getSelectedPurchaseOrders(),names=new Set(selected.map(row=>row.name));
+  const allowed=c.providerRows.filter(row=>names.has(row.name)).map(doc=>payments(c)?.orderReceiptAction(doc) || '');
   c.$purchaseActions?.find('.dlp-purchase-selected-count').text(c.translate(`已选 ${selected.length} 张订单`));
-  for(const [action,marker] of [['receipt','dlp-order-receipt'],['payment','dlp-order-pay']])c.$purchaseActions?.find(`[data-purchase-action="${action}"]`).prop('disabled',!one || !allowed.includes(marker));
-  c.$purchaseActions?.find('.dlp-purchase-action-notice').text(selected.length>1?c.translate('批量入库/付款尚未接入，请一次选择一张订单办理。'):'');
+  for(const [action,marker] of [['receipt','dlp-order-receipt'],['payment','dlp-order-pay']])c.$purchaseActions?.find(`[data-purchase-action="${action}"]`).prop('disabled',!selected.length || !allowed.every(value=>value.includes(marker)));
+  c.$purchaseActions?.find('.dlp-purchase-action-notice').text(selected.length>1?c.translate('入库可逐单或合并；合并付款按实际应付核销。'):'');
  }
  function clearSelection(c) {
   c.list.clear_checked_items?.();
@@ -104,7 +104,12 @@
   };
   c.runPurchaseAction=async action=> {
    const selected=c.getSelectedPurchaseOrders();
-   if(selected.length!==1) { if(selected.length>1)c.root.frappe.msgprint({message:c.translate('批量入库/付款尚未接入，请一次选择一张订单办理。'),indicator:'orange'});return; }
+   if(!selected.length)return;
+   if(selected.length>1){
+    if(action==='receipt')return payments(c).batchDocumentDrawer('Purchase Order',selected,'Purchase Receipt');
+    if(action==='payment')return payments(c).batchPay('Purchase Order',selected);
+    return;
+   }
    const doc=c.providerRows.find(row=>row.name===selected[0].name),native=payments(c)?.orderReceiptAction(doc) || '';
    if(action==='receipt' && native.includes('dlp-order-receipt'))return payments(c).documentDrawer('Purchase Order',doc.name,'Purchase Receipt');
    if(action==='payment' && native.includes('dlp-order-pay'))return payments(c).pay('Purchase Order',doc.name);

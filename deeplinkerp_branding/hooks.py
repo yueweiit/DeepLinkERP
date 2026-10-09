@@ -35,7 +35,7 @@ app_include_css = [
 ]
 app_include_js = [
 	"/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.21",
-	"/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.19",
+	"/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.20",
 	"/assets/deeplinkerp_branding/js/crossborder_procurement.js?v=0.0.5",
 	"/assets/deeplinkerp_branding/js/purchase_source.js?v=0.0.1",
     "/assets/deeplinkerp_branding/js/operating_payment_panel.js?v=0.0.7",

@@ -19,6 +19,8 @@
   else{c.providerOrderBy=`${field} ${order}`;c.refresh();}
  }
  function showPredicates(c){for(const field of ['supplier','status'])c.controls[field]?.$wrapper?.show();}
+ function selectionChanged(c){const names=new Set(c.list.get_checked_items?.(true) || []),selected=c.providerRows.filter(row=>names.has(row.name));c.$receiptBatch?.find('button').prop('disabled',!selected.length);c.$receiptBatch?.find('span').text(`已选 ${selected.length} 张入库`);}
+ function clearSelection(c){c.list.clear_checked_items?.();c.$receiptBatch?.toggle(c.providerScope==='all');selectionChanged(c);}
  async function exportCurrent(c) {
   const { root } = c;
   const args = {...request(c).args,export_format:'xlsx',columns:JSON.stringify(c.preferences.columns.filter(field=>field!=='payment_action'))};
@@ -49,12 +51,14 @@
    c.$providerScope=select;
    select.on('change.dlpReceipt',()=>c.setProviderScope(select.val()));
    $('<a class="btn btn-default btn-sm" href="/desk/purchase-payment-records">采购付款记录</a>').appendTo(c.$toolbar);
+   c.$receiptBatch=$('<div class="dlp-purchase-selection-actions"><span></span><button type="button" class="btn btn-primary btn-sm" disabled>合并应付付款</button></div>').insertAfter(c.$toolbar);
+   c.$receiptBatch.find('button').on('click.dlpReceipt',()=>{const names=new Set(c.list.get_checked_items?.(true) || []);return root.DeepLinkERPPurchasePayments.batchPay('Purchase Receipt',c.providerRows.filter(row=>names.has(row.name)).map(row=>({name:row.name})));});
    c.list.$result.on('click.dlpReceipt','[data-provider-sort]',e=>sortBy(c,e.currentTarget.dataset.providerSort));
    c.setProviderScope('all',false);
   },
   onActivate:showPredicates,
-  onPayload:c=>{ showPredicates(c); c.$providerNotice?.remove(); c.$providerNotice=c.root.$('<p class="text-muted dlp-po-provider-notice"></p>').text('入库 → 确认应付 → 部分 / 全额付款。提交付款才计已付；高级关联筛选和批量操作可切换原生视图。').insertAfter(c.$filters); }
+  onPayload:c=>{ showPredicates(c); selectionChanged(c); c.$providerNotice?.remove(); c.$providerNotice=c.root.$('<p class="text-muted dlp-po-provider-notice"></p>').text('入库 → 确认应付 → 部分 / 合并付款。提交付款才计已付；高级关联筛选可切换原生视图。').insertAfter(c.$filters); }
  };
- const grid=root.DeepLinkERPCompactList.create({doctype:'Purchase Receipt',moneyPrecision:2,dismissInitialOnboarding:true,columns:native,provider,controllerKey:'dlpReceiptGrid',routeClass:'dlp-purchase-receipt-grid-active',freezeUntil:'supplier_name',dateField:'posting_date',numbers:['grand_total'],dates:['posting_date'],quickFields:['company','supplier','status'],searchFields:['name','supplier_name'],extraFields:['supplier'],controls:[{fieldname:'search',fieldtype:'Data',label:'入库单号 / 供应商名称'},{fieldname:'company',fieldtype:'Link',options:'Company',label:'公司'},{fieldname:'supplier',fieldtype:'Link',options:'Supplier',label:'供应商'},{fieldname:'status',fieldtype:'Select',label:'入库状态'},{fieldname:'from_date',fieldtype:'Date',label:'入库开始日期',permission_field:'posting_date'},{fieldname:'to_date',fieldtype:'Date',label:'入库结束日期',permission_field:'posting_date'}]});
+ const grid=root.DeepLinkERPCompactList.create({doctype:'Purchase Receipt',moneyPrecision:2,dismissInitialOnboarding:true,columns:native,provider,providerSelectable:doc=>doc.docstatus===1 && !doc.is_return,keepColumnHeader:true,onSelectionChange:selectionChanged,onPageChange:clearSelection,onScopeChange:clearSelection,controllerKey:'dlpReceiptGrid',routeClass:'dlp-purchase-receipt-grid-active',freezeUntil:'supplier_name',dateField:'posting_date',numbers:['grand_total'],dates:['posting_date'],quickFields:['company','supplier','status'],searchFields:['name','supplier_name'],extraFields:['supplier'],controls:[{fieldname:'search',fieldtype:'Data',label:'入库单号 / 供应商名称'},{fieldname:'company',fieldtype:'Link',options:'Company',label:'公司'},{fieldname:'supplier',fieldtype:'Link',options:'Supplier',label:'供应商'},{fieldname:'status',fieldtype:'Select',label:'入库状态'},{fieldname:'from_date',fieldtype:'Date',label:'入库开始日期',permission_field:'posting_date'},{fieldname:'to_date',fieldtype:'Date',label:'入库结束日期',permission_field:'posting_date'}]});
  root.DeepLinkERPReceiptGrid=grid; grid.install(root);
 })(globalThis);

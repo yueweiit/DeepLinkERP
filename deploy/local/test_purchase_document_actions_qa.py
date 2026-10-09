@@ -393,6 +393,217 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
             po.submit()
         return po
 
+    def test_batch_receipts_individual_merged_partial_and_durable_replay(self):
+        from deeplinkerp_branding.services import purchase_document_actions as actions
+        self.assertTrue(callable(getattr(actions, "record_document_batch", None)), "Explicit native receipt batch is missing")
+        for merge in (0, 1):
+            with self.subTest(merge=merge):
+                with patch("oa_purchase_request.oa_purchase_request.oa_purchase_request.auto_create_purchase_receipt"):
+                    orders = [self.order(qty=5, rate=10), self.order(qty=6, rate=10)]
+                self.commit_fixture()
+                sources = [{"name": po.name, "modified": str(po.modified)} for po in orders]
+                preview = actions.preview_document_batch(sources, merge=merge)
+                edits = [{"items": [{"key": row["key"], "qty": 2, "warehouse": "Stores - QAB"}
+                    for row in projection["document"]["items"]]} for projection in preview["documents"]]
+                request = str(uuid.uuid4())
+                result = actions.record_document_batch(sources, edits, request, merge=merge, confirm=1)
+                self.assertEqual(len(result["documents"]), 1 if merge else 2)
+                names = [row["document"]["name"] for row in result["documents"]]
+                self.assertTrue(all(row["document"]["docstatus"] == 1 for row in result["documents"]))
+                backlinks = {(row.purchase_order, row.purchase_order_item) for name in names
+                    for row in frappe.get_doc("Purchase Receipt", name).items}
+                self.assertEqual(backlinks, {(po.name, po.items[0].name) for po in orders})
+                self.assertEqual([frappe.db.get_value("Purchase Order Item", po.items[0].name, "received_qty") for po in orders], [2, 2])
+                self.commit_fixture()
+                replay = actions.record_document_batch(sources, edits, request, merge=merge, confirm=1)
+                self.assertTrue(replay["reused"])
+                self.assertEqual([row["document"]["name"] for row in replay["documents"]], names)
+                with self.assertRaises(frappe.ValidationError):
+                    actions.record_document_batch(sources, [{}], request, merge=merge, confirm=1)
+
+    def test_batch_second_native_receipt_failure_rolls_back_whole_confirmation(self):
+        from deeplinkerp_branding.services import purchase_document_actions as actions
+        self.assertTrue(callable(getattr(actions, "record_document_batch", None)), "Explicit native receipt batch is missing")
+        with patch("oa_purchase_request.oa_purchase_request.oa_purchase_request.auto_create_purchase_receipt"):
+            orders = [self.order(qty=5), self.order(qty=5)]
+        self.commit_fixture()
+        sources = [{"name": po.name, "modified": str(po.modified)} for po in orders]
+        before = {dt: frappe.db.count(dt) for dt in self.types}
+        native_submit = actions._submit_document
+        calls = []
+        def second_failure(*args, **kwargs):
+            result = native_submit(*args, **kwargs)
+            calls.append(result)
+            if len(calls) == 2:
+                raise RuntimeError("QA batch second receipt after native stock/GL")
+            return result
+        with patch.object(actions, "_submit_document", side_effect=second_failure), self.assertRaisesRegex(RuntimeError, "second receipt"):
+            actions.record_document_batch(sources, [{}, {}], str(uuid.uuid4()), confirm=1)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(before, {dt: frappe.db.count(dt) for dt in self.types})
+        self.assertEqual([frappe.db.get_value("Purchase Order Item", po.items[0].name, "received_qty") for po in orders], [0, 0])
+        print(json.dumps({"proof": "batch_second_receipt_rollback", "site": SITE, "orders": [po.name for po in orders],
+            "before": before, "after": {dt: frappe.db.count(dt) for dt in self.types}, "received_after": [0, 0]}))
+
+    def test_batch_merged_receipt_invoice_and_partial_payment_exact_shared_reference(self):
+        from deeplinkerp_branding.services import purchase_document_actions as actions
+        self.assertTrue(callable(getattr(actions, "record_document_batch", None)), "Explicit native receipt batch is missing")
+        with patch("oa_purchase_request.oa_purchase_request.oa_purchase_request.auto_create_purchase_receipt"):
+            orders = [self.order(qty=3, rate=10), self.order(qty=4, rate=10)]
+        self.commit_fixture()
+        result = actions.record_document_batch([{"name": po.name, "modified": str(po.modified)} for po in orders],
+            [{}], str(uuid.uuid4()), merge=1, confirm=1)
+        receipt = result["documents"][0]["document"]
+        self.commit_fixture()
+        payable = actions.record_document_batch([{"name": receipt["name"], "modified": str(receipt["modified"])}],
+            [{}], str(uuid.uuid4()), source_doctype="Purchase Receipt", target_doctype="Purchase Invoice", confirm=1)
+        invoice = payable["documents"][0]["document"]
+        self.assertEqual(invoice["docstatus"], 1)
+        self.assertFalse(frappe.db.get_value("Purchase Invoice", invoice["name"], "update_stock"))
+        self.commit_fixture()
+        sources = [{"name": po.name} for po in orders]
+        payables = service.preview_payment_batch("Purchase Order", sources)
+        self.assertEqual([row["name"] for row in payables["invoices"]], [invoice["name"]])
+        payment = actions.record_payment("Purchase Order", orders[0].name, sources=payables["sources"],
+            allocations=[{"name": invoice["name"], "amount": 25}], bank_account="Cash - QAB", request_id=str(uuid.uuid4()))
+        self.assertEqual(payment["document"]["docstatus"], 1)
+        entry = frappe.get_doc("Payment Entry", payment["document"]["name"])
+        self.assertEqual({row.reference_name for row in entry.references}, {invoice["name"]})
+        self.assertEqual(sum(row.allocated_amount for row in entry.references), 25)
+        self.assertEqual(frappe.db.get_value("Purchase Invoice", invoice["name"], "outstanding_amount"), 45)
+
+    def test_batch_payment_gl_failure_retains_prior_payables_and_balances(self):
+        from deeplinkerp_branding.services import purchase_document_actions as actions
+        self.assertTrue(callable(getattr(actions, "record_document_batch", None)), "Explicit native receipt batch is missing")
+        with patch("oa_purchase_request.oa_purchase_request.oa_purchase_request.auto_create_purchase_receipt"):
+            orders = [self.order(qty=3, rate=10), self.order(qty=4, rate=10)]
+        self.commit_fixture()
+        receipts = actions.record_document_batch([{"name": po.name, "modified": str(po.modified)} for po in orders],
+            [{}, {}], str(uuid.uuid4()), confirm=1)["documents"]
+        self.commit_fixture()
+        invoices = actions.record_document_batch([{"name": row["document"]["name"], "modified": str(row["document"]["modified"])} for row in receipts],
+            [{}, {}], str(uuid.uuid4()), source_doctype="Purchase Receipt", target_doctype="Purchase Invoice", confirm=1)["documents"]
+        self.commit_fixture()
+        before = {dt: frappe.db.count(dt) for dt in self.types}
+        outstanding = {row["document"]["name"]: frappe.db.get_value("Purchase Invoice", row["document"]["name"], "outstanding_amount") for row in invoices}
+        selected = service.preview_payment_batch("Purchase Order", [{"name": po.name} for po in orders])["sources"]
+        native_submit = actions._confirm_payment
+        def fail_after_gl(*args, **kwargs):
+            native_submit(*args, **kwargs)
+            raise RuntimeError("QA merged payment after native GL")
+        with patch.object(actions, "_confirm_payment", side_effect=fail_after_gl), self.assertRaisesRegex(RuntimeError, "native GL"):
+            actions.record_payment("Purchase Order", orders[0].name, sources=selected,
+                allocations=[{"name": name, "amount": 10} for name in outstanding], bank_account="Cash - QAB", request_id=str(uuid.uuid4()))
+        self.assertEqual(before, {dt: frappe.db.count(dt) for dt in self.types})
+        self.assertEqual(outstanding, {name: frappe.db.get_value("Purchase Invoice", name, "outstanding_amount") for name in outstanding})
+        print(json.dumps({"proof": "merged_payment_failure_retains_prior_AP", "site": SITE, "outstanding_before": outstanding,
+            "outstanding_after": {name: frappe.db.get_value("Purchase Invoice", name, "outstanding_amount") for name in outstanding},
+            "before": before, "after": {dt: frappe.db.count(dt) for dt in self.types}}))
+
+    def test_batch_existing_automatic_receipt_drafts_preserve_manual_values(self):
+        from deeplinkerp_branding.services import purchase_document_actions as actions
+        orders = [self.order(qty=3, rate=10), self.order(qty=4, rate=10)]
+        drafts = []
+        for po in orders:
+            name = frappe.db.get_value("Purchase Receipt Item", {"purchase_order": po.name, "docstatus": 0}, "parent")
+            draft = frappe.get_doc("Purchase Receipt", name)
+            draft.items[0].qty = 1
+            draft.items[0].received_qty = 0
+            draft.items[0].warehouse = "Work In Progress - QAB"
+            draft.remarks = "QA manual receipt"
+            draft.save(); drafts.append(draft)
+        self.commit_fixture()
+        sources = [{"name": po.name, "modified": str(po.modified)} for po in orders]
+        preview = actions.preview_document_batch(sources)
+        self.assertEqual({row["document"]["name"] for row in preview["documents"]}, {draft.name for draft in drafts})
+        self.assertTrue(all(row["document"]["items"][0]["qty"] == 1 for row in preview["documents"]))
+        documents = [{"doctype": "Purchase Receipt", "name": row["document"]["name"], "modified": str(row["document"]["modified"])} for row in preview["documents"]]
+        edits = [{} if row["document"]["sources"][0]["name"] == orders[0].name else
+            {"remarks": "QA explicit edit", "items": [{"key": row["document"]["items"][0]["key"], "qty": 2,
+                "warehouse": "Stores - QAB"}]} for row in preview["documents"]]
+        result = actions.record_document_batch(sources, edits, str(uuid.uuid4()), documents=documents, confirm=1)
+        self.assertEqual({row["document"]["name"] for row in result["documents"]}, {draft.name for draft in drafts})
+        by_source = {row["document"]["sources"][0]["name"]: row["document"] for row in result["documents"]}
+        self.assertEqual((by_source[orders[0].name]["remarks"], by_source[orders[0].name]["items"][0]["warehouse"]),
+            ("QA manual receipt", "Work In Progress - QAB"))
+        self.assertEqual((by_source[orders[1].name]["remarks"], by_source[orders[1].name]["items"][0]["warehouse"]),
+            ("QA explicit edit", "Stores - QAB"))
+        self.assertEqual([frappe.db.get_value("Purchase Order Item", po.items[0].name, "received_qty") for po in orders], [1, 2])
+
+    def test_batch_receipt_rejects_changed_quantity_invalid_warehouse_and_merge_headers(self):
+        from deeplinkerp_branding.services import purchase_document_actions as actions
+        with patch("oa_purchase_request.oa_purchase_request.oa_purchase_request.auto_create_purchase_receipt"):
+            orders = [self.order(qty=3, rate=10), self.order(qty=4, rate=10)]
+        self.commit_fixture()
+        sources = [{"name": po.name, "modified": str(po.modified)} for po in orders]
+        before = {dt: frappe.db.count(dt) for dt in self.types}
+        for changes in ([{"items": [{"key": orders[0].items[0].name, "qty": 99}]}, {}],
+                        [{"items": [{"key": orders[0].items[0].name, "warehouse": "All Warehouses - QAB"}]}, {}]):
+            # Server groups are sorted by actual document identity.
+            edits = sorted(zip(orders, changes), key=lambda pair: pair[0].name)
+            with self.subTest(changes=changes), self.assertRaises(frappe.ValidationError):
+                actions.record_document_batch(sources, [row[1] for row in edits], str(uuid.uuid4()), confirm=1)
+            self.assertEqual(before, {dt: frappe.db.count(dt) for dt in self.types})
+        # Another current receipt consumed the first order after the preview.
+        taken = make_purchase_receipt(orders[0].name); taken.items[0].qty = 2; taken.insert().submit()
+        self.commit_fixture()
+        fresh = actions.preview_document_batch(sources)
+        self.assertEqual(next(row["document"]["items"][0]["max_qty"] for row in fresh["documents"]
+            if row["document"]["items"][0]["source_name"] == orders[0].name), 1)
+        stale = [{"name": po.name, "modified": "1900-01-01" if po == orders[0] else str(po.modified)} for po in orders]
+        with self.assertRaises(frappe.ValidationError):
+            actions.record_document_batch(stale, [{}, {}], str(uuid.uuid4()), confirm=1)
+        for field, value in (("company", "YUEWEI MX"), ("currency", "USD"), ("conversion_rate", 2), ("discount_amount", 1)):
+            with self.subTest(field=field):
+                old = orders[1].get(field); orders[1].set(field, value)
+                with self.assertRaises(frappe.ValidationError): actions._merge_compatible(orders)
+                orders[1].set(field, old)
+        orders[1].append("taxes", {"charge_type": "Actual", "account_head": "Stock Received But Not Billed - QAB", "tax_amount": 1})
+        with self.assertRaisesRegex(frappe.ValidationError, "固定税费"):
+            actions._merge_compatible(orders)
+
+    def test_batch_payment_existing_draft_fresh_outstanding_hold_and_replay(self):
+        from deeplinkerp_branding.services import purchase_document_actions as actions
+        with patch("oa_purchase_request.oa_purchase_request.oa_purchase_request.auto_create_purchase_receipt"):
+            orders = [self.order(qty=3, rate=10), self.order(qty=4, rate=10)]
+        self.commit_fixture()
+        receipts = actions.record_document_batch([{"name": po.name, "modified": str(po.modified)} for po in orders],
+            [{}, {}], str(uuid.uuid4()), confirm=1)["documents"]
+        self.commit_fixture()
+        invoices = actions.record_document_batch([{"name": row["document"]["name"], "modified": str(row["document"]["modified"])} for row in receipts],
+            [{}, {}], str(uuid.uuid4()), source_doctype="Purchase Receipt", target_doctype="Purchase Invoice", confirm=1)["documents"]
+        self.commit_fixture()
+        preview = service.preview_payment_batch("Purchase Receipt", [{"name": row["document"]["name"]} for row in receipts])
+        args = dict(source_doctype="Purchase Receipt", source_name=preview["sources"][0]["name"], sources=preview["sources"],
+            allocations=[{"name": row["name"], "amount": 10} for row in preview["invoices"]], bank_account="Cash - QAB", request_id=str(uuid.uuid4()), confirm=0)
+        draft = actions.record_payment(**args)
+        self.assertEqual(draft["document"]["amount"], 20)
+        self.commit_fixture()
+        repeated = actions.record_payment(**args)
+        self.assertTrue(repeated["reused"])
+        existing = actions.record_payment(**{**args, "request_id": str(uuid.uuid4()), "confirm": 1})
+        self.assertTrue(existing["needs_review"])
+        self.assertEqual(existing["document"]["name"], draft["document"]["name"])
+        self.assertEqual(existing["document"]["docstatus"], 0)
+        # Current native hold prohibits this already saved merged draft.
+        invoice = frappe.get_doc("Purchase Invoice", preview["invoices"][0]["name"])
+        invoice.on_hold = 1; invoice.release_date = None; invoice.db_update()
+        self.commit_fixture()
+        with self.assertRaises(frappe.ValidationError):
+            actions.submit_document("Payment Entry", draft["document"]["name"], draft["document"]["modified"])
+        self.assertEqual(frappe.db.get_value("Payment Entry", draft["document"]["name"], "docstatus"), 0)
+        invoice.on_hold = 0; invoice.db_update(); self.commit_fixture()
+        # A separate real payment consumes the first invoice before confirmation.
+        from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
+        paid = frappe.db.get_value("Purchase Invoice", invoice.name, "outstanding_amount") - 5
+        other = get_payment_entry("Purchase Invoice", invoice.name, bank_account="Cash - QAB", bank_amount=paid)
+        other.paid_amount = other.received_amount = paid
+        for ref in other.references: ref.allocated_amount = paid
+        other.insert().submit(); self.commit_fixture()
+        with self.assertRaises(frappe.ValidationError):
+            actions.submit_document("Payment Entry", draft["document"]["name"], draft["document"]["modified"])
+        self.assertEqual(frappe.db.get_value("Payment Entry", draft["document"]["name"], "docstatus"), 0)
+
     def test_native_source_same_link_recheck_pending_blocks_evidence_and_comment_then_nested_write_rolls_back(self):
         from deeplinkerp_branding.services import purchase_source_service as sources, purchase_repost_boundary as boundary
         po = self.order(submit=False)

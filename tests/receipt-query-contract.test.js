@@ -19,6 +19,16 @@ function receiptConfiguration() {
 
 const decoded = value => typeof value === "string" ? JSON.parse(value) : value;
 
+test('receipt batch selection only includes submitted nonreturns and clears at page or scope changes',()=>{
+ const config=receiptConfiguration();let clears=0,disabled,toggled;
+ assert.equal(config.providerSelectable({docstatus:1,is_return:0}),true);
+ assert.equal(config.providerSelectable({docstatus:0}),false);assert.equal(config.providerSelectable({docstatus:1,is_return:1}),false);
+ const surface={toggle:value=>toggled=value,find:()=>({prop:(_,value)=>disabled=value,text(){}})};
+ const c={providerScope:'all',providerRows:[{name:'PR'}],list:{get_checked_items:()=>[],clear_checked_items:()=>clears++},$receiptBatch:surface};
+ config.onPageChange(c);assert.equal(clears,1);assert.equal(disabled,true);
+ c.providerScope='orders';config.onScopeChange(c);assert.equal(clears,2);assert.equal(toggled,false);
+});
+
 test("receipt financial view retains native filters, OR filters, sorting and page scope", () => {
   const config = receiptConfiguration();
   const native = {
