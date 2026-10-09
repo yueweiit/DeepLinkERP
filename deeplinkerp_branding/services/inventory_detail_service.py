@@ -1009,8 +1009,18 @@ def _actual_qty(item_code: str, warehouse: str) -> float:
 	)
 	return float(value or 0)
 
-def _attach_reversal_progress(payload):
-	for row in payload.get("groups", []):
+def _attach_reversal_progress(payload, selections=None):
+	if selections:
+		selected = _parse_list(selections, "已选物料")
+		if len(selected) > MAX_PAGE_LENGTH:
+			raise ValueError("已选物料超过库存范围上限")
+		payload["selected_reversals"] = []
+		for row in selected:
+			code, warehouse = _text(row.get("item_code")), _text(row.get("source_warehouse"))
+			_validate_item(code)
+			_validate_warehouse(payload["company"], warehouse)
+			payload["selected_reversals"].append({"item_code": code, "warehouse": warehouse})
+	for row in payload.get("groups", []) + payload.get("selected_reversals", []):
 		operation_id = frappe.db.get_value("Bin", {"item_code": row["item_code"], "warehouse": row["warehouse"]}, "custom_purchase_reversal_operation") if row.get("warehouse") else None
 		row["reversal"] = None
 		if operation_id:
@@ -1225,6 +1235,7 @@ def get_inventory_location_detail(
 	filters: Any = None,
 	start: Any = 0,
 	page_length: Any = DEFAULT_PAGE_LENGTH,
+	progress_selections: Any = None,
 	**kwargs: Any,
 ) -> dict[str, Any]:
 	_require_read_permission()
@@ -1240,7 +1251,7 @@ def get_inventory_location_detail(
 	)
 	payload["snapshot_options"] = _list_snapshot_options(company)
 	payload.update(_movement_permission_payload())
-	return _attach_reversal_progress(payload)
+	return _attach_reversal_progress(payload, progress_selections)
 
 
 @_whitelist
@@ -1266,6 +1277,7 @@ def get_categorized_inventory_detail(
 	filters: Any = None,
 	start: Any = 0,
 	page_length: Any = DEFAULT_PAGE_LENGTH,
+	progress_selections: Any = None,
 	**kwargs: Any,
 ) -> dict[str, Any]:
 	_require_categorized_inventory_read_permission()
@@ -1289,7 +1301,7 @@ def get_categorized_inventory_detail(
 	if missing_item_group:
 		payload["warning"] = f"ERP 未维护分类物料组：{missing_item_group}"
 	payload.update(_movement_permission_payload())
-	return _attach_reversal_progress(payload)
+	return _attach_reversal_progress(payload, progress_selections)
 
 
 @_whitelist

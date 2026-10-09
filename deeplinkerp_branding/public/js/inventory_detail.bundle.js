@@ -619,6 +619,7 @@
 		}
 
 		fitViewport(active) {
+			this.syncReversalLifecycle(active);
 			if (!active) return this.stopTableViewport?.();
 			const host = this.wrapper?.ownerDocument?.defaultView || globalThis;
 			return globalThis.DeepLinkERPCompactList?.fitViewport?.(this, {
@@ -626,6 +627,35 @@
 				property: "--dlp-inventory-result-max-height", headerSelector: "thead", rowSelector: "tbody tr",
 				observeTargets: [this.$root.find(".id-actions")[0], this.$root.find(".id-summary")[0], this.$root.find(".id-pager")[0], this.page.wrapper?.find?.(".page-head")[0], this.page.wrapper?.find?.(".page-form")[0]],
 			});
+		}
+
+		syncReversalLifecycle(active) {
+			if (this.reversalActive === active) return;
+			this.reversalActive = active;
+			if (active) {
+				this.reversalHandler = event => {
+					if (!this.reversalActive || ![...this.currentGroups, ...this.selected.values()].some(
+						row => row.reversal?.operation_id === event?.operation_id)) return;
+					return this.refresh(); // event is a hint; only the fresh ACL response clears a block
+				};
+				frappe.realtime?.on("purchase_reversal_progress", this.reversalHandler);
+				this.scheduleReversalRefresh();
+			} else {
+				frappe.realtime?.off("purchase_reversal_progress", this.reversalHandler);
+				clearTimeout(this.reversalTimer);
+				this.reversalTimer = null;
+				this.reversalHandler = null;
+				++this.requestId; // a departing page cannot apply an old in-flight response
+				this.loading = false;
+			}
+		}
+
+		scheduleReversalRefresh() {
+			clearTimeout(this.reversalTimer);
+			this.reversalTimer = null;
+			if (this.reversalActive && [...this.currentGroups, ...this.selected.values()].some(row => reversalBlocked(row.reversal))) {
+				this.reversalTimer = setTimeout(() => this.refresh(), 5000);
+			}
 		}
 
 		async refresh(resetStart = false) {
@@ -658,6 +688,10 @@
 					page_length: this.pageLength,
 				};
 				if (!this.isMaterial) args.category = this.config.category;
+				const pending = [...this.selected.values()].filter(row => reversalBlocked(row.reversal));
+				if (pending.length) args.progress_selections = JSON.stringify(pending.map(row => ({
+					item_code: row.item_code, source_warehouse: row.source_warehouse,
+				})));
 				const response = await frappe.call({ method, args });
 				if (requestId !== this.requestId) return;
 				const payload = response.message || {};
@@ -669,6 +703,10 @@
 				for (const group of this.currentGroups) {
 					const selected = this.selected.get(selectionKey(group));
 					if (selected) selected.reversal = group.reversal;
+				}
+				for (const group of payload.selected_reversals || []) {
+					const selected = this.selected.get(selectionKey(group));
+					if (selected && Object.hasOwn(group, "reversal")) selected.reversal = group.reversal;
 				}
 				this.effectiveCompany = payload.company || "";
 				this.selectionCompany = this.effectiveCompany;
@@ -695,7 +733,7 @@
 			} catch (error) {
 				if (requestId !== this.requestId) return;
 				this.canCreateStockEntry = false;
-				this.currentGroups = [];
+				if (![...this.currentGroups, ...this.selected.values()].some(row => reversalBlocked(row.reversal))) this.currentGroups = [];
 				this.renderRows();
 				this.$root.find(".id-summary").text(error.message || "库存明细读取失败。");
 			} finally {
@@ -703,6 +741,7 @@
 					this.loading = false;
 					this.$root.removeClass("is-loading");
 					this.updateSelectionUi();
+					this.scheduleReversalRefresh();
 				}
 			}
 		}

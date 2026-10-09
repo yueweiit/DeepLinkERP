@@ -6,6 +6,7 @@ unchanged. Captured aliases keep their identity through audited trampolines.
 from __future__ import annotations
 
 from copy import deepcopy
+from contextlib import contextmanager
 import hashlib
 import json
 from pathlib import Path
@@ -143,13 +144,102 @@ def _task_fields(doc):
         "posting_date", "posting_time", "repost_only_accounting_ledgers", "via_landed_cost_voucher", "recreate_stock_ledgers", "recalculate_valuation_rate")}))
 
 
+def _owned_creation(doc):
+    """Private accepted call identities; no client flags or actor exception."""
+    context = progress.accepting()
+    if context is not None:
+        manifest = context["reversal"]
+        # Native new_doc can carry the user's default company; validate later
+        # replaces it from the actual pair/source. Those accepted identities
+        # prove company here, and capture_root checks the persisted result.
+        valid = (
+            doc.based_on == "Item and Warehouse" and (doc.item_code, doc.warehouse) in {
+                (row["item_code"], row["warehouse"]) for row in manifest["scope"]["pairs"]} or
+            doc.based_on == "Transaction" and (doc.voucher_type, doc.voucher_no) in {
+                (row["doctype"], row["name"]) for row in manifest["scope"]["vouchers"]})
+        if not valid:
+            progress._reject("purchase_reversal_root_outside_scope")
+        return True
+    owner = progress.owner()
+    if owner is not None:
+        if not (doc.repost_only_accounting_ledgers and doc.reposting_reference == owner["task"].name and
+                (doc.voucher_type, doc.voucher_no) in {tuple(value) for value in owner["expected"]} and doc.company == owner["task"].company):
+            progress._reject("purchase_reversal_child_outside_scope")
+        return True
+    return False
+
+
+def _task_scopes(doc):
+    from . import purchase_payment_service as service
+    from .purchase_reversal_scope import collect_repost_pair_scope
+    if doc.based_on == "Item and Warehouse":
+        service._read("Item", doc.item_code, {"stock_uom", "is_stock_item"})
+        warehouse = service._read("Warehouse", doc.warehouse, {"company", "is_group", "disabled"})
+        if warehouse.company != doc.company or warehouse.is_group or warehouse.disabled:
+            progress._reject("purchase_reversal_scope_invalid")
+        return (collect_repost_pair_scope(doc),), ()
+    if doc.based_on != "Transaction" or not doc.voucher_type or not doc.voucher_no:
+        progress._reject("purchase_reversal_scope_invalid")
+    source = service._read(doc.voucher_type, doc.voucher_no)
+    return tuple(boundary._scopes((source,), current=True, opaque=False)), (source,)
+
+
+@contextmanager
+def task_boundary(doc, *, creating=False):
+    """RIV publication/save/restart shares native writers' current scope leases."""
+    from . import purchase_payment_service as service
+    with boundary.execution():
+        old = boundary._persisted(doc)
+        creating = boundary._creates_identity(doc, inserting=creating)
+        boundary.check_pointer(doc, old, creating=creating)
+        active = progress.accepting() or progress.owner()
+        created = active.setdefault("_native_created_rivs", {}) if active is not None else {}
+        if (creating or doc.name in created) and _owned_creation(doc):
+            if not creating and _task_fields(doc) != created[doc.name]:
+                progress._reject("purchase_reversal_task_changed")
+            yield  # actual accepted roots/children already hold the complete leases
+            if creating:
+                created[doc.name] = _task_fields(doc)
+            return
+        operation_id = old.get(boundary.POINTER) if old else None
+        if operation_id:
+            guard_task(doc)
+            if _task_fields(doc) != _task_fields(old):
+                progress._reject("purchase_reversal_task_changed")
+            yield  # native owned writer acquired/reread its generation earlier
+            return
+        boundary.require_publication_order()
+        with boundary.acquire((boundary.fence_key(),)), service.current_reads():
+            if doc.based_on == "Item and Warehouse":
+                doc.company = service._read("Warehouse", doc.warehouse, {"company"}).company
+            elif doc.based_on == "Transaction" and doc.voucher_type and doc.voucher_no:
+                doc.company = service._read(doc.voucher_type, doc.voucher_no, {"company"}).company
+            roots = (doc, old) if old else (doc,)
+            scopes, sources = [], []
+            for task in roots:
+                ranges, documents = _task_scopes(task)
+                scopes.extend(ranges)
+                sources.extend(documents)
+            keys = boundary._scope_keys(scopes, (*sources, *roots))
+            with boundary.acquire(keys):
+                current_old = boundary._persisted(doc, current=True)
+                boundary.check_pointer(doc, current_old, creating=creating)
+                fresh, current_sources = [], []
+                for task in (doc, current_old) if current_old else (doc,):
+                    ranges, documents = _task_scopes(task)
+                    fresh.extend(ranges)
+                    current_sources.extend(documents)
+                if not boundary._scope_keys(fresh, (*current_sources, *roots)) <= keys:
+                    progress._reject("purchase_reversal_scope_changed")
+                boundary._check_pending(fresh, current_sources)
+                yield
+
+
 def capture_child(doc):
     owner = progress.owner()
     if owner is None:
         return False
-    if (not doc.repost_only_accounting_ledgers or doc.reposting_reference != owner["task"].name or
-            (doc.voucher_type, doc.voucher_no) not in {tuple(value) for value in owner["expected"]} or doc.company != owner["task"].company):
-        progress._reject("purchase_reversal_child_outside_scope")
+    _owned_creation(doc)
     frappe.db.set_value(doc.doctype, doc.name, boundary.POINTER, owner["operation_id"], update_modified=False)
     owner["progress"]["tasks"].setdefault(doc.name, {"identity": _task_fields(doc), "coverage": {}, "expected": [[doc.voucher_type, doc.voucher_no]]})
     return True
@@ -424,17 +514,21 @@ def verify_gl_coverage(context, output):
             progress._reject("purchase_reversal_receipt_missing")
     if not expected <= set(coverage):
         progress._reject("purchase_reversal_gl_coverage_missing")
+    invoice_plans = {}
     for identity in sorted(expected):
         doc = frappe.get_doc(*identity, for_update=True)
         plan = process_gl_map([frappe._dict(value) for value in deepcopy(coverage[identity]["expected"])])
         actual = consistency._ledger(doc, "GL Entry", is_cancelled=0)
         consistency._compare_gl(doc, consistency._gl_map(actual), consistency._gl_map(plan), "重算后的原生总账计划")
+        if doc.doctype == "Purchase Invoice":
+            invoice_plans[identity] = plan
         posted = frappe.db.get_values("China Accounting Voucher", {"source_doctype": doc.doctype,
             "source_name": doc.name, "source_event": "Posting", "docstatus": 1}, "name", for_update=True)
         for name, in posted:
             voucher = frappe.get_doc("China Accounting Voucher", name, for_update=True)
             consistency._check_finance_voucher(doc, voucher, "Posting", "Posted")
             consistency._compare_gl(doc, consistency._gl_map(voucher.entries), consistency._gl_map(actual), "历史中国凭证与重算后总账")
+    return invoice_plans
 
 
 def reconcile(operation_id):
@@ -472,5 +566,7 @@ def bulk_restart(docnames):
     riv = sys.modules["erpnext.stock.doctype.repost_item_valuation.repost_item_valuation"]
     names = frappe.parse_json(docnames)
     for name in names:
-        guard_task(frappe.get_doc("Repost Item Valuation", name), destructive=True)
+        doc = frappe.get_doc("Repost Item Valuation", name)
+        with task_boundary(doc):
+            guard_task(doc, destructive=True)  # whole batch preflight, before its first restart writes
     return riv._dlp_reversal_original_bulk_restart_reposting(docnames)

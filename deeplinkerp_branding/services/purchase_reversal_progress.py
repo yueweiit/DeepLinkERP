@@ -134,6 +134,7 @@ def acceptance(payload):
                 yield
             finally:
                 _accepting.reset(token)
+                context.pop("_native_created_rivs", None)
             if not manifest["roots"]:
                 context.pop("reversal", None)  # no RIV: ordinary synchronous receipt
 
@@ -199,7 +200,6 @@ def accept_audit(context, result):
         "document": result["document"], "doctype": source.doctype, "name": source.name, "permission": "cancel"}
     _write(context, progress)
     result["reversal"] = public(context, progress)
-    frappe.response["purchase_reversal"] = result["reversal"]
     frappe.db.after_commit.add(lambda: notify(context["operation_id"]))
 
 
@@ -288,14 +288,19 @@ def readonly_verify(context, progress):
     consistency.check_stock(source)
     consistency.check_order_received(source)
     consistency.check_billing(source)
-    for row in manifest["scope"]["sources"]:
-        doc = service._current(row["doctype"], row["name"])
-        if doc.doctype == "Purchase Invoice" and doc.docstatus == 1:
-            consistency.check_invoice_balance(doc)
+    consistency.check_cancelled_ledgers(source, context=context)
     consistency.verify_cancellation(source, context["gl_before"][source.doctype + ":" + source.name])
     from .purchase_native_repost import verify_stock_chain, verify_gl_coverage
     verify_stock_chain(manifest)
-    verify_gl_coverage(context, progress)
+    invoice_plans = verify_gl_coverage(context, progress)
+    from erpnext.accounts.general_ledger import process_gl_map
+    for identity in sorted({(row["doctype"], row["name"]) for row in manifest["scope"]["sources"] + manifest["scope"]["vouchers"]}):
+        doc = service._current(*identity)
+        if doc.doctype == "Purchase Invoice" and doc.docstatus == 1:
+            plan = invoice_plans.get(identity)
+            if plan is None:
+                plan = process_gl_map(doc.get_gl_entries())
+            consistency.check_invoice_balance(doc, gl_plan=plan)
     return {"source": manifest["source"], "sles": len(manifest["sles"]), "pairs": len(manifest["scope"]["pairs"]),
         "tasks": sorted(progress["tasks"]), "checked_at": datetime.now(timezone.utc).isoformat()}
 

@@ -135,7 +135,10 @@ def _form_operation(request_id, payload, native):
             return {"document": snapshot(frappe.get_doc(doc["doctype"], doc["name"])), "localname": doc.get("localname")}
         finally:
             frappe.flags.purchase_request_id = old_request
-    return operation.run(request_id, business_payload(payload), write, _form_replay)
+    result = operation.run(request_id, business_payload(payload), write, _form_replay)
+    if result.get("reversal"):
+        frappe.response["purchase_reversal"] = result["reversal"]
+    return result
 
 
 def _form_is_procurement(payload, *, doctype=None, name=None):
@@ -643,7 +646,13 @@ def check_order_received(doc):
         acknowledge_effect(order)
 
 
-def check_invoice_balance(doc):
+def check_invoice_balance(doc, *, gl_plan=None):
+    if gl_plan is not None:
+        from erpnext.accounts.utils import get_payment_ledger_entries
+        plan = get_payment_ledger_entries(gl_plan)
+        for ledger in ("Payment Ledger Entry", "Advance Payment Ledger Entry"):
+            _compare_payment_ledger(doc, ledger, _ledger(doc, ledger, delinked=0),
+                [row for row in plan if row.doctype == ledger], "重算应付本单付款及预付账簿")
     from erpnext.accounts.utils import QueryPaymentLedger
     ple = frappe.qb.DocType("Payment Ledger Entry")
     outstanding = QueryPaymentLedger().get_voucher_outstandings([frappe._dict(voucher_type=doc.doctype, voucher_no=doc.name)],
@@ -795,15 +804,17 @@ def check_billing(doc):
         acknowledge_effect(receipt)
 
 
-def check_cancelled_ledgers(doc):
+def check_cancelled_ledgers(doc, *, context=None):
     """ERPNext retains original plus swapped GL rows under either ledger policy."""
     from erpnext.accounts.utils import is_immutable_ledger_enabled
     state = _state()
-    context = operation.current() or (state["context"] if state else {})
+    if context is None:
+        context = operation.current() or (state["context"] if state else {})
     before = context.get("gl_before", {}).get(doc.doctype + ":" + doc.name)
     rows = _ledger(doc, "GL Entry")
     if before is None:
         operation.reject("采购取消缺少原生总账快照，不能确认冲销", "cancellation_gl_snapshot_missing")
+    before = [frappe._dict(row) for row in before]  # durable JSON or same-tx native rows
     original_names = {row.name for row in before}
     original = [row for row in rows if row.name in original_names]
     reverse = [row for row in rows if row.name not in original_names]
@@ -839,7 +850,7 @@ def check_cancelled_ledgers(doc):
         rows = _ledger(doc, ledger)
         if any(row.delinked != (0 if immutable else 1) for row in rows):
             operation.reject("采购取消后付款或预付账簿状态不一致", "cancellation_payment_ledger_active")
-        originals = payment_before[ledger]
+        originals = [frappe._dict(row) for row in payment_before[ledger]]
         names = {row.name for row in originals}
         retained = [row for row in rows if row.name in names]
         if len(retained) != len(originals):

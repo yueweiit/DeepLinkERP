@@ -45,7 +45,7 @@ app_include_js = [
 	"/assets/deeplinkerp_branding/js/deeplinkerp_navigation.js?v=0.0.20",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_interface_mode.js?v=0.0.3",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_branding.js?v=0.0.28",
-	"/assets/deeplinkerp_branding/js/inventory_detail.bundle.js?v=0.0.3",
+	"/assets/deeplinkerp_branding/js/inventory_detail.bundle.js?v=0.0.4",
 	"/assets/deeplinkerp_branding/js/selection_dropdown.bundle.js",
 ]
 

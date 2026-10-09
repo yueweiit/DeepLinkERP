@@ -67,6 +67,8 @@ _ROW_FIELDS |= {"against_stock_entry", "ste_detail", "original_item", "subcontra
 _SLE_FIELDS = ["name", "company", "voucher_type", "voucher_no", "voucher_detail_no", "item_code", "warehouse",
     "posting_datetime", "posting_date", "posting_time", "creation", "is_cancelled", "actual_qty",
     "dependant_sle_voucher_detail_no", "recalculate_rate"]
+_SERIAL_BATCH_FIELDS = {"has_serial_no", "has_batch_no", "serial_no", "rejected_serial_no", "batch_no",
+    "serial_and_batch_bundle", "rejected_serial_and_batch_bundle", "auto_created_serial_and_batch_bundle"}
 
 
 def _reject(reason):
@@ -175,11 +177,12 @@ class _ScopeBudget:
 
 
 class _Collector:
-    def __init__(self, root, *, current=False, stock_entry_lifecycle=True, opaque=False, boundary_gate=False, budget=None):
+    def __init__(self, root, *, current=False, stock_entry_lifecycle=True, opaque=False, boundary_gate=False, budget=None, cancellation=False):
         self.current = current
         self.stock_entry_lifecycle = stock_entry_lifecycle
         self.opaque = opaque
         self.boundary_gate = boundary_gate
+        self.cancellation = cancellation
         # Native ordinary non-stock PI drafts may preserve a manual draft PR
         # reference (existing auto-invoice completeness scenario). This is only
         # a protected read identity, never a submit/repost/cancel capability.
@@ -205,6 +208,22 @@ class _Collector:
         self.potential_billing_receipts = set()
         self.add_document(root)
 
+    def check_serial_batch(self, row):
+        # Only the new accepted cancellation contract excludes this native
+        # engine path. Ordinary stock writers retain their native support.
+        if self.cancellation and any(row.get(field) for field in _SERIAL_BATCH_FIELDS):
+            _reject("序列号或批次库存路径尚未支持采购异步冲销")
+
+    def read_item(self, code):
+        fields = {"is_stock_item", "stock_uom", "disabled"}
+        if self.cancellation:
+            fields |= {"has_serial_no", "has_batch_no"}
+        item = self.items.get(code)
+        if item is None:
+            item = self.items[code] = service._read("Item", code, fields)
+        self.check_serial_batch(item)
+        return item
+
     def read(self, doctype, name, *, source=True):
         identity = DocumentIdentity(doctype, name)
         if identity not in self.documents:
@@ -222,9 +241,7 @@ class _Collector:
     def add_pair(self, item_code, warehouse, anchor=None):
         if not item_code or not warehouse:
             _reject("物料或仓库身份缺失")
-        item = self.items.setdefault(item_code, None)
-        if item is None:
-            item = self.items[item_code] = service._read("Item", item_code, {"is_stock_item", "stock_uom", "disabled"})
+        item = self.read_item(item_code)
         if not item.is_stock_item or item.get("disabled"):
             _reject("库存流水物料不是有效库存物料")
         location = self.warehouses.setdefault(warehouse, None)
@@ -244,6 +261,9 @@ class _Collector:
     def row_pairs(self, doc, row, table):
         """Pairs from this exact native detail, never a same-item sibling row."""
         _child_parent(doc, row, table)
+        if self.cancellation:
+            _fields(row.doctype, _SERIAL_BATCH_FIELDS, doc.doctype)
+            self.check_serial_batch(row)
         if table == "supplied_items":
             if not doc.get("is_old_subcontracting_flow"):
                 return set()
@@ -252,7 +272,7 @@ class _Collector:
             warehouse = row.get("reserve_warehouse") if doc.doctype == "Purchase Order" else doc.get("supplier_warehouse")
             if not row.get("rm_item_code") or not warehouse:
                 _reject("原生供料物料或仓库缺失")
-            item = service._read("Item", row.rm_item_code, {"is_stock_item", "stock_uom", "disabled"})
+            item = self.read_item(row.rm_item_code)
             if not item.is_stock_item or item.get("disabled") or row.get("stock_uom") != item.stock_uom:
                 _reject("原生供料物料状态或库存单位不一致")
             return {StockPair(row.rm_item_code, warehouse)}
@@ -260,9 +280,7 @@ class _Collector:
         code = row.get("item_code")
         if not code:
             _reject("原生明细物料缺失")
-        native_item = self.items.get(code)
-        if native_item is None:
-            native_item = self.items[code] = service._read("Item", code, {"is_stock_item", "stock_uom", "disabled"})
+        native_item = self.read_item(code)
         if native_item.get("disabled") or row.get("stock_uom") and row.stock_uom != native_item.stock_uom:
             _reject("原生明细物料状态或库存单位不一致")
         stock = doc.doctype in _STOCK and (doc.doctype not in ("Purchase Invoice", "Sales Invoice") or doc.get("update_stock"))
@@ -414,7 +432,11 @@ class _Collector:
         if seen:
             query["name"] = ["not in", sorted(seen)]
         remaining = MAX_SLES - len(seen)
-        rows = frappe.db.get_values("Stock Ledger Entry", query, _SLE_FIELDS, as_dict=True,
+        fields = _SLE_FIELDS
+        if self.cancellation:
+            meta = frappe.get_meta("Stock Ledger Entry")
+            fields = fields + sorted(field for field in _SERIAL_BATCH_FIELDS if meta.has_field(field))
+        rows = frappe.db.get_values("Stock Ledger Entry", query, fields, as_dict=True,
             order_by="posting_datetime asc, creation asc, name asc", limit=remaining + 1,
             **({"for_update": True} if self.current else {}))
         if len(rows) > remaining:
@@ -427,6 +449,7 @@ class _Collector:
         for row in matched:
             if row.company != self.company:
                 _reject("库存流水公司或身份不一致")
+            self.check_serial_batch(row)
             self.sles[row.name] = row
         return matched
 
@@ -600,7 +623,11 @@ def collect_cancellation_scope(persisted_doc) -> ReversalScope:
     root = service._read(persisted_doc.doctype, persisted_doc.name)
     if root.docstatus != 1:
         _reject("取消根单据当前状态不是已提交")
-    collector = _Collector(root)
+    # PO/PE and a non-stock PI without receipt-rate adjustment cannot invoke
+    # the stock repost engine. Preserve their normal synchronous semantics.
+    stock_cancellation = root.doctype == "Purchase Receipt" or root.doctype == "Purchase Invoice" and (
+        root.get("update_stock") or frappe.db.get_single_value("Buying Settings", "set_landed_cost_based_on_purchase_invoice_rate"))
+    collector = _Collector(root, cancellation=bool(stock_cancellation))
     collector.closure()
     return collector.result()
 

@@ -855,6 +855,31 @@ def require_publication_order(state=None):
         _reject("原生库存同步发布隔离顺序无效，请重试独立请求")
 
 
+def _repost_producer(roots, scopes):
+    """Potential native force/future/queue producers, not ordinary stock saves.
+
+    The existing collector has already read the actual future frontier. A new
+    unproved late producer is rejected by the RIV boundary, never fenced late.
+    """
+    from .purchase_reversal_scope import _STOCK
+    for doc in roots:
+        if doc.docstatus not in (1, 2):
+            continue
+        if doc.doctype == "Landed Cost Voucher" or doc.docstatus == 2 and doc.doctype in _STOCK:
+            return True
+        if doc.doctype == "Purchase Invoice" and frappe.db.get_single_value("Buying Settings", "set_landed_cost_based_on_purchase_invoice_rate"):
+            return True  # native receipt cost adjustment calls force=True
+        if doc.doctype not in _STOCK or doc.doctype in ("Purchase Invoice", "Sales Invoice") and not doc.get("update_stock"):
+            continue
+        if any(any((row.doctype, row.name) != (doc.doctype, doc.name) for row in scope.vouchers) for scope in scopes):
+            return True
+        consuming = [(row.item_code, row.get("s_warehouse") or row.get("from_warehouse") or row.get("warehouse"))
+            for row in doc.get("items") or [] if doc.doctype in ("Stock Entry", "Delivery Note", "Sales Invoice")]
+        if len(consuming) != len(set(consuming)):
+            return True  # native queue condition after actual consuming SLEs
+    return False
+
+
 @contextmanager
 def _documents_boundary(documents, *, force_opaque=False, creating=False):
     """One complete sorted lease and UNION budget for the actual native batch."""
@@ -881,8 +906,10 @@ def _documents_boundary(documents, *, force_opaque=False, creating=False):
         scopes = _scopes(roots, current=False, opaque=opaque)
         opaque = opaque or _opaque_sources(scopes)
         keys = _scope_keys(scopes, roots)
-        # Fence FIRST. Known audited unrelated ranges never borrow a site fence.
-        with acquire((fence_key(),) if opaque else ()):
+        producer = _repost_producer(roots, scopes)
+        # Fence FIRST for actual potential producers; unrelated non-producers
+        # keep their ordinary scoped concurrency.
+        with acquire((fence_key(),) if opaque or producer else ()):
             with acquire(keys):
                 with service.current_reads():
                     current_roots, current_proposed_documents = [], []
@@ -897,6 +924,8 @@ def _documents_boundary(documents, *, force_opaque=False, creating=False):
                     current_opaque = current_opaque or _opaque_sources(fresh)
                     if current_opaque and not opaque:
                         _reject("原生关联范围已改变，请重试独立请求")
+                    if _repost_producer(current_roots, fresh) and not (opaque or producer):
+                        _reject("原生重算发布范围已改变，请重试独立请求")
                     if not _scope_keys(fresh, current_roots) <= keys:
                         _reject("库存保护范围已扩大，请重试独立请求")
                     if opaque:
@@ -1046,6 +1075,10 @@ class PointerBoundary:
     def _pointer_call(self, method, *args, creating=False, **kwargs):
         from . import purchase_payment_service as service
         with execution():
+            if self.doctype == "Repost Item Valuation":
+                from .purchase_native_repost import task_boundary
+                with task_boundary(self, creating=creating):
+                    return method(*args, **kwargs)
             creating = _creates_identity(self, inserting=creating)
             if creating:
                 check_pointer(self, None, creating=True)  # before lease/native naming
@@ -1080,20 +1113,25 @@ class PointerBoundary:
         if fieldname == POINTER or isinstance(fieldname, dict) and POINTER in fieldname:
             frappe.throw("库存保护指针不能由普通单据写入、清除或替换", frappe.PermissionError)
         if self.doctype == "Repost Item Valuation":
-            from .purchase_native_repost import guard_task
-            guard_task(self)
+            from .purchase_native_repost import _task_fields
+            fields = {fieldname} if isinstance(fieldname, str) else set(fieldname)
+            if fields & _task_fields(self).keys():
+                frappe.throw("原生重算范围必须通过单据保存核查，不能直接改写", frappe.PermissionError)
+            return self._pointer_call(super().db_set, fieldname, *args, **kwargs)
         return super().db_set(fieldname, *args, **kwargs)
 
     def db_update(self, *args, **kwargs):
-        from .purchase_native_repost import guard_task
+        from .purchase_native_repost import task_boundary
         if self.doctype == "Repost Item Valuation":
-            guard_task(self)
+            with task_boundary(self):
+                return super().db_update(*args, **kwargs)
         return super().db_update(*args, **kwargs)
 
     def restart_reposting(self):
-        from .purchase_native_repost import guard_task
-        guard_task(self, destructive=True)
-        return super().restart_reposting()
+        from .purchase_native_repost import guard_task, task_boundary
+        with task_boundary(self):
+            guard_task(self, destructive=True)
+            return super().restart_reposting()
 
     def deduplicate_similar_repost(self):
         if frappe.db.get_value(self.doctype, self.name, POINTER, for_update=True):
