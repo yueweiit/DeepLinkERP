@@ -469,6 +469,37 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         self.assertEqual(receipt["result"]["created"],1)
         self.assertTrue(receipt["acknowledgements"])
 
+    def test_source_sync_linked_only_replay_rechecks_current_purchase_order_read_acl(self):
+        from frappe import permissions
+        from deeplinkerp_branding.services import purchase_operation, purchase_consistency
+        row=self.purchase_source_row()
+        with self.source_snapshot([row]) as sources:
+            created=sources.sync_purchase_sources(request_id=str(uuid.uuid4()))
+            self.assertEqual(created["created"],1)
+            self.commit_fixture(name_prefix="PUR-ORD-2026-")
+            key=str(uuid.uuid4())
+            linked=sources.sync_purchase_sources(request_id=key)
+            self.assertEqual((linked["created"],linked["already_linked"],linked["documents"]),(0,1,[]))
+            self.commit_fixture(name_prefix="PUR-ORD-2026-")
+            audit_name=purchase_operation.identity("Administrator",key)
+            original_receipt=frappe.db.get_value("Integration Request",audit_name,"output")
+            self.assertEqual(json.loads(original_receipt)["artifacts"],[])
+            order=frappe.get_doc("Purchase Order",created["documents"][0]["name"])
+            original_order=purchase_consistency.artifact_evidence(order)
+            source=frappe.get_doc(sources.DOCTYPE,order.custom_oa_purchase_expense).as_dict()
+            counts={dt:frappe.db.count(dt) for dt in self.types}
+            current_permission=permissions.has_permission
+            def revoked(doctype,ptype="read",*args,**kwargs):
+                return False if doctype=="Purchase Order" and ptype=="read" else current_permission(doctype,ptype,*args,**kwargs)
+            with patch.object(permissions,"has_permission",side_effect=revoked):
+                self.assertFalse(frappe.has_permission("Purchase Order","read",doc=order))
+                rejected=sources.sync_purchase_sources(request_id=key)
+            self.assertTrue(rejected.get("failed"),rejected)
+            self.assertEqual(frappe.db.get_value("Integration Request",audit_name,"output"),original_receipt)
+            self.assertEqual(purchase_consistency.artifact_evidence(order.reload()),original_order)
+            self.assertEqual(frappe.get_doc(sources.DOCTYPE,source["name"]).as_dict(),source)
+            self.assertEqual({dt:frappe.db.count(dt) for dt in self.types},counts)
+
     def test_source_sync_second_native_insert_failure_rolls_back_cache_orders_and_receipt(self):
         from erpnext.buying.doctype.purchase_order.purchase_order import PurchaseOrder
         self.commit_fixture("Item", "QA-ATOMIC-")

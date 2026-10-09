@@ -826,6 +826,8 @@ def _sync_replay(receipt):
         doc = _source(acknowledged["name"])
         if _version(_json(doc.get(SOURCE_FIELD)),_json(doc.get(EVIDENCE_FIELD))) != acknowledged["version"] or doc.get("purchase_order") != acknowledged.get("purchase_order"):
             operation.reject("采购来源缓存或关联已变化，请重新同步核对", "replay_source_changed")
+        if acknowledged.get("purchase_order"):
+            _native("Purchase Order",acknowledged["purchase_order"])
     return {**receipt["result"], "documents":[{k:row[k] for k in ("doctype","name")} for row in receipt["documents"]], "reused":True}
 
 
