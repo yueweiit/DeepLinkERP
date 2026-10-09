@@ -35,7 +35,7 @@ function harness({document=projection(), drafts=[], precision, floatPrecision=3,
  };
  host.window=host;host.globalThis=host;
  host.frappe.require=async()=>{};
- const nativeCall=host.frappe.call;host.frappe.call=async request=>{if(request.method.endsWith('.list_attachments') || request.method.endsWith('.discard')){requests.push(request);return {message:[]};}return nativeCall(request);};
+ const nativeCall=host.frappe.call;host.frappe.call=async request=>{if(request.method.endsWith('.get_progress')){requests.push(request);return {message:host.reversal || null};}if(request.method.endsWith('.list_attachments') || request.method.endsWith('.discard')){requests.push(request);return {message:[]};}return nativeCall(request);};
  host.frappe.ui.FileUploader=class {constructor(options){this.options=options;this.transfers=[];this.uploader={files:[],add_files:files=>this.uploader.files.push(...files.map(file=>({name:file.name,uploading:false,request_succeeded:false}))),upload_file:file=>{this.transfers.push(file.name);return Promise.resolve();}};uploaders.push(this);}ack(index,name){const doc={doctype:'File',name,file_name:this.uploader.files[index].name,file_url:'/private/files/'+name,is_private:1};Object.assign(this.uploader.files[index],{doc,request_succeeded:true});this.options.on_success(doc);}};
  const context=vm.createContext(host);
  for(const file of ['frappe-native-number-format.js','frappe-native-number-controls.js'])vm.runInContext(fs.readFileSync(path.join(__dirname,'fixtures',file),'utf8'),context);
@@ -61,6 +61,16 @@ function harness({document=projection(), drafts=[], precision, floatPrecision=3,
  const delegatedClick=async(className,dataset)=>{const button={tagName:'BUTTON',dataset,classList:{contains:name=>name===className}};const event={target:{closest:selector=>selector.includes('.'+className)?button:null},preventDefault(){},stopPropagation(){}};for(const entry of documentEvents.filter(entry=>entry.type==='click'))entry.fn(event);await new Promise(resolve=>setImmediate(resolve));};
  return {api:host.DeepLinkERPPurchasePayments,host,controls,requests,loaded,surfaces,confirms,uploaders,documentEvents,metadataReads,delegatedClick,click,html,confirm:()=>confirms.shift()(),routeClose:()=>listeners.change()};
 }
+
+test('accepted reversal blocks existing batch, payment and saved-payment drawers before preview',async()=>{
+ for(const open of [h=>h.api.batchDocumentDrawer('Purchase Order',[{name:'PO'}]),h=>h.api.batchPay('Purchase Receipt',[{name:'PR'}]),h=>h.api.pay('Purchase Receipt','PR'),h=>h.api.paymentDrawer('PE')]){
+  const h=harness();h.host.reversal={operation_id:'IR',stage:'failed',safe_reason:'native_repost_failed',can_retry:false};
+  await open(h);
+  assert.match(h.html(),/失败待处理/);
+  assert.equal(h.controls.length,0);
+  assert.equal(h.requests.filter(row=>/preview_|get_purchase_chain|record_|complete_payment/.test(row.method)).length,0);
+ }
+});
 
 test('batch receipt preview is read only and explicit draft preserves exact source row edits',async()=>{
  const p=projection('Purchase Receipt');p.editable_item_fields=['qty','warehouse'];p.document.sources=[{name:'PO-A',modified:'v1'}];
@@ -205,7 +215,8 @@ test('PO to payable reads fresh invoice chain, resumes its PI draft and saves bo
  const document=projection();document.document.name='PI-DRAFT';document.document.modified='target-current';document.source_modified='po-preview-current';
  const h=harness({document,drafts:[{name:'PR-WRONG'}],chain:{can_create_invoice:false,draft_invoices:[{name:'PI-DRAFT',modified:'target-current'}],source_modified:'po-chain-current'}});
  await h.api.documentDrawer('Purchase Order','PO','Purchase Invoice');
- assert.equal(h.requests[0].method,'deeplinkerp_branding.services.purchase_payment_service.get_purchase_chain');
+ assert.equal(h.requests[0].method,'deeplinkerp_branding.services.purchase_reversal_progress.get_progress');
+ assert.equal(h.requests[1].method,'deeplinkerp_branding.services.purchase_payment_service.get_purchase_chain');
  assert.equal(h.requests.filter(r=>r.method==='frappe.client.get_list').length,0);
  assert.equal(h.requests.find(r=>r.method.endsWith('.preview_document')).args.target_name,'PI-DRAFT');
  assert.match(h.surfaces[0].value,/采购订单→确认应付（不更新库存）/);
@@ -217,17 +228,17 @@ test('PO to payable shows only actual PI draft choices without previewing a gues
  const h=harness({drafts:[{name:'PR-WRONG'}],chain:{can_create_invoice:false,draft_invoices:[{name:'PI-A'},{name:'PI-B'}],source_modified:'po-current'}});
  await h.api.documentDrawer('Purchase Order','PO','Purchase Invoice');
  assert.match(h.html(),/2 张可见应付草稿/);assert.match(h.html(),/data-target="PI-A"/);assert.match(h.html(),/data-target="PI-B"/);
- assert.doesNotMatch(h.html(),/PR-WRONG|新建另一张剩余入库/);assert.equal(h.requests.length,1);
+ assert.doesNotMatch(h.html(),/PR-WRONG|新建另一张剩余入库/);assert.equal(h.requests.length,2);
 });
 test('PO invoice refusal displays fresh invoice reason inside the drawer without mapping or saving',async()=>{
  const h=harness({chain:{can_create_invoice:false,draft_invoices:[],invoice_reason:'订单尚未提交，请核对原生订单',source_modified:'po-current'}});
  await h.api.documentDrawer('Purchase Order','PO','Purchase Invoice');
- assert.match(h.html(),/订单尚未提交，请核对原生订单/);assert.equal(h.controls.length,0);assert.equal(h.requests.length,1);
+ assert.match(h.html(),/订单尚未提交，请核对原生订单/);assert.equal(h.controls.length,0);assert.equal(h.requests.length,2);
 });
 test('PO invoice clicked draft that is no longer visible is refused rather than replaced',async()=>{
  const h=harness({chain:{can_create_invoice:true,draft_invoices:[{name:'OTHER'}],invoice_reason:'请刷新'}});
  await h.api.documentDrawer('Purchase Order','PO','Purchase Invoice','REMOVED');
- assert.match(h.html(),/草稿已变化或不可见/);assert.equal(h.requests.length,1);assert.equal(h.controls.length,0);
+ assert.match(h.html(),/草稿已变化或不可见/);assert.equal(h.requests.length,2);assert.equal(h.controls.length,0);
 });
 test('native default Float precision3 accepts qty0.004 while drawer display is only2',async()=>{
  const h=harness();await h.api.documentDrawer('Purchase Receipt','PR','Purchase Invoice');
@@ -806,9 +817,9 @@ test('crossborder row and generic PO invoice controls share the one existing cap
  const cross=crossHarness();assert.equal(cross.documentEvents.filter(entry=>entry.type==='click').length,1);assert.equal(cross.documentEvents.find(entry=>entry.type==='click').capture,true);
  await cross.delegatedClick('dlp-crossborder-open',{crossborderOrder:'PO',crossborderTab:'logistics'});assert.equal(cross.calls.filter(r=>r.method.endsWith('.get_order_progress')).length,1);assert.match(cross.html(),/手工核对节点/);
  const document=projection();document.document.name='PI-DRAFT';document.source_modified='po-current';const order=harness({document,chain:{can_create_invoice:false,draft_invoices:[{name:'PI-DRAFT'}]}});
- await order.delegatedClick('dlp-receipt-invoice',{name:'PO',sourceDoctype:'Purchase Order',target:'PI-DRAFT'});assert.equal(order.requests[0].args.source_doctype,'Purchase Order');assert.equal(order.requests.find(r=>r.method.endsWith('.preview_document')).args.source_doctype,'Purchase Order');assert.equal(order.requests.find(r=>r.method.endsWith('.preview_document')).args.target_name,'PI-DRAFT');
- const row=harness({document:{...projection(),source_modified:'po-current'},chain:{can_create_invoice:true,draft_invoices:[]}});await row.delegatedClick('dlp-order-invoice',{name:'PO'});assert.equal(row.requests[0].args.source_doctype,'Purchase Order');assert.equal(row.requests.filter(r=>r.method==='frappe.client.get_list').length,0);
- const receipt=harness();await receipt.delegatedClick('dlp-receipt-invoice',{name:'PR'});assert.equal(receipt.requests[0].args.source_doctype,'Purchase Receipt');assert.equal(receipt.requests[0].args.target_doctype,'Purchase Invoice');
+ await order.delegatedClick('dlp-receipt-invoice',{name:'PO',sourceDoctype:'Purchase Order',target:'PI-DRAFT'});assert.equal(order.requests[0].args.doctype,'Purchase Order');assert.equal(order.requests.find(r=>r.method.endsWith('.preview_document')).args.source_doctype,'Purchase Order');assert.equal(order.requests.find(r=>r.method.endsWith('.preview_document')).args.target_name,'PI-DRAFT');
+ const row=harness({document:{...projection(),source_modified:'po-current'},chain:{can_create_invoice:true,draft_invoices:[]}});await row.delegatedClick('dlp-order-invoice',{name:'PO'});assert.equal(row.requests[0].args.doctype,'Purchase Order');assert.equal(row.requests.filter(r=>r.method==='frappe.client.get_list').length,0);
+ const receipt=harness();await receipt.delegatedClick('dlp-receipt-invoice',{name:'PR'});assert.equal(receipt.requests[0].args.doctype,'Purchase Receipt');assert.equal(receipt.requests.find(r=>r.method.endsWith('.preview_document')).args.target_doctype,'Purchase Invoice');
 });
 test('actual crossborder close followed by a payment drawer leaves that payment live on list cancellation',async()=>{
  const document=projection('Payment Entry');document.document.name='PE';document.allowed_actions=['Submit'];

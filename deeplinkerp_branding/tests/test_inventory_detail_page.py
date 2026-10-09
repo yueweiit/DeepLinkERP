@@ -21,6 +21,21 @@ def run_js(body: str) -> dict:
 	return json.loads(result.stdout)
 
 
+def test_reversal_stage_blocks_existing_inventory_movement_without_losing_selection():
+	result = run_js("""
+const group={item_code:'I',warehouse:'W',reversal:{stage:'failed'},locations:[{}]};
+const key=inventory.selectionKey(group),selected=new Map([[key,{item_code:'I',source_warehouse:'W'}]]);
+const next=inventory.updateCurrentPageSelection([group],selected,true);
+const html=inventory.renderMaterialRows([group],new Set([key]));
+const button={length:1,text(){},prop(k,v){this[k]=v;},attr(){}};
+inventory.InventoryDetailPage.prototype.updateMovementButton.call({$movementButton:button,selected:next,canCreateStockEntry:true});
+console.log(JSON.stringify({disabled:button.disabled,selected:next.size,html}));
+""")
+	assert result["disabled"] is True
+	assert result["selected"] == 1
+	assert "失败待处理" in result["html"]
+
+
 def test_material_rows_use_one_selectable_checkbox_per_item_warehouse_group() -> None:
 	result = run_js(
 		"""

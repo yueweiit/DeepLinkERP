@@ -360,6 +360,8 @@ def _allow(name):
 
 def guard(doc, *, proposed=None):
     """Both stored and proposed identities before any native write/commit."""
+    from .purchase_reversal_progress import guard_audit
+    guard_audit(doc, proposed)
     fields = {"name": doc.name, "integration_request_service": doc.get("integration_request_service")}
     if proposed:
         fields.update(proposed)

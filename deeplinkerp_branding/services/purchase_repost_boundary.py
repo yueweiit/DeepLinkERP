@@ -65,7 +65,7 @@ class Session:
     # invalidate(); resolve(identity, immutable candidate bytes) -> exact bytes
     # or None. promote/invalidate are memory-only; neither can start SQL or a
     # transaction method. The later owned native adapter supplies identity/lease/input
-    # authority; no hook, endpoint, worker or ownership publisher installs it.
+    # authority; purchase_native_repost installs it only for an accepted task.
     receipt_participant: object = None
     receipt_phase: str | None = None
     receipt_resolution: dict | None = None
@@ -325,6 +325,8 @@ class Session:
             protect_native_acquisition(query, arguments.arguments["values"], self)
             protect_native_release(query, arguments.arguments["values"], self)
             query = adapt_query(query, self)
+            from .purchase_native_repost import current_query
+            query = current_query(query)
             self.sql_sequence += 1
             participant, prepared, candidate = self.receipt_participant, None, None
             identity = {"execution_id": self.execution_id, "connection_id": self.connection_id, "epoch": self.epoch}
@@ -404,6 +406,9 @@ class Session:
             return result
 
         def transaction(kind, method, *args, **kwargs):
+            from .purchase_reversal_progress import accepting
+            if kind == "commit" and accepting() is not None:
+                _reject("原生取消受理不能提前提交")
             if self.receipt_phase is not None:
                 _reject("回执处理不能重入事务方法")
             self.authority()
@@ -611,7 +616,8 @@ def _check_bin_pending(item_code, warehouse):
         ["name", POINTER], as_dict=True, limit=2, for_update=True)
     if len(rows) > 1:
         _reject("实际库存 Bin 重复")
-    if any(row.get(POINTER) for row in rows):
+    from .purchase_reversal_progress import allows
+    if any(row.get(POINTER) and not allows(row.get(POINTER)) for row in rows):
         _reject("相关库存范围待完成，请稍后重试")
 
 
@@ -1073,7 +1079,45 @@ class PointerBoundary:
     def db_set(self, fieldname, *args, **kwargs):
         if fieldname == POINTER or isinstance(fieldname, dict) and POINTER in fieldname:
             frappe.throw("库存保护指针不能由普通单据写入、清除或替换", frappe.PermissionError)
+        if self.doctype == "Repost Item Valuation":
+            from .purchase_native_repost import guard_task
+            guard_task(self)
         return super().db_set(fieldname, *args, **kwargs)
+
+    def db_update(self, *args, **kwargs):
+        from .purchase_native_repost import guard_task
+        if self.doctype == "Repost Item Valuation":
+            guard_task(self)
+        return super().db_update(*args, **kwargs)
+
+    def restart_reposting(self):
+        from .purchase_native_repost import guard_task
+        guard_task(self, destructive=True)
+        return super().restart_reposting()
+
+    def deduplicate_similar_repost(self):
+        if frappe.db.get_value(self.doctype, self.name, POINTER, for_update=True):
+            return  # owned jobs require real coverage; no naked native Skipped
+        if self.repost_only_accounting_ledgers:
+            owned = frappe.db.get_values(self.doctype, {"based_on": "Transaction", "voucher_type": self.voucher_type,
+                "voucher_no": self.voucher_no, "docstatus": 1, "repost_only_accounting_ledgers": 1,
+                "status": "Queued", POINTER: ["is", "set"]}, "name", limit=1, for_update=True)
+        elif self.based_on == "Item and Warehouse":
+            owned = frappe.db.sql(f"""SELECT name FROM `tabRepost Item Valuation` WHERE item_code=%s AND warehouse=%s
+                AND name!=%s AND TIMESTAMP(posting_date,posting_time)>TIMESTAMP(%s,%s)
+                AND docstatus=1 AND status='Queued' AND based_on='Item and Warehouse'
+                AND `{POINTER}` IS NOT NULL AND `{POINTER}`!='' LIMIT 1 FOR UPDATE""",
+                (self.item_code, self.warehouse, self.name, self.posting_date, self.posting_time))
+        else:
+            owned = []
+        if owned:
+            _reject("已受理采购冲销的原生任务不能被普通去重跳过")
+        return super().deduplicate_similar_repost()
+
+    @staticmethod
+    def clear_old_logs(days=None):
+        from .purchase_native_repost import clear_old_logs
+        clear_old_logs(days)
 
 
 def before_execution(*args, **kwargs):
@@ -1083,6 +1127,8 @@ def before_execution(*args, **kwargs):
     db = getattr(frappe.local, "db", None)  # actual instance, not LocalProxy type
     if _known_database(db) and not db.transaction_writes:
         initialize()
+        from .purchase_native_repost import install
+        install()
         from .purchase_native_intent import METHOD, install
         if kwargs.get("method") == METHOD:
             install()  # captured native callable is resolved before before_job

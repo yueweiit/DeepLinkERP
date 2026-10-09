@@ -35,7 +35,7 @@ app_include_css = [
 ]
 app_include_js = [
 	"/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.22",
-	"/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.24",
+	"/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.25",
 	"/assets/deeplinkerp_branding/js/crossborder_procurement.js?v=0.0.5",
 	"/assets/deeplinkerp_branding/js/purchase_source.js?v=0.0.2",
     "/assets/deeplinkerp_branding/js/operating_payment_panel.js?v=0.0.8",
@@ -45,7 +45,7 @@ app_include_js = [
 	"/assets/deeplinkerp_branding/js/deeplinkerp_navigation.js?v=0.0.20",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_interface_mode.js?v=0.0.3",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_branding.js?v=0.0.28",
-	"/assets/deeplinkerp_branding/js/inventory_detail.bundle.js?v=0.0.2",
+	"/assets/deeplinkerp_branding/js/inventory_detail.bundle.js?v=0.0.3",
 	"/assets/deeplinkerp_branding/js/selection_dropdown.bundle.js",
 ]
 
@@ -182,7 +182,11 @@ doc_events["Integration Request"] = {
     "on_trash": "deeplinkerp_branding.services.purchase_operation.protect_audit",
     "before_rename": "deeplinkerp_branding.services.purchase_operation.protect_audit",
 }
-doc_events["Repost Item Valuation"] = {"on_submit": "deeplinkerp_branding.services.purchase_consistency.check_native_repost"}
+doc_events["Repost Item Valuation"] = {"on_submit": "deeplinkerp_branding.services.purchase_consistency.check_native_repost",
+    "on_trash": "deeplinkerp_branding.services.purchase_native_repost.protect_task",
+    "before_rename": "deeplinkerp_branding.services.purchase_native_repost.protect_task"}
+for _checkpoint_event in ("validate", "on_trash"):
+    doc_events["File"][_checkpoint_event] = [doc_events["File"][_checkpoint_event], "deeplinkerp_branding.services.purchase_native_repost.protect_checkpoint"]
 extend_doctype_class = {
     **{doctype: ["deeplinkerp_branding.services.purchase_consistency.ProcurementControllerBoundary"]
        for doctype in ("Purchase Order", "Purchase Receipt", "Purchase Invoice", "Payment Entry")},
@@ -202,7 +206,7 @@ override_whitelisted_methods.update({"frappe.desk.form.save.savedocs": "deeplink
     "erpnext.buying.doctype.purchase_order.purchase_order.update_status": "deeplinkerp_branding.services.purchase_repost_boundary.update_purchase_order_status",
     "erpnext.buying.doctype.purchase_order.purchase_order.close_or_unclose_purchase_orders": "deeplinkerp_branding.services.purchase_repost_boundary.close_or_unclose_purchase_orders",
     "erpnext.controllers.accounts_controller.update_child_qty_rate": "deeplinkerp_branding.services.purchase_repost_boundary.update_child_qty_rate"})
-scheduler_events = {"cron": {"*/15 * * * *": ["deeplinkerp_branding.services.operating_expenses.scheduled_sync", "deeplinkerp_branding.services.purchase_source_service.scheduled_sync"]}}
+scheduler_events = {"cron": {"*/15 * * * *": ["deeplinkerp_branding.services.operating_expenses.scheduled_sync", "deeplinkerp_branding.services.purchase_source_service.scheduled_sync", "deeplinkerp_branding.services.purchase_reversal_progress.recover"]}}
 website_context = {
 	"favicon": "/assets/deeplinkerp_branding/logo/tab_logo.svg?v=0.0.6",
 	"splash_image": "/assets/deeplinkerp_branding/logo/deeplinkerp_logo_radius.png?v=0.0.6",

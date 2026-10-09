@@ -1009,6 +1009,26 @@ def _actual_qty(item_code: str, warehouse: str) -> float:
 	)
 	return float(value or 0)
 
+def _attach_reversal_progress(payload):
+	for row in payload.get("groups", []):
+		operation_id = frappe.db.get_value("Bin", {"item_code": row["item_code"], "warehouse": row["warehouse"]}, "custom_purchase_reversal_operation") if row.get("warehouse") else None
+		row["reversal"] = None
+		if operation_id:
+			from . import purchase_reversal_progress as progress
+			_, context, output = progress._load(operation_id)
+			try:
+				row["reversal"] = progress.public(context, output)
+			except frappe.PermissionError:
+				row["reversal"] = {"stage": "waiting_inventory", "safe_reason": "progress_unavailable", "can_retry": False}
+	return payload
+
+
+def _require_pair_available(item_code, warehouse):
+	# This endpoint only prepares an unsaved native document. The real writer
+	# still acquires/rechecks the existing durable leases on save/submit.
+	if frappe.db.get_value("Bin", {"item_code": item_code, "warehouse": warehouse}, "custom_purchase_reversal_operation"):
+		frappe.throw("采购冲销未完成，相关库存移动暂缓办理。", frappe.ValidationError)
+
 
 def build_movement_item_spec(
 	*,
@@ -1095,6 +1115,7 @@ def get_inventory_movement_context(company: str, selections: Any) -> dict[str, A
 		seen.add(key)
 		item = _validate_item(item_code)
 		_validate_warehouse(company, source_warehouse)
+		_require_pair_available(item_code, source_warehouse)
 		items.append(
 			{
 				"item_code": item_code,
@@ -1153,6 +1174,8 @@ def prepare_inventory_stock_entry(
 			raise ValueError(f"重复移动物料仓库组：{item_code} / {source_warehouse}")
 		seen.add(key)
 		item = _validate_item(item_code)
+		for warehouse in {source_warehouse, target_warehouse} - {""}:
+			_require_pair_available(item_code, warehouse)
 		actual_qty = 0.0
 		if purpose in {"Material Issue", "Material Transfer"}:
 			_validate_warehouse(company, source_warehouse)
@@ -1217,7 +1240,7 @@ def get_inventory_location_detail(
 	)
 	payload["snapshot_options"] = _list_snapshot_options(company)
 	payload.update(_movement_permission_payload())
-	return payload
+	return _attach_reversal_progress(payload)
 
 
 @_whitelist
@@ -1266,7 +1289,7 @@ def get_categorized_inventory_detail(
 	if missing_item_group:
 		payload["warning"] = f"ERP 未维护分类物料组：{missing_item_group}"
 	payload.update(_movement_permission_payload())
-	return payload
+	return _attach_reversal_progress(payload)
 
 
 @_whitelist

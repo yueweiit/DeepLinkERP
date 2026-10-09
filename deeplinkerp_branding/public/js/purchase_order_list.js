@@ -44,9 +44,10 @@
    return `<a href="${esc(unified.formLink(doc))}" data-name="${esc(doc.name)}">${esc(doc.name)}</a>${refs || (doc.source==='OA'?'<span class="dlp-po-provenance">钉钉</span>':'')}`;
   }
   if(field==='supplier_name')return doc.supplier?`<a href="/desk/supplier/${encodeURIComponent(doc.supplier)}">${esc(doc.supplier_name || '—')}</a>`:esc(doc.supplier_name || '供应商待核对');
-  if(field==='status')return doc.row_type==='purchase_order'?(c.list.get_indicator_html?.(doc,Boolean(c.list.workflow_state_fieldname)) || esc(c.translate(doc.status || '—'))):esc(doc.status || '来源待完善');
+  if(field==='status')return doc.row_type==='purchase_order'?`${c.list.get_indicator_html?.(doc,Boolean(c.list.workflow_state_fieldname)) || esc(c.translate(doc.status || '—'))} ${payments(c)?.reversalHTML(doc.reversal) || ''}`:esc(doc.status || '来源待完善');
   if(field==='receipt_action') {
    if(doc.row_type==='oa_request')return provider.renderValue(field,doc,{},esc);
+   if(payments(c)?.reversalBlocked(doc.reversal))return payments(c).reversalHTML(doc.reversal);
    const related=doc.order_progress?.state==='restricted'?'<span class="text-warning">关联进度受限，请核对权限</span>':['internal','logistics'].map((tab,i)=>`<button type="button" class="btn btn-xs btn-default dlp-crossborder-open" data-crossborder-order="${esc(doc.name)}" data-crossborder-tab="${tab}">${t(i?'物流证据':'内部关联')}</button>`).join('');
    return `<span class="dlp-po-row-actions">${payments(c)?.orderReceiptAction(doc) || ''}${related}</span>`;
   }
@@ -105,6 +106,7 @@
   c.runPurchaseAction=async action=> {
    const selected=c.getSelectedPurchaseOrders();
    if(!selected.length)return;
+   if(selected.some(value=>payments(c)?.reversalBlocked(c.providerRows.find(row=>row.name===value.name)?.reversal)))return;
    if(selected.length>1){
     if(action==='receipt')return payments(c).batchDocumentDrawer('Purchase Order',selected,'Purchase Receipt');
     if(action==='payment')return payments(c).batchPay('Purchase Order',selected);

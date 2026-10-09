@@ -926,10 +926,19 @@ def _read_records(native_filters=None, native_or_filters=None, order_by="transac
 def get_unified_purchase_list(filters=None, start=0, page_length=DEFAULT_PAGE_LENGTH,
 	order_by="transaction_date desc", native_filters=None, native_or_filters=None) -> dict:
 	orders, requests, capabilities, warnings, currencies, reverse_readable, native_fields = _read_records(native_filters, native_or_filters, order_by)
-	return build_unified_purchase_payload(orders, requests, filters=filters, start=start, page_length=page_length,
+	payload = build_unified_purchase_payload(orders, requests, filters=filters, start=start, page_length=page_length,
 		order_by=order_by, currency_codes=currencies, capabilities=capabilities, warnings=warnings,
 		oa_reverse_link_readable=reverse_readable, native_fields=native_fields, progress_loader=_load_order_progress,
 		company_loader=_load_company_scope, order_fields_loader=_load_order_fields_scope, include_items=True)
+	POINTER = "custom_purchase_reversal_operation"
+	names = [row["name"] for row in payload["rows"] if row["row_type"] == "purchase_order"]
+	pending = {name for name, in frappe.db.get_values(PURCHASE_ORDER, {"name": ["in", names], POINTER: ["is", "set"]}, "name")} if names else set()
+	for row in payload["rows"]:
+		if row["row_type"] == "purchase_order":
+			if row["name"] in pending or row.get("docstatus") == 2:
+				from .purchase_reversal_progress import projection
+			row["reversal"] = projection(frappe.get_doc(PURCHASE_ORDER, row["name"], for_update=True)) if row["name"] in pending or row.get("docstatus") == 2 else None
+	return payload
 
 
 @_whitelist

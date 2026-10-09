@@ -126,14 +126,16 @@ def _form_operation(request_id, payload, native):
         frappe.flags.purchase_request_id = request_id
         try:
             before = len(frappe.response.get("docs") or [])
-            native()
+            from .purchase_reversal_progress import acceptance
+            with acceptance(payload):
+                native()
             if len(frappe.response.get("docs") or []) <= before:
                 operation.reject("采购原生操作尚无同步确认结果，不能确认完成", "native_synchronous_result_missing")
             doc = frappe.response.docs[-1]
             return {"document": snapshot(frappe.get_doc(doc["doctype"], doc["name"])), "localname": doc.get("localname")}
         finally:
             frappe.flags.purchase_request_id = old_request
-    operation.run(request_id, business_payload(payload), write, _form_replay)
+    return operation.run(request_id, business_payload(payload), write, _form_replay)
 
 
 def _form_is_procurement(payload, *, doctype=None, name=None):
@@ -428,6 +430,24 @@ def check_cancellation(doc, cancelled_gl):
     result = finance.process_cancellation_snapshot(doc.doctype, doc.name)
     if result.get("status") != "resolved" or not result.get("voucher"):
         operation.reject("中国会计凭证冲销尚未完成，采购取消已回滚", "finance_cancellation_incomplete")
+    return verify_cancellation(doc, cancelled_gl, result=result, assignments=assignments, acknowledge=True)
+
+
+def verify_cancellation(doc, cancelled_gl, *, result=None, assignments=None, acknowledge=False):
+    """Pure verification shared by synchronous cancellation and final recovery."""
+    if result is None:
+        if not cancelled_gl or not finance_service(doc):
+            posted = frappe.db.exists("China Accounting Voucher", {"source_doctype": doc.doctype,
+                "source_name": doc.name, "source_event": "Posting", "docstatus": 1})
+            if posted:
+                operation.reject("中国会计取消证据不可用", "finance_cancellation_settings_inactive")
+            return {"module": "China Finance cancellation", "result": "verified", "reason": "no applicable posting"}
+        result = {"voucher": frappe.db.get_value("China Accounting Voucher", {"source_doctype": doc.doctype,
+            "source_name": doc.name, "source_event": "Cancellation", "docstatus": 1}, "name"),
+            "issue": frappe.db.get_value("China Voucher Sync Issue", {"issue_key": f"Cancellation|{doc.doctype}|{doc.name}"}, "name")}
+        if not result["voucher"]:
+            operation.reject("中国会计冲销证据缺失", "finance_cancellation_incomplete")
+    assignments = _finance_assignments(doc) if assignments is None else assignments
     reversal = frappe.get_doc("China Accounting Voucher", result["voucher"], for_update=True)
     if reversal.docstatus != 1 or not reversal.reversal_of:
         operation.reject("中国会计凭证冲销关联不完整", "finance_reversal_link_missing")
@@ -438,20 +458,23 @@ def check_cancellation(doc, cancelled_gl):
         _check_finance_voucher(doc, voucher, event, "Reversed" if event == "Posting" else "Posted")
     _compare_gl(doc, _gl_map(original.entries), _gl_map(cancelled_gl), "原凭证与取消前原生总账")
     _compare_gl(doc, _gl_map(reversal.entries), _gl_map(original.entries), "冲销凭证与原凭证反向金额", reverse=True)
-    for voucher in (original, reversal):
-        acknowledge_effect(voucher, system_effect=True)
+    if acknowledge:
+        for voucher in (original, reversal):
+            acknowledge_effect(voucher, system_effect=True)
     if not result.get("issue"):
         operation.reject("中国会计冲销缺少同步记录身份", "finance_cancellation_issue_missing")
     issue = frappe.get_doc("China Voucher Sync Issue", result["issue"], for_update=True)
     if (issue.company, issue.source_doctype, issue.source_name, issue.issue_key, issue.status, issue.cancellation_voucher) != (
             doc.company, doc.doctype, doc.name, f"Cancellation|{doc.doctype}|{doc.name}", "Resolved", reversal.name):
         operation.reject("中国会计冲销同步记录未完成或来源不一致", "finance_cancellation_issue_mismatch")
-    acknowledge_effect(issue, system_effect=True)
+    if acknowledge:
+        acknowledge_effect(issue, system_effect=True)
     for name in assignments:
         assignment = frappe.get_doc("China Cash Flow Assignment", name, for_update=True)
         if assignment.status != "Cancelled" or assignment.docstatus not in (0, 2):
             operation.reject("中国会计现金流量指定尚未完成取消", "finance_cash_assignment_not_cancelled")
-        acknowledge_effect(assignment, system_effect=True)
+        if acknowledge:
+            acknowledge_effect(assignment, system_effect=True)
     return {"module": "China Finance cancellation", "result": "verified", "voucher": reversal.name}
 
 
@@ -548,6 +571,9 @@ def check_native_repost(doc, method=None):
     Never run its executor: in production it commits and finishes asynchronously.
     The hook is inert for independent native stock jobs outside this boundary.
     """
+    from . import purchase_reversal_progress as progress, purchase_native_repost
+    if progress.capture_root(doc) or purchase_native_repost.capture_child(doc):
+        return
     context = operation.current()
     if context is None:
         return
@@ -560,7 +586,7 @@ def check_native_repost(doc, method=None):
         source=context["documents"], target={"doctype": doc.doctype, "name": doc.name})
 
 
-def check_pending_reposts(doc):
+def check_pending_reposts(doc, pairs=None):
     """Only native pending reposts sharing this operation's actual stock scope.
 
     Transaction-based identities must join their real SLE voucher. Item-based
@@ -571,7 +597,7 @@ def check_pending_reposts(doc):
     sources = [doc]
     sources.extend(service._current("Purchase Receipt", name) for name in sorted({
         row.get("purchase_receipt") for row in doc.items if row.get("purchase_receipt")}))
-    pairs = {(row.item_code, warehouse) for source in sources for row in source.items
+    pairs = pairs if pairs is not None else {(row.item_code, warehouse) for source in sources for row in source.items
         for warehouse in (row.get("warehouse"), row.get("rejected_warehouse")) if warehouse and
         frappe.get_cached_value("Item", row.item_code, "is_stock_item")}
     if not pairs:
@@ -585,7 +611,8 @@ def check_pending_reposts(doc):
         .where((repost.company == doc.company) & (sle.company == doc.company) & (repost.docstatus == 1) &
             repost.status.notin(["Completed", "Cancelled"]) & affected)
         .orderby(repost.name).for_update().run(as_dict=True))
-    if pending:
+    from .purchase_reversal_progress import owned_pending
+    if any(not owned_pending(row.name) for row in pending):
         operation.reject("已有待完成的原生库存重估影响本次采购，请先核对原生重估状态；本次未写入",
             "native_stock_repost_pending")
 

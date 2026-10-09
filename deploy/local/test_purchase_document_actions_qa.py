@@ -1,5 +1,7 @@
 """Native drawer actions on one synthetic site, always rolled back."""
 import json
+import gzip
+import hashlib
 import subprocess
 import sys
 import uuid
@@ -345,9 +347,16 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         self.types += ("MES Integration Log", "MES Material Request Task", "Error Log")  # native C1 side effects
         self.types += ("DocShare", "DefaultValue")  # exact new User fixture side effects, never historical rows
         self.types += ("Purchase Taxes and Charges Template",)
+        self.types += ("File",)  # native reversal checkpoints, exact fixture-owned files
         self.before = {doctype: frappe.db.count(doctype) for doctype in self.types}
         self.initial_names = {doctype: set(frappe.get_all(doctype, pluck="name", limit_page_length=0)) for doctype in self.types}
         self.committed_names = None
+        self.async_controls = None
+        if "reversal" in self._testMethodName or "trusted_future_receipt_cancel" in self._testMethodName:
+            self.async_controls = (frappe.db.get_value("China Finance Settings", COMPANY, "auto_submit_purchase_invoice"),
+                frappe.db.get_single_value("Stock Settings", "auto_insert_price_list_rate_if_missing"),
+                frappe.db.get_single_value("Stock Settings", "update_existing_price_list_rate"),
+                {dt: frappe.db.count(dt, {"custom_purchase_reversal_operation": ["is", "set"]}) for dt in ("Purchase Order", "Purchase Receipt", "Purchase Invoice", "Payment Entry", "Bin", "Repost Item Valuation")})
         self.addCleanup(self.clean)
         self.item = "QA-ATOMIC-" + uuid.uuid4().hex[:10]
         frappe.get_doc({"doctype": "Item", "item_code": self.item, "item_name": self.item, "item_group": "All Item Groups",
@@ -355,6 +364,11 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
 
     def clean(self):
         frappe.db.rollback()
+        if self.committed_names is not None:
+            # A failed callback or an uncommitted File deletion can hide a
+            # durable native chunk from its local finally. Re-register only
+            # this fixture's exact post-rollback deltas before removing them.
+            self.remember_new_names()
         for doctype in ("Accounts Settings", "Buying Settings", "System Settings", "Stock Settings", "Stock Reposting Settings"):
             frappe.clear_document_cache(doctype, doctype)
         frappe.clear_document_cache("Company", COMPANY)
@@ -363,14 +377,56 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
             # never run this cleanup on another site/database or production.
             if frappe.local.site != SITE or frappe.conf.db_name != "qa_procurement_5" or frappe.conf.db_host != "db":
                 raise RuntimeError("Synthetic cleanup scope changed")
+            files = []
+            for name in sorted(self.committed_names["File"]):
+                if not frappe.db.exists("File", name):
+                    continue
+                file = frappe.get_doc("File", name)
+                self.assertEqual(file.attached_to_doctype, "Repost Item Valuation")
+                self.assertEqual(file.attached_to_field, "reposting_data_file")
+                self.assertIn(file.attached_to_name, self.committed_names["Repost Item Valuation"])
+                task = frappe.get_doc("Repost Item Valuation", file.attached_to_name)
+                self.assertEqual(task.company, COMPANY)
+                if task.based_on == "Item and Warehouse":
+                    self.assertIn(task.item_code, self.committed_names["Item"])
+                else:
+                    self.assertIn(task.voucher_no, self.committed_names[task.voucher_type])
+                content = file.get_content()
+                checkpoint = json.loads(gzip.decompress(content))
+                files.append({"row": file.as_dict(), "root": {field: task.get(field) for field in
+                    ("name", "based_on", "company", "item_code", "warehouse", "voucher_type", "voucher_no")}, "bytes": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(), "checkpoint": checkpoint,
+                    "path": file.get_full_path()})
+            if files:
+                print("ASYNC_QA_FILES_BEFORE=" + json.dumps(files, default=str), flush=True)
             for doctype, names in self.committed_names.items():
+                if doctype == "File":
+                    for name in names:
+                        if frappe.db.exists("File", name):
+                            frappe.delete_doc("File", name, ignore_permissions=True, delete_permanently=True, force=True)
+                    continue
                 for field in frappe.get_meta(doctype).get_table_fields():
                     frappe.db.delete(field.options, {"parenttype": doctype, "parent": ["in", sorted(names)]})
                 frappe.db.delete(doctype, {"name": ["in", sorted(names)]})
                 if doctype == "User" and names:
                     frappe.db.delete("DefaultValue", {"parent": ["in", sorted(names)]})  # exact newly created users only
             frappe.db.commit()
+            if files:
+                from pathlib import Path
+                print("ASYNC_QA_FILES_AFTER=" + json.dumps([{"name": value["row"]["name"],
+                    "row_exists": bool(frappe.db.exists("File", value["row"]["name"])),
+                    "path_exists": Path(value["path"]).exists(),
+                    "remaining_url_references": frappe.db.count("File", {"file_url": value["row"]["file_url"]})}
+                    for value in files]), flush=True)
         self.assertEqual(self.before, {doctype: frappe.db.count(doctype) for doctype in self.types})
+        if self.async_controls is not None:
+            current = (frappe.db.get_value("China Finance Settings", COMPANY, "auto_submit_purchase_invoice"),
+                frappe.db.get_single_value("Stock Settings", "auto_insert_price_list_rate_if_missing"),
+                frappe.db.get_single_value("Stock Settings", "update_existing_price_list_rate"),
+                {dt: frappe.db.count(dt, {"custom_purchase_reversal_operation": ["is", "set"]}) for dt in self.async_controls[3]})
+            self.assertEqual(current, self.async_controls)
+            print("ASYNC_QA_CLEAN=" + json.dumps({"test": self._testMethodName, "counts_restored": True,
+                "controls": current[:3], "pointer_counts": current[3]}), flush=True)
 
     def commit_fixture(self, primary_doctype="Purchase Order", name_prefix="QA-ATOMIC-PO-"):
         frappe.db.commit()
@@ -5239,7 +5295,463 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         for identity, evidence in self.fixture_effects.items():
             self.assertEqual(guard.artifact_evidence(frappe.get_doc(*identity)), evidence, str(identity))
 
-    def test_pending_native_repost_with_future_sle_refuses_receipt_cancellation(self):
+    def test_trusted_future_receipt_cancel_accepts_then_native_repost_verifies_complete(self):
+        from deeplinkerp_branding.services import purchase_consistency as guard, purchase_operation as kernel
+        from erpnext.stock.doctype.repost_item_valuation import repost_item_valuation as native
+        po, prior, future = self.future_receipts()
+        request_id = str(uuid.uuid4())
+        payload = json.dumps(prior.as_dict(), default=str)
+        try:
+            guard.cancel(prior.doctype, prior.name, request_id=request_id, doc=payload)
+            operation_id = kernel.identity("Administrator", request_id)
+            audit = frappe.get_doc("Integration Request", operation_id)
+            self.assertEqual(audit.status, "Queued")
+            self.assertEqual(json.loads(audit.output)["stage"], "waiting_inventory")
+            self.assertEqual(frappe.db.get_value(prior.doctype, prior.name, "docstatus"), 2)
+            roots = frappe.get_all("Repost Item Valuation", filters={"custom_purchase_reversal_operation": operation_id}, pluck="name")
+            self.assertTrue(roots)
+            frappe.db.commit()
+            self.remember_new_names()
+            for name in roots:
+                native.execute_reposting_entry(name)
+            audit.reload()
+            self.assertEqual(audit.status, "Completed", audit.output)
+            self.assertEqual(json.loads(audit.output)["stage"], "completed")
+            self.assertFalse(frappe.db.get_value(prior.doctype, prior.name, "custom_purchase_reversal_operation"))
+            self.assertEqual(frappe.db.get_value("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"}, "actual_qty"), 2)
+        finally:
+            self.remember_new_names()
+
+    def accept_reversal(self, prior):
+        from deeplinkerp_branding.services import purchase_consistency as guard, purchase_operation as kernel
+        request_id = str(uuid.uuid4())
+        payload = json.dumps(prior.as_dict(), default=str)
+        try:
+            guard.cancel(prior.doctype, prior.name, request_id=request_id, doc=payload)
+            frappe.db.commit()
+        finally:
+            self.remember_new_names()
+        name = kernel.identity("Administrator", request_id)
+        return name, request_id, payload, frappe.get_all("Repost Item Valuation", filters={"custom_purchase_reversal_operation": name}, pluck="name")
+
+    def test_reversal_native_transfer_repack_propagation_completes_item_warehouse_roots(self):
+        from erpnext.stock.doctype.repost_item_valuation import repost_item_valuation as native
+        po = self.order(transaction_date=add_days(nowdate(), -5))
+        available = make_purchase_receipt(po.name)
+        available.items[0].qty = 2
+        available.set_posting_time = 1
+        available.posting_date, available.posting_time = add_days(nowdate(), -4), "12:00:00"
+        available.insert().submit()
+        root = make_purchase_receipt(po.name)
+        root.items[0].qty = 2
+        root.set_posting_time = 1
+        root.posting_date, root.posting_time = add_days(nowdate(), -3), "12:00:00"
+        root.insert().submit()
+        output = self.scope_item()
+        transfer = self.scope_stock_entry("Material Transfer", add_days(nowdate(), -2), [
+            {"item_code": self.item, "qty": 1, "s_warehouse": "Stores - QAB", "t_warehouse": "Finished Goods - QAB"}])
+        repack = self.scope_stock_entry("Repack", add_days(nowdate(), -1), [
+            {"item_code": self.item, "qty": 1, "s_warehouse": "Finished Goods - QAB"},
+            {"item_code": output, "qty": 1, "t_warehouse": "Work In Progress - QAB", "is_finished_item": 1}])
+        self.commit_fixture()
+        try:
+            operation_id, key, payload, roots = self.accept_reversal(root)
+            self.assertTrue(roots)
+            self.assertTrue(all(frappe.db.get_value("Repost Item Valuation", name, "based_on") == "Item and Warehouse" for name in roots))
+            for name in roots:
+                native.execute_reposting_entry(name)
+            audit = frappe.get_doc("Integration Request", operation_id)
+            self.assertEqual(audit.status, "Completed", audit.output)
+            manifest = json.loads(audit.data)["reversal"]
+            self.assertTrue({transfer.name, repack.name} <= {row["name"] for row in manifest["scope"]["vouchers"]})
+            self.assertEqual(len(manifest["scope"]["pairs"]), 3)
+            coverage = [value for task in json.loads(audit.output)["tasks"].values() for value in task["coverage"].values()]
+            self.assertTrue(any(value["voucher"] == [transfer.doctype, transfer.name] and not value["expected"] for value in coverage), "zero-output GL voucher must have actual native coverage")
+            self.assertFalse(frappe.db.get_value("Bin", {"item_code": output, "warehouse": "Work In Progress - QAB"}, "custom_purchase_reversal_operation"))
+        finally:
+            self.remember_new_names()
+
+    def test_reversal_actual_stock_checkpoint_failure_resumes_committed_native_chunk(self):
+        from erpnext.stock.doctype.repost_item_valuation import repost_item_valuation as native
+        from erpnext.stock import stock_ledger as stock
+        from deeplinkerp_branding.services import purchase_reversal_progress as progress
+        po, prior, future = self.future_receipts()
+        operation_id, key, payload, roots = self.accept_reversal(prior)
+        original = stock.update_args_in_repost_item_valuation
+        def after_checkpoint(*args, **kwargs):
+            original(*args, **kwargs)
+            if args[1] == 1:
+                raise RuntimeError("QA actual checkpoint committed")
+        try:
+            with patch.object(stock, "update_args_in_repost_item_valuation", side_effect=after_checkpoint):
+                native.execute_reposting_entry(roots[0])
+            audit = frappe.get_doc("Integration Request", operation_id)
+            self.assertEqual(audit.status, "Failed")
+            task = frappe.get_doc("Repost Item Valuation", roots[0])
+            self.assertEqual(task.current_index, 1, task.error_log)
+            self.assertTrue(task.reposting_data_file)
+            receipts = json.loads(audit.output)["receipts"]
+            self.assertTrue(any(row["current_index"] == 1 and row["checkpoint"] for row in receipts))
+            with self.assertRaises(frappe.ValidationError):
+                native.remove_attached_file(roots[0])
+            file = frappe.get_doc("File", next(iter(json.loads(audit.output)["tasks"][roots[0]]["files"])))
+            with self.assertRaises(frappe.ValidationError):
+                file.delete(ignore_permissions=True)
+            frappe.db.rollback()
+            self.assertEqual(progress.get_progress(prior.doctype, prior.name)["stage"], "failed")
+            progress.retry(prior.doctype, prior.name)
+            frappe.db.commit()
+            native.execute_reposting_entry(roots[0])
+            audit.reload()
+            self.assertEqual(audit.status, "Completed", audit.output)
+            self.assertTrue(json.loads(audit.output)["files_cleaned"])
+            self.assertFalse(frappe.db.exists("File", {"attached_to_doctype": "Repost Item Valuation", "attached_to_name": roots[0], "attached_to_field": "reposting_data_file"}))
+        finally:
+            self.remember_new_names()
+
+    def test_reversal_actual_gl_commit_before_index_failure_replays_covered_voucher(self):
+        from erpnext.stock.doctype.repost_item_valuation import repost_item_valuation as native
+        from deeplinkerp_branding.services import purchase_reversal_progress as progress
+        po, prior, future = self.future_receipts()
+        operation_id, key, payload, roots = self.accept_reversal(prior)
+        controller = type(frappe.get_doc("Repost Item Valuation", roots[0]))
+        original = controller.db_set
+        def before_index(doc, field, *args, **kwargs):
+            if field == "gl_reposting_index":
+                raise RuntimeError("QA GL committed before native index")
+            return original(doc, field, *args, **kwargs)
+        try:
+            with patch.object(controller, "db_set", new=before_index):
+                native.execute_reposting_entry(roots[0])
+            audit = frappe.get_doc("Integration Request", operation_id)
+            self.assertEqual(audit.status, "Failed")
+            output = json.loads(audit.output)
+            self.assertTrue(output["tasks"][roots[0]]["coverage"])
+            self.assertEqual(frappe.db.get_value("Repost Item Valuation", roots[0], "gl_reposting_index"), 0)
+            progress.retry(prior.doctype, prior.name)
+            frappe.db.commit()
+            native.execute_reposting_entry(roots[0])
+            audit.reload()
+            self.assertEqual(audit.status, "Completed", audit.output)
+        finally:
+            self.remember_new_names()
+
+    def test_reversal_missing_native_gl_child_holds_failure_then_existing_generation_resumes(self):
+        from erpnext.stock.doctype.repost_item_valuation import repost_item_valuation as native
+        from deeplinkerp_branding.services import purchase_reversal_progress as progress
+        setting = frappe.db.get_single_value("Stock Reposting Settings", "enable_separate_reposting_for_gl")
+        try:
+            frappe.db.set_single_value("Stock Reposting Settings", "enable_separate_reposting_for_gl", 1)
+            po, prior, future = self.future_receipts()
+            operation_id, key, payload, roots = self.accept_reversal(prior)
+            controller = type(frappe.get_doc("Repost Item Valuation", roots[0]))
+            original = controller.submit
+            def swallow_child(doc, *args, **kwargs):
+                if doc.repost_only_accounting_ledgers:
+                    raise RuntimeError("QA actual native child creation swallowed")
+                return original(doc, *args, **kwargs)
+            with patch.object(controller, "submit", new=swallow_child):
+                with self.assertRaises(frappe.ValidationError):
+                    native.execute_reposting_entry(roots[0])
+            audit = frappe.get_doc("Integration Request", operation_id)
+            self.assertEqual(audit.status, "Failed")
+            self.assertEqual(json.loads(audit.output)["safe_reason"], "purchase_reversal_gl_coverage_missing")
+            self.assertEqual(frappe.db.get_value(prior.doctype, prior.name, "custom_purchase_reversal_operation"), operation_id)
+            progress.retry(prior.doctype, prior.name)
+            frappe.db.commit()
+            # Root is already natively Completed; reconciliation must discover
+            # absent expected jobs and resume the same native root, never cancel.
+            native.execute_reposting_entry(roots[0])
+            tasks = frappe.get_all("Repost Item Valuation", filters={"custom_purchase_reversal_operation": operation_id}, pluck="name")
+            self.assertGreater(len(tasks), len(roots))
+            for name in tasks:
+                native.execute_reposting_entry(name)
+            audit.reload()
+            self.assertEqual(audit.status, "Completed", audit.output)
+        finally:
+            self.remember_new_names()
+            frappe.db.set_single_value("Stock Reposting Settings", "enable_separate_reposting_for_gl", setting)
+            frappe.db.commit()
+            self.remember_new_names()
+
+    def test_reversal_final_readonly_verifier_failure_keeps_block_and_never_repairs(self):
+        from erpnext.stock.doctype.repost_item_valuation import repost_item_valuation as native
+        from deeplinkerp_branding.services import purchase_reversal_progress as progress, purchase_consistency as guard
+        po, prior, future = self.future_receipts()
+        operation_id, key, payload, roots = self.accept_reversal(prior)
+        original = progress.readonly_verify
+        queries = []
+        def readonly(context, output):
+            sql = frappe.db.sql
+            def observe(query, *args, **kwargs):
+                queries.append(str(query))
+                self.assertNotIn(str(query).lstrip().split()[0].upper(), {"INSERT", "UPDATE", "DELETE", "REPLACE", "ALTER"})
+                return sql(query, *args, **kwargs)
+            with patch.object(frappe.db, "sql", side_effect=observe), \
+                    patch.object(guard, "check_finance", side_effect=AssertionError("final must not create Posting")), \
+                    patch.object(guard, "check_cancellation", side_effect=AssertionError("final must not create Cancellation")):
+                original(context, output)
+            guard.operation.reject("QA final consistency failure", "qa_final_consistency_failure")
+        try:
+            with patch.object(progress, "readonly_verify", side_effect=readonly):
+                with self.assertRaises(frappe.ValidationError):
+                    native.execute_reposting_entry(roots[0])
+            self.assertTrue(queries)
+            audit = frappe.get_doc("Integration Request", operation_id)
+            self.assertEqual(audit.status, "Failed")
+            self.assertEqual(json.loads(audit.output)["safe_reason"], "qa_final_consistency_failure")
+            self.assertEqual(frappe.db.get_value("Repost Item Valuation", roots[0], "status"), "Completed")
+            self.assertEqual(frappe.db.get_value(prior.doctype, prior.name, "custom_purchase_reversal_operation"), operation_id)
+            with self.assertRaises(frappe.ValidationError):
+                self.scope_stock_entry("Material Issue", nowdate(), [{"item_code": self.item, "qty": 1, "s_warehouse": "Stores - QAB"}])
+        finally:
+            self.remember_new_names()
+
+    def test_reversal_public_current_acl_idempotency_and_native_bypasses(self):
+        from deeplinkerp_branding.services import purchase_consistency as guard, purchase_reversal_progress as progress
+        from erpnext.stock.doctype.repost_item_valuation import repost_item_valuation as native
+        po, prior, future = self.future_receipts()
+        operation_id, key, payload, roots = self.accept_reversal(prior)
+        try:
+            first = progress.get_progress(prior.doctype, prior.name)
+            self.assertEqual(set(first), {"operation_id", "stage", "safe_reason", "can_retry"})
+            self.assertEqual(first["stage"], "waiting_inventory")
+            with patch.object(frappe.desk.form.save, "cancel", side_effect=AssertionError("replay cannot recancel")):
+                guard.cancel(prior.doctype, prior.name, request_id=key, doc=payload)
+            self.assertEqual(progress.get_progress(prior.doctype, prior.name), first)
+            allowed = frappe.has_permission
+            def denied(doctype, ptype="read", *args, **kwargs):
+                doc = kwargs.get("doc")
+                if doctype == prior.doctype and doc and doc.name == prior.name:
+                    return False
+                return allowed(doctype, ptype, *args, **kwargs)
+            with patch.object(frappe, "has_permission", side_effect=denied):
+                with self.assertRaises(frappe.PermissionError):
+                    progress.get_progress(prior.doctype, prior.name)
+                with self.assertRaises(frappe.PermissionError):
+                    guard.cancel(prior.doctype, prior.name, request_id=key, doc=payload)
+            def cannot_handle_root(doctype, ptype="read", *args, **kwargs):
+                doc = kwargs.get("doc")
+                if doctype == prior.doctype and doc and doc.name == prior.name and ptype == "cancel":
+                    return False
+                return allowed(doctype, ptype, *args, **kwargs)
+            with patch.object(frappe, "has_permission", side_effect=cannot_handle_root):
+                with self.assertRaises(frappe.PermissionError):
+                    progress.retry(po.doctype, po.name)
+            task = frappe.get_doc("Repost Item Valuation", roots[0])
+            with self.assertRaises(frappe.PermissionError):
+                task.restart_reposting()
+            with self.assertRaises(frappe.PermissionError):
+                task.db_set("status", "Cancelled")
+            with self.assertRaises(frappe.PermissionError):
+                audit = frappe.get_doc("Integration Request", operation_id)
+                audit.status = "Completed"
+                audit.db_update()
+            with patch.object(frappe.db, "delete") as delete:
+                type(task).clear_old_logs(1)
+                self.assertIn("custom_purchase_reversal_operation", str(delete.call_args.kwargs["filters"]))
+                native.RepostItemValuation.clear_old_logs(1)
+                self.assertIn("custom_purchase_reversal_operation", str(delete.call_args.kwargs["filters"]))
+            with patch.object(type(task), "restart_reposting", side_effect=AssertionError("bulk must preflight before restart")):
+                with self.assertRaises(frappe.PermissionError):
+                    native.bulk_restart_reposting(json.dumps(roots))
+            other = frappe.get_doc({"doctype": "Repost Item Valuation", "company": COMPANY, "based_on": "Item and Warehouse",
+                "item_code": self.item, "warehouse": "Stores - QAB", "posting_date": prior.posting_date,
+                "posting_time": prior.posting_time}).insert()
+            other.submit()
+            frappe.db.commit()
+            self.remember_new_names()
+            with patch.object(native, "_dlp_reversal_original_repost", side_effect=AssertionError("intersecting unowned worker must not enter native writer")):
+                with self.assertRaises(frappe.ValidationError):
+                    native.execute_reposting_entry(other.name)
+            native.execute_reposting_entry(roots[0])
+            self.assertEqual(progress.get_progress(prior.doctype, prior.name)["stage"], "completed")
+            native.execute_reposting_entry(other.name)
+            self.assertIn(frappe.db.get_value(other.doctype, other.name, "status"), ("Completed", "Skipped"))
+            with patch.object(frappe.desk.form.save, "cancel", side_effect=AssertionError("completed replay cannot recancel")):
+                guard.cancel(prior.doctype, prior.name, request_id=key, doc=payload)
+        finally:
+            self.remember_new_names()
+
+    def test_reversal_two_connections_preloaded_worker_cannot_write_across_final_completion(self):
+        from erpnext.stock.doctype.repost_item_valuation import repost_item_valuation as native
+        from erpnext.stock import stock_ledger as stock
+        from deeplinkerp_branding.services import purchase_reversal_progress as progress
+        po, prior, future = self.future_receipts()
+        operation_id, key, payload, roots = self.accept_reversal(prior)
+        primary, peer = frappe.local.db, self.boundary_database()
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        primary_session = frappe.local.purchase_session
+        peer_session = boundary.initialize(peer)
+        frappe.local.db = peer
+        frappe.local.purchase_session = peer_session
+        preloaded = frappe.get_doc("Repost Item Valuation", roots[0])
+        self.assertEqual(preloaded.status, "Queued")
+        peer_id = peer.sql("SELECT CONNECTION_ID()")[0][0]
+        frappe.local.db = primary
+        frappe.local.purchase_session = primary_session
+        self.assertNotEqual(peer_id, primary.sql("SELECT CONNECTION_ID()")[0][0])
+        original = stock.update_args_in_repost_item_valuation
+        observed = []
+        def contender(*args, **kwargs):
+            original(*args, **kwargs)
+            if observed: return
+            frappe.local.db = peer
+            frappe.local.purchase_session = peer_session
+            token = progress._executing.set(None)
+            try:
+                with self.assertRaises(frappe.ValidationError) as caught:
+                    native.repost(preloaded)
+                observed.append(str(caught.exception))
+                peer.rollback()
+            finally:
+                progress._executing.reset(token)
+                frappe.local.db = primary
+                frappe.local.purchase_session = primary_session
+        try:
+            with patch.object(stock, "update_args_in_repost_item_valuation", side_effect=contender):
+                native.execute_reposting_entry(roots[0])
+            self.assertTrue(observed)
+            self.assertEqual(frappe.db.get_value("Integration Request", operation_id, "status"), "Completed")
+            frappe.db.commit()
+            frappe.local.db = peer
+            frappe.local.purchase_session = peer_session
+            with patch.object(native, "_dlp_reversal_original_repost", side_effect=AssertionError("stale worker must not write")):
+                native.repost(preloaded)
+            self.assertEqual(progress.get_progress(prior.doctype, prior.name)["stage"], "completed")
+        finally:
+            peer.rollback()
+            frappe.local.db = primary
+            frappe.local.purchase_session = primary_session
+            self.remember_new_names()
+
+    def test_reversal_actual_native_commit_response_loss_resolves_exact_durable_receipt_then_resumes(self):
+        from erpnext.stock.doctype.repost_item_valuation import repost_item_valuation as native
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary, purchase_reversal_progress as progress
+        from frappe.database import get_db
+        po, prior, future = self.future_receipts()
+        operation_id, key, payload, roots = self.accept_reversal(prior)
+        state = boundary.initialize()
+        original = state.native_sql
+        lost = []
+        def commit_response(query, *args, **kwargs):
+            result = original(query, *args, **kwargs)
+            if str(query).strip().upper() == "COMMIT" and state.receipt_participant and not lost:
+                lost.append(True)
+                raise RuntimeError("QA actual native commit response lost")
+            return result
+        try:
+            with patch.object(state, "native_sql", side_effect=commit_response), self.assertRaises(Exception):
+                native.execute_reposting_entry(roots[0])
+            self.assertTrue(lost)
+            self.assertTrue(state.poisoned)
+            self.assertEqual(state.receipt_resolution["result"], "durable")
+        finally:
+            # A new request after the old physical owner was closed. Never
+            # permit lazy reconnect or re-handshake in the poisoned execution.
+            fresh = get_db(socket=frappe.conf.db_socket, host=frappe.conf.db_host, port=frappe.conf.db_port,
+                user=frappe.conf.db_user, password=frappe.conf.db_password, cur_db_name=frappe.conf.db_name)
+            fresh.connect()
+            frappe.local.db = fresh
+            frappe.local.purchase_session = boundary.initialize(fresh)
+            self.remember_new_names()
+        audit = frappe.get_doc("Integration Request", operation_id)
+        self.assertEqual(audit.status, "Queued")
+        self.assertEqual(json.loads(audit.output)["stage"], "recalculating")
+        self.assertTrue(json.loads(audit.output)["receipts"])
+        native.execute_reposting_entry(roots[0])
+        self.assertEqual(progress.get_progress(prior.doctype, prior.name)["stage"], "completed")
+        self.remember_new_names()
+
+    def test_reversal_acceptance_and_final_write_faults_rollback_only_their_transactions(self):
+        from erpnext.stock.doctype.repost_item_valuation import repost_item_valuation as native
+        from deeplinkerp_branding.services import purchase_reversal_progress as progress, purchase_consistency as guard
+        po, prior, future = self.future_receipts()
+        before = frappe.db.count("Repost Item Valuation")
+        original = progress._write
+        def acceptance_fault(context, output):
+            original(context, output)
+            if output["stage"] == "waiting_inventory":
+                raise RuntimeError("QA acceptance transaction fault")
+        with patch.object(progress, "_write", side_effect=acceptance_fault), self.assertRaisesRegex(RuntimeError, "acceptance transaction fault"):
+            guard.cancel(prior.doctype, prior.name, request_id=str(uuid.uuid4()), doc=json.dumps(prior.as_dict(), default=str))
+        self.assertEqual(frappe.db.get_value(prior.doctype, prior.name, "docstatus"), 1)
+        self.assertEqual(frappe.db.count("Repost Item Valuation"), before)
+        operation_id, key, payload, roots = self.accept_reversal(prior.reload())
+        def final_fault(context, output):
+            original(context, output)
+            if output["stage"] == "completed":
+                raise RuntimeError("QA final transaction fault")
+        try:
+            with patch.object(progress, "_write", side_effect=final_fault), self.assertRaisesRegex(RuntimeError, "final transaction fault"):
+                native.execute_reposting_entry(roots[0])
+            audit = frappe.get_doc("Integration Request", operation_id)
+            self.assertEqual(audit.status, "Failed")
+            self.assertTrue(json.loads(audit.output)["receipts"])
+            self.assertEqual(frappe.db.get_value("Repost Item Valuation", roots[0], "status"), "Completed")
+            self.assertEqual(frappe.db.get_value(prior.doctype, prior.name, "custom_purchase_reversal_operation"), operation_id)
+            self.assertEqual(frappe.db.get_value("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"}, "actual_qty"), 2)
+            progress.retry(prior.doctype, prior.name)
+            frappe.db.commit()
+            progress.recover()
+            frappe.db.commit()
+            self.assertEqual(frappe.db.get_value("Integration Request", operation_id, "status"), "Completed")
+        finally:
+            self.remember_new_names()
+
+    def test_reversal_inventory_projection_and_existing_movement_entry_refuse_pending(self):
+        from deeplinkerp_branding.services import inventory_detail_service as inventory
+        from erpnext.stock.doctype.repost_item_valuation import repost_item_valuation as native
+        po, prior, future = self.future_receipts()
+        operation_id, key, payload, roots = self.accept_reversal(prior)
+        try:
+            payload = {"groups": [{"item_code": self.item, "warehouse": "Stores - QAB"}]}
+            inventory._attach_reversal_progress(payload)
+            self.assertEqual(payload["groups"][0]["reversal"]["stage"], "waiting_inventory")
+            selected = json.dumps([{"item_code": self.item, "source_warehouse": "Stores - QAB", "qty": 1}])
+            with self.assertRaises(frappe.ValidationError):
+                inventory.get_inventory_movement_context(COMPANY, selected)
+            with self.assertRaises(frappe.ValidationError):
+                inventory.prepare_inventory_stock_entry(COMPANY, "Material Issue", items=selected)
+            native.execute_reposting_entry(roots[0])
+            inventory._attach_reversal_progress(payload)
+            self.assertIsNone(payload["groups"][0]["reversal"])
+            self.assertEqual(inventory.get_inventory_movement_context(COMPANY, selected)["items"][0]["actual_qty"], 2)
+        finally:
+            self.remember_new_names()
+
+    def test_reversal_future_native_gl_drift_does_not_repair_existing_china_posting(self):
+        from erpnext.stock.doctype.repost_item_valuation import repost_item_valuation as native
+        first_po = self.order(transaction_date=add_days(nowdate(), -4), rate=10)
+        prior = make_purchase_receipt(first_po.name)
+        prior.items[0].qty = 2
+        prior.set_posting_time = 1
+        prior.posting_date, prior.posting_time = add_days(nowdate(), -3), "12:00:00"
+        prior.insert().submit()
+        second_po = self.order(transaction_date=add_days(nowdate(), -2), rate=30)
+        future = make_purchase_receipt(second_po.name)
+        future.items[0].qty = 2
+        future.set_posting_time = 1
+        future.posting_date, future.posting_time = add_days(nowdate(), -1), "12:00:00"
+        future.insert().submit()
+        issue = self.scope_stock_entry("Material Issue", nowdate(), [{"item_code": self.item, "qty": 1, "s_warehouse": "Stores - QAB"}])
+        self.commit_fixture()
+        posting = frappe.db.get_value("China Accounting Voucher", {"source_doctype": issue.doctype, "source_name": issue.name, "source_event": "Posting", "docstatus": 1}, "name")
+        self.assertTrue(posting)
+        snapshot = frappe.get_doc("China Accounting Voucher", posting).as_dict()
+        operation_id, key, payload, roots = self.accept_reversal(prior)
+        try:
+            with self.assertRaises(frappe.ValidationError):
+                native.execute_reposting_entry(roots[0])
+            audit = frappe.get_doc("Integration Request", operation_id)
+            self.assertEqual(audit.status, "Failed")
+            self.assertEqual(frappe.db.get_value(prior.doctype, prior.name, "custom_purchase_reversal_operation"), operation_id)
+            self.assertEqual(frappe.get_doc("China Accounting Voucher", posting).as_dict(), snapshot)
+            self.assertEqual(frappe.db.get_value("Stock Ledger Entry", {"voucher_type":issue.doctype,"voucher_no":issue.name,"is_cancelled":0}, "stock_value_difference"), -30)
+        finally:
+            self.remember_new_names()
+
+    def test_unkeyed_native_repost_with_future_sle_refuses_receipt_cancellation(self):
         po, prior, future = self.future_receipts()
         frappe.flags.dont_execute_stock_reposts = True  # native production-equivalent RIV.on_submit branch
         try:

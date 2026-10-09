@@ -911,13 +911,16 @@ test("whole-order selection clears with page and tabs and opens the native batch
 	const checked = new Set(), calls = [];
 	c.originals.get_checked_items = names => [...checked].map(name => names ? name : { name });
 	list.clear_checked_items = () => { checked.clear(); list.$checks = []; };
-	env.DeepLinkERPPurchasePayments = { orderReceiptAction: () => 'dlp-order-pay dlp-order-receipt', pay: (...args) => calls.push(["pay", ...args]), documentDrawer: (...args) => calls.push(["receipt", ...args]), batchDocumentDrawer: (...args) => calls.push(["batch-receipt", ...args]), batchPay: (...args) => calls.push(["batch-pay", ...args]) };
+	env.DeepLinkERPPurchasePayments = { reversalBlocked: value => Boolean(value && value.stage !== 'completed'), orderReceiptAction: () => 'dlp-order-pay dlp-order-receipt', pay: (...args) => calls.push(["pay", ...args]), documentDrawer: (...args) => calls.push(["receipt", ...args]), batchDocumentDrawer: (...args) => calls.push(["batch-receipt", ...args]), batchPay: (...args) => calls.push(["batch-pay", ...args]) };
 	assert.equal(c.providerScope, "orders");
 	payload({ name: "PO-1", row_type: "purchase_order", modified: "v1", order_progress: { items: [{ name: "I1" }, { name: "I2" }] } });
 	checked.add("PO-1"); checked.add("OA-UNRELATED"); list.on_row_checked();
 	assert.deepEqual(c.getSelectedPurchaseOrders(), [{ name: "PO-1", modified: "v1" }]);
 	await c.runPurchaseAction("receipt"); await c.runPurchaseAction("payment");
 	assert.deepEqual(calls, [["receipt", "Purchase Order", "PO-1", "Purchase Receipt"], ["pay", "Purchase Order", "PO-1"]]);
+	c.providerRows[0].reversal = { stage: 'failed' };
+	await c.runPurchaseAction('receipt'); await c.runPurchaseAction('payment');
+	assert.equal(calls.length, 2, 'pending selection cannot start dependent batch or single actions');
 	c.setPage(1); assert.equal(checked.size, 0);
 	checked.add("PO-1"); c.quick.company = "OTHER"; list.get_args(); assert.equal(checked.size, 0);
 	checked.add("PO-1"); const old = dispatch(list);

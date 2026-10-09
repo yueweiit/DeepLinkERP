@@ -83,6 +83,13 @@
 		);
 	}
 
+	const reversalBlocked = value => Boolean(value && (value.stage !== "completed" || value.refresh_failed));
+	function reversalHTML(value) {
+		if (!value) return "";
+		const labels = {waiting_inventory:"待库存重算",recalculating:"重算中",verifying:"校验中",completed:"冲销完成",failed:"失败待处理"};
+		return `<span class="text-warning" role="status">${escapeHtml(labels[value.stage] || "冲销进度待核对")}</span>`;
+	}
+
 	function selectionCell(group, size, selectedKeys) {
 		const rowspan = rowspanAttribute(size);
 		const key = selectionKey(group);
@@ -107,6 +114,7 @@
 						item_code: group.item_code,
 						...(group.item_name ? { item_name: group.item_name } : {}),
 						source_warehouse: group.warehouse,
+						...(group.reversal ? {reversal: group.reversal} : {}),
 					});
 				} else {
 					next.delete(key);
@@ -131,7 +139,7 @@
 					selectionCell(group, locations.length, selectedKeys),
 					`<td class="id-code"${rowspan}><a href="#" data-item-code="${itemCode}">${itemCode}</a></td>`,
 					`<td class="id-name"${rowspan}>${escapeHtml(group.item_name)}</td>`,
-					`<td${rowspan}>${escapeHtml(group.warehouse || "—")}</td>`,
+					`<td${rowspan}>${escapeHtml(group.warehouse || "—")} ${reversalHTML(group.reversal)}</td>`,
 				].join("");
 				const sharedAfter = [
 					`<td class="id-quantity id-total"${rowspan}>${formatQuantity(
@@ -191,7 +199,7 @@
 					selectionCell(group, locations.length, selectedKeys),
 					`<td class="id-code"${rowspan}><a href="#" data-item-code="${itemCode}">${itemCode}</a></td>`,
 					`<td class="id-name"${rowspan}>${escapeHtml(group.item_name)}</td>`,
-					`<td${rowspan}>${escapeHtml(group.warehouse || "—")}</td>`,
+					`<td${rowspan}>${escapeHtml(group.warehouse || "—")} ${reversalHTML(group.reversal)}</td>`,
 				].join("");
 				const sharedMiddle = [
 					`<td class="id-quantity${quantityClass}"${rowspan}>${formatQuantity(
@@ -499,6 +507,7 @@
 						item_code: group.item_code,
 						item_name: group.item_name || "",
 						source_warehouse: group.warehouse,
+						...(group.reversal ? {reversal: group.reversal} : {}),
 					});
 				} else {
 					this.selected.delete(key);
@@ -584,8 +593,10 @@
 		updateMovementButton() {
 			if (!this.$movementButton?.length) return;
 			const label = `物料移动 (${this.selected.size})`;
-			const reason = this.movementDisabledReason || "";
+			const pending = [...this.selected.values()].some(row => reversalBlocked(row.reversal));
+			const reason = pending ? "采购冲销未完成，物料移动暂缓办理。" : this.movementDisabledReason || "";
 			const disabled = !this.canCreateStockEntry || this.selected.size === 0 ||
+				pending ||
 				Boolean(this.loading || this.companyChangePending) ||
 				Boolean(this.fields && (!this.effectiveCompany ||
 					this.effectiveCompany !== this.company ||
@@ -655,6 +666,10 @@
 				}
 				this.lastPayload = payload;
 				this.currentGroups = payload.groups || [];
+				for (const group of this.currentGroups) {
+					const selected = this.selected.get(selectionKey(group));
+					if (selected) selected.reversal = group.reversal;
+				}
 				this.effectiveCompany = payload.company || "";
 				this.selectionCompany = this.effectiveCompany;
 				this.canCreateStockEntry = Boolean(payload.can_create_stock_entry) &&

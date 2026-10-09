@@ -902,7 +902,14 @@ def get_purchase_chain(source_doctype, source_name, include_payments=True):
             can_prepay = amount(doc.per_billed) < 100 and amount(advance["outstanding"]) > 0
             if not can_prepay:
                 advance_reason = "订单无可预付余额，请核对金额与已预付记录"
+    from .purchase_reversal_progress import projection
+    reversal = projection(doc)
+    if reversal and reversal["stage"] != "completed":
+        can_create = can_invoice = can_prepay = False
+        drafts = []
+        reason = invoice_reason = advance_reason = "采购冲销未完成，相关操作暂缓办理"
     return {"source_doctype": source_doctype, "name": doc.name, "company": doc.company, "supplier": doc.supplier,
+            "reversal": reversal,
             "currency": doc.currency, "grand_total": doc.grand_total, "status": doc.status,
             "docstatus": doc.docstatus, "orders": orders, "order_progress": progress, "invoices": invoices, "balances": [] if incomplete else summarize(invoices), "incomplete_links": incomplete,
             "can_create_invoice": can_invoice, "draft_invoices": drafts,
@@ -966,6 +973,7 @@ def _receipt_list(filters, start, page_length, native_filters, or_filters, order
             row["can_create_invoice"] = chain["can_create_invoice"]
             row["draft_invoices"] = chain["draft_invoices"]
             row["draft_orders"] = chain["draft_orders"]
+            row["reversal"] = chain.get("reversal")
             row["shared_payable"] = bool(not chain["incomplete_links"] and any(invoice["shared"] for invoice in chain["invoices"]))
             row["settlement_state"] = "余额不可见" if chain["incomplete_links"] or (chain["warnings"] and not chain["balances"]) else "未形成应付"
             row["payment_state"] = ("关联缺失或无权读取" if chain["incomplete_links"] else "共享应付" if any(i["shared"] for i in chain["invoices"]) else "余额不可见" if chain["warnings"] else "未形成应付")

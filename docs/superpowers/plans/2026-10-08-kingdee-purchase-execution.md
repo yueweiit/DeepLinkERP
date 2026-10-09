@@ -463,6 +463,12 @@ D 的只读完成校验必须由**实际 native input/branch 与 chunk receipt**
 - [ ] 收到受理结果显示“取消已受理，库存重算未完成”；只在 server completed 刷新后显示“冲销完成”。轮询失败保留最后可信阶段和重试提示；不以 timeout、docstatus2 或 HTTP200 推断成功。
 - [ ] 真实本地 browser 逐条验证 native form、采购 list、receipt list 和 drawer 的阶段/拦截/自动刷新，无提交的 preview/cancel 路径零业务写入；记录所用 QA/asset SHA。运行 `node --test tests/*.test.js`、asset build 及资源副本核对，规格/质量审查。
 
+**整项异步业务本地候选（2026-10-09，取代后续安全微切片）：** 在同一 `purchase_operation` IR 和 `Session.receipt_participant` 上接通受理、原生 common repost adapter、partial receipts、只读完成/失败恢复及现有 form/list/drawer/inventory 行为；不新增 Doctype、库存队列或复制估值算法。实际 native affected 18 tests / 75.770s / exit 0，包含 12 个新增业务方法：真实 future-PR 受理→executor→完成、Transfer→Repack 与 Item/Warehouse roots、stock checkpoint、GL commit-before-index、遗漏 GL child、最终 verifier 失败、当前 ACL/幂等/具体绕过、两连接旧 worker、COMMIT 响应丢失、受理/最终事务故障、库存移动拦截、未来 GL 与旧 China Posting 漂移。另 6 个原有严格/无 RIV/闭包回归通过。日志 `/tmp/dlp-async-native-final.log`；165 边界单元、357 passed/1 原有 skip 查询/库存测试、237 UI tests 均 exit 0，分别见 `/tmp/dlp-async-unit-final.log`、`/tmp/dlp-async-host-final.log`、`/tmp/dlp-async-ui-final.log`。原生真实 `names` keyword 的空 bulk 兼容定向 RED→GREEN 见 `/tmp/dlp-async-bulk-keyword-{red,green}.log`；无任务重置或业务写入。
+
+原生夹具 finally 在 rollback 后重新记名，覆盖 callback/response-loss 隐藏的持久副作用；新 File 按精确身份、实际 native root/新物料、附件行及 checkpoint 内容记录后使用原生删除，保留共享物理文件的既有引用。每个新增场景全 51 类计数恢复，控制项 `[auto_submit_PI, auto_insert_price, update_price]=[0,1,0]`、六指针全 0；最终 runtime/只读 mounts 证据 `/tmp/dlp-async-runtime-final.json`、`/tmp/dlp-async-scheduler-final.json`、`/tmp/dlp-async-mounts-final.json`。Finance/OA 固定只读绑定和四个 native SHA 未变；`frappe.in_test=False`、scheduler disabled、仅原有两个 gunicorn。库存资源版本 `0.0.3`、付款 `0.0.25` 已更新。
+
+限定债务/兼容：旧 File `d7c7005696`、`db14d58d6e`、`0abda2184c` 原样保留，均为 88-byte 空 checkpoint、SHA256 `1640004941e68ac751a4c1e8403695bec559505f3af6b989b7301750b3270327`，缺少来源物料交叉证明，不按时间/文件名清理。MES、未证明制造/委外、serial/batch、特殊 reconciliation 等已有未知路径保持受理前拒绝；普通 PR、Transfer/Repack 已实际适配。保留 native scheduler/同步取消及现有 Finance getter 兼容层，只有原生提供等价持久进度/权限/租约/丢响应保证并迁移真实调用后才退出。最终完成后的 checkpoint 清理若发生独立文件故障，只保留临时文件并记录安全日志，不倒改业务 Completed；自动清理重试未扩展为新队列。等待整体 SPEC → Quality；完整 browser/CI/窄联合 schema/真实 drain/生产部署继续由唯一发布线程串行处理，不据局部回归宣告整个采购项目完成。
+
 ### 后续采购任务与统一发布
 
 - [ ] PI 原生 hold/release 的三字段 B2 仅验证提前 pending 拦截、当前 write ACL 及整请求异常清理，不代表已有统一业务审计或付款资格联动验收。完整发布前复用共用操作边界覆盖整次原生 block/unblock/change-release 动作、无金额变动的后检与日志，并验证已有付款草稿等实际依赖采用当前 hold/release 规则；不凭空生成 GL 或新的应付单，也不把每次 db_set 当独立成功事务。

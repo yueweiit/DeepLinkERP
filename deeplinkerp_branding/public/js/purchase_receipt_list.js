@@ -19,7 +19,7 @@
   else{c.providerOrderBy=`${field} ${order}`;c.refresh();}
  }
  function showPredicates(c){for(const field of ['supplier','status'])c.controls[field]?.$wrapper?.show();}
- function selectionChanged(c){const names=new Set(c.list.get_checked_items?.(true) || []),selected=c.providerRows.filter(row=>names.has(row.name));c.$receiptBatch?.find('button').prop('disabled',!selected.length);c.$receiptBatch?.find('span').text(`已选 ${selected.length} 张入库`);}
+ function selectionChanged(c){const names=new Set(c.list.get_checked_items?.(true) || []),selected=c.providerRows.filter(row=>names.has(row.name));c.$receiptBatch?.find('button').prop('disabled',!selected.length || selected.some(row=>c.root.DeepLinkERPPurchasePayments?.reversalBlocked(row.reversal)));c.$receiptBatch?.find('span').text(`已选 ${selected.length} 张入库`);}
  function clearSelection(c){c.list.clear_checked_items?.();c.$receiptBatch?.toggle(c.providerScope==='all');selectionChanged(c);}
  async function exportCurrent(c) {
   const { root } = c;
@@ -35,11 +35,12 @@
   summary:(c,escape)=>escape(`入库金额：${(c.providerPayload?.totals || []).map(row=>`${Number(row.grand_total).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})} ${row.currency}`).join(' · ') || '—'} ｜ 余额按关联应付币种；共享整单余额不作入库合计`),
   renderValue:(field,doc,format,escape)=>{
    if(field==='grand_total') return doc.grand_total===null || doc.grand_total===undefined?'—':`${escape(Number(doc.grand_total).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}))} ${escape(doc.currency || '')}`.trim();
-   if(field==='status') return escape(doc.docstatus===0?'草稿':doc.docstatus===2?'已取消':doc.is_return?'退货入库':'已入库');
+   if(field==='status') return `${escape(doc.docstatus===0?'草稿':doc.docstatus===2?'已取消':doc.is_return?'退货入库':'已入库')} ${root.DeepLinkERPPurchasePayments?.reversalHTML(doc.reversal) || ''}`;
    if(field==='orders') return(doc.orders || []).map(name=>`<a href="/desk/purchase-order/${encodeURIComponent(name)}">${escape(name)}</a>`).join(' · ') || '—';
    if(field==='payment_state') return `<span title="${escape((doc.warnings || []).join('；'))}">${escape(doc.settlement_state || doc.payment_state || '—')}${doc.shared_payable?' · 共享整单':''}</span>`;
    if(['settled','outstanding'].includes(field)) return(doc.balances || []).map(b=>`<span title="${doc.shared_payable?'共享应付整单余额':'关联应付余额'}">${escape(Number(b[field]).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}))} ${escape(b.currency)}</span>`).join(' · ') || '—';
    if(field==='payment_action') {
+    if(root.DeepLinkERPPurchasePayments?.reversalBlocked(doc.reversal))return root.DeepLinkERPPurchasePayments.reversalHTML(doc.reversal);
     if(doc.docstatus===0){const actions=root.DeepLinkERPPurchasePayments;return (doc.draft_orders || []).length?(doc.draft_orders || []).map(name=>actions?.nativeAction('Purchase Order',name,'先处理订单草稿') || '').join(' '):actions?.nativeAction('Purchase Receipt',doc.name,'处理入库草稿') || '—';}
     const button=(cls,label,target='')=>`<button type="button" class="btn btn-xs btn-default ${cls}" data-name="${escape(doc.name)}"${target?` data-target="${escape(target)}"`:''}>${label}</button>`;
     return [(doc.draft_invoices || []).map(invoice=>button('dlp-receipt-invoice','继续应付草稿',typeof invoice==='string'?invoice:invoice.name)).join(' '), doc.can_create_invoice?button('dlp-receipt-invoice','确认应付'):'',doc.can_create?button('dlp-receipt-pay','付款 / 继续付款'):''].filter(Boolean).join(' ') || `<span title="${escape(doc.reason || '')}">—</span>`;

@@ -156,7 +156,7 @@ test('records advanced controls reuse two native FilterGroups with parent permis
 });
 test('PO form invoice actions use the fresh chain and preserve the actual source type',async()=>{
  let html='';const box={find(){return {on(){}};},prependTo(){return this;}};
- const api=payments(async()=>({message:{source_doctype:'Purchase Order',orders:[],invoices:[],payments:[],balances:[],draft_invoices:[{name:'DRAFT-PI'}],can_create_invoice:true}}),{$:value=>{html=value;return box;}});
+ const api=payments(async request=>({message:request.method.endsWith('get_progress')?null:{source_doctype:'Purchase Order',orders:[],invoices:[],payments:[],balances:[],draft_invoices:[{name:'DRAFT-PI'}],can_create_invoice:true}}),{$:value=>{html=value;return box;}});
  await api.formRefresh({doctype:'Purchase Order',doc:{name:'PO'},is_new:()=>false,$wrapper:{find:()=>({remove(){}})},layout:{wrapper:{}}});
   assert.match(html,/dlp-receipt-invoice[^>]+data-source-doctype="Purchase Order"[^>]+data-target="DRAFT-PI"/);
   assert.match(html,/data-source-doctype="Purchase Order"[^>]*>确认应付/);
@@ -168,6 +168,21 @@ test('submitted PO exposes payable action using native invoice permissions even 
   const denied=payments(undefined,{frappe:{model:{can_read:()=>false,can_create:()=>false}}});
   assert.doesNotMatch(denied.orderReceiptAction({name:'PO',docstatus:1,per_received:100,per_billed:0}),/dlp-order-invoice/);
 });
+test('reversal poll failure retains last trusted pending state and blocks dependent actions',async()=>{
+ let failure=false;
+ const api=payments(async()=>{if(failure)throw new Error('connection lost');return {message:{operation_id:'IR-1',stage:'waiting_inventory',safe_reason:null,can_retry:false}};},
+  {frappe:{model:{can_read:()=>true,can_create:()=>true}}});
+ const doc={doctype:'Purchase Order',name:'PO',docstatus:1,status:'To Receive and Bill',per_received:0,per_billed:0};
+ const first=await api.refreshReversal(doc);
+ assert.equal(first.stage,'waiting_inventory');assert.match(api.reversalHTML(first),/待库存重算/);
+ assert.doesNotMatch(api.orderReceiptAction({...doc,reversal:first}),/dlp-order-pay|dlp-order-receipt|dlp-order-invoice/);
+ failure=true;
+ const second=await api.refreshReversal(doc);
+ assert.equal(second.stage,'waiting_inventory');assert.equal(second.operation_id,'IR-1');
+ assert.equal(second.refresh_failed,true);assert.match(api.reversalHTML(second),/进度刷新失败/);
+ for(const stage of ['recalculating','verifying','failed'])assert.doesNotMatch(api.orderReceiptAction({...doc,reversal:{stage}}),/dlp-order-pay|dlp-order-receipt/);
+ assert.match(api.orderReceiptAction({...doc,reversal:{stage:'completed'}}),/dlp-order-receipt/);
+});
 test('owned drawer controls release native datepicker and their handlers once',()=>{
  let destroyed=0,unbound=0;const cleanup=functionFrom('disposeControls');const controls=[{datepicker:{destroy:()=>destroyed++},$input:{off:()=>unbound++}}];
  cleanup(controls);cleanup(controls);assert.equal(destroyed,1);assert.equal(unbound,1);assert.equal(controls.length,0);
@@ -176,7 +191,7 @@ test('real pay async initialization stops after route cancellation, without crea
  let routeClose,resolveFirst,started,created=0,dateCreated=0,removed=0;
  const firstStarted=new Promise(resolve=>started=resolve);
  const surface={appendTo(){return this;},find(){return this;},on(){return this;},off(){return this;},html(){return this;},trigger(){return this;},toggleClass(){return this;},attr(){return this;},prop(){return this;},remove(){removed++;return this;}};
- const api=payments(async()=>({message:{can_create:true,invoices:[{name:'PI',can_pay:true,outstanding:100,currency:'USD'}],company:'C',balances:[]}}),{$:()=>surface,document:{body:{},addEventListener(){},removeEventListener(){}},crypto:{randomUUID:()=> 'uuid'},frappe:{router:{on:(type,fn)=>routeClose=fn},datetime:{get_today:()=> '2026-10-04'},ui:{form:{make_control:({df})=>{created++;if(df.fieldtype==='Date')dateCreated++;return {$input:surface,get_value:()=>'',set_value:()=>created===1?new Promise(resolve=>{resolveFirst=resolve;started();}):Promise.resolve()};}}}}});
+ const api=payments(async request=>({message:request.method.endsWith('.get_progress')?null:{can_create:true,invoices:[{name:'PI',can_pay:true,outstanding:100,currency:'USD'}],company:'C',balances:[]}}),{$:()=>surface,document:{body:{},addEventListener(){},removeEventListener(){}},crypto:{randomUUID:()=> 'uuid'},frappe:{router:{on:(type,fn)=>routeClose=fn},datetime:{get_today:()=> '2026-10-04'},ui:{form:{make_control:({df})=>{created++;if(df.fieldtype==='Date')dateCreated++;return {$input:surface,get_value:()=>'',set_value:()=>created===1?new Promise(resolve=>{resolveFirst=resolve;started();}):Promise.resolve()};}}}}});
  const pending=api.pay('Purchase Receipt','PR');await firstStarted;routeClose();resolveFirst();await pending;
  assert.equal(created,1);assert.equal(dateCreated,0);assert.equal(removed,1);
 });
@@ -184,7 +199,7 @@ test('real date control initialized before route cancellation is destroyed and c
  let routeClose,resolveFirst,started,created=0,destroyed=0;
  const firstStarted=new Promise(resolve=>started=resolve);
  const surface={appendTo(){return this;},find(){return this;},on(){return this;},off(){return this;},html(){return this;},trigger(){return this;},toggleClass(){return this;},attr(){return this;},prop(){return this;},remove(){return this;}};
- const api=payments(async()=>({message:{document:{name:'PE',posting_date:'2026-10-04',docstatus:0,references:[]},editable_fields:['posting_date'],allowed_actions:[]}}),{$:()=>surface,document:{body:{},addEventListener(){},removeEventListener(){}},frappe:{router:{on:(type,fn)=>routeClose=fn},ui:{form:{make_control:({df})=>{created++;return {$input:surface,...(df.fieldtype==='Date'?{datepicker:{destroy:()=>destroyed++}}:{}),get_value:()=>'',set_value:()=>created===1?new Promise(resolve=>{resolveFirst=resolve;started();}):Promise.resolve()};}}}}});
+ const api=payments(async request=>({message:request.method.endsWith('.get_progress')?null:{document:{name:'PE',posting_date:'2026-10-04',docstatus:0,references:[]},editable_fields:['posting_date'],allowed_actions:[]}}),{$:()=>surface,document:{body:{},addEventListener(){},removeEventListener(){}},frappe:{router:{on:(type,fn)=>routeClose=fn},ui:{form:{make_control:({df})=>{created++;return {$input:surface,...(df.fieldtype==='Date'?{datepicker:{destroy:()=>destroyed++}}:{}),get_value:()=>'',set_value:()=>created===1?new Promise(resolve=>{resolveFirst=resolve;started();}):Promise.resolve()};}}}}});
  const pending=api.paymentDrawer('PE');await firstStarted;routeClose();resolveFirst();await pending;
  assert.equal(created,1);assert.equal(destroyed,1);
 });

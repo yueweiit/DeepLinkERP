@@ -337,6 +337,8 @@ class ReadBoundary:
 		return doctype == "Currency" and name in {"CNY", "MXN", "USD", "XYZ"}
 
 	def get_values(self, doctype, filters, fields, **kwargs):
+		if filters.get("custom_purchase_reversal_operation") == ["is", "set"]:
+			return [(row["name"],) for row in self.records[doctype] if row["name"] in filters["name"][1] and row.get("custom_purchase_reversal_operation")]
 		self.private_reads.append((doctype, filters, fields))
 		return [{field: row.get(field) for field in fields} for row in self.records[doctype]
 			if row["name"] in filters["name"][1]]

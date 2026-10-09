@@ -107,6 +107,10 @@ def _reserve(context):
 
 
 def complete_audit(context, output):
+    if context.get("reversal", {}).get("roots"):
+        from .purchase_reversal_progress import accept_audit
+        accept_audit(context, output)
+        return
     documents = output["documents"] if "documents" in output else [output.get("document", output)]
     receipts = []
     for document in documents:
@@ -200,6 +204,9 @@ def run(request_id, payload, operation, replay, *, digest=None, acknowledge_vali
                 facts = json.loads(previous.data)
                 if facts.get("digest") != digest or facts.get("user") != frappe.session.user:
                     reject("同一请求内容已改变，请刷新后重新核对", "request_payload_changed")
+                if facts.get("reversal"):
+                    from .purchase_reversal_progress import replay as replay_progress
+                    return replay_progress(previous)
                 if previous.status != "Completed":
                     reject("上次请求尚未完成，请稍后重试", "request_incomplete")
                 return replay(json.loads(previous.output))

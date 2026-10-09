@@ -40,6 +40,8 @@ class ReversalScope:
     pairs: tuple[StockPair, ...]
     sources: tuple[DocumentIdentity, ...]
     vouchers: tuple[DocumentIdentity, ...]
+    sles: tuple[str, ...] = ()
+    anchors: tuple[tuple[StockPair, str], ...] = ()
 
 
 _NATIVE = {
@@ -551,6 +553,10 @@ class _Collector:
                 # Later execution must capture only actual native RIV roots.
                 for identity in sorted(self.potential_billing_receipts):
                     self.seed_document(self.documents[identity])
+        self.expand_frontier(require_bins=require_bins)
+
+    def expand_frontier(self, *, require_bins=True):
+        """Same real SLE propagation for native transaction and pair roots."""
         while True:
             pending = sorted(self.vouchers - self.expanded)
             frontier = sorted((pair, anchor) for pair, anchor in self.anchors.items()
@@ -572,7 +578,8 @@ class _Collector:
 
     def result(self):
         return ReversalScope(self.company, self.posting_datetime, tuple(sorted(self.pairs)),
-            tuple(sorted(self.sources)), tuple(sorted(self.vouchers)))
+            tuple(sorted(self.sources)), tuple(sorted(self.vouchers)), tuple(sorted(self.sles)),
+            tuple((pair, str(anchor)) for pair, anchor in sorted(self.anchors.items())))
 
 
 def collect_document_scope(doc) -> ReversalScope:
@@ -618,3 +625,21 @@ def collect_boundary_scope(doc, *, current=False, stock_entry_lifecycle=True, op
                 # Existing stock frontier expansion is reused, not LCV-as-SLE.
                 collector.closure(require_bins=False)
         return collector.result()
+
+
+def collect_repost_pair_scope(task):
+    """Actual Item/Warehouse RIV footprint, without inventing a source document."""
+    anchor = _datetime(task)
+    rows = frappe.db.get_values("Stock Ledger Entry", {"company": task.company, "item_code": task.item_code,
+        "warehouse": task.warehouse, "posting_datetime": [">=", anchor], "is_cancelled": 0},
+        _SLE_FIELDS, as_dict=True, for_update=True, limit=MAX_SLES + 1)
+    if len(rows) > MAX_SLES:
+        _reject("原生库存流水范围超过安全上限")
+    if not rows:
+        return ReversalScope(task.company, anchor, (StockPair(task.item_code, task.warehouse),), (), ())
+    root = service._read(rows[0].voucher_type, rows[0].voucher_no)
+    collector = _Collector(root, current=True, boundary_gate=True)
+    collector.add_pair(task.item_code, task.warehouse, anchor)
+    collector.consume(rows, propagate=True)
+    collector.expand_frontier(require_bins=False)
+    return collector.result()
