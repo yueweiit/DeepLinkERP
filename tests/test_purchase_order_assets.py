@@ -43,8 +43,8 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 
 	def test_unified_adapter_loads_after_cache_busted_shared_engine(self):
 		scripts = hooks.app_include_js
-		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.19"
-		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.9"
+		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.20"
+		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.10"
 		self.assertIn(engine, scripts)
 		self.assertIn(adapter, scripts)
 		self.assertLess(scripts.index(engine), scripts.index(adapter))
@@ -62,7 +62,7 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		self.assertIn(crossborder, scripts)
 		self.assertEqual(sum("/crossborder_procurement.js" in path for path in scripts), 1)
 		self.assertLess(scripts.index(payments), scripts.index(crossborder))
-		self.assertLess(scripts.index(crossborder), scripts.index("/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.9"))
+		self.assertLess(scripts.index(crossborder), scripts.index("/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.10"))
 		self.assertIn("/assets/deeplinkerp_branding/css/purchase_payments.css?v=0.0.8", hooks.app_include_css)
 		self.assertNotIn("crossborder_procurement", str(getattr(hooks, "web_include_js", None)))
 
@@ -83,13 +83,13 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		self.assertIsNotNone(rule, "Only the classic PO menu should override the global right anchor")
 		self.assertRegex(rule.group(1), r"left:\s*0\s*;")
 		self.assertRegex(rule.group(1), r"right:\s*auto\s*;")
-		self.assertIn("/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.19", hooks.app_include_css)
+		self.assertIn("/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.20", hooks.app_include_css)
 
-	def test_grouped_source_identity_stays_one_line_instead_of_overlapping_its_date(self):
+	def test_purchase_source_identity_stays_one_line_in_the_physical_table(self):
 		css = (Path(__file__).resolve().parents[1] / "deeplinkerp_branding/public/css/purchase_order_list.css").read_text()
-		selector = r"body\.dlp-purchase-order-grid-active \.dlp-po-group > button\[data-purchase-source\]"
+		selector = r"body\.dlp-purchase-order-grid-active \.dlp-purchase-table button\[data-purchase-source\]"
 		rule = re.search(selector + r"\s*\{([^}]+)\}", css)
-		self.assertIsNotNone(rule, "Only the grouped OA identity should override the native fixed button height")
+		self.assertIsNotNone(rule, "The physical OA identity overrides the native fixed button height")
 		for property_name, value in (("display", "block"), ("height", "auto"), ("white-space", "nowrap"), ("overflow", "hidden"), ("text-overflow", "ellipsis"), ("text-align", "left"), ("max-width", "100%")):
 			self.assertRegex(rule.group(1), re.escape(property_name) + r":\s*" + re.escape(value) + r"\s*;")
 

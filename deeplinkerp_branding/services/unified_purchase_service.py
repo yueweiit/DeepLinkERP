@@ -73,7 +73,10 @@ EXPORT_LABELS = {
 	"oa_warning": "OA 提示", "oa_references": "OA 来源明细", "row_type": "类型",
 	"requested_amount": "来源申请金额", "cashier_paid_amount": "出纳实付（未代表 ERP 入账）", "cashier_currency": "出纳实付币种",
 	"cashier_evidence_status": "出纳证据状态", "source_eligible": "来源可办理", "source_version": "来源版本",
+	"warehouse": "仓库", "item_code": "物料编码", "item_name": "物料名称", "qty": "数量", "uom": "单位",
+	"rate": "单价", "amount": "明细金额", "received_qty": "已入库数量",
 }
+ITEM_EXPORT_FIELDS = frozenset({"warehouse", "item_code", "item_name", "qty", "uom", "rate", "amount", "received_qty"})
 DEFAULT_EXPORT_COLUMNS = (
 	"transaction_date", "name", "supplier_name", "status", "company", "source", "oa_number",
 	"approval_status", "currency", "grand_total", "oa_currency", "oa_amount", "oa_amount_basis",
@@ -469,7 +472,7 @@ def _canonical_rows(purchase_orders, oa_requests, currency_codes: set[str], oa_r
 def _matches(row: dict, filters: dict) -> bool:
 	if filters["scope"] == "orders" and row["row_type"] != "purchase_order":
 		return False
-	if filters["scope"] == "oa" and row["source"] != "OA":
+	if filters["scope"] == "oa" and row["row_type"] != "oa_request":
 		return False
 	source = {"oa": "OA", "non_oa": "未关联 OA"}.get(filters["source"])
 	if source and row["source"] != source:
@@ -496,9 +499,9 @@ def _matches(row: dict, filters: dict) -> bool:
 	return not search or any(search in _text(value).casefold() for value in values + row.get("_search_values", []))
 
 
-def _load_order_progress(names):
+def _load_order_progress(names, include_items=False):
 	from .purchase_order_progress import _get_order_progress_batch
-	return _get_order_progress_batch(names)
+	return _get_order_progress_batch(names, include_items=include_items)
 
 
 def _restricted_order_progress(name):
@@ -584,9 +587,10 @@ def _authorize_native_rows(rows, company_loader, order_fields_loader, native_fie
 			_redact_restricted_row(row, native_fields)
 
 
-def _attach_progress(rows, loader=None):
+def _attach_progress(rows, loader=None, *, include_items=False):
 	orders = [row for row in rows if row["row_type"] == "purchase_order" and (row.get("order_progress") or {}).get("state") != "restricted"]
-	progress = loader([row["name"] for row in orders]) if loader and orders else {}
+	names = [row["name"] for row in orders]
+	progress = (loader(names, include_items=True) if include_items else loader(names)) if loader and orders else {}
 	for row in rows:
 		if row["name"] in progress and row["row_type"] == "purchase_order":
 			row["order_progress"] = progress[row["name"]]
@@ -657,15 +661,15 @@ def _public_rows(rows: list[dict]) -> list[dict]:
 
 def build_unified_purchase_payload(purchase_orders, oa_requests, *, filters=None, start=0,
 	page_length=DEFAULT_PAGE_LENGTH, order_by="transaction_date desc", currency_codes=(),
-	capabilities=None, warnings=(), oa_reverse_link_readable=True, native_fields=None, progress_loader=None, company_loader=None, order_fields_loader=None) -> dict:
+	capabilities=None, warnings=(), oa_reverse_link_readable=True, native_fields=None, progress_loader=None, company_loader=None, order_fields_loader=None, include_items=False) -> dict:
 	start = _integer(start, minimum=0)
 	page_length = _integer(page_length, minimum=1, maximum=MAX_PAGE_LENGTH)
 	rows, totals = _pipeline(purchase_orders, oa_requests, filters=filters, order_by=order_by,
 		currency_codes=currency_codes, oa_reverse_link_readable=oa_reverse_link_readable, native_fields=native_fields,
 		progress_loader=progress_loader, company_loader=company_loader, order_fields_loader=order_fields_loader)
 	page = rows[start:start + page_length]
-	if not _needs_full_progress(_filters(filters)):
-		_attach_progress(page, progress_loader)
+	if include_items or not _needs_full_progress(_filters(filters)):
+		_attach_progress(page, progress_loader, include_items=include_items)
 	return {
 		"rows": _public_rows(page), "total_count": len(rows),
 		"start": start, "page_length": page_length, "has_previous": start > 0,
@@ -688,6 +692,13 @@ def _columns(columns: Any) -> list[str]:
 
 def _export_value(field: str, row: dict) -> Any:
 	"""Display-only cells; canonical identity, permissions and evidence stay intact."""
+	if field in ITEM_EXPORT_FIELDS:
+		progress = row.get("order_progress") or {}
+		permitted = set(progress.get("item_fields") or [])
+		items = [item for item in progress.get("items", []) if item.get("name")] if "name" in permitted and progress.get("state") != "restricted" else []
+		return "\n".join((_display_number(item.get(field), quantity=field in {"qty", "received_qty"})
+			if field in {"qty", "received_qty", "rate", "amount"} else _text(item.get(field)) or "—")
+			if field in permitted else "—" for item in items) or "—"
 	if field == "name" and row.get("row_type") == "oa_request":
 		return f"待完善 · {row.get('oa_number') or row['name']}"
 	if field == "source":
@@ -916,7 +927,7 @@ def get_unified_purchase_list(filters=None, start=0, page_length=DEFAULT_PAGE_LE
 	return build_unified_purchase_payload(orders, requests, filters=filters, start=start, page_length=page_length,
 		order_by=order_by, currency_codes=currencies, capabilities=capabilities, warnings=warnings,
 		oa_reverse_link_readable=reverse_readable, native_fields=native_fields, progress_loader=_load_order_progress,
-		company_loader=_load_company_scope, order_fields_loader=_load_order_fields_scope)
+		company_loader=_load_company_scope, order_fields_loader=_load_order_fields_scope, include_items=True)
 
 
 @_whitelist
@@ -927,6 +938,8 @@ def export_unified_purchase_list(filters=None, columns=None, order_by="transacti
 	rows, _ = _pipeline(orders, requests, filters=filters, order_by=order_by,
 		currency_codes=currencies, oa_reverse_link_readable=reverse_readable, native_fields=native_fields,
 		progress_loader=_load_order_progress, full_progress=True, company_loader=_load_company_scope, order_fields_loader=_load_order_fields_scope)
+	if ITEM_EXPORT_FIELDS.intersection(fields):
+		_attach_progress(rows, _load_order_progress, include_items=True)
 	records = {PURCHASE_ORDER: {row["name"]: row for row in orders}, OA_REQUEST: {row["name"]: row for row in requests}}
 	used = defaultdict(set)
 	for row in rows:

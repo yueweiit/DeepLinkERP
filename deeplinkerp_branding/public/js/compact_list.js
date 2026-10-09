@@ -257,6 +257,7 @@
 			page: 0, pageSize: 100, requestId: 0, querySignature: null, total: null, summary: [],
 			translate: root.__ || ((label) => label),
 			setPage(page) {
+				config.onPageChange?.(this);
 				this.page = Math.max(0, Number(page) || 0);
 				list.start = this.page * this.pageSize;
 				list.page_length = this.pageSize;
@@ -277,6 +278,7 @@
 				this.total = null; this.summary = []; this.querySignature = null; this.requestId++;
 				this.setPage(0); this.savePreferences(); this.activate();
 				this.$providerScope?.val(scope);
+				config.onScopeChange?.(this);
 				this.$providerControls?.toggle(providerActive(this));
 				for (const field of config.quickFields || []) if (field !== "company") this.controls[field]?.$wrapper?.toggle(!providerReadonly(this));
 				if (providerReadonly(this)) { list.page?.hide_actions_menu?.(); list.page?.clear_primary_action?.(); }
@@ -453,11 +455,18 @@
 			this.$result?.find(".list-row-container").remove();
 			this.$list_head_subject = null;
 			this.$checkbox_actions = null;
-			this.render_header();
-			currentRows(controller).forEach((doc, index) => {
-				doc._idx = index;
-				this.$result?.append(this.get_list_row_html(doc));
-			});
+			if (config.renderTable) {
+				currentRows(controller).forEach((doc, index) => { doc._idx = index; });
+				this.$result?.append(config.renderTable(controller, currentRows(controller)));
+				this.$list_head_subject = this.$result?.find(".list-header-subject");
+				this.$checkbox_actions = this.$result?.find(".checkbox-actions");
+			} else {
+				this.render_header();
+				currentRows(controller).forEach((doc, index) => {
+					doc._idx = index;
+					this.$result?.append(this.get_list_row_html(doc));
+				});
+			}
 			config.afterRender?.(controller);
 			if (providerActive(controller) && !currentRows(controller).length) this.$result?.append('<div class="list-row-container dlp-provider-empty text-muted text-center" role="status">没有符合条件的采购记录</div>');
 		};
@@ -554,6 +563,7 @@
 	}
 
 	function headerHTML(controller) {
+		if (config.renderHeader) return config.renderHeader(controller);
 		const { translate: t, list } = controller;
 		const provider = providerActive(controller), readonly = providerReadonly(controller);
 		const checkbox = readonly ? "" : `<input class="list-header-checkbox list-check-all" type="checkbox" title="${escapeHTML(t("Select All"))}">`;
@@ -565,6 +575,7 @@
 	}
 
 	function rowHTML(controller, doc) {
+		if (config.renderRow) return config.renderRow(controller, doc);
 		const { list, root } = controller;
 		const provider = providerActive(controller), readonly = !rowSelectable(controller, doc);
 		const formatters = {

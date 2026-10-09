@@ -226,14 +226,16 @@ def test_unconfirmed_company_and_creation_fallback_are_filterable():
 
 @pytest.mark.parametrize(("scope", "names"), [
 	("all", {"PO-1", "PO-2", "OA-2"}), ("orders", {"PO-1", "PO-2"}),
-	("oa", {"PO-1", "OA-2"}),
+	("oa", {"OA-2"}),
 ])
-def test_scope_oa_includes_linked_orders(scope, names):
+def test_scope_tabs_partition_real_orders_and_unconverted_oa_sources(scope, names):
 	result = backend().build_unified_purchase_payload(
 		[po(custom_oa_purchase_expense="OA-1"), po("PO-2")], [oa(), oa("OA-2")],
 		filters={"scope": scope},
 	)
 	assert {row["name"] for row in result["rows"]} == names
+	if scope == "oa":
+		assert result["total_count"] == 1 and result["totals"]["orders"] == []
 
 
 def test_pagination_is_stable_and_totals_cover_all_filtered_rows():
@@ -380,7 +382,7 @@ def connect(monkeypatch, boundary):
 	monkeypatch.setattr(s, "_permitted_fields", lambda dt, **kwargs: set(boundary.permitted_fields(dt, permission_type="read", **kwargs)))
 	# Native record hydration is exercised in test_crossborder_progress. This
 	# boundary covers unified query/canonical/export behavior without a site.
-	monkeypatch.setattr(s, "_load_order_progress", lambda names: {}, raising=False)
+	monkeypatch.setattr(s, "_load_order_progress", lambda names, include_items=False: {}, raising=False)
 	monkeypatch.setattr(s, "_restricted_order_progress", lambda name: {"name": name, "state": "restricted", "review_required": True})
 	monkeypatch.setattr(s, "_project_source_roles", lambda rows, sources, fields, orders: {}, raising=False)
 	monkeypatch.setattr(s, "_load_company_scope", lambda names: set(names), raising=False)
@@ -939,16 +941,18 @@ def test_list_progress_uses_one_shared_batch_and_page_or_filter_scope(monkeypatc
 	b = ReadBoundary([po(f"PO-{index:04}", grand_total=1) for index in range(size)], oa_installed=False)
 	s = connect(monkeypatch, b)
 	calls = []
-	def batch(names):
-		calls.append(list(names))
-		return {name: progress_row(unpaid=2) for name in names}
+	def batch(names, include_items=False):
+		calls.append((list(names), include_items))
+		return {name: {**progress_row(unpaid=2), **({"item_fields": ["name", "warehouse"], "items": [{"name": name + "-ITEM", "warehouse": "W1"}]} if include_items else {})} for name in names}
 	monkeypatch.setattr(s, "_load_order_progress", batch, raising=False)
 	result = s.get_unified_purchase_list(start=100)
-	assert len(calls) == 1 and len(calls[0]) == 100
+	assert len(calls) == 1 and len(calls[0][0]) == 100 and calls[0][1] is True
 	assert all(row.get("order_progress", {}).get("external", {}).get("order_unpaid") == 2 for row in result["rows"])
+	assert all(row["order_progress"]["items"][0]["name"] == row["name"] + "-ITEM" for row in result["rows"])
 	calls.clear()
 	result = s.get_unified_purchase_list(start=100, page_length=size, filters={"progress_phase": "supplier_unpaid"})
-	assert len(calls) == 1 and len(calls[0]) == size
+	assert len(calls) == 2 and len(calls[0][0]) == size and calls[0][1] is False
+	assert len(calls[1][0]) == size - 100 and calls[1][1] is True
 	assert result["total_count"] == size and len(result["rows"]) == size - 100
 	assert result["totals"]["orders"] == [{"currency": "USD", "amount": size}]
 
@@ -973,6 +977,18 @@ def test_export_seven_groups_expand_readable_leaves_in_requested_order_without_l
 	assert "MXN" in str(data[1]) and "USD" in str(data[1]) and "Nos" in str(data[1])
 	assert "{'" not in str(data[1]) and '"external"' not in str(data[1])
 	assert order["grand_total"] == 45.6789 and progress["external"]["order_unpaid"] == 12.34567
+
+
+def test_material_export_keeps_whole_order_totals_and_alignment_without_filling_unknowns():
+	s = backend()
+	progress = {"currency": "CNY", "item_fields": ["name", "item_code", "warehouse", "qty", "amount"], "items": [
+		{"name": "I-1", "item_code": "SAME", "warehouse": "W1", "qty": 0, "amount": None},
+		{"name": "I-2", "item_code": "SAME", "warehouse": None, "qty": None, "amount": 12.34567, "rate": 999},
+	]}
+	data = s.build_unified_purchase_export([po(grand_total=100, order_progress=progress)], [], columns=["name", "item_code", "warehouse", "qty", "amount", "rate", "grand_total"])
+	assert len(data) == 2
+	assert data[1] == ["PO-1", "SAME\nSAME", "W1\n—", "0\n—", "—\n12.35", "—\n—", 100.0]
+	assert progress["items"][1]["amount"] == 12.34567
 
 
 def test_group_export_is_unbounded_and_shares_computed_filter_batch(monkeypatch, capture_xlsx):

@@ -500,7 +500,9 @@ class CrossborderProgressTests(unittest.TestCase):
             calls.append((dt, kwargs.get("parenttype")))
             return self.memory.fields(dt, **kwargs)
         with patch.object(payment, "get_permitted_fields", side_effect=fields), patch.object(progress, "get_permitted_fields", side_effect=fields):
-            progress.get_order_progress(["EXT"], include_items=True)
+            result = progress.get_order_progress(["EXT"], include_items=True)["EXT"]
+            self.assertIn("warehouse", result["item_fields"])
+            self.assertEqual(result["items"][0]["name"], self.memory.records["Purchase Order", "EXT"]["items"][0]["name"])
         for dt in ("Purchase Order", "Purchase Order Item", "Company", "Purchase Invoice", "Purchase Invoice Item"):
             self.assertEqual(sum(name == dt for name, _ in calls), 1, "field permission must be request-local, not per row or projection")
 

@@ -34,12 +34,13 @@ test("existing OR filters remain consistent and conflicting quick search is refu
 	assert.throws(() => production("buildQuery")(native, { search: "different buyer" }, permitted), /OR filters/);
 });
 
-test("design-specific header labels and widths keep the desktop table within 1700px", () => {
+test("purchase header uses a physical material table with compact independent columns", () => {
 	const { list, env } = bareList();
 	production("mount")(list, env);
 	const header = list.get_header_html();
-	for (const label of ["订单/审批", "供应商/采购付款公司", "项目/最终归属", "供应商付款", "集团内部结算", "收货物流", "操作"]) assert.ok(header.includes(label));
-	assert.ok(header.includes("166px 190px 200px 190px 200px 200px 155px"), "approved seven groups retain compact desktop widths");
+	for (const label of ["采购订单号", "订单状态", "供应商名称", "仓库", "物料编码", "物料名称", "数量", "单位", "单价", "金额", "已入库数量"]) assert.ok(header.includes(label), label);
+	assert.match(header, /<thead>/);
+	assert.equal((header.match(/list-check-all/g) || []).length, 1);
 });
 
 test("export includes visible columns in order and account currency, without any page limit", () => {
@@ -334,22 +335,19 @@ test("realtime updates reload the bounded second page and its filtered count and
 	assert.deepEqual(list.pending_document_refreshes, []);
 });
 
-test("a payment refresh updates expanded progress when the order timestamp is unchanged", async () => {
-	const { list, env } = realtimeList();
-	const order = { name: "PO-1", modified: "unchanged-order" };
-	const progress = { modified: order.modified, settled: 3000, order_unpaid: 7000 };
-	env.frappe.call = async () => unifiedPayload([{ ...order, order_progress: progress }]);
-	useNativeRefreshFlow(list, env);
-	const controller = production("mount")(list, env);
-	const items = [{ item_code: "material", qty: 4 }];
-	controller.purchaseExpanded = new Map([[order.name, { modified: order.modified, settled: 1000, order_unpaid: 9000, items }]]);
-	list.data = [{ ...order }];
-	list.pending_document_refreshes = [{ name: order.name }];
-	await list.process_document_refreshes();
-	assert.equal(list.data[0].order_progress.settled, 3000);
-	assert.equal(controller.purchaseExpanded.get(order.name).settled, 3000);
-	assert.equal(controller.purchaseExpanded.get(order.name).order_unpaid, 7000);
-	assert.equal(controller.purchaseExpanded.get(order.name).items, items, "retain permitted material detail without another item request");
+test("a payment refresh replaces progress and page materials when the order timestamp is unchanged", async () => {
+ const { list, env } = realtimeList(), order = { name: "PO-1", modified: "unchanged-order" };
+ const progress = { modified: order.modified, settled: 3000, order_unpaid: 7000, item_fields: ["name", "item_code", "qty"], items: [{ name: "POI-1", item_code: "material", qty: 4 }] };
+ env.frappe.call = async () => unifiedPayload([{ ...order, order_progress: progress }]);
+ useNativeRefreshFlow(list, env);
+ production("mount")(list, env);
+ list.data = [{ ...order, order_progress: { settled: 1000, items: [{ name: "OLD-ITEM" }] } }];
+ list.pending_document_refreshes = [{ name: order.name }];
+ await list.process_document_refreshes();
+ assert.equal(list.data[0].order_progress.settled, 3000);
+ assert.equal(list.data[0].order_progress.items, progress.items);
+ assert.match(list.get_list_row_html(list.data[0]), /POI-1/);
+ assert.doesNotMatch(list.get_list_row_html(list.data[0]), /OLD-ITEM/);
 });
 
 test("a realtime refresh after a filter change cannot accept the old query response", async () => {
@@ -499,10 +497,10 @@ test("rendered rows retain native selection hooks, native indicator, and escaped
 	assert.match(html, /purchase-order\/PO%2F%221/);
 	assert.match(html, /supplier\/SUP%2F1/);
 	assert.match(html, /Supplier &lt;A&gt;/);
-	assert.match(html, />123\.46 MXN<\/div>/);
-	assert.match(html, />5\.68 CNY<\/div>/);
+assert.match(html, />123\.46 MXN<\/td>/);
+assert.match(html, />5\.68 CNY<\/td>/);
 	assert.equal(doc.grand_total, 123.456789, "display rounding must not alter source amounts or export values");
-	assert.match(html, />部分已付<\/div>/);
+assert.match(html, />部分已付<\/td>/);
 	assert.equal(doc.advance_payment_status, "Partially Paid", "display translation must not alter the query/export field value");
 });
 
@@ -541,16 +539,17 @@ test("purchase selection leaves its column headers visible and preserves native 
 function selectionList() {
 	const { list, env } = bareList();
 	const rows = new Map();
-	let appended = 0;
-	list.data = [{ name: "PO-1" }, { name: "PO-2" }];
+list.data = [{ name: "PO-1", row_type: "purchase_order" }, { name: "PO-2", row_type: "purchase_order" }];
 	list.$result = {
 		find(selector) {
-			if (selector === ".list-row-container") return { remove() { rows.clear(); appended = 0; } };
+			if (selector === ".list-row-container") return { remove() { rows.clear(); } };
+			if (selector === ".list-header-subject") return { show() {}, find() { return { prop() { return this; } }; } };
+			if (selector === ".checkbox-actions") return { hide() {} };
 			if (selector === ".list-row-checkbox:checked") return [...rows.values()].filter((row) => row.checked);
 			const name = selector.match(/data-name='([^']+)'/)?.[1];
 			return { prop(property, value) { const row = rows.get(name); if (row) row[property] = value; } };
 		},
-		append() { const doc = list.data[appended++]; rows.set(doc.name, { name: doc.name, checked: false }); },
+append(html) { for (const match of html.matchAll(/list-row-checkbox"[^>]*data-name="([^"]+)"/g)) rows.set(match[1], { name: match[1], checked: false }); },
 	};
 	// These dependencies follow ListView.set_rows_as_checked/on_row_checked's live DOM contract.
 	list.on_row_checked = function () { this.$checks = this.$result.find(".list-row-checkbox:checked"); this.actionsVisible = this.$checks.length > 0; };
@@ -741,7 +740,7 @@ test("all real Purchase Order scopes use one unified provider while virtual grou
 		assert.match(call.method, /unified_purchase_service\.get_unified_purchase_list$/);
 		assert.equal(JSON.parse(call.args.filters).scope, scope);
 		const header = list.get_header_html();
-		for (const label of ["订单/审批", "供应商/采购付款公司", "项目/最终归属", "供应商付款", "集团内部结算", "收货物流", "操作"]) assert.ok(header.includes(label), label);
+		for (const label of ["采购订单号", "供应商名称", "订单状态", "操作"]) assert.ok(header.includes(label), label);
 		for (const group of ["project_context", "external_payment", "internal_settlement", "receipt_logistics", "receipt_action"]) assert.equal(list.fields.some(field => field[0] === group), false, group);
 		assert.doesNotMatch(header, /data-provider-sort="(?:project_context|external_payment|internal_settlement|receipt_logistics|receipt_action)"/);
 	}
@@ -757,7 +756,7 @@ test("purchase provider inherits saved custom columns without appending new defa
 	assert.match([...writes.keys()][0], /site-a:buyer-a:Purchase%20Order:unified$/);
 });
 
-test("a unified page payload is the only page-wide progress read and sequence contains arrow plus number", async () => {
+test("a unified page payload supplies material progress directly without an expansion read", async () => {
 	const { list, env } = bareList(), calls = [];
 	env.frappe.call = async request => { calls.push(request); return { message: {} }; }; env.cur_list = list;
 	const controller = production("mount")(list, env); controller.setProviderScope("all", false);
@@ -766,7 +765,7 @@ test("a unified page payload is the only page-wide progress read and sequence co
 	await new Promise(resolve => setImmediate(resolve)); assert.equal(calls.length, 0);
 	assert.equal(controller.providerRows[0].order_progress.external.settled, 1);
 	const html = list.get_list_row_html(doc);
-	assert.match(html, /dlp-purchase-expand/); assert.match(html, /data-fieldname="_sequence"[^>]*>[\s\S]*?3<\/span>/);
+assert.doesNotMatch(html, /dlp-purchase-expand/); assert.match(html, /data-fieldname="_sequence"[^>]*>3<\/td>/);
 });
 
 test("restricted related progress retains independently authorized native order actions and gates only crossborder entries", () => {
@@ -785,13 +784,13 @@ test("restricted related progress retains independently authorized native order 
 	} finally { if (previous === undefined) delete globalThis.DeepLinkERPPurchasePayments; else globalThis.DeepLinkERPPurchasePayments = previous; }
 });
 
-test("crossborder CSS preserves natural grouped row height, fixed header and disables freezing at 768", () => {
-	const css = fs.readFileSync(path.join(__dirname, "../deeplinkerp_branding/public/css/purchase_order_list.css"), "utf8");
-	assert.match(css, /body\.dlp-purchase-order-grid-active \.dlp-po-grid\s*\{[^}]*--dlp-po-row-height:\s*60px/);
-	assert.match(css, /body\.dlp-purchase-order-grid-active \.dlp-po-grid-header\s*\{[^}]*height:\s*32px/);
-	assert.match(css, /body\.dlp-purchase-order-grid-active[^{}]*\.dlp-po-group\s*\{[^}]*white-space:\s*normal/);
-	assert.match(css, /@media\s*\(max-width:\s*768px\)\s*\{\s*body\.dlp-purchase-order-grid-active \.dlp-po-frozen\s*\{[^}]*position:\s*static/);
-	assert.match(css, /\.result-container[^{}]*::-webkit-scrollbar[\s\S]*height:\s*12px/);
+test("purchase physical table CSS preserves table layout, rowspans and sticky scrolling without changing shared consumers", () => {
+ const css = fs.readFileSync(path.join(__dirname, "../deeplinkerp_branding/public/css/purchase_order_list.css"), "utf8");
+ assert.match(css, /body\.dlp-purchase-order-grid-active \.dlp-purchase-table[^{}]*\.dlp-po-grid-row[^{}]*\{[^}]*display:\s*table-row/);
+ assert.match(css, /body\.dlp-purchase-order-grid-active \.dlp-purchase-table\s*\{[^}]*border-collapse:\s*separate/);
+ assert.match(css, /body\.dlp-purchase-order-grid-active \.dlp-purchase-table th\s*\{[^}]*position:\s*sticky/);
+ assert.match(css, /\.dlp-purchase-table \.dlp-purchase-frozen\s*\{[^}]*left:\s*var\(--dlp-purchase-left\)/);
+ assert.doesNotMatch(css, /\.dlp-purchase-expand\s*\{/);
 });
 
 function mountedPurchase() {
@@ -816,101 +815,66 @@ function mountedPurchase() {
 	return { ...fixture, controller, calls, controls, handlers, payload, click };
 }
 
-test("lazy expansion reads only the clicked public PO and reuses source-version detail without changing precision", async () => {
-	const { list, controller: c, calls, payload, click } = mountedPurchase();
-	const doc = { name: "PO-1", row_type: "purchase_order", modified: "v1", source_version: "source-v1", order_progress: { modified: "v1", currency: "CNY", settled: 0, order_unpaid: null } };
-	payload(doc); assert.equal(calls.length, 0);
-	const opening = click(doc.name); assert.equal(calls.length, 1);
-	assert.equal(calls[0].request.method, "deeplinkerp_branding.services.purchase_order_progress.get_order_progress");
-	assert.deepEqual(calls[0].request.args, { purchase_orders: ["PO-1"], include_items: 1 });
-	const detail = { modified: "v1", currency: "CNY", settled: 0, order_unpaid: null, item_fields: ["idx", "qty", "uom", "rate", "amount", "received_qty"], items: [{ idx: 1, qty: 1.234567, uom: "kg", rate: 9.12345, amount: 11.265478, received_qty: null }] };
-	calls[0].resolve({ message: { "PO-1": detail } }); await opening;
-	assert.match(list.get_list_row_html(doc), /1\.23 kg/); assert.match(list.get_list_row_html(doc), /9\.12 CNY/); assert.doesNotMatch(list.get_list_row_html(doc), /1\.234567/);
-	assert.equal(detail.items[0].qty, 1.234567);
-	await click(doc.name); assert.equal(c.purchaseExpanded.has(doc.name), false);
-	await click(doc.name); assert.equal(calls.length, 1); assert.equal(c.purchaseExpanded.has(doc.name), true);
-	list.last_args = null; payload({ ...doc, source_version: "source-v2" });
-	assert.equal(c.purchaseExpanded.has(doc.name), false);
-	const changed = click(doc.name); assert.equal(calls.length, 2);
-	calls[1].resolve({ message: { "PO-1": detail } }); await changed;
+test("physical detail rows use actual item IDs and one whole-order checkbox with real rowspans", () => {
+	const { list, env } = bareList(); production("mount")(list, env);
+	const doc = { name: "PO-1", row_type: "purchase_order", docstatus: 1, supplier_name: "S", grand_total: 100, currency: "CNY", oa_references: [{ name: "OA-1", number: "审批-1" }], order_progress: { settled: null, item_fields: ["name", "item_code", "item_name", "warehouse", "qty", "uom", "rate", "amount", "received_qty"], items: [{ name: "POI-A", item_code: "SAME", item_name: "材料", warehouse: "W1", qty: 2, uom: "kg", rate: 3, amount: 6, received_qty: 0 }, { name: "POI-B", item_code: "SAME", warehouse: "W2", qty: 4, received_qty: null }] } };
+	const html = list.get_list_row_html(doc);
+	assert.equal((html.match(/list-row-checkbox/g) || []).length, 1);
+	assert.equal((html.match(/<tr /g) || []).length, 2);
+	for (const id of ["POI-A", "POI-B"]) assert.match(html, new RegExp(`data-item-name="${id}"`));
+	for (const field of ["name", "status", "supplier_name", "grand_total"]) assert.match(html, new RegExp(`data-fieldname="${field}"[^>]*rowspan="2"`));
+	assert.match(html, /W1/); assert.match(html, /W2/); assert.match(html, /钉钉/); assert.match(html, /审批-1/);
+	assert.match(html, /data-fieldname="received_qty"[^>]*>0<\/td>/);
+	assert.match(html, /data-fieldname="received_qty"[^>]*>—<\/td>/);
+	assert.doesNotMatch(html, /dlp-purchase-expand|dlp-purchase-expanded/);
+	assert.equal(doc.order_progress.items[0].rate, 3);
 });
 
-test("fresh expanded progress wins over an older page snapshot until the next unified payload", async () => {
-	const { controller: c, calls, payload, click, list } = mountedPurchase(), doc = { name: "PO-1", row_type: "purchase_order", modified: "v1", order_progress: { modified: "v1", settled: 0, order_unpaid: 100 } };
-	payload(doc); const opening = click(doc.name);
-	calls[0].resolve({ message: { "PO-1": { modified: "v1", settled: 25, order_unpaid: 75, items: [{ item_code: "I" }] } } }); await opening;
-	assert.equal(c.purchaseExpanded.get(doc.name).settled, 25);
-	assert.equal(c.providerRows[0].order_progress.settled, 25, "the current row must use the same authorized fresh progress as its expansion");
-	await click(doc.name); await click(doc.name); assert.equal(c.purchaseExpanded.get(doc.name).settled, 25);
-	list.last_args = null; payload({ ...doc, order_progress: { ...doc.order_progress, settled: 40, order_unpaid: 60 } });
-	assert.equal(c.purchaseExpanded.get(doc.name).settled, 40); assert.equal(c.purchaseExpanded.get(doc.name).items[0].item_code, "I");
-	assert.equal(calls.length, 1);
+test("purchase detail invalidation cancels earlier page data after a source write without changing PO.modified", () => {
+	const { controller: c, payload, list } = mountedPurchase();
+	const doc={name:'PO-1',row_type:'purchase_order',modified:'v1',order_progress:{item_fields:['name','item_name'],items:[{name:'I-1',item_name:'BEFORE WRITE'}]}};
+	payload(doc);list.last_args=null;const pending=dispatch(list);
+	c.invalidatePurchaseDetails(['PO-1']);assert.doesNotMatch(list.get_list_row_html(doc),/BEFORE WRITE/);
+	const response={message:{rows:[{...doc,order_progress:{item_fields:['name','item_name'],items:[{name:'I-1',item_name:'STALE WRITE'}]}}],total_count:1}};
+	pending.callback(response);list.prepare_data(response);
+	assert.doesNotMatch(list.get_list_row_html(c.providerRows[0]),/STALE WRITE/);
 });
 
-test("a pre-click delayed unified snapshot cannot roll back fresh detail while a later refresh can update the unchanged PO", async () => {
-	const { controller: c, calls, payload, click, list } = mountedPurchase();
-	const progress = settled => ({ modified: "v1", currency: "CNY", settled, order_unpaid: 100 - settled, external: { state: "exact", settled, order_unpaid: 100 - settled, currency: "CNY" } });
-	const doc = { name: "PO-1", row_type: "purchase_order", modified: "v1", order_progress: progress(0) };
-	payload(doc); list.last_args = null; const delayedPage = dispatch(list), opening = click(doc.name);
-	calls[0].resolve({ message: { "PO-1": { ...progress(25), items: [{ item_code: "I" }] } } }); await opening;
-	const older = { message: { rows: [{ ...doc, order_progress: progress(0) }], total_count: 1 } }; delayedPage.callback(older); list.prepare_data(older);
-	assert.equal(c.purchaseExpanded.get(doc.name).settled, 25, "a response dispatched before the click must not replace its detail");
-	assert.equal(c.purchaseDetailsCache.get(doc.name).settled, 25); assert.equal(c.providerRows[0].order_progress.external.settled, 25);
-	list.last_args = null; payload({ ...doc, order_progress: progress(40) });
-	assert.equal(c.purchaseExpanded.get(doc.name).settled, 40); assert.equal(c.purchaseDetailsCache.get(doc.name).settled, 40); assert.equal(c.providerRows[0].order_progress.external.settled, 40);
-	assert.equal(c.purchaseExpanded.get(doc.name).items[0].item_code, "I");
-	await click(doc.name); await click(doc.name); assert.equal(c.purchaseExpanded.get(doc.name).settled, 40); assert.equal(calls.length, 1);
+test("whole-order selection and same-page tabs clear state and constrain actions to existing single-order flows", async () => {
+	const { controller: c, list, env, handlers, payload } = mountedPurchase();
+	const checked = new Set(), calls = [];
+	c.originals.get_checked_items = names => [...checked].map(name => names ? name : { name });
+	list.clear_checked_items = () => { checked.clear(); list.$checks = []; };
+	env.DeepLinkERPPurchasePayments = { orderReceiptAction: () => 'dlp-order-pay dlp-order-receipt', pay: (...args) => calls.push(["pay", ...args]), documentDrawer: (...args) => calls.push(["receipt", ...args]) };
+	assert.equal(c.providerScope, "orders");
+	payload({ name: "PO-1", row_type: "purchase_order", modified: "v1", order_progress: { items: [{ name: "I1" }, { name: "I2" }] } });
+	const find=list.$result.find.bind(list.$result);
+	list.$result.find=selector=>selector==='.list-row-checkbox'?{prop(key,value){if(value)for(const doc of list.data)checked.add(doc.name);else checked.clear();return this;}}:find(selector);
+	assert.equal(typeof handlers.get('.list-check-all'), 'function');
+	handlers.get('.list-check-all')({currentTarget:{checked:true}});
+	assert.deepEqual([...checked], ['PO-1'], 'header select-all selects current-page orders once, regardless of item count');
+	handlers.get('.list-check-all')({currentTarget:{checked:false}});assert.equal(checked.size,0);
+	checked.add("PO-1"); checked.add("OA-UNRELATED"); list.on_row_checked();
+	assert.deepEqual(c.getSelectedPurchaseOrders(), [{ name: "PO-1", modified: "v1" }]);
+	await c.runPurchaseAction("receipt"); await c.runPurchaseAction("payment");
+	assert.deepEqual(calls, [["receipt", "Purchase Order", "PO-1", "Purchase Receipt"], ["pay", "Purchase Order", "PO-1"]]);
+	c.setPage(1); assert.equal(checked.size, 0);
+	checked.add("PO-1"); c.quick.company = "OTHER"; list.get_args(); assert.equal(checked.size, 0);
+	checked.add("PO-1"); const old = dispatch(list);
+	assert.equal(typeof handlers.get("[data-purchase-scope]"), "function");
+	handlers.get("[data-purchase-scope]")({ currentTarget: { dataset: { purchaseScope: "oa" } } });
+	assert.equal(c.providerScope, "oa"); assert.equal(checked.size, 0);
+	const response = { message: { rows: [{ name: "PO-OLD", row_type: "purchase_order" }], total_count: 1 } }; old.callback(response); list.prepare_data(response);
+	assert.deepEqual(c.providerRows, []);
+	payload({ name: "OA-1", row_type: "oa_request" });
+	assert.equal(c.getSelectedPurchaseOrders().length, 0); assert.doesNotMatch(list.get_header_html(), /list-check-all/);
+	c.setProviderScope("orders", false);
+	c.providerRows = list.data = [{ name: "PO-1", row_type: "purchase_order" }, { name: "PO-2", row_type: "purchase_order" }];
+	checked.add("PO-1"); checked.add("PO-2");
+	env.frappe.msgprint = options => calls.push(["notice", options.message]);
+	await c.runPurchaseAction("receipt"); assert.equal(calls.length, 3); assert.match(calls[2][1], /批量.*尚未接入/);
 });
 
-test("a same-generation restricted page cancels an opening and cannot restore earlier permitted items", async () => {
-	const { controller: c, calls, payload, click, list } = mountedPurchase(), doc = { name: "PO-1", row_type: "purchase_order", modified: "v1", order_progress: { modified: "v1", state: "exact" } };
-	payload(doc); list.last_args = null; const pendingPage = dispatch(list), opening = click(doc.name);
-	const restricted = { ...doc, order_progress: { modified: "v1", state: "restricted" } }, response = { message: { rows: [restricted], total_count: 1 } };
-	pendingPage.callback(response); list.prepare_data(response); const cancelled = !c.purchaseExpansionRequests.has(doc.name);
-	calls[0].resolve({ message: { "PO-1": { modified: "v1", state: "exact", item_fields: ["item_name"], items: [{ item_name: "PRE-RESTRICTION ITEM" }] } } }); await opening;
-	assert.equal(c.purchaseExpanded.has(doc.name), false); assert.equal(c.purchaseDetailsCache.has(doc.name), false); assert.equal(cancelled, true);
-	assert.doesNotMatch(list.get_list_row_html(restricted), /PRE-RESTRICTION ITEM/); assert.equal(c.providerRows[0].order_progress.state, "restricted");
-});
-
-test("explicit purchase detail invalidation clears written orders and rejects a pending response without a PO version change", async () => {
-	const { controller: c, calls, payload, click } = mountedPurchase(), doc = { name: "PO-1", row_type: "purchase_order", modified: "v1", order_progress: { modified: "v1" } };
-	payload(doc); const opening = click(doc.name);
-	c.purchaseDetailsCache.set("PO-OTHER", { _sourceVersion: "other" }); c.purchaseExpanded.set("PO-OTHER", { _sourceVersion: "other" });
-	assert.equal(typeof c.invalidatePurchaseDetails, "function"); c.invalidatePurchaseDetails([doc.name]);
-	assert.equal(c.purchaseExpansionRequests.has(doc.name), false); assert.equal(c.purchaseExpanded.has(doc.name), false); assert.equal(c.purchaseDetailsCache.has("PO-OTHER"), true);
-	calls[0].resolve({ message: { "PO-1": { modified: "v1", items: [{ item_name: "PRE-WRITE DETAIL" }] } } }); await opening;
-	assert.equal(c.purchaseDetailsCache.has(doc.name), false);
-	const fresh = click(doc.name); assert.equal(calls.length, 2); calls[1].resolve({ message: { "PO-1": { modified: "v1", items: [{ item_name: "AFTER WRITE" }] } } }); await fresh;
-	assert.equal(c.purchaseExpanded.get(doc.name).items[0].item_name, "AFTER WRITE");
-	c.invalidatePurchaseDetails(); assert.equal(c.purchaseExpanded.size, 0); assert.equal(c.purchaseDetailsCache.size, 0); assert.equal(c.purchaseExpansionRequests.size, 0);
-});
-
-test("expanded responses are discarded after a pending filter, changed route or cancelled opening", async () => {
-	for (const reason of ["filter", "route", "collapse"]) {
-		const { env, controller: c, calls, payload, click } = mountedPurchase(), doc = { name: "PO-1", row_type: "purchase_order", modified: "v1", order_progress: { modified: "v1" } };
-		payload(doc); calls.length = 0; const opening = click(doc.name);
-		if (reason === "filter") c.quick.beneficiary_company = "NEW";
-		if (reason === "route") env.frappe.get_route = () => ["Form", "Purchase Order", "PO-1"];
-		if (reason === "collapse") { const closing = click(doc.name); assert.equal(calls.length, 1, "collapse must not start a second read"); await closing; }
-		calls[0].resolve({ message: { "PO-1": { modified: "v1", items: [{ item_name: "STALE DETAIL" }] } } }); await opening;
-		assert.equal(c.purchaseExpanded.has(doc.name), false, reason);
-		assert.doesNotMatch(c.list.$result.value, /STALE DETAIL/, reason);
-	}
-});
-
-test("superseded opening and stale errors cannot overwrite the current expansion or notice", async () => {
-	const { controller: c, calls, payload, click } = mountedPurchase(), doc = { name: "PO-1", row_type: "purchase_order", modified: "v1", order_progress: { modified: "v1" } };
-	payload(doc); calls.length = 0; const old = click(doc.name); const closing = click(doc.name); assert.equal(calls.length, 1, "collapse must cancel the pending read"); await closing; const fresh = click(doc.name);
-	assert.equal(calls.length, 2);
-	calls[1].resolve({ message: { "PO-1": { modified: "v1", items: [{ item_name: "CURRENT DETAIL" }] } } }); await fresh;
-	calls[0].resolve({ message: { "PO-1": { modified: "v1", items: [{ item_name: "STALE DETAIL" }] } } }); await old;
-	assert.equal(c.purchaseExpanded.get(doc.name).items[0].item_name, "CURRENT DETAIL");
-	await click(doc.name); const failing = click(doc.name), notice = c.$purchaseNotice.value;
-	assert.equal(calls.length, 2, "same-version detail should still be cached"); await failing;
-	await click(doc.name); c.purchaseDetailsCache.clear(); const pending = click(doc.name);
-	c.quick.review_only = true; calls[2].reject(new Error("old failure")); await pending;
-	assert.equal(c.$purchaseNotice.value, notice);
-});
 
 test("main filters use native authorized company links, translated progress values and one reset", async () => {
 	const { controller: c, controls, list } = mountedPurchase();

@@ -3,8 +3,6 @@
 .dlp-procurement-tabs a,.dlp-procurement-tabs button { padding:6px 16px; border:0; border-radius:4px; background:var(--control-bg,#f3f3f3); color:var(--text-color); }
 .dlp-procurement-tabs .active { background:var(--blue-50,#eaf2ff); color:var(--blue-600,#1677ff); font-weight:600; }
 .dlp-procurement-tabs button:disabled,.dlp-finance-disabled { opacity:.5; cursor:not-allowed; }
-.dlp-purchase-expanded { min-width:0; }
-.dlp-purchase-expanded table { white-space:nowrap; min-width:740px; }
 body:is(.dlp-purchase-order-grid-active, .dlp-material-request-grid-active, .dlp-purchase-receipt-grid-active, .dlp-sales-order-grid-active, .dlp-purchase-payment-grid-active, .dlp-purchase-payable-grid-active, .dlp-operating-expense-grid-active) {
 	--dlp-po-border: #e1e8f0;
 	--dlp-po-header-bg: #f4f7fb;
@@ -522,24 +520,34 @@ body.dlp-purchase-order-grid-active-readonly .page-actions .primary-action {
 .dlp-provider-empty { padding: 32px 16px; }
 [data-dlp-oa-compatibility="true"] { display: none !important; }
 
-/* Seven purchase groups grow with their facts; the shared scalar lists keep their density. */
-body.dlp-purchase-order-grid-active .dlp-po-grid { --dlp-po-row-height: 60px; }
-body.dlp-purchase-order-grid-active .dlp-po-grid.dlp-po-standard { --dlp-po-row-height: 72px; }
-body.dlp-purchase-order-grid-active .dlp-po-grid-header { height: 32px; min-height: 32px; }
-body.dlp-purchase-order-grid-active .dlp-po-grid-header-columns { height: 32px; }
-body.dlp-purchase-order-grid-active .dlp-po-grid-row .dlp-po-grid-cell:has(.dlp-po-group) { align-items: flex-start; white-space: normal; overflow: visible; }
+/* The purchase table uses physical material rows; other compact lists stay grids. */
+body.dlp-purchase-order-grid-active .dlp-purchase-table { border-collapse: separate; border-spacing: 0; table-layout: fixed; width: max-content; min-width: 100%; font-size: inherit; }
+body.dlp-purchase-order-grid-active .dlp-purchase-table .dlp-po-grid-row,
+body.dlp-purchase-order-grid-active .dlp-purchase-table .dlp-po-grid-header { display: table-row; height: auto; background: inherit; }
+body.dlp-purchase-order-grid-active .dlp-purchase-table .dlp-purchase-order-body { display: table-row-group; background: var(--dlp-po-row-bg); }
+body.dlp-purchase-order-grid-active .dlp-purchase-table .dlp-purchase-order-body:nth-of-type(even) { background: var(--dlp-po-row-alt); }
+body.dlp-purchase-order-grid-active .dlp-purchase-table th,
+body.dlp-purchase-order-grid-active .dlp-purchase-table td { display: table-cell; height: var(--dlp-po-row-height); padding: var(--dlp-po-cell-padding); vertical-align: middle; white-space: nowrap; border-right: 1px solid var(--dlp-po-border); border-bottom: 1px solid var(--dlp-po-border); background: inherit; overflow: hidden; text-overflow: ellipsis; }
+body.dlp-purchase-order-grid-active .dlp-purchase-table th { position: sticky; top: 0; z-index: 5; height: 32px; background: var(--dlp-po-header-bg); font-weight: 600; }
+body.dlp-purchase-order-grid-active .dlp-purchase-table .dlp-purchase-frozen { position: sticky; left: var(--dlp-purchase-left); z-index: 2; background: inherit; }
+body.dlp-purchase-order-grid-active .dlp-purchase-table th.dlp-purchase-frozen { z-index: 6; background: var(--dlp-po-header-bg); }
+body.dlp-purchase-order-grid-active .dlp-purchase-table-wrap { background: var(--dlp-po-row-bg); padding: 0; }
+body.dlp-purchase-order-grid-active .frappe-list.dlp-po-grid .result-container .result > .list-row-container.dlp-purchase-table-wrap:first-child { position: static; top: auto; z-index: auto; }
+body.dlp-purchase-order-grid-active .dlp-purchase-table .dlp-purchase-order-body:hover { background: var(--dlp-po-hover); }
+body.dlp-purchase-order-grid-active .dlp-purchase-table :is([data-fieldname="qty"],[data-fieldname="rate"],[data-fieldname="amount"],[data-fieldname="received_qty"],[data-fieldname="grand_total"],[data-fieldname="order_settled"],[data-fieldname="order_unpaid"]) { text-align: right; font-variant-numeric: tabular-nums; }
+body.dlp-purchase-order-grid-active .dlp-purchase-table :is([data-fieldname="_select"],[data-fieldname="_sequence"]) { text-align: center; }
+body.dlp-purchase-order-grid-active .dlp-purchase-selection-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 0; }
+body.dlp-purchase-order-grid-active .dlp-po-provenance { display: block; color: var(--text-muted); font-size: 11px; line-height: 16px; }
+/* These optional columns still serve saved custom column sets. */
 body.dlp-purchase-order-grid-active .dlp-po-group { display: flex; flex-direction: column; gap: 1px; width: 100%; white-space: normal; line-height: 18px; overflow-wrap: anywhere; }
 body.dlp-purchase-order-grid-active .dlp-po-group-line { display: block; white-space: normal; }
 body.dlp-purchase-order-grid-active .dlp-po-group > a { display: block; white-space: normal; }
-body.dlp-purchase-order-grid-active .dlp-po-group > button[data-purchase-source] {
+body.dlp-purchase-order-grid-active .dlp-purchase-table button[data-purchase-source] {
 	display: block; max-width: 100%; min-width: 0; height: auto; padding: 0; line-height: inherit;
 	white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; flex-shrink: 0;
 }
-body.dlp-purchase-order-grid-active .dlp-po-row-actions { align-items: flex-start; gap: 4px; }
+body.dlp-purchase-order-grid-active .dlp-po-row-actions { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px; white-space: normal; }
 body.dlp-purchase-order-grid-active .dlp-po-row-actions .dlp-order-actions { display: flex; flex-wrap: wrap; gap: 4px; }
-body.dlp-purchase-order-grid-active .dlp-po-grid-row [data-fieldname="_sequence"] { padding: 4px 2px; gap: 1px; justify-content: flex-start; }
-body.dlp-purchase-order-grid-active .dlp-purchase-expand { flex: 0 0 12px; width: 12px; padding: 0; }
-body.dlp-purchase-order-grid-active .dlp-purchase-sequence { font-size: 11px; }
 body.dlp-purchase-order-grid-active .dlp-po-filters { padding: 6px 8px; gap: 8px; }
 body.dlp-purchase-order-grid-active .dlp-po-filter[data-fieldname="beneficiary_company"] { width: 150px; }
 body.dlp-purchase-order-grid-active .dlp-po-filter[data-fieldname="progress_phase"] { width: 145px; }
@@ -549,4 +557,6 @@ body.dlp-purchase-order-grid-active .dlp-po-source-advanced { display: flex; gap
 body.dlp-purchase-order-grid-active .dlp-po-source-advanced[open] { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 @media (max-width: 768px) {
 	body.dlp-purchase-order-grid-active .dlp-po-frozen { position: static; box-shadow: none; }
+	body.dlp-purchase-order-grid-active .dlp-purchase-table td.dlp-purchase-frozen { position: static; }
+	body.dlp-purchase-order-grid-active .dlp-purchase-table th.dlp-purchase-frozen { left: auto; }
 }
