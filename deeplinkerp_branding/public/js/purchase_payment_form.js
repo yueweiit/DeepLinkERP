@@ -15,7 +15,8 @@ if (!window.dlpPurchasePaymentFormInstalled) {
  const nativeSave = frappe.ui.form.save;
  frappe.ui.form.save = function(frm, action, callback, btn) {
   if (!supported.has(frm.doc.doctype) || window.cur_frm !== frm) return nativeSave.apply(this, arguments);
-  if (frm.dlpReversal && (frm.dlpReversal.stage !== 'completed' || frm.dlpReversal.refresh_failed)) {
+  if (frm.dlpReversalIdentity?.doctype === frm.doc.doctype && frm.dlpReversalIdentity?.name === frm.doc.name &&
+      frm.dlpReversal && (frm.dlpReversal.stage !== 'completed' || frm.dlpReversal.refresh_failed)) {
    frappe.msgprint('冲销未完成，相关操作暂缓办理。');
    return;
   }
@@ -30,8 +31,12 @@ if (!window.dlpPurchasePaymentFormInstalled) {
   dispatch = pending;
   try {
    return nativeSave.call(this, frm, action, response => {
+    const renamed = response?.docs?.some(doc => doc.doctype === pending.doctype &&
+     doc.localname === pending.name && doc.name === frm.doc.name);
+    if (window.cur_frm !== frm || frm.doc.doctype !== pending.doctype || (frm.doc.name !== pending.name && !renamed)) return;
     if (response?.purchase_reversal && response.purchase_reversal.stage !== 'completed') {
      frm.dlpReversal = response.purchase_reversal;
+     frm.dlpReversalIdentity = {doctype: frm.doc.doctype, name: frm.doc.name};
      frappe.show_alert?.({message:'取消已受理，库存重算尚未完成。',indicator:'orange'});
     }
     if (response && !response.exc && response.docs?.some(doc => doc.doctype === pending.doctype) && requests.get(frm) === pending) requests.delete(frm);

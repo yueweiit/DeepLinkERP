@@ -1025,7 +1025,7 @@ def _attach_reversal_progress(payload, selections=None):
 		row["reversal"] = None
 		if operation_id:
 			from . import purchase_reversal_progress as progress
-			_, context, output = progress._load(operation_id)
+			_, context, output = progress._load(operation_id, lock=False)
 			try:
 				row["reversal"] = progress.public(context, output)
 			except frappe.PermissionError:

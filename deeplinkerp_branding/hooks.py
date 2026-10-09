@@ -35,7 +35,7 @@ app_include_css = [
 ]
 app_include_js = [
 	"/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.22",
-	"/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.25",
+	"/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.26",
 	"/assets/deeplinkerp_branding/js/crossborder_procurement.js?v=0.0.5",
 	"/assets/deeplinkerp_branding/js/purchase_source.js?v=0.0.2",
     "/assets/deeplinkerp_branding/js/operating_payment_panel.js?v=0.0.8",
@@ -185,9 +185,8 @@ doc_events["Integration Request"] = {
 doc_events["Repost Item Valuation"] = {"on_submit": "deeplinkerp_branding.services.purchase_consistency.check_native_repost",
     "on_trash": "deeplinkerp_branding.services.purchase_native_repost.protect_task",
     "before_rename": "deeplinkerp_branding.services.purchase_native_repost.protect_task"}
-for _checkpoint_event in ("validate", "on_trash"):
-    doc_events["File"][_checkpoint_event] = [doc_events["File"][_checkpoint_event], "deeplinkerp_branding.services.purchase_native_repost.protect_checkpoint"]
 extend_doctype_class = {
+    "File": ["deeplinkerp_branding.services.purchase_native_repost.CheckpointFileBoundary"],
     **{doctype: ["deeplinkerp_branding.services.purchase_consistency.ProcurementControllerBoundary"]
        for doctype in ("Purchase Order", "Purchase Receipt", "Purchase Invoice", "Payment Entry")},
     "Integration Request": ["deeplinkerp_branding.services.purchase_operation.ProcurementAuditRetention"],

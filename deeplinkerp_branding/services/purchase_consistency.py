@@ -717,7 +717,7 @@ def check_payment_ledgers(doc):
             acknowledge_effect(order)
 
 
-def check_billing(doc):
+def check_billing(doc, *, context=None):
     """Read native source rows and status calculators, without posting or repairing."""
     from erpnext.stock.doctype.purchase_receipt.purchase_receipt import (
         get_billed_amount_against_po, get_billed_amount_against_pr,
@@ -727,7 +727,8 @@ def check_billing(doc):
     if doc.doctype == "Purchase Receipt":
         receipts.add(doc.name)
     state = _state()
-    context = operation.current() or (state["context"] if state else {})
+    if context is None:
+        context = operation.current() or (state["context"] if state else {})
     preserved = context.get("billing_preserved", {})
     def unchanged(source):
         previous = preserved.get(source.doctype + ":" + source.name)

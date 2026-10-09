@@ -44,17 +44,23 @@
   return true;
  }
  async function reversalForm(frm){
-  if(frm.is_new())return;
   const identity={doctype:frm.doctype,name:frm.doc.name},generation=frm.dlpReversalGeneration=(frm.dlpReversalGeneration || 0)+1;
+  root.clearTimeout?.(frm.dlpReversalTimer);frm.dlpReversalTimer=null;
+  const previous=frm.dlpReversalIdentity;
+  if(frm.is_new() || previous?.doctype!==identity.doctype || previous?.name!==identity.name){
+   frm.dlpReversal=null;frm.$wrapper.find('.dlp-reversal-status').remove();
+  }
+  frm.dlpReversalIdentity=identity;
+  if(frm.is_new())return;
   const value=await refreshReversal(identity);
-  if(frm.doc.name!==identity.name || frm.dlpReversalGeneration!==generation)return;
+  if(frm.doctype!==identity.doctype || frm.doc.name!==identity.name || frm.dlpReversalGeneration!==generation)return;
   frm.dlpReversal=value;
   frm.$wrapper.find('.dlp-reversal-status').remove();
   if(value){
    const box=$(`<section class="dlp-reversal-status">${reversalHTML(value)}${reversalBlocked(value)?'<p>冲销未完成，相关库存与采购后续操作暂缓办理。</p>':''}${value.can_retry && !value.refresh_failed?'<button type="button" class="btn btn-default btn-sm dlp-reversal-retry">继续处理</button>':''}</section>`).prependTo(frm.layout.wrapper);
    box.find('.dlp-reversal-retry').on('click.dlpReversal',async()=>{await call('retry',identity,'deeplinkerp_branding.services.purchase_reversal_progress.');await frm.reload_doc();});
   }
-  if(reversalBlocked(value) && root.setTimeout)root.setTimeout(()=>{if(root.cur_frm===frm && frm.doc.name===identity.name && frm.dlpReversalGeneration===generation)formRefresh(frm);},5000);
+  if(reversalBlocked(value) && root.setTimeout)frm.dlpReversalTimer=root.setTimeout(()=>{if(root.cur_frm===frm && frm.doctype===identity.doctype && frm.doc.name===identity.name && frm.dlpReversalGeneration===generation)formRefresh(frm);},5000);
   return value;
  }
 

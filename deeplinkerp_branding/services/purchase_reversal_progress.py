@@ -66,10 +66,11 @@ def guard_audit(doc, proposed=None):
             frappe.throw("采购操作审计不能由普通操作创建或改写", frappe.PermissionError)
 
 
-def _load(name):
+def _load(name, *, lock=True):
+    """Workflow execution locks current IR; UI projections use a plain read."""
     rows = frappe.db.get_values("Integration Request", {"name": name},
         ["name", "status", "integration_request_service", "data", "output", "reference_doctype", "reference_docname"],
-        as_dict=True, for_update=True)
+        as_dict=True, for_update=lock)
     if len(rows) != 1 or rows[0].integration_request_service != operation.SERVICE:
         _reject()
     row = rows[0]
@@ -239,7 +240,7 @@ def public(context, progress):
 def get_progress(doctype, name):
     if doctype not in boundary.PENDING_TYPES:
         _reject("purchase_reversal_source_invalid")
-    source = frappe.get_doc(doctype, name, for_update=True)
+    source = frappe.get_doc(doctype, name, for_update=False)
     _permission(source, "read")
     operation_id = source.get(boundary.POINTER)
     if not operation_id:
@@ -249,7 +250,7 @@ def get_progress(doctype, name):
         if not rows or not json.loads(rows[0].output or "{}").get("generation"):
             return None
         operation_id = rows[0].name
-    row, context, progress = _load(operation_id)
+    row, context, progress = _load(operation_id, lock=False)
     if context["reversal"]["source"] != {"doctype": doctype, "name": name} and [doctype, name] not in context["reversal"]["pointers"]:
         _reject()
     return public(context, progress)
@@ -266,7 +267,7 @@ def projection(doc):
 
 
 def replay(row):
-    _, context, progress = _load(row.name)
+    _, context, progress = _load(row.name, lock=True)
     source = frappe.get_doc(context["reversal"]["source"]["doctype"], context["reversal"]["source"]["name"])
     _permission(source, "read")
     _permission(source, "cancel")
@@ -287,7 +288,7 @@ def readonly_verify(context, progress):
     # and review invalidation deliberately remain acceptance-only operations.
     consistency.check_stock(source)
     consistency.check_order_received(source)
-    consistency.check_billing(source)
+    consistency.check_billing(source, context=context)
     consistency.check_cancelled_ledgers(source, context=context)
     consistency.verify_cancellation(source, context["gl_before"][source.doctype + ":" + source.name])
     from .purchase_native_repost import verify_stock_chain, verify_gl_coverage
@@ -342,7 +343,7 @@ def retry(doctype, name):
     if not operation_id:
         _reject("purchase_reversal_not_pending")
     with boundary.acquire((boundary.fence_key(),)):
-        row, context, progress = _load(operation_id)
+        row, context, progress = _load(operation_id, lock=True)
         with boundary.acquire(keys(context["reversal"])):
             root = context["reversal"]["source"]
             if root != {"doctype": doctype, "name": name} and [doctype, name] not in context["reversal"]["pointers"]:

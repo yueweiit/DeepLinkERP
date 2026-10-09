@@ -71,3 +71,25 @@ test("same endpoint names at an external origin never receive a procurement key 
  h.root.frappe.ui.form.save(frm, "Save", () => {});
  assert.ok(args(h.calls.at(-1)).request_id);
 });
+
+test("pending form state and late save responses belong only to their document identity", () => {
+ const h = host(), frm = form("PR-OLD", "Purchase Receipt"); h.root.cur_frm = frm;
+ h.root.frappe.msgprint = () => {};
+ frm.dlpReversal = {stage:"waiting_inventory"};
+ frm.dlpReversalIdentity = {doctype:"Purchase Receipt",name:"PR-OLD"};
+ h.root.frappe.ui.form.save(frm, "cancel", () => {});
+ assert.equal(h.calls.length, 0, "current cancelled form remains blocked");
+ frm.doc.name = "new-purchase-receipt-b";
+ h.root.frappe.ui.form.save(frm, "Save", () => {});
+ assert.equal(h.calls.length, 1, "old pending document cannot block a new draft");
+ const oldReply = frm.reply;
+ frm.doc.name = "new-purchase-receipt-c";
+ oldReply({purchase_reversal:{operation_id:"IR-OLD",stage:"waiting_inventory"},docs:[{doctype:"Purchase Receipt",name:"PR-OLD"}]});
+ assert.equal(frm.dlpReversal?.operation_id, undefined, "old acceptance response cannot taint a different draft");
+ let callbacks=0;
+ h.root.frappe.ui.form.save(frm, "Save", () => {callbacks++;});
+ const currentReply=frm.reply;
+ frm.doc.name="PR-NEW";frm.doc.__islocal=0;
+ currentReply({docs:[{doctype:"Purchase Receipt",name:"PR-NEW",localname:"new-purchase-receipt-c"}]});
+ assert.equal(callbacks,1,"native confirmed localname mapping remains the current document");
+});

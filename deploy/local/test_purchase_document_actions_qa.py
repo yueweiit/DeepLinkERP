@@ -5045,11 +5045,13 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         frappe.db.rollback()
         frappe.clear_document_cache("Buying Settings", "Buying Settings")
 
-    def future_receipts(self):
+    def future_receipts(self, *, future_rate=None):
         po = self.order(transaction_date=add_days(nowdate(), -3))
+        future_po = self.order(transaction_date=add_days(nowdate(), -3), items=[{"item_code": self.item,
+            "qty": 10, "rate": future_rate, "warehouse": "Stores - QAB", "schedule_date": nowdate()}]) if future_rate is not None else po
         receipts = []
         for days in (-2, -1):
-            pr = make_purchase_receipt(po.name)
+            pr = make_purchase_receipt((future_po if days == -1 else po).name)
             pr.items[0].qty = 2
             pr.set_posting_time = 1
             pr.posting_date, pr.posting_time = add_days(nowdate(), days), "12:00:00"
@@ -5442,12 +5444,23 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         from erpnext.stock.doctype.repost_item_valuation import repost_item_valuation as native
         from erpnext.stock import stock_ledger as stock
         from deeplinkerp_branding.services import purchase_reversal_progress as progress
-        po, prior, future = self.future_receipts()
+        po, prior, future = self.future_receipts(future_rate=2000)
+        self.scope_stock_entry("Material Transfer", nowdate(), [{"item_code": self.item, "qty": 1,
+            "s_warehouse": "Stores - QAB", "t_warehouse": "Finished Goods - QAB"}])
+        self.commit_fixture()
         operation_id, key, payload, roots = self.accept_reversal(prior)
         original = stock.update_args_in_repost_item_valuation
         def after_checkpoint(*args, **kwargs):
             original(*args, **kwargs)
             if args[1] == 1:
+                # Native checkpoint creation may leave duplicate File rows.
+                # Remove only this actual owner's redundant aliases, while
+                # its real worker context is still active; keep one live file.
+                files = frappe.get_all("File", filters={"attached_to_doctype": "Repost Item Valuation",
+                    "attached_to_name": roots[0], "attached_to_field": "reposting_data_file"}, pluck="name", order_by="creation asc")
+                for name in files[:-1]:
+                    frappe.get_doc("File", name).delete(ignore_permissions=True)
+                frappe.db.commit()
                 raise RuntimeError("QA actual checkpoint committed")
         try:
             with patch.object(stock, "update_args_in_repost_item_valuation", side_effect=after_checkpoint):
@@ -5461,9 +5474,43 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
             self.assertTrue(any(row["current_index"] == 1 and row["checkpoint"] for row in receipts))
             with self.assertRaises(frappe.ValidationError):
                 native.remove_attached_file(roots[0])
-            file = frappe.get_doc("File", next(iter(json.loads(audit.output)["tasks"][roots[0]]["files"])))
+            file = frappe.get_doc("File", next(name for name in json.loads(audit.output)["tasks"][roots[0]]["files"]
+                if frappe.db.exists("File", name)))
+            from pathlib import Path
+            path, old = Path(file.get_full_path()), file.as_dict()
+            content = path.read_bytes()
+            self.assertEqual(frappe.db.count("File", {"content_hash": file.content_hash}), 1, "real checkpoint must have unique physical bytes")
+            from deeplinkerp_branding.services.purchase_native_repost import CheckpointFileBoundary
+            self.assertIsInstance(file, CheckpointFileBoundary, "load current source hooks before native File lifecycle")
+            try:
+                with self.assertRaises(frappe.ValidationError):
+                    file.delete(ignore_permissions=True)
+                self.assertTrue(path.exists(), "guard must run before native physical deletion")
+            finally:
+                if not path.exists():
+                    # Keep a meaningful physical-delete RED from stranding
+                    # this precisely captured fixture. Native File writes its
+                    # original bytes only; unknown files are never restored.
+                    self.assertEqual(file.attached_to_name, roots[0])
+                    self.assertEqual(hashlib.md5(content).hexdigest(), old["content_hash"])
+                    file._content = content
+                    file.write_file()
+                    frappe.db.commit()
+            self.assertEqual(path.read_bytes(), content)
+            for changes in ({"attached_to_doctype": None, "attached_to_name": None, "attached_to_field": None},
+                    {"attached_to_name": future.name}, {"file_url": "/private/files/QA-ATOMIC-replacement.json.gz"}, {"is_private": 0}):
+                proposed = frappe.get_doc(old)
+                proposed.update(changes)
+                with self.subTest(changes=changes), self.assertRaises(frappe.ValidationError):
+                    proposed.save(ignore_permissions=True)
+                self.assertEqual(frappe.get_doc("File", file.name).as_dict(), old)
+                self.assertEqual(path.read_bytes(), content)
             with self.assertRaises(frappe.ValidationError):
-                file.delete(ignore_permissions=True)
+                frappe.get_doc({"doctype": "File", "file_url": file.file_url, "is_private": 1}).insert(ignore_permissions=True)
+            print("ASYNC_CHECKPOINT_FILE_GUARD=" + json.dumps({"row": old, "task": roots[0], "source": prior.name,
+                "item": self.item, "bytes": len(content), "sha256_before": hashlib.sha256(content).hexdigest(),
+                "sha256_after": hashlib.sha256(path.read_bytes()).hexdigest(), "row_unchanged": frappe.get_doc("File", file.name).as_dict() == old,
+                "physical_exists": path.exists(), "checkpoint": json.loads(gzip.decompress(content))}, default=str), flush=True)
             frappe.db.rollback()
             self.assertEqual(progress.get_progress(prior.doctype, prior.name)["stage"], "failed")
             progress.retry(prior.doctype, prior.name)
@@ -5473,6 +5520,55 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
             self.assertEqual(audit.status, "Completed", audit.output)
             self.assertTrue(json.loads(audit.output)["files_cleaned"])
             self.assertFalse(frappe.db.exists("File", {"attached_to_doctype": "Repost Item Valuation", "attached_to_name": roots[0], "attached_to_field": "reposting_data_file"}))
+        finally:
+            self.remember_new_names()
+
+    def test_reversal_native_no_billing_update_stock_return_preserves_durable_context(self):
+        from erpnext.buying.doctype.purchase_order.purchase_order import make_purchase_invoice as from_order
+        from erpnext.controllers.sales_and_purchase_return import make_return_doc
+        from erpnext.stock.doctype.repost_item_valuation import repost_item_valuation as native
+        from deeplinkerp_branding.services import purchase_reversal_progress as progress
+        po = self.order(transaction_date=add_days(nowdate(), -5))
+        first = from_order(po.name)
+        first.update_stock = 1
+        first.set_posting_time = 1
+        first.posting_date, first.posting_time = add_days(nowdate(), -4), "12:00:00"
+        first.items[0].qty, first.items[0].warehouse = 2, "Stores - QAB"
+        first.insert().submit()
+        returns = []
+        for days in (-3, -2):
+            returned = make_return_doc("Purchase Invoice", first.name)
+            returned.set_posting_time = 1
+            returned.posting_date, returned.posting_time = add_days(nowdate(), days), "12:00:00"
+            returned.items[0].qty = -1
+            returned.items[0].received_qty = -1
+            returned.update_billed_amount_in_purchase_order = 0
+            returned.update_billed_amount_in_purchase_receipt = 0
+            returned.insert().submit()
+            returns.append(returned)
+        self.scope_stock_entry("Material Receipt", add_days(nowdate(), -1), [{"item_code": self.item,
+            "qty": 2, "t_warehouse": "Stores - QAB", "basic_rate": 1000}])
+        self.commit_fixture()
+        operation_id, key, payload, roots = self.accept_reversal(returns[-1])
+        before = frappe.db.get_value("Purchase Order Item", po.items[0].name, "billed_amt")
+        original = progress.readonly_verify
+        def readonly(context, output):
+            sql = frappe.db.sql
+            def observe(query, *args, **kwargs):
+                self.assertNotIn(str(query).lstrip().split()[0].upper(), {"INSERT", "UPDATE", "DELETE", "REPLACE", "ALTER"})
+                return sql(query, *args, **kwargs)
+            with patch.object(frappe.db, "sql", side_effect=observe):
+                return original(context, output)
+        try:
+            with patch.object(progress, "readonly_verify", side_effect=readonly):
+                for root in roots:
+                    native.execute_reposting_entry(root)
+            self.assertEqual(frappe.db.get_value("Integration Request", operation_id, "status"), "Completed")
+            self.assertEqual(frappe.db.get_value("Purchase Order Item", po.items[0].name, "billed_amt"), before)
+            self.assertEqual(before, first.items[0].amount)
+            print("ASYNC_RETURN_BILLING_PROOF=" + json.dumps({"source": returns[-1].name, "other_submitted_return": returns[0].name,
+                "order": po.name, "billed_before": before, "billed_after": frappe.db.get_value("Purchase Order Item", po.items[0].name, "billed_amt"),
+                "status": "Completed", "readonly_final": True}), flush=True)
         finally:
             self.remember_new_names()
 
@@ -5784,8 +5880,51 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
                 progress._executing.reset(token)
                 frappe.local.db = primary
                 frappe.local.purchase_session = primary_session
+        from threading import Event, Thread
+        reader_done, reader_results, reader_errors, reader_queries = Event(), [], [], []
+        reader_thread = None
+        verify = progress.readonly_verify
+        def verify_with_reader(context, output):
+            # finalize has already written/locked IR in the actual native tx.
+            # The independent UI reader must finish before that tx can commit.
+            def read_progress():
+                frappe.init(site=SITE, sites_path="/home/frappe/frappe-bench/sites")
+                frappe.local.db, frappe.local.purchase_session = peer, peer_session
+                frappe.set_user("Administrator")
+                sql = peer.sql
+                def observe(query, *args, **kwargs):
+                    reader_queries.append(str(query))
+                    return sql(query, *args, **kwargs)
+                try:
+                    peer.rollback()
+                    peer.sql("SET SESSION innodb_lock_wait_timeout=1")
+                    from deeplinkerp_branding.services import inventory_detail_service as inventory
+                    with patch.object(peer, "sql", side_effect=observe):
+                        reader_results.append(progress.get_progress(prior.doctype, prior.name))
+                        reader_results.append(progress.projection(frappe.get_doc(prior.doctype, prior.name)))
+                        reader_results.append(inventory._attach_reversal_progress({"company": COMPANY,
+                            "groups": [{"item_code": self.item, "warehouse": "Stores - QAB"}]} )["groups"][0]["reversal"])
+                except Exception as error:
+                    reader_errors.append(type(error).__name__)
+                finally:
+                    peer.rollback()
+                    peer.sql("SET SESSION innodb_lock_wait_timeout=50")
+                    reader_done.set()
+            nonlocal reader_thread
+            reader_thread = Thread(target=read_progress)
+            reader_thread.start()
+            self.assertTrue(reader_done.wait(2), "progress polling waited for the final writer's locked IR/source")
+            self.assertFalse(reader_errors, str(reader_errors))
+            self.assertEqual(len(reader_results), 3)
+            self.assertTrue(all(value["operation_id"] == operation_id and value["stage"] != "failed" for value in reader_results))
+            self.assertFalse(any("FOR UPDATE" in query.upper() for query in reader_queries), "all UI source/IR projection reads must remain nonlocking")
+            print("ASYNC_READER_FINAL_PROOF=" + json.dumps({"writer_stage": output["stage"], "connection_id": peer_id,
+                "reader_stages": [value["stage"] for value in reader_results], "reader_errors": reader_errors,
+                "read_queries": len(reader_queries), "locking_read_queries": 0}), flush=True)
+            return verify(context, output)
         try:
-            with patch.object(stock, "update_args_in_repost_item_valuation", side_effect=contender):
+            with patch.object(stock, "update_args_in_repost_item_valuation", side_effect=contender), \
+                    patch.object(progress, "readonly_verify", side_effect=verify_with_reader):
                 native.execute_reposting_entry(roots[0])
             self.assertTrue(observed, str(callback_errors))
             self.assertEqual(frappe.db.get_value("Integration Request", operation_id, "status"), "Completed")
@@ -5796,6 +5935,9 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
                 native.repost(preloaded)
             self.assertEqual(progress.get_progress(prior.doctype, prior.name)["stage"], "completed")
         finally:
+            if reader_thread is not None:
+                reader_thread.join(5)
+                self.assertFalse(reader_thread.is_alive())
             peer.rollback()
             frappe.local.db = primary
             frappe.local.purchase_session = primary_session

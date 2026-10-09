@@ -130,13 +130,39 @@ def protect_task(doc, method=None):
 
 
 def protect_checkpoint(doc, method=None):
-    if doc.attached_to_doctype != "Repost Item Valuation" or doc.attached_to_field != "reposting_data_file":
+    fields = ["attached_to_doctype", "attached_to_name", "attached_to_field", "file_url"]
+    old = frappe.db.get_value("File", doc.name, fields, as_dict=True) if doc.name else None
+    references = [doc, old] if old else [doc]
+    # The native adapter always creates a new immutable checkpoint file. Its
+    # own old/new associations may safely deduplicate identical bytes or drop
+    # its own alias; native File preserves other rows' shared physical data.
+    if progress.owner() and all(row.get("attached_to_doctype") == "Repost Item Valuation" and
+            row.get("attached_to_field") == "reposting_data_file" and progress.allows(frappe.db.get_value(
+                "Repost Item Valuation", row.get("attached_to_name"), boundary.POINTER)) for row in references):
         return
-    operation_id = frappe.db.get_value("Repost Item Valuation", doc.attached_to_name, boundary.POINTER)
-    if operation_id and not progress.allows(operation_id):
-        _, _, output = progress._load(operation_id)
-        if method != "on_trash" or output["stage"] != "completed":
-            progress._reject("purchase_reversal_evidence_pending")
+    urls = {row.get("file_url") for row in references if row.get("file_url")}
+    if urls:
+        references += frappe.db.get_values("File", {"file_url": ["in", sorted(urls)],
+            "attached_to_doctype": "Repost Item Valuation", "attached_to_field": "reposting_data_file"}, fields, as_dict=True)
+    tasks = {row.get("attached_to_name") for row in references if row.get("attached_to_doctype") == "Repost Item Valuation"
+        and row.get("attached_to_field") == "reposting_data_file" and row.get("attached_to_name")}
+    for name in sorted(tasks):
+        operation_id = frappe.db.get_value("Repost Item Valuation", name, boundary.POINTER)
+        if operation_id and not progress.allows(operation_id):
+            _, _, output = progress._load(operation_id, lock=False)
+            if method != "on_trash" or output["stage"] != "completed":
+                progress._reject("purchase_reversal_evidence_pending")
+
+
+class CheckpointFileBoundary:
+    """Guard before native File moves/deletes bytes, not its post-native hook."""
+    def validate(self):
+        protect_checkpoint(self, "validate")
+        return super().validate()
+
+    def on_trash(self):
+        protect_checkpoint(self, "on_trash")
+        return super().on_trash()
 
 
 def _task_fields(doc):
@@ -252,7 +278,7 @@ class Receipt:
 
     def prepare(self, identity):
         owner = self.owner
-        _, current, durable = progress._load(owner["operation_id"])
+        _, current, durable = progress._load(owner["operation_id"], lock=True)
         if current["reversal"]["generation"] != owner["context"]["reversal"]["generation"]:
             progress._reject("purchase_reversal_generation_changed")
         native = frappe.get_doc("Repost Item Valuation", owner["task"].name, for_update=True)
@@ -333,12 +359,12 @@ def repost(doc):
         operation_id = frappe.db.get_value("Repost Item Valuation", doc.name, boundary.POINTER, for_update=True)
         if not operation_id:
             return _unowned(doc, native)
-        _, context, output = progress._load(operation_id)
+        _, context, output = progress._load(operation_id, lock=True)
         manifest = context["reversal"]
         with boundary.acquire(progress.keys(manifest)):
             task = frappe.get_doc("Repost Item Valuation", doc.name, for_update=True)
             # The preloaded native doc cannot authorize a write after waiting.
-            _, context, output = progress._load(operation_id)
+            _, context, output = progress._load(operation_id, lock=True)
             if output["stage"] == "completed":
                 return
             identities = {root["name"]: root for root in manifest["roots"]}
@@ -373,7 +399,7 @@ def repost(doc):
                     raise  # exact durable receipt is evidence, never a reconnect license
                 frappe.db.rollback()
                 if not state.poisoned:
-                    _, context, output = progress._load(operation_id)
+                    _, context, output = progress._load(operation_id, lock=True)
                     owner.update(context=context, progress=output)
                     output.update(stage="failed", safe_reason=operation.error_identifier(error))
                     progress._write(context, output)
@@ -439,7 +465,7 @@ def remove_file(docname):
         return  # unfinished evidence is retained; final summary survives cleanup
     operation_id = frappe.db.get_value("Repost Item Valuation", docname, boundary.POINTER)
     if operation_id:
-        _, _, output = progress._load(operation_id)
+        _, _, output = progress._load(operation_id, lock=True)
         if output["stage"] != "completed":
             progress._reject("purchase_reversal_evidence_pending")
     return riv._dlp_reversal_original_remove_attached_file(docname)
@@ -533,7 +559,7 @@ def verify_gl_coverage(context, output):
 
 def reconcile(operation_id):
     with boundary.execution(), boundary.acquire((boundary.fence_key(),)):
-        _, context, output = progress._load(operation_id)
+        _, context, output = progress._load(operation_id, lock=True)
         if output["stage"] == "failed":
             return  # failure holds until current native handling authority retries
         with boundary.acquire(progress.keys(context["reversal"])):
@@ -545,7 +571,7 @@ def reconcile(operation_id):
                 cleanup_files(context, output)
             except Exception as error:
                 frappe.db.rollback()
-                _, context, output = progress._load(operation_id)
+                _, context, output = progress._load(operation_id, lock=True)
                 output.update(stage="failed", safe_reason=operation.error_identifier(error))
                 progress._write(context, output)
                 operation.runtime_log(context, "reversal_failed", error)

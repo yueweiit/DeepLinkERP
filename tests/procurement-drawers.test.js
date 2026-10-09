@@ -183,6 +183,19 @@ test('reversal poll failure retains last trusted pending state and blocks depend
  for(const stage of ['recalculating','verifying','failed'])assert.doesNotMatch(api.orderReceiptAction({...doc,reversal:{stage}}),/dlp-order-pay|dlp-order-receipt/);
  assert.match(api.orderReceiptAction({...doc,reversal:{stage:'completed'}}),/dlp-order-receipt/);
 });
+test('same-doctype new form clears pending status, timer and late progress loads',async()=>{
+ let resolve,host,removed=0,next=0;const timers=new Map(),box={find:()=>({on(){}}),prependTo(){return box;}};
+ const api=payments(()=>new Promise(done=>resolve=done),{$:()=>box,
+  setTimeout:fn=>{timers.set(++next,fn);return next;},clearTimeout:id=>timers.delete(id)},value=>{host=value;});
+ const frm={doctype:'Purchase Invoice',doc:{doctype:'Purchase Invoice',name:'PI-OLD'},is_new:()=>Boolean(frm.doc.__islocal),
+  $wrapper:{find:()=>({remove(){removed++;}})},layout:{wrapper:{}}};host.cur_frm=frm;
+ const pending=api.formRefresh(frm);resolve({message:{operation_id:'IR-OLD',stage:'waiting_inventory'}});await pending;
+ assert.equal(timers.size,1);
+ const stale=api.formRefresh(frm);
+ frm.doc={doctype:'Purchase Invoice',name:'new-purchase-invoice-a',__islocal:1};await api.formRefresh(frm);
+ resolve({message:{operation_id:'IR-OLD',stage:'failed'}});await stale;
+ assert.equal(frm.dlpReversal,null);assert.equal(timers.size,0);assert.equal(removed>=2,true);
+});
 test('owned drawer controls release native datepicker and their handlers once',()=>{
  let destroyed=0,unbound=0;const cleanup=functionFrom('disposeControls');const controls=[{datepicker:{destroy:()=>destroyed++},$input:{off:()=>unbound++}}];
  cleanup(controls);cleanup(controls);assert.equal(destroyed,1);assert.equal(unbound,1);assert.equal(controls.length,0);
