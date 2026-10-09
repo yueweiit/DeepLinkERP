@@ -10,7 +10,8 @@ from zoneinfo import ZoneInfo
 from . import operating_oa_source as oa
 from .operating_expense_contract import digest
 
-PROCESS_CODES = ("PROC-BFDF6F09-4551-43B3-8C55-537AA74A241B", "PROC-6E11B527-2F82-439C-817D-C868DE086C97")
+PROCESS_CODES = ("PROC-BFDF6F09-4551-43B3-8C55-537AA74A241B", "PROC-6E11B527-2F82-439C-817D-C868DE086C97",
+                 "PROC-E69FCD3E-E374-4C54-9D8F-6E1F55AD741F")
 EXECUTION_REGIONS = frozenset({"中国", "中国china", "中国 china", "china", "墨西哥", "墨西哥mexico",
                               "墨西哥méxico", "墨西哥 mexico", "墨西哥 méxico", "mexico", "méxico"})
 ALIASES = {

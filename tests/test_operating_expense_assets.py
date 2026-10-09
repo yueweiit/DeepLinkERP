@@ -34,7 +34,7 @@ class OperatingExpenseAssetsTest(unittest.TestCase):
 		self.assertIn(provider, files)
 		self.assertLess(files.index(shell), files.index(drawer))
 		self.assertLess(files.index(drawer), files.index(provider))
-		self.assertIn(drawer + "?v=0.0.14", hooks.app_include_js)
+		self.assertIn(drawer + "?v=0.0.16", hooks.app_include_js)
 		panel = "/assets/deeplinkerp_branding/js/operating_payment_panel.js"
 		self.assertEqual(files.count(panel), 1)
 		self.assertLess(files.index(panel), files.index(drawer))
@@ -59,6 +59,20 @@ class OperatingExpenseAssetsTest(unittest.TestCase):
 	def test_new_business_labels_have_spanish_translations(self):
 		translations = (ROOT / "deeplinkerp_branding/translations/es.csv").read_text()
 		for label in (
+			"待办理",
+			"钉钉申请单号",
+			"应付款公司",
+			"账户性质",
+			"应付金额",
+			"已支付金额",
+			"待付款金额",
+			"货币类型",
+			"项目归属",
+			"需求付款日期",
+			"本页不提供批量付款",
+			"来源字段冲突，待核对",
+			"异常付款",
+			"未计入正常余额",
 			"审批已结束",
 			"审批已终止",
 			"付款明细",
@@ -86,3 +100,23 @@ class OperatingExpenseAssetsTest(unittest.TestCase):
 			"本笔结算已记账、已取消或存在问题，只能查看。",
 		):
 			self.assertIn(label + ",", translations)
+
+	def test_operating_navigation_keeps_normal_width_and_its_own_visible_scrollbar(self):
+		shared = (ROOT / "deeplinkerp_branding/public/css/purchase_order_list.css").read_text()
+		narrow = shared.split("@media (min-width: 768px)", 1)[1].split("@media (max-width:", 1)[0]
+		self.assertNotIn(".dlp-operating-expense-grid-active", narrow)
+		specific = (ROOT / "deeplinkerp_branding/public/css/operating_expenses.css").read_text()
+		self.assertIn(".body-sidebar-top", specific)
+		self.assertIn(".body-sidebar-top:not(#page-form-builder *)", specific)
+		self.assertIn("overflow-y: scroll", specific)
+		self.assertIn("scrollbar-gutter: stable", specific)
+		self.assertIn("::-webkit-scrollbar-thumb", specific)
+		self.assertIn("width: 12px", specific)
+
+	def test_shared_desktop_nonmodal_drawer_style_is_opt_in_and_keeps_mobile_overlay(self):
+		shared = (ROOT / "deeplinkerp_branding/public/css/purchase_payments.css").read_text()
+		self.assertIn("@media (min-width: 768px)", shared)
+		self.assertIn(".dlp-payment-overlay.dlp-drawer-desktop-nonmodal", shared)
+		self.assertIn("pointer-events: none", shared)
+		self.assertIn("pointer-events: auto", shared)
+		self.assertIn("var(--sidebar-width, 240px)", shared)

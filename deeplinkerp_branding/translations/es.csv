@@ -303,6 +303,25 @@ Excel 共享文本索引不符合预期。,El índice de texto compartido de Exc
 金额不完整，需复核,Importes incompletos; requiere revisión
 申请编号 / 摘要 / 收款人,Solicitud / descripción / beneficiario
 来源付款状态,Estado de pago en origen
+待办理,Pendiente de gestión
+钉钉申请单号,Número de solicitud de DingTalk
+应付款公司,Unidad solicitante
+账户性质,Tipo de cuenta
+应付金额,Importe solicitado
+已支付金额,Importe pagado
+待付款金额,Saldo pendiente de pago
+货币类型,Moneda
+项目归属,Proyecto asignado
+需求付款日期,Fecha solicitada de pago
+本页不提供批量付款,Esta página no permite registrar pagos en lote
+来源字段冲突，待核对,Conflicto en los datos de origen; requiere revisión
+历史付款待核对,Historial de pagos pendiente de revisión
+法律公司待确认,Entidad legal pendiente de confirmación
+法律公司归属待复核,Asignación de entidad legal pendiente de revisión
+付款金额异常，待核对,Importes de pago anómalos; requiere revisión
+审批证据待核对,Evidencia de aprobación pendiente de revisión
+异常付款,Pagos anómalos
+未计入正常余额,Excluidos del saldo normal
 未付款,Sin pagar
 部分付款,Pagado parcialmente
 已付款,Pagado
@@ -513,6 +532,7 @@ Excel 共享文本索引不符合预期。,El índice de texto compartido de Exc
 已知,Importe conocido
 付款进度,Avance de pagos
 新增付款,Registrar un pago
+录入第一笔付款,Registrar el primer pago
 保存付款记录,Guardar registro de pago
 审批状态,Estado de aprobación
 已通过,Aprobado

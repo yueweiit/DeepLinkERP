@@ -410,6 +410,147 @@ class OperatingPaymentNativeQA(unittest.TestCase):
         with self.assertRaises(frappe.ValidationError):
             service.register_payment(self.source.name, self.values("21"), self.raw["version"], "qa-first")
 
+    def test_post_write_balance_failure_rejects_and_rolls_back_each_financial_operation(self):
+        service = self.service()
+        real_balance = service.balance
+        history = {**copy.deepcopy(self.raw), "takeover": {"owner": "deeplinkerp", "claim_token": "qa-claim", "history_fingerprint": "qa-history"}}
+        for operation in ("claim", "register", "reverse"):
+            with self.subTest(operation=operation):
+                frappe.db.savepoint("operation_fixture")
+                payment_id = None
+                try:
+                    if operation != "claim":
+                        self.takeover()
+                    if operation == "reverse":
+                        payment_id = service.register_payment(self.source.name, self.values(), self.raw["version"], "qa-check-first")["payment_id"]
+                    before = service.payment_detail(self.source)
+                    frappe.db.savepoint("financial_write")
+                    def fail_after_write(frozen, records):
+                        written = (bool(frappe.db.exists(service.TAKEOVER, self.source.name)) if operation == "claim"
+                                   else any(row["status"] == ("Reversed" if operation == "reverse" else "Registered") for row in records))
+                        if written:
+                            raise ValueError("QA post-write balance failure")
+                        return real_balance(frozen, records)
+                    with patch.object(service, "balance", side_effect=fail_after_write), patch.object(self.expenses, "_request", return_value={"schema_version": 1, "items": [history]}):
+                        with self.assertRaisesRegex(frappe.ValidationError, "QA post-write balance failure"):
+                            if operation == "claim":
+                                service.claim_takeover(self.source.name, self.raw["version"], history["version"], "qa-check-claim")
+                            elif operation == "register":
+                                service.register_payment(self.source.name, self.values(), self.raw["version"], "qa-check-register")
+                            else:
+                                service.reverse_payment(self.source.name, payment_id, "QA rollback", "qa-check-reverse")
+                    # Same rollback boundary as an unsuccessful Frappe POST.
+                    frappe.db.rollback(save_point="financial_write")
+                    after = service.payment_detail(self.source)
+                    self.assertEqual(after["balance"], before["balance"])
+                    self.assertEqual([(row["name"], row["status"]) for row in after["payments"]], [(row["name"], row["status"]) for row in before["payments"]])
+                    self.assertEqual(after["managed"], before["managed"])
+                finally:
+                    frappe.db.rollback(save_point="operation_fixture")
+        self.assertEqual((frappe.db.count("GL Entry"), frappe.db.count("Payment Entry")), (self.before_gl, self.before_pe))
+
+    def test_native_insert_hook_cannot_change_registered_financial_facts(self):
+        from frappe.model.document import Document
+        service = self.takeover()
+        original = Document.run_method
+        for field, value in (("amount", "21.00"), ("status", "Reversed"), ("bank_account", "wrong-bank"), ("source", "1001")):
+            with self.subTest(field=field):
+                frappe.db.savepoint("payment_hook")
+                def changed(document, method, *args, **kwargs):
+                    result = original(document, method, *args, **kwargs)
+                    if document.doctype == service.PAYMENT and method == "after_insert":
+                        frappe.db.set_value(service.PAYMENT, document.name, field, value, update_modified=False)
+                    return result
+                try:
+                    with patch.object(Document, "run_method", new=changed), self.assertRaises(frappe.ValidationError):
+                        service.register_payment(self.source.name, self.values(), self.raw["version"], "qa-hook-payment")
+                finally:
+                    frappe.db.rollback(save_point="payment_hook")
+                self.assertEqual(frappe.db.count(service.PAYMENT, {"source": self.source.name}), 0)
+                self.assertEqual(service.payment_detail(self.source)["balance"]["pending_amount"], "70.00")
+
+    def test_idempotent_returns_still_reject_corrupt_history_and_changed_payment(self):
+        service = self.takeover()
+        result = service.register_payment(self.source.name, self.values(), self.raw["version"], "qa-idempotent-check")
+        frappe.db.set_value(service.PAYMENT, result["payment_id"], "amount", "21.00", update_modified=False)
+        with self.assertRaises(frappe.ValidationError):
+            service.register_payment(self.source.name, self.values(), self.raw["version"], "qa-idempotent-check")
+        frappe.db.set_value(service.PAYMENT, result["payment_id"], "amount", "20.00", update_modified=False)
+        service.reverse_payment(self.source.name, result["payment_id"], "QA reversed", "qa-idempotent-reverse")
+        frappe.db.set_value(service.TAKEOVER, self.source.name, "history_json", "invalid-json", update_modified=False)
+        for operation in ("claim", "register", "reverse"):
+            with self.subTest(operation=operation), self.assertRaises(frappe.ValidationError):
+                if operation == "claim":
+                    service.claim_takeover(self.source.name, self.raw["version"], "ignored-existing", "qa-idempotent-claim")
+                elif operation == "register":
+                    service.register_payment(self.source.name, self.values(), self.raw["version"], "qa-idempotent-check")
+                else:
+                    service.reverse_payment(self.source.name, result["payment_id"], "QA reversed", "qa-idempotent-reverse")
+        self.assertEqual(frappe.db.get_value(service.PAYMENT, result["payment_id"], "status"), "Reversed")
+
+    def test_reversal_can_correct_registered_fact_after_source_changes_without_hiding_notice(self):
+        service = self.takeover()
+        result = service.register_payment(self.source.name, self.values(), self.raw["version"], "qa-changed-reversal")
+        changed = {**self.raw, "amount": "101.00", "approvals": {"eligibility": "blocked", "raw": {"status": "COMPLETED", "result": "refuse"}}}
+        frappe.db.set_value(self.expenses.SOURCE, self.source.name, "source_json", json.dumps(changed), update_modified=False)
+        detail = service.reverse_payment(self.source.name, result["payment_id"], "QA fact correction", "qa-changed-reverse")
+        self.assertEqual(frappe.db.get_value(service.PAYMENT, result["payment_id"], "status"), "Reversed")
+        self.assertIsNone(detail["balance"])
+        self.assertIn("财务事实已变化", detail["notice"])
+
+    def test_takeover_retry_after_local_postcheck_failure_keeps_same_upstream_claim_identity(self):
+        history = self.oa_source()
+        service = self.service()
+        real_balance = service.balance
+        response = {"schema_version": 2, "source_system": "cashier-payment-archive", "items": [history]}
+        frappe.db.savepoint("claim_retry")
+        def failed_local_result(frozen, records):
+            if frappe.db.exists(service.TAKEOVER, self.source.name):
+                raise ValueError("QA local claim postcheck failed")
+            return real_balance(frozen, records)
+        with patch.object(self.expenses, "_request", return_value=response) as request:
+            with patch.object(service, "balance", side_effect=failed_local_result), self.assertRaises(frappe.ValidationError):
+                service.claim_takeover(self.source.name, self.raw["version"], history["version"], "qa-failed-attempt", zero_history_confirmed=True, expected_eligibility_fingerprint=self.raw["payment_eligibility"]["evidence_fingerprint"])
+            # Upstream remains frozen after a local rollback, never auto-unlocked.
+            frappe.db.rollback(save_point="claim_retry")
+            first = service.claim_takeover(self.source.name, self.raw["version"], history["version"], "qa-retry-one", zero_history_confirmed=True, expected_eligibility_fingerprint=self.raw["payment_eligibility"]["evidence_fingerprint"])
+            again = service.claim_takeover(self.source.name, self.raw["version"], history["version"], "qa-retry-two", zero_history_confirmed=True, expected_eligibility_fingerprint=self.raw["payment_eligibility"]["evidence_fingerprint"])
+        self.assertTrue(first["managed"])
+        self.assertTrue(again["existing"])
+        self.assertEqual(frappe.db.count(service.TAKEOVER, {"source": self.source.name}), 1)
+        self.assertEqual(len(request.call_args_list), 2)
+        self.assertEqual({call.args[0] for call in request.call_args_list}, {service.CLAIM_PATH + "takeover-claim"})
+        self.assertEqual(request.call_args_list[0].kwargs["data"]["request_id"], request.call_args_list[1].kwargs["data"]["request_id"])
+
+    def test_financial_audit_logs_ids_amounts_and_result_without_payment_private_text(self):
+        service = self.takeover()
+        values = {**self.values(), "remark": "private-person-name", "bank_reference": "private-bank-reference"}
+        with patch.object(frappe, "logger") as logger:
+            result = service.register_payment(self.source.name, values, self.raw["version"], "qa-audit-safe")
+            service.reverse_payment(self.source.name, result["payment_id"], "private-reversal-note", "qa-audit-reverse")
+            real_balance = service.balance
+            def failed_result(history, records):
+                if len(records) > 1:
+                    raise ValueError("private-error-person-bank-form-secret")
+                return real_balance(history, records)
+            frappe.db.savepoint("audit_failure")
+            try:
+                with patch.object(service, "balance", side_effect=failed_result), self.assertRaises(frappe.ValidationError):
+                    service.register_payment(self.source.name, values, self.raw["version"], "qa-audit-failed")
+            finally:
+                frappe.db.rollback(save_point="audit_failure")
+            service.reverse_payment(self.source.name, result["payment_id"], "private-reversal-note", "qa-audit-reverse")
+        logs = [call.args[0] for call in logger.return_value.info.call_args_list if call.args and isinstance(call.args[0], dict)]
+        self.assertTrue(logs)
+        self.assertIn({"operation": "register", "source": self.source.name, "document": result["payment_id"], "amount": "20.00", "result": "validated"}, logs)
+        self.assertEqual(logs.count({"operation": "reverse", "source": self.source.name, "document": result["payment_id"], "amount": "20.00", "result": "validated"}), 2)
+        rejected = next(row for row in logs if row["result"] == "rejected")
+        self.assertEqual({key: rejected.get(key) for key in ("error_type", "error_code", "stage")},
+                         {"error_type": "ValidationError", "error_code": "financial_postcondition_failed", "stage": "payment_context"})
+        serialized = json.dumps(logs)
+        for private in (values["remark"], values["bank_reference"], values["party"], values["bank_account"], "private-reversal-note", "private-error-person-bank-form-secret"):
+            self.assertNotIn(private, serialized)
+
     def test_external_draft_dependency_rolls_back_reversal_without_losing_association(self):
         service=self.takeover()
         values={**self.values(),"advance_account":"Creditors - QOC","source_exchange_rate":"1","bank_exchange_rate":"1"}
@@ -431,6 +572,62 @@ class OperatingPaymentNativeQA(unittest.TestCase):
         self.assertEqual(frappe.db.get_value(self.expenses.EVENT,original.name,"journal_entry"),draft["journal_entry"])
         self.assertEqual(frappe.db.get_value(service.PAYMENT,result["payment_id"],"status"),"Registered")
         self.assertEqual(service.payment_detail(self.source)["balance"]["pending_amount"],"50.00")
+
+    def test_reversal_rejects_inconsistent_events_and_native_hooks_without_losing_draft(self):
+        from frappe.model.document import Document
+        service = self.takeover()
+        values = {**self.values(), "advance_account": "Creditors - QOC", "source_exchange_rate": "1", "bank_exchange_rate": "1"}
+        result = service.register_payment(self.source.name, values, self.raw["version"], "qa-reversal-postcheck")
+        merged = service.merge_source(self.source, copy.deepcopy(self.raw))
+        preview = service.advance_preview(self.source, merged, "erp-payment:" + result["payment_id"])
+        with patch.object(self.expenses, "_fresh", return_value=merged):
+            draft = self.expenses.create_voucher_draft(self.source.name, preview["fingerprint"], "erp-payment:" + result["payment_id"])
+        initial = frappe.get_doc(self.expenses.EVENT, preview["event_key"])
+        original = Document.run_method
+        changes = {"source": "1001", "company": "wrong-company", "operation": "expense", "payment_source_id": "other-payment"}
+        for scenario in [*changes, "relink_after_delete", "restore_native_after_delete", "delete_event_after_delete", "missing_voided_docstatus"]:
+            with self.subTest(scenario=scenario):
+                frappe.db.savepoint("reverse_association")
+                try:
+                    if scenario in changes:
+                        frappe.db.set_value(self.expenses.EVENT, initial.name, scenario, changes[scenario], update_modified=False)
+                    def inconsistent(doc, method, *args, **kwargs):
+                        value = original(doc, method, *args, **kwargs)
+                        if doc.doctype == "Journal Entry" and doc.name == draft["journal_entry"] and method == "after_delete":
+                            if scenario == "relink_after_delete":
+                                frappe.db.set_value(self.expenses.EVENT, initial.name, "journal_entry", doc.name, update_modified=False)
+                            elif scenario == "restore_native_after_delete":
+                                doc.db_insert()
+                                for child in doc.get_all_children():
+                                    child.db_insert()
+                            elif scenario == "delete_event_after_delete":
+                                frappe.db.delete(self.expenses.EVENT, {"name": initial.name})
+                            elif scenario == "missing_voided_docstatus":
+                                provenance = json.loads(frappe.db.get_value(self.expenses.EVENT, initial.name, "provenance_json"))
+                                del provenance["voided_draft"]["document"]["docstatus"]
+                                frappe.db.set_value(self.expenses.EVENT, initial.name, "provenance_json", json.dumps(provenance), update_modified=False)
+                        return value
+                    with patch.object(Document, "run_method", new=inconsistent), self.assertRaises(frappe.ValidationError):
+                        service.reverse_payment(self.source.name, result["payment_id"], "QA hook rollback", "qa-postcheck-reverse", discard_drafts=True)
+                finally:
+                    frappe.db.rollback(save_point="reverse_association")
+                restored = frappe.get_doc(self.expenses.EVENT, initial.name)
+                self.assertEqual((restored.source, restored.company, restored.operation, restored.payment_source_id, restored.journal_entry, restored.provenance_json),
+                                 (initial.source, initial.company, initial.operation, initial.payment_source_id, initial.journal_entry, initial.provenance_json))
+                self.assertEqual(frappe.db.get_value(service.PAYMENT, result["payment_id"], "status"), "Registered")
+                self.assertEqual(frappe.db.get_value("Journal Entry", draft["journal_entry"], "docstatus"), 0)
+                self.assertEqual(service.payment_detail(self.source)["balance"]["pending_amount"], "50.00")
+        service.reverse_payment(self.source.name, result["payment_id"], "QA hook rollback", "qa-postcheck-reverse", discard_drafts=True)
+        for field, value in changes.items():
+            with self.subTest(idempotent_field=field):
+                frappe.db.savepoint("reverse_idempotent")
+                try:
+                    frappe.db.set_value(self.expenses.EVENT, initial.name, field, value, update_modified=False)
+                    with self.assertRaises(frappe.ValidationError):
+                        service.reverse_payment(self.source.name, result["payment_id"], "QA hook rollback", "qa-postcheck-reverse", discard_drafts=True)
+                finally:
+                    frappe.db.rollback(save_point="reverse_idempotent")
+        self.assertEqual((frappe.db.count("GL Entry"), frappe.db.count("Payment Entry")), (self.before_gl, self.before_pe))
 
     def test_overpay_and_stale_facts_are_rejected(self):
         service = self.takeover()

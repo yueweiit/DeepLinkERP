@@ -98,6 +98,19 @@ class NativePurchaseSourcesQA(unittest.TestCase):
         self.assertNotIn(service.RECONCILIATION_FIELD,fields)
 
     def test_source_update_retains_manual_header_and_child_values(self):
+        long_source, long_evidence = fixture("QA-PUR-LONG-PAYEE", "QA-DT-LONG-PAYEE")
+        long_source["payee"] = "QA bank information " + "完整原文" * 100
+        long_source["originator_user_name"] = "QA " + "长申请人" * 100
+        long_source["version"] = contract.digest(long_source)
+        long_name = service._cache_source(long_source, long_evidence, "QA Operating China")
+        long_doc = frappe.get_doc(service.DOCTYPE, long_name)
+        self.assertIsNone(long_doc.payee)
+        self.assertIsNone(long_doc.creator)
+        self.assertEqual(json.loads(long_doc.get(service.SOURCE_FIELD))["payee"], long_source["payee"])
+        self.assertEqual(json.loads(long_doc.get(service.SOURCE_FIELD))["originator_user_name"], long_source["originator_user_name"])
+        self.assertEqual(service._cache_source(long_source, long_evidence), long_name)
+        for dt, before in self.before.items():
+            self.assertEqual(frappe.db.count(dt), before)
         frappe.db.set_value(service.DOCTYPE,self.name,{"currency":"USD","description":"manual text",
             "target_company":"QA Operating China",service.CONFIRMED_FIELD:1,service.BENEFICIARY_FIELD:"QA Operating Mexico"})
         source={**self.source,"requested_amount":"200"}; source["version"]=contract.digest(source)

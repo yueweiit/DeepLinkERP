@@ -11,7 +11,7 @@ import json
 import re
 from collections import defaultdict
 from urllib.parse import urlencode
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -41,7 +41,13 @@ TYPES = {"付款申请solicitud de pago": "payment", "付款申请 solicitud de 
 CURRENCIES = {"人民币": "CNY", "人民币cny": "CNY", "人民币rmb": "CNY", "cny": "CNY", "美元": "USD", "usd": "USD", "美元usd": "USD", "美元dólar": "USD",
               "比索": "MXN", "mxn": "MXN", "peso": "MXN", "pesos": "MXN"}
 _FORM_ALIASES = {"申请类型": "type", "执行地区": "region", "金额": "amount", "币种": "currency",
-                 "事项说明": "summary", "收款人": "payee", "付款日期": "needed_date", "归属项目": "project", "项目": "project"}
+                 "事项说明": "summary", "收款人": "payee", "付款日期": "needed_date", "归属项目": "project", "项目": "project",
+                 "申请部门/组织": "source_company", "部门/组织": "source_company", "部门Departamento": "source_company",
+                 "账户性质": "account_nature", "备注": "remark"}
+_DISPLAY_ALIASES = (("source_company", "source_company", "source_organization"),
+                    ("account_nature", "account_nature", "account_nature"), ("project", "project", "project"),
+                    ("needed_payment_date", "needed_date", "needed_payment_date"),
+                    ("general_manager_approval", None, "general_manager_approval"), ("remark", "remark", "remark"))
 # Contains matching conservatively retains names with Unicode prefix whitespace;
 # fields() remains authoritative. Keep every occurrence, JSON type and order.
 _OPERATING_FORM_VALUES = (
@@ -61,7 +67,7 @@ def timestamp(value):
     return parsed.astimezone(timezone.utc)
 
 
-def fields(row):
+def fields(row, *, conflicts=None):
     components = row.get("form_component_values") or []
     if isinstance(components, str):
         components = json.loads(components, parse_float=Decimal)
@@ -75,6 +81,8 @@ def fields(row):
         for prefix, key in _FORM_ALIASES.items():
             if name.startswith(prefix):
                 # Duplicate components are ambiguous, not last-value-wins.
+                if key in result and conflicts is not None:
+                    conflicts.add(key)
                 result[key] = None if key in result else component.get("value")
                 break
     return result
@@ -84,8 +92,8 @@ def normalized(value):
     return " ".join(str(value or "").split()).casefold()
 
 
-def in_scope(row):
-    form = fields(row)
+def in_scope(row, *, form=None):
+    form = fields(row) if form is None else form
     try:
         return (row.get("process_code") in PROCESS_CODES and START <= timestamp(row.get("create_time")) < END
                 and normalized(form.get("region")) in {"中国", "中国china", "中国 china", "china"}
@@ -189,8 +197,52 @@ def withdrawn_source(raw, row=None):
     return item
 
 
+def display_projection(form, cashier, form_conflicts):
+    """Merge display evidence only; no display approval flag authorizes payment."""
+    cashier = cashier or {}
+    cashier_conflicts = set(cashier.get("projection_conflicts") or [])
+    values, sources, conflicts = {}, {}, []
+    approval_raw = cashier.get("approvals", {}).get("raw") or {}
+    for field, form_key, cashier_key in _DISPLAY_ALIASES:
+        candidates = [(form.get(form_key) if form_key else None, "oa.form." + str(form_key)),
+                      (cashier.get(cashier_key), "cashier." + cashier_key)]
+        if field == "general_manager_approval" and cashier_key not in cashier:
+            candidates[1] = (approval_raw.get(field), "cashier.approvals.raw." + field)
+        invalid = form_key in form_conflicts or cashier_key in cashier_conflicts
+        known = {}
+        for raw, provenance in candidates:
+            if raw is None or raw == "":
+                continue
+            if not isinstance(raw, str):
+                invalid = True
+                continue
+            value = raw.strip()
+            if not value:
+                continue
+            if field == "account_nature" and value not in {"公户", "私户"}:
+                invalid = True
+                continue
+            if field == "needed_payment_date":
+                try:
+                    value = date.fromisoformat(value).isoformat()
+                except ValueError:
+                    invalid = True
+                    continue
+            known.setdefault(value, provenance)
+        if invalid or len(known) > 1:
+            values[field] = None
+            conflicts.append(field)
+        elif known:
+            values[field], sources[field] = next(iter(known.items()))
+        else:
+            values[field] = None
+    return {**values, "projection_sources": sources, "projection_conflicts": conflicts}
+
+
 def merge_application(row, cashier_items, company_resolution, *, candidates=None):
-    form = fields(row)
+    form_conflicts = set()
+    form = fields(row, conflicts=form_conflicts)
+    scoped = in_scope(row, form=form)
     candidates = [item for item in cashier_items if matches(row, item, require_corp=True)] if candidates is None else candidates
     cashier = candidates[0] if len(candidates) == 1 else None
     conflict = len(candidates) > 1
@@ -200,7 +252,7 @@ def merge_application(row, cashier_items, company_resolution, *, candidates=None
                      amount is None or exact_amount(cashier.get("amount")) is None or
                      money(amount) != money(cashier["amount"]) or currency != cashier.get("currency"))
     approval = {"eligibility": "eligible" if row.get("status") == "COMPLETED" and row.get("result") == "agree"
-                and not row.get("deleted_at") and in_scope(row) else "blocked",
+                and not row.get("deleted_at") and scoped else "blocked",
                 "raw": {"status": row.get("status"), "result": row.get("result"), "deleted_at": str(row.get("deleted_at") or "")}}
     if cashier and not conflict:
         for key, value in (cashier.get("approvals", {}).get("raw") or {}).items():
@@ -218,7 +270,7 @@ def merge_application(row, cashier_items, company_resolution, *, candidates=None
     decision = workflow.get("payment_eligibility") if workflow.get("lookup_status") == "found" else None
     decision = copy.deepcopy(decision) if isinstance(decision, dict) else {
         "can_register_payment": False, "reason": "审批证据待同步，请查看钉钉原单", "notice": ""}
-    if conflict or row.get("deleted_at") or not in_scope(row):
+    if conflict or row.get("deleted_at") or not scoped:
         decision.update(can_register_payment=False, reason="申请来源冲突或已撤回，请核对")
     names = dict.fromkeys(str(person.get("name") or person.get("id") or "")
         for task in workflow.get("current_tasks") or [] for person in task.get("assignees") or [] if isinstance(person, dict))
@@ -226,15 +278,14 @@ def merge_application(row, cashier_items, company_resolution, *, candidates=None
             "oa_identity": {"corp_id": row["corp_id"], "process_instance_id": row["process_instance_id"]},
             "approval_no": row.get("business_id"), "dingding_id": row["process_instance_id"],
             "cashier_source_id": cashier.get("source_id") if cashier else None,
-            "source_company": resolution.get("assigned_department") if resolution.get("status") == "matched" else None,
+            "company_mapping_source": resolution.get("assigned_department") if resolution.get("status") == "matched" else None,
             "company_resolution": copy.deepcopy(resolution), "source_sheet": resolution.get("assigned_department"),
             "application_type": TYPES.get(normalized(form.get("type")), "unclassified"), "application_type_raw": form.get("type"),
             "applicant": identity.get("employee_name") if identity.get("manual_applicant_override") else row.get("originator_user_name") or "待核对",
             "applicant_user_id": row.get("originator_user_id"),
             "payee_name": form.get("payee"), "summary": form.get("summary"),
-            "project": form.get("project") if isinstance(form.get("project"), str) else None,
             "request_date": timestamp(row["create_time"]).astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat(),
-            "needed_payment_date": form.get("needed_date"), "amount": amount, "currency": currency,
+            "amount": amount, "currency": currency,
             "original_source_amount": amount, "original_source_currency": currency,
             "paid_amount": paid, "pending_amount": pending, "source_status": cashier.get("source_status") if paid is not None and pending is not None else "付款待核对",
             "cashier_reported_payment_status": cashier.get("source_status") if cashier else None,
@@ -246,6 +297,9 @@ def merge_application(row, cashier_items, company_resolution, *, candidates=None
             "attachments": copy.deepcopy(cashier.get("attachments", [])) if cashier and not conflict else [],
             "updated_at": timestamp(row.get("updated_at") or row["create_time"]).isoformat(),
             "original_url": "https://aflow.dingtalk.com/dingtalk/mobile/homepage.htm?" + urlencode({"procInstId": row["process_instance_id"]})}
+    display_cashier = cashier if cashier and not conflict and all(
+        cashier.get(key) == row[key] for key in ("corp_id", "process_instance_id")) else None
+    item.update(display_projection(form, display_cashier, form_conflicts))
     item["version"] = digest(item)
     return item
 

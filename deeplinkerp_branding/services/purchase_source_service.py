@@ -579,6 +579,22 @@ def _cached_doc(source):
     return None
 
 
+def _native_header_text(meta, fieldname, value):
+    """Project descriptive evidence only when the installed short field can hold it.
+
+    The complete value stays in SOURCE_FIELD. Never truncate bank details, alter
+    identifiers, or overwrite an existing manually reviewed native header.
+    """
+    if value is None:
+        return None
+    field = meta.get_field(fieldname)
+    column_type, default_length = frappe.db.type_map.get(field.fieldtype, (None, None))
+    limit = frappe.utils.cint(field.length) or frappe.utils.cint(default_length)
+    if column_type == "varchar" and limit and len(frappe.utils.cstr(value)) > limit:
+        return None
+    return value
+
+
 def _cache_source(source,evidence,company=None):
     doc = _cached_doc(source)
     values = {SOURCE_ID_FIELD:source["source_id"],SOURCE_FIELD:json.dumps(source,ensure_ascii=False,default=str),
@@ -589,12 +605,13 @@ def _cache_source(source,evidence,company=None):
         frappe.db.set_value(DOCTYPE,doc.name,values,update_modified=False)
         return doc.name
     doc = frappe.new_doc(DOCTYPE)
+    meta = doc.meta
     doc.update({**values,"process_instance_id":source["process_instance_id"],"process_code":source["process_code"],
                 # Frappe field:oa_code keeps this equal to the internal document name.
                 # The immutable original approval number remains in SOURCE_FIELD.
-                "oa_code":"DT-PUR-"+digest(source["source_id"]),"apply_date":source["apply_date"],"creator":source.get("originator_user_name"),
+                "oa_code":"DT-PUR-"+digest(source["source_id"]),"apply_date":source["apply_date"],"creator":_native_header_text(meta,"creator",source.get("originator_user_name")),
                 "execution_region":source.get("region"),"currency":source.get("currency"),"description":source.get("description"),
-                "payee":source.get("payee"),"target_company":None,PROPOSAL_FIELD:company,CONFIRMED_FIELD:0,"sync_status":"Pending Purchase Order",
+                "payee":_native_header_text(meta,"payee",source.get("payee")),"target_company":None,PROPOSAL_FIELD:company,CONFIRMED_FIELD:0,"sync_status":"Pending Purchase Order",
                 "backfill_imported":1,"items_json":json.dumps(source["items"],ensure_ascii=False),"detail_total_amount":source.get("detail_total_amount"),
                 "payment_amount":source.get("requested_amount")})
     with managed_write():

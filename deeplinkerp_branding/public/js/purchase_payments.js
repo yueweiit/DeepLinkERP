@@ -56,7 +56,8 @@
  function recordsRoute(chain){frappe.route_options={[chain.source_doctype==='Purchase Receipt'?'purchase_receipt':'purchase_order']:chain.name};frappe.set_route('purchase-payment-records');}
  const returnKey='dlp-procurement-return';
  function nativeAction(type,name,label){return `<button type="button" class="btn btn-xs btn-default dlp-native-document" data-doctype="${esc(type)}" data-name="${esc(name)}" title="${esc(t(label))}" aria-label="${esc(t(label))}">${esc(t(label))}</button>`;}
- function openNative(type,name){
+ async function openNative(type,name){
+  if(activeDrawer?.guardNavigation && !(await activeDrawer.close()))return;
   const route=frappe.get_route?.() || [],grid=currentController();
   let previous;try{previous=JSON.parse(root.sessionStorage?.getItem(returnKey) || 'null');}catch(error){/* optional browser storage */}
   const context={...(route[0]==='Form' && previous?previous:{route,quick:grid?.quick,page:grid?.page,scroll:grid?.list?.$result?.get?.(0)?.scrollTop || 0}),type,name};
@@ -85,17 +86,67 @@
   // The permission-checked native child join may repeat a parent for each item.
   const seen=new Set();return rows.filter(row=>{if(seen.has(row.name))return false;seen.add(row.name);return true;});
  }
- function newDrawer(title,wide=false){
-  if(activeDrawer)return null;
-  const id=gate.begin(),opener=root.document.activeElement;
-  const panel=$(`<div class="dlp-payment-overlay"><section class="dlp-payment-drawer${wide?' dlp-document-drawer':''}" role="dialog" aria-modal="true" aria-label="${esc(t(title))}"><header><h3>${esc(t(title))}</h3><button type="button" class="btn btn-default dlp-close" aria-label="${esc(t('关闭'))}">×</button></header><div class="dlp-payment-body"><p role="status">${esc(t('正在读取…'))}</p></div><footer><button type="button" class="btn btn-default dlp-cancel">${esc(t('取消'))}</button></footer></section></div>`).appendTo(root.document.body);
-  const drawer={id,panel,controls:[],busy:false,loadId:0,alive:()=>activeDrawer===drawer && gate.current(id),
-   close(force=false,cleaned=false){if(this.busy && !force)return;if(!force && !cleaned && this.beforeClose)return this.beforeClose().then(ok=>{if(ok!==false)this.close(false,true);});gate.cancel();this.attachments?.stop();disposeControls(this.controls);panel.remove();root.document.removeEventListener('keydown',keys);if(activeDrawer===this)activeDrawer=null;if(!force)opener?.focus?.();},
-   error(error){panel.find('.dlp-error').text(t(error?.message || '操作失败，请核对系统提示。'));},
-   setBusy(value){this.busy=value;panel.find('.dlp-payment-drawer').toggleClass('dlp-busy',value);panel.find('.dlp-payment-body').attr('aria-busy',String(value));panel.find('button').prop('disabled',value);this.attachments?.refresh();},
+ function guardDrawerNavigation(drawer){
+  const router=frappe.router;if(!router || typeof router.set_route!=='function' || typeof router.route!=='function')return false;
+  const nativeSetRoute=router.set_route,nativeRoute=router.route,originURL=root.location.href,originIndex=root.navigation?.currentEntry?.index,originOptions=frappe.route_options;
+  let restoring=false,deferredTraversal=false;
+  const restoreOptions=()=>{frappe.route_options=originOptions;};
+  async function navigate(next,rollback=restoreOptions){
+   if(!drawer.alive())return next();
+   if((drawer.busy && drawer.busyOperation!=='read') || drawer.navigationPending){rollback();return false;}
+   drawer.navigationPending=true;
+   try{if(!(await drawer.close())){rollback();return false;}deferredTraversal=false;return next();}
+   finally{drawer.navigationPending=false;}
+  }
+  // Frappe's set_route pushes URL state before route parses/renders. Guard the
+  // entry before that push; guard route itself for native browser Back/Forward.
+  const setRoute=function(...args){
+   if(frappe.open_in_new_tab)return nativeSetRoute.apply(this,args);
+   const options=frappe.route_options,hash=frappe.route_hash;
+   return navigate(()=>{frappe.route_options=options;frappe.route_hash=hash;return nativeSetRoute.apply(this,args);});
   };
-  const keys=e=>{if(e.target.closest?.('.modal'))return;if(e.key==='Escape'){e.preventDefault();drawer.close();}if(e.key==='Tab'){const elements=panel.find('button,input,select,textarea,summary,a[href]').filter(':visible:not(:disabled)').toArray();if(!elements.length)return;const first=elements[0],last=elements[elements.length-1];if(e.shiftKey && root.document.activeElement===first){e.preventDefault();last.focus();}else if(!e.shiftKey && root.document.activeElement===last){e.preventDefault();first.focus();}}};
-  activeDrawer=drawer;root.document.addEventListener('keydown',keys);panel.find('.dlp-close,.dlp-cancel').on('click.dlpDrawer',()=>drawer.close());panel.find('.dlp-close').trigger('focus');return drawer;
+  const route=function(...args){
+   if(restoring && root.location.href===originURL){restoring=false;return false;}
+   if(root.location.href===originURL)return nativeRoute.apply(this,args);
+   const targetIndex=root.navigation?.currentEntry?.index;
+   const rollback=()=>{
+    restoreOptions();
+    // Native Frappe history states are null. Navigation entry indices preserve
+    // the real Back/Forward cursor without overwriting the traversed entry.
+    if(Number.isInteger(originIndex) && originIndex>=0 && Number.isInteger(targetIndex) && targetIndex>=0 && originIndex!==targetIndex){restoring=true;root.history.go(originIndex-targetIndex);}
+    else deferredTraversal=true;
+   };
+   return navigate(()=>nativeRoute.apply(this,args),rollback);
+  };
+  router.set_route=setRoute;router.route=route;
+  drawer.releaseNavigation=()=>{
+   if(router.set_route===setRoute)router.set_route=nativeSetRoute;if(router.route===route)router.route=nativeRoute;
+   // Without entry indices retain both the history entry and guarded UI. An
+   // explicitly approved manual close then renders the pending current URL.
+   if(deferredTraversal && !drawer.navigationPending)nativeRoute.call(router);
+  };
+  return true;
+ }
+ function newDrawer(title,wide=false,options={}){
+  if(activeDrawer)return null;
+  const id=gate.begin(),opener=root.document.activeElement,media=options.desktopNonModal?root.matchMedia?.('(max-width: 767.98px)'):null,modal=()=>!options.desktopNonModal || !media || media.matches;
+  const panel=$(`<div class="dlp-payment-overlay${options.desktopNonModal?' dlp-drawer-desktop-nonmodal':''}"><section class="dlp-payment-drawer${wide?' dlp-document-drawer':''}" role="dialog" aria-modal="${modal()}" aria-label="${esc(t(title))}"><header><h3>${esc(t(title))}</h3><button type="button" class="btn btn-default dlp-close" aria-label="${esc(t('关闭'))}">×</button></header><div class="dlp-payment-body"><p role="status">${esc(t('正在读取…'))}</p></div><footer><button type="button" class="btn btn-default dlp-cancel">${esc(t('取消'))}</button></footer></section></div>`).appendTo(root.document.body);
+  const drawer={id,panel,controls:[],busy:false,loadId:0,guardNavigation:Boolean(options.guardNavigation),alive:()=>activeDrawer===drawer && gate.current(id),
+   close(force=false,cleaned=false){
+    if(activeDrawer!==this || (this.busy && !force && !(this.guardNavigation && this.busyOperation==='read')))return false;
+    if(!force && !cleaned && this.beforeClose){this.closePending ||= Promise.resolve(this.beforeClose()).then(ok=>ok!==false?this.close(false,true):false).finally(()=>{this.closePending=null;});return this.closePending;}
+    gate.cancel();this.releaseNavigation?.();media?.removeEventListener?.('change',resize);this.attachments?.stop();disposeControls(this.controls);panel.remove();root.document.removeEventListener('keydown',keys);root.removeEventListener?.('beforeunload',beforeUnload);activeDrawer=null;if(!force)opener?.focus?.();return true;
+   },
+   error(error){panel.find('.dlp-error').text(t(error?.message || '操作失败，请核对系统提示。'));},
+   setBusy(value,operation='write'){this.busy=value;this.busyOperation=value?operation:null;panel.find('.dlp-payment-drawer').toggleClass('dlp-busy',value);panel.find('.dlp-payment-body').attr('aria-busy',String(value));panel.find('button').prop('disabled',value);if(this.guardNavigation && operation==='read')panel.find('.dlp-close,.dlp-cancel').prop('disabled',false);this.attachments?.refresh();},
+  };
+  const resize=()=>panel.find('.dlp-payment-drawer').attr('aria-modal',String(modal()));
+  const beforeUnload=event=>{
+   if(!drawer.alive() || !((drawer.busy && drawer.busyOperation!=='read') || drawer.beforeUnloadShouldBlock?.()))return;
+   event.preventDefault();event.returnValue='';
+  };
+  const keys=e=>{if(e.target.closest?.('.modal'))return;if(e.key==='Escape'){e.preventDefault();drawer.close();}if(e.key==='Tab' && modal()){const elements=panel.find('button,input,select,textarea,summary,a[href]').filter(':visible:not(:disabled)').toArray();if(!elements.length)return;const first=elements[0],last=elements[elements.length-1];if(e.shiftKey && root.document.activeElement===first){e.preventDefault();last.focus();}else if(!e.shiftKey && root.document.activeElement===last){e.preventDefault();first.focus();}}};
+  activeDrawer=drawer;if(options.guardNavigation){drawer.guardNavigation=guardDrawerNavigation(drawer);root.addEventListener?.('beforeunload',beforeUnload);}media?.addEventListener?.('change',resize);root.document.addEventListener('keydown',keys);panel.find('.dlp-close,.dlp-cancel').on('click.dlpDrawer',()=>drawer.close());panel.find('.dlp-close').trigger('focus');return drawer;
  }
  const destroyedDatepickers=new WeakSet();
  function disposeControls(controls){for(const control of controls.splice(0)){control.dlpDisposeInput?.();delete control.dlpDisposeInput;control.$input?.off('.dlpDrawer .dlpInvoice');const picker=control.datepicker;if(picker?.destroy && !destroyedDatepickers.has(picker)){destroyedDatepickers.add(picker);picker.destroy();}}}
@@ -496,7 +547,7 @@
  if(root.document && !root.__dlpProcurementActionsInstalled){
   root.__dlpProcurementActionsInstalled=true;
   root.document.addEventListener('click',event=>{const button=event.target.closest?.('.dlp-receipt-pay,.dlp-receipt-invoice,.dlp-order-invoice,.dlp-order-receipt,.dlp-order-pay,.dlp-payment-preview,.dlp-voucher-preview,.dlp-native-document,.dlp-crossborder-open');if(!button)return;if(button.tagName==='A' && (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button))return;event.preventDefault();event.stopPropagation();const name=button.dataset.name;if(button.classList.contains('dlp-crossborder-open'))root.DeepLinkERPCrossborderProcurement?.open(button.dataset.crossborderOrder,button.dataset.crossborderTab,root.cur_list?.dlpPurchaseOrderGrid);else if(button.classList.contains('dlp-native-document'))openNative(button.dataset.doctype,name);else if(button.classList.contains('dlp-receipt-pay'))pay('Purchase Receipt',name);else if(button.classList.contains('dlp-receipt-invoice'))documentDrawer(button.dataset.sourceDoctype || 'Purchase Receipt',name,'Purchase Invoice',button.dataset.target || null);else if(button.classList.contains('dlp-order-invoice'))documentDrawer('Purchase Order',name,'Purchase Invoice');else if(button.classList.contains('dlp-order-pay'))pay('Purchase Order',name);else if(button.classList.contains('dlp-order-receipt'))documentDrawer('Purchase Order',name,'Purchase Receipt');else if(button.classList.contains('dlp-payment-preview'))paymentDrawer(name);else voucherDrawer(name);},true);
-  frappe.router?.on('change',()=>{gate.cancel();activeDrawer?.close(true);});
+  frappe.router?.on('change',()=>{if(activeDrawer?.guardNavigation)return;gate.cancel();activeDrawer?.close(true);});
  }
  function mountProcurementTabs(c) {
   const route=c.root.frappe.get_route?.() || [], current=route[0]==='List'?route[1]:route[0];

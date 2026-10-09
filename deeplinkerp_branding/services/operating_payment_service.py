@@ -90,7 +90,7 @@ def _needs_zero_history_confirmation(item):
     return item.get("payment_evidence_status") == "unknown" and not item.get("payments")
 
 
-def payment_context(doc, item=None, for_update=False):
+def payment_context(doc, item=None, for_update=False, *, strict=False, check_intent=True):
     """Load one authorized source's immutable history and local records once."""
     record = _takeover(doc,for_update=for_update)
     if not record:
@@ -102,12 +102,84 @@ def payment_context(doc, item=None, for_update=False):
         context["records"] = records
         history = _history(record)
         context["history"] = history
-        if not _intent_matches(record.expense_fingerprint, item if item is not None else json.loads(doc.source_json)):
+        if check_intent and not _intent_matches(record.expense_fingerprint, item if item is not None else json.loads(doc.source_json)):
             raise ValueError("接管后的申请财务事实已变化，请管理员复核；既有付款不会删除")
         context["balance"] = balance(history, records)
     except (ValueError, TypeError, KeyError) as error:
+        if strict:
+            frappe.throw(str(error))
         context["notice"] = str(error)
     return context
+
+
+def _checked_write_detail(doc, operation, expected=None, item=None, *, reversal_events=None):
+    """One current records/balance read; any failed write postcondition aborts RPC."""
+    document = (expected or {}).get("name") or (expected or {}).get("payment_key") or doc.name
+    amount = (expected or {}).get("amount") or doc.amount
+    stage = "payment_context"
+    try:
+        context = payment_context(doc, item, for_update=True, strict=True, check_intent=operation != "reverse")
+        if not context["record"] or not context["balance"]:
+            frappe.throw("付款接管或余额写后校验失败，请刷新并核查")
+        if expected:
+            stage = "payment_record"
+            record = (context["record"] if expected["doctype"] == TAKEOVER
+                      else expenses._read(PAYMENT, document, set(PAYMENT_FIELDS), for_update=True))
+            expenses._assert_financial_fields(record, expected, "付款记录写后校验不一致，请刷新并核查")
+        if operation == "reverse":
+            stage = "payment_voucher_association"
+            _checked_reversal_events(doc, record, completed=True, expected_names=reversal_events)
+        if operation == "reverse" and not _intent_matches(context["record"].expense_fingerprint, json.loads(doc.source_json)):
+            # Correcting a recorded fact does not re-authorize a new payment.
+            # Validate frozen balances, but retain unknown presentation for a
+            # changed source rather than silently treating it as compatible.
+            context.update(balance=None, notice="接管后的申请财务事实已变化，请管理员复核；既有付款不会删除")
+        stage = "payment_detail"
+        result = payment_detail(doc, context)
+    except Exception as error:
+        expenses._audit_financial(operation, doc.name, document, amount, "rejected", error=error, stage=stage)
+        raise
+    expenses._audit_financial(operation, doc.name, document, amount, "validated")
+    return result
+
+
+def _checked_reversal_events(doc, payment, *, completed=False, expected_names=None):
+    """Check internal audit links under locks; never expose their private JSON."""
+    payment_source = "erp-payment:" + payment.name
+    expected_key = expenses._event_key(doc, payment_source)
+    rows = frappe.get_all(expenses.EVENT, filters={"source": doc.name, "payment_source_id": payment_source},
+                          fields=["name"], limit_page_length=0, run=False).for_update().run(as_dict=True)
+    # A malformed source/payment field must not hide the deterministic event
+    # from the filtered query and let a reversal orphan its original draft.
+    if frappe.db.get_value(expenses.EVENT, expected_key, "name", for_update=True) and not any(row.name == expected_key for row in rows):
+        rows.append(frappe._dict(name=expected_key))
+    if expected_names is not None and {row.name for row in rows} != set(expected_names):
+        frappe.throw("付款凭证事件写后缺失或变化，请人工复核")
+    events = []
+    for row in rows:
+        event = expenses._read(expenses.EVENT, row.name, {"source", "company", "operation", "payment_source_id"}, for_update=True)
+        expenses._assert_financial_fields(event, {"name": expected_key, "event_key": expected_key, "source": doc.name,
+            "company": doc.company, "operation": "payment", "payment_source_id": payment_source}, "付款凭证事件关联不一致，请人工复核")
+        if completed:
+            voided = json.loads(event.provenance_json or "{}").get("voided_draft")
+            if voided:
+                if not isinstance(voided, dict) or not isinstance(voided.get("document"), dict):
+                    frappe.throw("付款草稿弃用审计不完整，请人工复核")
+                saved = voided["document"]
+                expenses._assert_financial_fields(event, {"journal_entry": None}, "付款草稿弃用后关联仍存在，请人工复核")
+                expenses._assert_financial_fields(saved, {"doctype": "Journal Entry", "name": voided.get("journal_entry"),
+                    "company": doc.company, "docstatus": 0, "custom_operating_event_key": event.name,
+                    "custom_operating_source": doc.name}, "付款草稿弃用审计关联不一致，请人工复核")
+                if not voided.get("journal_entry") or frappe.db.get_value("Journal Entry", voided["journal_entry"], "name", for_update=True):
+                    frappe.throw("付款草稿弃用后原生凭证仍存在，请人工复核")
+            elif event.journal_entry:
+                journal = expenses._read("Journal Entry", event.journal_entry, {"company", "docstatus"}, for_update=True)
+                if journal.company != doc.company or journal.docstatus != 2:
+                    frappe.throw("撤销付款仍有关联未取消凭证，请人工复核")
+            else:
+                frappe.throw("付款凭证关联缺失且无弃用审计，请人工复核")
+        events.append(event)
+    return events
 
 
 def payment_detail(doc, context=None, for_update=False):
@@ -299,7 +371,7 @@ def claim_takeover(source_id, expected_source_version, expected_history_version,
     expenses._finance()
     doc = expenses._source(source_id, write=True)
     if _takeover(doc,for_update=True):
-        return {"existing": True, **payment_detail(doc,for_update=True)}
+        return {"existing": True, **_checked_write_detail(doc, "claim")}
     item = _fresh_base(doc)
     if item["version"] != expected_source_version:
         frappe.throw("申请事实已变化，请重新预览")
@@ -322,12 +394,13 @@ def claim_takeover(source_id, expected_source_version, expected_history_version,
     _source_match(item, history, payload["source_id"], response.get("schema_version"), doc)
     if claim.get("owner") != "deeplinkerp" or not claim.get("claim_token") or not claim.get("history_fingerprint"):
         frappe.throw("来源未确认付款锁定，ERP 登记仍关闭")
-    with expenses.managed_write():
-        frappe.get_doc({"doctype": TAKEOVER, "source": doc.name, "company": doc.company, "cashier_root": payload["source_id"],
+    values = {"doctype": TAKEOVER, "source": doc.name, "company": doc.company, "cashier_root": payload["source_id"],
                         "history_json": json.dumps(history, ensure_ascii=False), "claim_token": claim["claim_token"],
                         "history_fingerprint": claim["history_fingerprint"], "expense_fingerprint": digest(payment_intent_facts(item)),
-                        "claimed_by": frappe.session.user, "claimed_at": now_datetime()}).insert(ignore_permissions=True)
-    return {"existing": False, **payment_detail(doc)}
+                        "claimed_by": frappe.session.user, "claimed_at": now_datetime()}
+    with expenses.managed_write():
+        frappe.get_doc(values).insert(ignore_permissions=True)
+    return {"existing": False, **_checked_write_detail(doc, "claim", {**values, "history_json": history}, item)}
 
 
 def _values(doc, item, values):
@@ -381,10 +454,15 @@ def _register_payment(source_id, values, expected_source_version, request_id):
     key = digest([frappe.local.site, doc.name, frappe.session.user, identifier(request_id)])
     fingerprint = digest(values)
     existing = frappe.db.get_value(PAYMENT, key, ["request_fingerprint", "source"], as_dict=True,for_update=True)
+    persisted = {"doctype": PAYMENT, "payment_key": key, "source": doc.name, "company": doc.company,
+                 "currency": item["currency"], "bank_currency": bank.account_currency, "bank_account": bank.name,
+                 "party_type": values["party_type"], "party": values["party"], "bank_reference": values.get("bank_reference"), "remark": values.get("remark"),
+                 "registered_by": frappe.session.user, "request_fingerprint": fingerprint, "terms_json": values}
     if existing:
         if existing.source != doc.name or existing.request_fingerprint != fingerprint:
             frappe.throw("相同付款请求不能变更金额或字段")
-        return {"payment_id": key, "existing": True, **payment_detail(doc,for_update=True)}
+        normalized = _checked(registration, values, values.get("amount"), same_currency=bank.account_currency == item["currency"])
+        return {"payment_id": key, "existing": True, **_checked_write_detail(doc, "register", {**persisted, **normalized}, item)}
     cached_intent=(expected_source_version==doc.source_version and
                    _intent_matches(takeover.expense_fingerprint, json.loads(doc.source_json)))
     # Ownership changes the transport version, not the frozen financial intent.
@@ -392,16 +470,12 @@ def _register_payment(source_id, values, expected_source_version, request_id):
     # Changed financial facts still fail above, and live approval is rechecked.
     if item["version"] != expected_source_version and not cached_intent:
         frappe.throw("申请事实已变化，请刷新后重新确认付款")
-    detail = payment_detail(doc,for_update=True)
-    if not detail.get("balance"):
-        frappe.throw(detail.get("notice") or "付款历史待核对")
-    normalized = _checked(registration, values, detail["balance"]["pending_amount"], same_currency=bank.account_currency == item["currency"])
+    context = payment_context(doc, item, for_update=True, strict=True)
+    normalized = _checked(registration, values, context["balance"]["pending_amount"], same_currency=bank.account_currency == item["currency"])
+    persisted.update(status="Registered", **normalized, source_version=item["version"])
     with expenses.managed_write():
-        frappe.get_doc({"doctype": PAYMENT, "payment_key": key, "source": doc.name, "company": doc.company, "status": "Registered", **normalized,
-                        "currency": item["currency"], "bank_currency": bank.account_currency, "bank_account": bank.name,
-                        "party_type": values["party_type"], "party": values["party"], "bank_reference": values.get("bank_reference"), "remark": values.get("remark"),
-                        "registered_by": frappe.session.user, "request_fingerprint": fingerprint, "source_version": item["version"], "terms_json": json.dumps(values, ensure_ascii=False)}).insert(ignore_permissions=True)
-    return {"payment_id": key, "existing": False, **payment_detail(doc,for_update=True)}
+        frappe.get_doc({**persisted, "terms_json": json.dumps(values, ensure_ascii=False)}).insert(ignore_permissions=True)
+    return {"payment_id": key, "existing": False, **_checked_write_detail(doc, "register", persisted, item)}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -429,15 +503,15 @@ def reverse_payment(source_id, payment_id, reason, request_id, discard_drafts=Fa
         frappe.throw("必须填写撤销原因")
     key = digest([frappe.session.user, identifier(request_id)])
     fingerprint = digest([payment.name, reason.strip()])
+    expected = {"doctype": PAYMENT, **{field: payment.get(field) for field in PAYMENT_FIELDS}}
     if payment.status == "Reversed":
         if payment.reversal_key != key or payment.reversal_fingerprint != fingerprint:
             frappe.throw("付款已撤销，请刷新；不能更改原撤销原因")
-        return payment_detail(doc,for_update=True)
+        return _checked_write_detail(doc, "reverse", expected)
     discard_drafts = _confirmation(discard_drafts)
-    events = frappe.get_all(expenses.EVENT, filters={"source": doc.name, "payment_source_id": "erp-payment:" + payment.name}, fields=["name", "journal_entry"],limit_page_length=0,run=False).for_update().run(as_dict=True)
-    for row in events:
-        event = expenses._read(expenses.EVENT, row.name, {"company", "source"}, for_update=True)
-        journal = expenses._read("Journal Entry", row.journal_entry, {"company", "docstatus"}, for_update=True)
+    events = _checked_reversal_events(doc, payment)
+    for event in events:
+        journal = expenses._read("Journal Entry", event.journal_entry, {"company", "docstatus"}, for_update=True)
         if journal.company != doc.company:
             frappe.throw("关联凭证公司不符，请核查")
         if journal.docstatus == 2:
@@ -457,9 +531,11 @@ def reverse_payment(source_id, payment_id, reason, request_id, discard_drafts=Fa
         # Native recoverable deletion retains Deleted Document. Do not force
         # links: any other dependency must block and roll back this transaction.
         frappe.delete_doc("Journal Entry",journal.name,ignore_missing=False)
-    payment.update({"status": "Reversed", "reversal_reason": reason.strip(), "reversed_by": frappe.session.user, "reversed_at": now_datetime(), "reversal_key": key, "reversal_fingerprint": fingerprint})
+    expected.update(status="Reversed", reversal_reason=reason.strip(), reversed_by=frappe.session.user,
+                    reversed_at=now_datetime(), reversal_key=key, reversal_fingerprint=fingerprint)
+    payment.update(expected)
     expenses._save(payment)
-    return payment_detail(doc,for_update=True)
+    return _checked_write_detail(doc, "reverse", expected, reversal_events=[event.name for event in events])
 
 
 @frappe.whitelist()

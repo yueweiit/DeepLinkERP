@@ -25,6 +25,10 @@ class PurchaseSourceContractTest(unittest.TestCase):
 
     def test_scope_requires_purchase_template_recognized_region_and_china_year(self):
         self.assertTrue(self.module.in_scope(source()))
+        # Confirmed original purchase-expense template, not an operating template.
+        newer = source(process_code="PROC-E69FCD3E-E374-4C54-9D8F-6E1F55AD741F", status="RUNNING")
+        self.assertTrue(self.module.in_scope(newer))
+        self.assertFalse(self.module.normalize(newer)["eligible"])
         for patch in ({"process_code": "operation"}, {"create_time": datetime(2025, 12, 31, 15, 59, tzinfo=timezone.utc)},
                       {"create_time": datetime(2026, 12, 31, 16, tzinfo=timezone.utc)}):
             self.assertFalse(self.module.in_scope(source(**patch)))
