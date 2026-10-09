@@ -73,13 +73,21 @@ def business_payload(value):
     return value
 
 
-def artifact_evidence(doc, *, ignored_fields=()):
+def artifact_evidence(doc, *, ignored_fields=(), include_against_voucher=False):
     facts = {"document": business_payload(doc.as_dict())}
     for field in ignored_fields:
         facts["document"].pop(field, None)
     facts["ledgers"] = {doctype: sorted(_ledger(doc, doctype), key=lambda row: row.name) for doctype in
         ("GL Entry", "Stock Ledger Entry", "Payment Ledger Entry", "Advance Payment Ledger Entry") if doc.doctype in
         ("Purchase Order", "Purchase Receipt", "Purchase Invoice", "Payment Entry")}
+    if include_against_voucher and doc.doctype == "Purchase Invoice":
+        for doctype in ("Payment Ledger Entry", "Advance Payment Ledger Entry"):
+            # A PE owns these rows, but its allocation changes this PI's AP.
+            # No PE actor permission or recalculation is part of a PI hold.
+            rows = {row.name: row for row in facts["ledgers"][doctype]}
+            rows.update({row.name: row for row in frappe.db.get_values(doctype,
+                {"against_voucher_type": doc.doctype, "against_voucher_no": doc.name}, "*", as_dict=True, for_update=True)})
+            facts["ledgers"][doctype] = sorted(rows.values(), key=lambda row: row.name)
     bin_keys = {(row.item_code, row.warehouse) for row in facts["ledgers"].get("Stock Ledger Entry", [])}
     if doc.doctype == "Purchase Order":
         # PO's native requested/ordered updater changes Bin without any SLE.
@@ -114,7 +122,8 @@ def hold_evidence(doc):
             for (name,) in names:
                 documents[doctype, name] = frappe.get_doc(doctype, name, for_update=True)
     return {identity: artifact_evidence(native, ignored_fields=PI_HOLD_FIELDS | {"modified", "modified_by"}
-            if identity == (doc.doctype, doc.name) else ()) for identity, native in documents.items()}
+            if identity == (doc.doctype, doc.name) else (), include_against_voucher=identity == (doc.doctype, doc.name))
+        for identity, native in documents.items()}
 
 
 def check_hold(doc, before):
@@ -252,6 +261,7 @@ def register_document(doc, method=None):
     recorded = next((row for row in context["documents"] if (row["doctype"], row["name"]) == (doc.doctype, doc.name)), None)
     if recorded:
         recorded.pop("permission", None)  # this document actually passed its native controller
+        recorded.pop("include_against_voucher", None)
     else:
         context["documents"].append({"doctype": doc.doctype, "name": doc.name})
     facts = snapshot(doc)

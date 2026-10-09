@@ -1797,8 +1797,10 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
                     self.fixture_effects.pop((pi.doctype, pi.name))
                     old = frappe.get_doc(pi.doctype, pi.name).as_dict()
                     audits = set(frappe.get_all("Integration Request", pluck="name"))
+                    request_id = str(uuid.uuid4())
                     with patch.object(guard, "check_finance", side_effect=AssertionError("Hold must not calculate or repair finance")), \
-                         patch.object(permissions, "has_permission", side_effect=write_only):
+                         patch.object(permissions, "has_permission", side_effect=write_only), \
+                         patch.dict(frappe.flags, {"purchase_request_id": request_id}):
                         self.assertIsNone(call())
                         self.commit_fixture()
                     new = set(frappe.get_all("Integration Request", pluck="name")) - audits
@@ -1814,10 +1816,30 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
                         old.pop(field, None); current.pop(field, None)
                     self.assertEqual(current, old)
                     self.assert_effects_unchanged()
-                    # A hold action and its replay require write, even for a submitted PI.
-                    with patch.object(permissions, "has_permission", side_effect=write_only):
-                        kernel.replay_artifacts(receipt)
-                        guard._form_replay(receipt)
+                    # Repeat the actual native public action with a freshly loaded
+                    # PI, not the replay helpers, under the same keyed intent.
+                    with patch.object(permissions, "has_permission", side_effect=write_only), \
+                         patch.dict(frappe.flags, {"purchase_request_id": request_id}), \
+                         patch.object(frappe.db, "set_value", wraps=frappe.db.set_value) as writes:
+                        error = None
+                        try: self.assertIsNone(call())
+                        except frappe.ValidationError as caught: error = caught
+                        self.assertIsNone(error, "Identical keyed native hold action must replay")
+                        writes.assert_not_called()
+                    self.assertEqual(set(frappe.get_all("Integration Request", pluck="name")) - audits, new)
+                    if submitted and action == "block":
+                        with patch.dict(frappe.flags, {"purchase_request_id": request_id}):
+                            with self.assertRaises(frappe.ValidationError) as caught:
+                                block_invoice(pi.name, add_days(nowdate(), 4), "QA changed keyed arguments")
+                            self.assertEqual(caught.exception.purchase_error_id, "request_payload_changed")
+                            with patch.object(permissions, "has_permission", side_effect=lambda doctype, ptype="read", *a, **kw:
+                                    False if doctype == pi.doctype and ptype == "write" else native_permission(doctype, ptype, *a, **kw)):
+                                with self.assertRaises(frappe.PermissionError): self.assertIsNone(call())
+                            before_drift = frappe.get_doc(pi.doctype, pi.name).as_dict()
+                            frappe.db.set_value(pi.doctype, pi.name, "hold_comment", "QA replay fact drift", update_modified=False)
+                            with self.assertRaises(frappe.ValidationError) as caught: call()
+                            self.assertEqual(caught.exception.purchase_error_id, "replay_evidence_changed")
+                            self.assertEqual(frappe.get_doc(pi.doctype, pi.name).as_dict(), before_drift)
             if submitted:
                 from frappe.client import set_value
                 with self.assertRaises(frappe.ValidationError):
@@ -1947,6 +1969,51 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
             if row["name"] == pi.name)["can_pay"])
         paid = actions.submit_document("Payment Entry", draft["name"], draft["modified"])["document"]
         self.assertEqual(paid["docstatus"], 1)
+        self.commit_fixture()
+        # A real partial PE owns these PLE rows while they settle this PI.
+        # Stored PI outstanding is deliberately left unchanged by corruption.
+        from deeplinkerp_branding.services import purchase_operation as kernel
+        entries = frappe.db.get_values("Payment Ledger Entry", {"voucher_type": "Payment Entry", "voucher_no": paid["name"],
+            "against_voucher_type": pi.doctype, "against_voucher_no": pi.name}, "*", as_dict=True, for_update=True)
+        self.assertTrue(entries)
+        entry = entries[0]
+        outstanding = frappe.db.get_value(pi.doctype, pi.name, "outstanding_amount")
+        self.remember_effects()
+        native_set = frappe.db.set_value
+        corrupted = []
+        def corrupt_allocated_ple(doctype, name, fieldname, *args, **kwargs):
+            result = native_set(doctype, name, fieldname, *args, **kwargs)
+            if (doctype, name, fieldname) == (pi.doctype, pi.name, "release_date"):
+                native_set("Payment Ledger Entry", entry.name, "amount", entry.amount + 1, update_modified=False)
+                corrupted.append(frappe.db.get_value(pi.doctype, pi.name, "outstanding_amount"))
+            return result
+        with patch.object(frappe.db, "set_value", side_effect=corrupt_allocated_ple), self.assertRaises(frappe.ValidationError) as caught:
+            block_invoice(pi.name, add_days(nowdate(), 4), "QA allocated PLE corrupt hook")
+        self.assertEqual(caught.exception.purchase_error_id, "invoice_hold_business_facts_changed")
+        self.assertEqual(corrupted, [outstanding])
+        self.assert_effects_unchanged()
+        self.assertEqual(frappe.db.get_value("Payment Ledger Entry", entry.name, "amount"), entry.amount)
+        request_id = str(uuid.uuid4())
+        from frappe import permissions
+        native_permission = permissions.has_permission
+        def pi_hold_permission(doctype, ptype="read", *args, **kwargs):
+            return False if doctype == "Payment Entry" and ptype in ("write", "submit") else native_permission(doctype, ptype, *args, **kwargs)
+        with patch.dict(frappe.flags, {"purchase_request_id": request_id}), \
+             patch.object(permissions, "has_permission", side_effect=pi_hold_permission):
+            block_invoice(pi.name, add_days(nowdate(), 4), "QA partial paid keyed hold")
+            self.commit_fixture()
+            with patch.object(frappe.db, "set_value", wraps=frappe.db.set_value) as writes:
+                self.assertIsNone(block_invoice(pi.name, add_days(nowdate(), 4), "QA partial paid keyed hold"))
+                writes.assert_not_called()
+            audit_name = kernel.identity("Administrator", request_id)
+            receipt_before = frappe.db.get_value("Integration Request", audit_name, "output")
+            frappe.db.set_value("Payment Ledger Entry", entry.name, "amount", entry.amount + 1, update_modified=False)
+            with self.assertRaises(frappe.ValidationError) as caught:
+                block_invoice(pi.name, add_days(nowdate(), 4), "QA partial paid keyed hold")
+            self.assertEqual(caught.exception.purchase_error_id, "replay_evidence_changed")
+            self.assertEqual(frappe.db.get_value(pi.doctype, pi.name, "outstanding_amount"), outstanding)
+            self.assertEqual(frappe.db.get_value("Payment Ledger Entry", entry.name, "amount"), entry.amount)
+            self.assertEqual(frappe.db.get_value("Integration Request", audit_name, "output"), receipt_before)
 
     def test_material_request_backlink_requires_actual_detail_and_shared_union_budget(self):
         from deeplinkerp_branding.services import purchase_reversal_scope as scope

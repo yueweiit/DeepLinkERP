@@ -988,6 +988,7 @@ def _native_documents_action(documents, native, payload, *, force_opaque=False, 
                     identity = next(row for row in consistency._state()["context"]["documents"]
                         if (row["doctype"], row["name"]) == (doc.doctype, doc.name))
                     identity["permission"] = "write"
+                    identity["include_against_voucher"] = True
                 if (doc.doctype, doc.name) not in prior:
                     # update_child_qty_rate writes children before parent.save;
                     # that later save's old snapshot is not this action's old
@@ -996,7 +997,8 @@ def _native_documents_action(documents, native, payload, *, force_opaque=False, 
             return service._read(documents[0].doctype, documents[0].name)
         write.__name__ = payload["action"]
         documents[0]._procurement_call(write, _purchase_payload={**payload,
-            "documents": [consistency.business_payload(doc.as_dict()) for doc in documents]})
+            "documents": [{"doctype": doc.doctype, "name": doc.name} if hold_only else
+                consistency.business_payload(doc.as_dict()) for doc in documents]})
         return result.get("native")  # preserve native public None
 
 

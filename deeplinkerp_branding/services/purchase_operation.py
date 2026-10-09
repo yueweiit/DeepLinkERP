@@ -134,7 +134,8 @@ def complete_audit(context, output):
         native = frappe.get_doc(identity["doctype"], identity["name"], for_update=True)
         permission = identity.get("permission") or ("submit" if native.docstatus == 1 else "cancel" if native.docstatus == 2 else "write")
         artifacts.append({**identity, "docstatus": native.docstatus, "modified": str(native.modified),
-            "permission": permission, "evidence": artifact_evidence(native)})
+            "permission": permission, "evidence": artifact_evidence(native, include_against_voucher=True)
+                if identity.get("include_against_voucher") else artifact_evidence(native)})
     receipt = {"documents": receipts} if "documents" in output else receipts[0]
     receipt.update(artifacts=artifacts)
     for key in ("result", "acknowledgements"):
@@ -162,7 +163,8 @@ def replay_artifacts(receipt):
                 if not frappe.has_permission(doc.doctype, permission, doc=doc):
                     reject("采购操作关联单据权限已改变，请重新核对", "replay_permission_changed", frappe.PermissionError)
     for artifact, doc in documents:
-        if doc.docstatus != artifact["docstatus"] or str(doc.modified) != artifact["modified"] or artifact_evidence(doc) != artifact["evidence"]:
+        evidence = artifact_evidence(doc, include_against_voucher=True) if artifact.get("include_against_voucher") else artifact_evidence(doc)
+        if doc.docstatus != artifact["docstatus"] or str(doc.modified) != artifact["modified"] or evidence != artifact["evidence"]:
             reject("采购操作关联单据或流水已改变，请重新核对", "replay_evidence_changed")
 
 
