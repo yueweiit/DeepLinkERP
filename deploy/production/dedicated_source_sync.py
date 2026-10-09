@@ -240,6 +240,32 @@ def install(config, start_timer=False):
     return receipt
 
 
+def retarget(config, start_timer=False):
+    """Update an already installed idle timer's pins, preserving logging/queues."""
+    validate_config(config)
+    with locked():
+        verify_identity(config)
+        receipt_path = STATE / "installation.json"
+        receipt = json.loads(receipt_path.read_bytes())
+        previous = json.loads((STATE / "config.json").read_bytes())
+        validate_config(previous)
+        if receipt.get("version") != 1 or receipt.get("status") not in {"installed", "staged"} or receipt["config"] != previous:
+            raise RuntimeError("Existing source installation evidence differs; HOLD")
+        ledger = STATE / "run.json"
+        if ledger.exists() and json.loads(ledger.read_bytes()).get("active"):
+            raise RuntimeError("Existing source execution is unconfirmed; HOLD")
+        # No logging-snapshot/apply: queued fixed jobs must remain queued.
+        if previous != config:
+            receipt.update(config=config, previous_config=previous)
+        receipt["status"] = "installed" if start_timer else "staged"
+        save_json(receipt_path, receipt)
+        atomic_write(SHARE / "launcher.py", Path(__file__).read_bytes())
+        save_json(STATE / "config.json", config)
+        if start_timer:
+            systemctl("start", UNIT_NAMES[1])  # Never enable a previously absent timer.
+    return receipt
+
+
 def rollback():
     # Stop new invocations and let the launcher cancel any active container child.
     systemctl("disable", "--now", UNIT_NAMES[1])
@@ -262,7 +288,7 @@ def rollback():
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("install", "run", "rollback"))
+    parser.add_argument("action", choices=("install", "retarget", "run", "rollback"))
     parser.add_argument("--revision")
     parser.add_argument("--image-id")
     parser.add_argument("--runner-sha256")
@@ -272,8 +298,8 @@ def main(argv=None):
     if Path.home() != Path("/home/yuewei"):
         parser.error("Run as the existing yuewei host user")
     try:
-        if args.action == "install":
-            install({"version": 1, "revision": args.revision, "image_id": args.image_id,
+        if args.action in {"install", "retarget"}:
+            (install if args.action == "install" else retarget)({"version": 1, "revision": args.revision, "image_id": args.image_id,
                      "runner_sha256": args.runner_sha256}, start_timer=args.start_timer)
         elif args.action == "rollback":
             rollback()

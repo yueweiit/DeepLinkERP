@@ -319,6 +319,7 @@ class JointReleaseGuardTests(unittest.TestCase):
 		after["models"]["Operating Expense Source"]["schema"] = self.schema()
 		after["metadata"]["scope"]["Scheduled Job Type"] = [{"name": "exact-new-job", "method": module.OPERATING_METHOD, "creation": "frozen"}]
 		contract = {"metadata_plan": {"scope": after["metadata"]["scope"], "new_definitions": ["Operating Expense Source"]}, "sources_before": before["audit"]["release_sources_all"], "sources_after": after["audit"]["release_sources_all"], "preserved_before": before["audit"]["preserved_apps"]}
+		contract.update(model_schemas={name: model["schema"] for name, model in after["models"].items()}, custom_fields=dict.fromkeys(module.CUSTOM_FIELD_ORDER))
 		receipt = self.module().DDLReceipt.create(path, {"candidate_sha": "a" * 40, "contract_sha256": "b" * 64}, before, contract)
 		receipt.finish(after)
 		return receipt, before, after
@@ -336,7 +337,7 @@ class JointReleaseGuardTests(unittest.TestCase):
 			current["metadata"]["scope"] = copy.deepcopy(new)
 		fake = types.SimpleNamespace(conf=types.SimpleNamespace(maintenance_mode=1), db=types.SimpleNamespace(rollback=lambda: None, commit=lambda: events.append("commit"), sql_ddl=ddl), scrub=lambda name: name.lower().replace(" ", "_"), clear_cache=lambda **kw: None)
 		audit = types.SimpleNamespace(capture_joint_state=lambda **kw: copy.deepcopy(current), table_schema=lambda name: copy.deepcopy(current["je"]["schema"] if name == "Journal Entry" else current["models"][name]["schema"]))
-		with patch.dict(sys.modules, {"frappe": fake, "audit_unified_purchase": audit}), patch.object(module, "_assert_joint_invariants", lambda *a, **kw: None), patch.object(module, "capture_joint_metadata", lambda: copy.deepcopy(current["metadata"])), patch.object(module, "_write_scope", write_scope):
+		with patch.dict(sys.modules, {"frappe": fake, "audit_unified_purchase": audit}), patch.object(sys.modules["joint_release_guards"], "verified_quiescence", return_value=True), patch.object(module, "_assert_joint_invariants", lambda *a, **kw: None), patch.object(module, "capture_joint_metadata", lambda **kw: copy.deepcopy(current["metadata"])), patch.object(module, "_write_scope", write_scope):
 			return module.restore_joint_metadata(path, **kwargs)
 
 	def test_fully_applied_rollback_refuses_missing_new_metadata_column_index_or_model_before_writes(self):
@@ -536,7 +537,7 @@ class JointReleaseGuardTests(unittest.TestCase):
 			return []
 		with patch.dict(sys.modules, {"frappe": types.SimpleNamespace(db=types.SimpleNamespace(sql=sql))}):
 			module._assert_no_joint_customizations()
-		self.assertEqual(len(events), 3)
+		self.assertEqual(len(events), 4)
 		self.assertTrue(all("Journal Entry" not in values or set(module.CUSTOM_FIELD_ORDER) <= set(values) for _, values in events))
 
 	def test_native_planning_virtualizes_cache_fills_but_forbids_real_cache_sql_and_commit_mutations(self):
@@ -611,11 +612,12 @@ class JointReleaseGuardTests(unittest.TestCase):
 	def test_shell_quiesces_workers_before_new_image_and_keeps_durable_receipt_in_sites_volume(self):
 		source = (ROOT / "deploy/production/deploy_unified_purchase.sh").read_text()
 		self.assertIn("quiesce_release_workers() {", source)
-		self.assertIn('"${dc[@]}" stop queue-long queue-short scheduler', source)
+		self.assertIn('--host-drain', source)
+		self.assertNotIn('"${dc[@]}" stop ', source)
 		self.assertIn("--joint-apply", source)
 		self.assertIn("--joint-rollback", source)
 		self.assertIn("/home/frappe/frappe-bench/sites/deeplinkerp.com/private/release-evidence/", source)
-		self.assertLess(source.index("quiesce_release_workers\n"), source.index("switched=1"))
+		self.assertLess(source.index("quiesce_release_workers\n"), source.index('# All six containers are staged stopped.'))
 
 	def test_cli_refuses_ambiguous_actions_or_non_durable_receipt_before_connecting(self):
 		module = self.metadata_module()
@@ -704,7 +706,7 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 		metadata = {"scope": {"Has Role": [], "Custom Field": []}, "outside": {"Custom Field": module.digest([{"name": "Purchase Order-custom_oa_purchase_expense", "fieldtype": "Data"}])}, "outside_rows": {"Custom Field": [{"name": "Purchase Order-custom_oa_purchase_expense", "fieldtype": "Data"}], "Has Role": []}}
 		rows = [{"name": f"source-{i}", "original_evidence": '{"manual": 1 }'} for i in range(372)]
 		before = {"metadata": metadata, "je": {"schema": je, "rows": [{"name": "old-je"}], "original_columns": list(je["columns"])}, "models": {"Operating Expense Source": {"schema": self.schema(), "rows": rows}}, "operating_singles": [{"doctype": "Operating Expense Sync Settings", "field": "sync_enabled", "value": "0"}], "audit": {"release_sources_all": {"branding": "candidate"}, "tables": {"Has Role": module.digest([]), "OA Purchase Request": module.digest([{"name": "OA-old", "manual": "keep"}])}, "schemas": {"Journal Entry": je}, "singles": "same", "configuration_sha256": "same"}}
-		contract = {"sources_after": before["audit"]["release_sources_all"], "model_schemas": {"Operating Expense Source": self.schema()}}
+		contract = {"sources_after": before["audit"]["release_sources_all"], "model_schemas": {"Operating Expense Source": self.schema()}, "custom_fields": dict.fromkeys(module.CUSTOM_FIELD_ORDER)}
 		return types.SimpleNamespace(state={"before": before, "contract": contract}), copy.deepcopy(before)
 
 	def assert_invariants(self, module, receipt, current):
@@ -729,24 +731,26 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 				else: current["metadata"]["outside_rows"]["Custom Field"][0]["fieldtype"] = "Link"
 				with self.assertRaises(AssertionError): self.assert_invariants(module, receipt, current)
 
-	def test_only_eleven_exact_oa_fields_are_in_scope_not_existing_po_or_native_oa_flags(self):
+	def test_only_contract_oa_fields_are_in_scope_not_existing_po_or_native_oa_flags(self):
 		module = self.metadata_module()
 		fields = module.SOURCE_FIELD_ORDER
-		self.assertEqual(len(fields), 11)
-		for field in fields:
-			self.assertTrue(module._in_joint_scope("Custom Field", {"name": "OA Purchase Request-" + field, "dt": "OA Purchase Request", "fieldname": field}))
-			self.assertTrue(module._in_joint_scope("Custom Field", {"name": "orphan-alias", "dt": "OA Purchase Request", "fieldname": field}))
-		for dt, field in (("Purchase Order", "custom_oa_purchase_expense"), ("OA Purchase Request", "source_stale"), ("OA Purchase Request", "target_company")):
-			self.assertFalse(module._in_joint_scope("Custom Field", {"name": dt + "-" + field, "dt": dt, "fieldname": field}))
+		self.assertEqual(len(fields), 12)
+		fake = types.SimpleNamespace(get_app_path=lambda app, filename: str(ROOT / app / filename))
+		with patch.dict(sys.modules, {"frappe": fake}):
+			for field in fields:
+				self.assertTrue(module._in_joint_scope("Custom Field", {"name": "OA Purchase Request-" + field, "dt": "OA Purchase Request", "fieldname": field}))
+				self.assertTrue(module._in_joint_scope("Custom Field", {"name": "orphan-alias", "dt": "OA Purchase Request", "fieldname": field}))
+			for dt, field in (("Purchase Order", "custom_oa_purchase_expense"), ("OA Purchase Request", "source_stale"), ("OA Purchase Request", "target_company")):
+				self.assertFalse(module._in_joint_scope("Custom Field", {"name": dt + "-" + field, "dt": dt, "fieldname": field}))
 
 	def test_source_cf_definitions_reuse_installer_without_invoking_it_and_keep_security(self):
 		module = self.metadata_module()
 		self.assertTrue(hasattr(module, "_source_custom_fields"))
 		fake = types.SimpleNamespace(get_app_path=lambda app, filename: str(ROOT / app / filename))
 		with patch.dict(sys.modules, {"frappe": fake}): fields = module._source_custom_fields()
-		self.assertEqual(len(fields), 11)
+		self.assertEqual(len(fields), 12)
 		for name, field in fields.items():
-			visible = name in {"custom_purchase_beneficiary_company", "custom_purchase_company_proposal", "custom_purchase_project"}
+			visible = name in {"custom_purchase_beneficiary_company", "custom_purchase_company_proposal", "custom_purchase_project", "custom_purchase_pending_reason"}
 			self.assertEqual((field.get("hidden", 0), field["read_only"], field["no_copy"]), (int(not visible), 1, 1))
 			self.assertFalse(field.get("default") or field.get("reqd"))
 			self.assertEqual(field.get("unique", 0), int(name == "custom_purchase_source_id"))
@@ -813,7 +817,7 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 		self.assertTrue(hasattr(module, "_validate_oa_ddl"))
 		fields = self.source_fields(module)
 		for name, field in fields.items():
-			kind = {"Data": "varchar(140)", "Link": "varchar(140)", "Long Text": "longtext", "Check": "tinyint(4) NOT NULL DEFAULT 0", "Datetime": "datetime(6)"}[field["fieldtype"]]
+			kind = {"Data": "varchar(140)", "Link": "varchar(140)", "Long Text": "longtext", "Small Text": "text", "Check": "tinyint(4) NOT NULL DEFAULT 0", "Datetime": "datetime(6)"}[field["fieldtype"]]
 			module._validate_oa_ddl(f"ALTER TABLE `tabOA Purchase Request` ADD COLUMN `{name}` {kind}", set(fields), fields)
 		module._validate_oa_ddl("ALTER TABLE `tabOA Purchase Request` ADD UNIQUE INDEX IF NOT EXISTS custom_purchase_source_id (`custom_purchase_source_id`)", set(fields), fields)
 		for sql in ("ALTER TABLE `tabPurchase Order` ADD COLUMN `custom_purchase_source_id` varchar(140)", "ALTER TABLE `tabOA Purchase Request` MODIFY COLUMN `currency` varchar(140)", "ALTER TABLE `tabOA Purchase Request` ADD COLUMN `custom_purchase_source_json` varchar(140)", "ALTER TABLE `tabOA Purchase Request` ADD COLUMN `custom_purchase_source_id` varchar(140) NOT NULL", "ALTER TABLE `tabOA Purchase Request` ADD UNIQUE INDEX IF NOT EXISTS custom_purchase_source_id (`custom_purchase_source_id`(40))"):
@@ -852,7 +856,7 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 		self.assertEqual(set(additions["indexes"]), {"custom_purchase_source_id"})
 		for name, definition in additions["columns"].items():
 			kind = fields[name]["fieldtype"]
-			self.assertEqual(definition["type"], {"Data": "varchar(140)", "Link": "varchar(140)", "Long Text": "longtext", "Check": "tinyint(4)", "Datetime": "datetime(6)"}[kind])
+			self.assertEqual(definition["type"], {"Data": "varchar(140)", "Link": "varchar(140)", "Long Text": "longtext", "Small Text": "text", "Check": "tinyint(4)", "Datetime": "datetime(6)"}[kind])
 			self.assertEqual((definition["nullable"], definition["default_value"]), ("NO", "0") if kind == "Check" else ("YES", "NULL"))
 			if kind in {"Check", "Datetime"}:
 				self.assertIsNone(definition["charset"])
@@ -872,7 +876,7 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 			spec.loader.exec_module(audit)
 		module = self.metadata_module()
 		schema = self.schema()
-		with patch.dict(sys.modules, {"procurement_release_metadata": module}), patch.object(audit, "table_schema", side_effect=lambda dt: schema if dt in {"Journal Entry", "OA Purchase Request"} else None), patch.object(audit, "capture_audit", return_value={}), patch.object(module, "capture_joint_metadata", return_value={}):
+		with patch.dict(sys.modules, {"procurement_release_metadata": module}), patch.object(audit, "table_schema", side_effect=lambda dt: schema if dt in {"Journal Entry", "OA Purchase Request"} else None), patch.object(audit, "capture_audit", return_value={}), patch.object(module, "capture_joint_metadata", return_value={}), patch.object(module, "_native_reversal_contract", return_value={"tables": []}):
 			state = audit.capture_joint_state(original_columns=["name"], original_oa_columns=["name", "manual"])
 		self.assertEqual(state["oa"]["original_columns"], ["name", "manual"])
 		self.assertEqual(state["oa"]["rows"], [{"name": "OA-old", "manual": "keep"}])
@@ -982,7 +986,7 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 			result = []
 			for field in wanted.fields:
 				if field.fieldname not in current["oa"]["schema"]["columns"]:
-					kind = {"Data": "varchar(140)", "Link": "varchar(140)", "Long Text": "longtext", "Check": "tinyint(4) NOT NULL DEFAULT 0", "Datetime": "datetime(6)"}[field.fieldtype]
+					kind = {"Data": "varchar(140)", "Link": "varchar(140)", "Long Text": "longtext", "Small Text": "text", "Check": "tinyint(4) NOT NULL DEFAULT 0", "Datetime": "datetime(6)"}[field.fieldtype]
 					result.append(f"ALTER TABLE `tabOA Purchase Request` ADD COLUMN `{field.fieldname}` {kind}")
 			if any(field.fieldname == "custom_purchase_source_id" and field.get("unique") for field in wanted.fields) and "custom_purchase_source_id" not in current["oa"]["schema"]["indexes"]:
 				result.append("ALTER TABLE `tabOA Purchase Request` ADD UNIQUE INDEX IF NOT EXISTS custom_purchase_source_id (`custom_purchase_source_id`)")
@@ -1015,21 +1019,22 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 		stack = __import__("contextlib").ExitStack()
 		self.addCleanup(stack.close)
 		stack.enter_context(patch.dict(sys.modules, {"frappe": fake, "frappe.model.meta": types.SimpleNamespace(Meta=object), "frappe.utils": types.SimpleNamespace(now_datetime=lambda: "2026-10-06"), "audit_unified_purchase": audit}))
+		stack.enter_context(patch.object(sys.modules["joint_release_guards"], "verified_quiescence", return_value=True))
 		stack.enter_context(patch.object(module, "load_joint_contract", side_effect=lambda: copy.deepcopy(contract)))
 		stack.enter_context(patch.object(module, "_joint_plan", return_value=plan))
 		stack.enter_context(patch.object(module, "_native_schema_sql", side_effect=native_sql))
 		stack.enter_context(patch.object(module, "_write_scope", side_effect=write_scope))
-		stack.enter_context(patch.object(module, "capture_joint_metadata", side_effect=lambda: copy.deepcopy(current["metadata"])))
+		stack.enter_context(patch.object(module, "capture_joint_metadata", side_effect=lambda **kw: copy.deepcopy(current["metadata"])))
 		stack.enter_context(patch.object(module, "_desired_navigation", side_effect=lambda scope, **kw: scope))
 		return before, current, events, control
 
-	def test_eleven_oa_column_intents_and_unique_index_are_durable_and_second_apply_is_idle(self):
+	def test_contract_oa_column_intents_and_unique_index_are_durable_and_second_apply_is_idle(self):
 		module = self.metadata_module()
 		with tempfile.TemporaryDirectory() as directory:
 			path = Path(directory) / "receipt.json"
 			before, current, events, _ = self.native_oa_boundary(module, path)
 			result = module.apply_joint_metadata("a" * 40, path)
-			self.assertEqual(result["ddl_boundaries"], 12)
+			self.assertEqual(result["ddl_boundaries"], len(module.SOURCE_FIELD_ORDER) + 1)
 			self.assertEqual(current["models"], before["models"])
 			self.assertEqual(current["operating_singles"], before["operating_singles"])
 			first = path.read_bytes(); events.clear()
@@ -1038,7 +1043,7 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 			self.assertEqual(path.read_bytes(), first)
 
 	def test_each_interrupted_oa_autocommit_rolls_back_only_new_null_columns_and_job(self):
-		for crash in range(1, 13):
+		for crash in range(1, len(self.metadata_module().SOURCE_FIELD_ORDER) + 2):
 			with self.subTest(crash=crash), tempfile.TemporaryDirectory() as directory:
 				module = self.metadata_module()
 				path = Path(directory) / "receipt.json"
@@ -1126,6 +1131,192 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 			events.clear()
 			with self.assertRaisesRegex(AssertionError, "non-NULL"): module.restore_joint_metadata(path)
 			self.assertEqual(events, [])
+
+
+class CombinedReleaseContractTests(unittest.TestCase):
+	module = JointReleaseGuardTests.module
+	metadata_module = JointReleaseGuardTests.metadata_module
+	def test_native_only_scope_keeps_optional_metadata_and_old_jobs_outside(self):
+		module = self.metadata_module()
+		import inspect
+		self.assertIn("native_only", inspect.signature(module.capture_joint_metadata).parameters)
+		fake = types.SimpleNamespace(get_app_path=lambda app, name: str(ROOT / app / name), get_meta=lambda dt: types.SimpleNamespace(fields=[]))
+		with patch.dict(sys.modules, {"frappe": fake}):
+			native = module._native_reversal_contract()
+		rows = {dt: [] for dt in ("DocType", "Custom Field", "Page", "Workspace", "Workspace Sidebar", "Scheduled Job Type", "Property Setter", "Custom DocPerm")}
+		rows["Custom Field"] = [{"name": dt + "-" + native["fieldname"], "dt": dt, "fieldname": native["fieldname"]} for dt in native["targets"]] + [{"name": "Journal Entry-" + module.CUSTOM_FIELD_ORDER[0], "dt": "Journal Entry", "fieldname": module.CUSTOM_FIELD_ORDER[0]}]
+		rows["DocType"] = [{"name": name} for name in module.JOINT_MODELS]
+		rows["Workspace"] = [{"name": "Buying", "custom": "原始字节"}]
+		rows["Scheduled Job Type"] = [{"name": "native-" + str(i), "method": method} for i, method in enumerate(module.SCHEDULED_METHODS)]
+		with patch.dict(sys.modules, {"frappe": fake}), patch.object(module, "_rows", side_effect=lambda dt: copy.deepcopy(rows[dt])):
+			result = module.capture_joint_metadata(native_only=True)
+		self.assertEqual(len(result["scope"]["Custom Field"]), 6)
+		self.assertEqual(result["scope"]["Scheduled Job Type"], [rows["Scheduled Job Type"][-1]])
+		for dt in ("DocType", "Page", "Workspace", "Workspace Sidebar"):
+			self.assertEqual(result["scope"][dt], [])
+			self.assertEqual(result["outside_rows"][dt], rows[dt])
+		self.assertEqual(result["outside_rows"]["Scheduled Job Type"], rows["Scheduled Job Type"][:2])
+
+	def test_native_only_rollback_uses_shared_first_writer_marker(self):
+		module, guard = self.metadata_module(), self.module()
+		fake = types.SimpleNamespace(conf=types.SimpleNamespace(maintenance_mode=1))
+		with tempfile.TemporaryDirectory() as directory:
+			shared = Path(directory) / "main.resume.json"
+			guard.record_resume(shared, {"candidate_sha": "a" * 40, "image_id": "sha256:" + "b" * 64}, "candidate-serving")
+			with patch.dict(sys.modules, {"frappe": fake, "audit_unified_purchase": types.SimpleNamespace(table_schema=None)}), patch.dict(os.environ, {"DEEPLINKERP_RELEASE_RESUME_RECEIPT": str(shared)}), patch("joint_release_guards.verified_quiescence", return_value=True), patch("joint_release_guards.DDLReceipt.load", side_effect=AssertionError("Secondary receipt was loaded before the shared marker gate")):
+				with self.assertRaisesRegex(AssertionError, "forward|HOLD"):
+					module.restore_joint_metadata(Path(directory) / "secondary.json")
+
+	def test_twelfth_source_field_reuses_visible_readonly_native_text(self):
+		module = self.metadata_module()
+		fake = types.SimpleNamespace(get_app_path=lambda app, name: str(ROOT / app / name))
+		with patch.dict(sys.modules, {"frappe": fake}):
+			fields = module._source_custom_fields()
+		self.assertEqual(len(fields), 12)
+		field = fields["custom_purchase_pending_reason"]
+		self.assertEqual((field["fieldtype"], field.get("hidden", 0), field["read_only"], field["no_copy"], field.get("permlevel", 0)), ("Small Text", 0, 1, 1, 0))
+		self.assertEqual(module._source_column(field, 20)["type"], "text")
+		module._validate_oa_ddl("ALTER TABLE `tabOA Purchase Request` ADD COLUMN `custom_purchase_pending_reason` text", {field["fieldname"]}, fields)
+
+	def test_native_reversal_contract_is_separate_from_drop_table_models(self):
+		module = self.metadata_module()
+		self.assertTrue(hasattr(module, "_native_reversal_contract"), "Native contract must reuse the existing installer")
+		fake = types.SimpleNamespace(get_app_path=lambda app, name: str(ROOT / app / name))
+		with patch.dict(sys.modules, {"frappe": fake}):
+			contract = module._native_reversal_contract()
+		self.assertEqual(set(contract["tables"]), {"Bin", "Purchase Order", "Purchase Receipt", "Purchase Invoice", "Payment Entry", "Repost Item Valuation", "Integration Request"})
+		self.assertFalse(set(contract["tables"]) & set(module.JOINT_MODELS))
+		self.assertEqual(contract["definition"]["options"], "Integration Request")
+		self.assertEqual(contract["activity_index_columns"], ["integration_request_service", contract["activity_column"], "name"])
+		self.assertIn("'Completed'", contract["activity_expression"])
+		self.assertEqual(contract["recover_method"], module.REVERSAL_METHOD)
+
+	def test_first_resume_marker_is_durable_idempotent_and_blocks_rollback(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "assert_pre_resume"), "Pre-resume rollback guard required")
+		with tempfile.TemporaryDirectory() as directory:
+			path = Path(directory) / "resume.json"
+			guard.assert_pre_resume(path)
+			with patch.object(guard.DDLReceipt, "_sync_directory", wraps=guard.DDLReceipt._sync_directory) as sync:
+				guard.record_resume(path, {"candidate_sha": "a" * 40, "image_id": "sha256:" + "b" * 64}, "candidate-web")
+				sync.assert_called_once_with(path.parent)
+			first = path.read_bytes()
+			guard.record_resume(path, {"candidate_sha": "a" * 40, "image_id": "sha256:" + "b" * 64}, "candidate-web")
+			self.assertEqual(path.read_bytes(), first)
+			for corrupt in (False, True):
+				with self.subTest(corrupt=corrupt):
+					if corrupt: path.write_text("broken")
+					with self.assertRaisesRegex(AssertionError, "forward|HOLD"):
+						guard.assert_pre_resume(path)
+
+	def test_budget_uses_actual_same_filesystem_sum_and_refuses_unknown(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "filesystem_budget"), "Actual filesystem budget required")
+		with tempfile.TemporaryDirectory() as directory:
+			path = Path(directory)
+			with patch.object(guard.os, "statvfs", return_value=types.SimpleNamespace(f_bavail=10, f_frsize=10)):
+				self.assertEqual(guard.filesystem_budget({"extract": (path, 20), "build": (path, 30)}, reserve_bytes=10)[0]["required_bytes"], 60)
+				with self.assertRaisesRegex(AssertionError, "space"):
+					guard.filesystem_budget({"extract": (path, 60), "backup": (path, 50)}, reserve_bytes=0)
+			for amount in (None, 0, -1):
+				with self.subTest(amount=amount), self.assertRaises(AssertionError):
+					guard.filesystem_budget({"backup": (path, amount)})
+
+	def test_raw_rq_snapshot_preserves_queue_order_without_native_cleanup_calls(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "raw_rq_snapshot"), "Read-only raw RQ inventory required")
+		class Redis:
+			worker = None
+			def scan(self, cursor, **kwargs): return 0, [b"rq:queues", b"rq:workers", b"rq:queue:bench:short", b"rq:job:queued"] + ([b"rq:worker:old"] if self.worker is not None else [])
+			def type(self, key): return b"set" if key in {"rq:queues", "rq:workers"} else b"list" if key == "rq:queue:bench:short" else b"hash" if key == "rq:job:queued" or key == "rq:worker:old" and self.worker is not None else b"none"
+			def scard(self, key): return len(self.smembers(key))
+			def smembers(self, key): return {b"rq:queue:bench:short"} if key == "rq:queues" else set()
+			def llen(self, key): return 2 if key == "rq:queue:bench:short" else 0
+			def lrange(self, key, *args): return [b"queued", b"queued"] if key == "rq:queue:bench:short" else []
+			def zcard(self, key): return 0
+			def zrange(self, key, *args, **kwargs): return []
+			def hlen(self, key): return 4
+			def hstrlen(self, key, field): return 4
+			def hmget(self, key, fields): return [{"status": b"queued", "origin": b"bench:short"}.get(field) for field in fields]
+			def hexists(self, key, field): return True
+			def hkeys(self, key): return list(self.worker)
+			def hgetall(self, key): return self.worker
+		snapshot = guard.raw_rq_snapshot(Redis())
+		self.assertEqual(snapshot["queues"]["bench:short"], ["queued", "queued"])
+		self.assertEqual(snapshot["workers"], {})
+		self.assertEqual(snapshot["jobs"]["queued"]["status"], "queued")
+		redis = Redis()
+		redis.worker = dict(pid="1", hostname="native", birth="2026-10-09T00:00:00Z", state="idle", queues="bench:short")
+		with self.assertRaisesRegex(AssertionError, "Orphan/stale"):
+			guard.raw_rq_snapshot(redis)
+		redis.worker["death"] = "2026-10-09T00:01:00Z"
+		after = guard.raw_rq_snapshot(redis)
+		before = copy.deepcopy(snapshot)
+		before["workers"] = {"rq:worker:old": {key: value for key, value in redis.worker.items() if key != "death"}}
+		guard.verify_rq_drain(before, after, {})
+		after["tombstones"]["rq:worker:old"]["birth"] = "old-unmatched"
+		with self.assertRaisesRegex(AssertionError, "identity"):
+			guard.verify_rq_drain(before, after, {})
+
+	def test_owned_build_cleanup_rejects_drift_shared_mount_or_asset_without_deleting(self):
+		guard = self.module()
+		for scenario in ("exact", "extra-file", "changed-file", "shared-mount", "asset-url", "asset-body", "post-health"):
+			with self.subTest(scenario=scenario), tempfile.TemporaryDirectory(prefix="unified-purchase-build.", dir="/tmp") as build_name, tempfile.TemporaryDirectory() as evidence_name:
+				build, evidence = Path(build_name), Path(evidence_name)
+				(build / "release-source-manifest.json").write_bytes(b"{}")
+				(build / "raw.js").write_bytes(b"raw")
+				files = {item.name: hashlib.sha256(item.read_bytes()).hexdigest() for item in build.iterdir()}
+				stats = build.stat(); image = "sha256:" + "b" * 64
+				owned = {"path": str(build), "identity": [stats.st_dev, stats.st_ino, stats.st_uid], "files": files, "manifest_sha256": files["release-source-manifest.json"], "max_bytes": 100, "candidate_sha": "a" * 40, "image_id": image, "rollback_image_id": "sha256:" + "c" * 64, "raw_assets": {"/assets/raw.js?v=1": files["raw.js"]}}
+				(evidence / "build-ownership.json").write_text(json.dumps(owned))
+				accepted = {"browser_accepted": True, "candidate_sha": owned["candidate_sha"], "image_id": image, "loaded_assets": [{"url": "https://deeplinkerp.com/assets/raw.js?v=" + ("0" if scenario == "asset-url" else "1"), "body_sha256": "d" * 64 if scenario == "asset-body" else files["raw.js"]}]}
+				(evidence / "acceptance.json").write_text(json.dumps(accepted))
+				if scenario == "extra-file": (build / "not-this-release.txt").write_text("keep")
+				if scenario == "changed-file": (build / "raw.js").write_text("new")
+				calls = []
+				def host_call(args):
+					calls.append(args)
+					if args == ["docker", "ps", "-aq"]: return "container-id"
+					if args[:2] == ["docker", "inspect"]: return json.dumps([{"Mounts": [{"Source": str(build.resolve())}]}] if scenario == "shared-mount" else [{"Mounts": []}])
+					if args[:3] == ["docker", "image", "inspect"]: return json.dumps([{"Id": args[-1]}])
+					return "pong"
+				def inspect(service):
+					return {"Image": image, "State": {"Running": not (scenario == "post-health" and not build.exists())}}
+				with patch.object(guard, "_host_call", side_effect=host_call), patch.object(guard, "_container_inspect", side_effect=inspect), patch.object(guard.subprocess, "run", return_value=types.SimpleNamespace(stdout=b"raw")):
+					if scenario == "exact":
+						result = guard.cleanup_owned_build(evidence, evidence / "acceptance.json")
+						self.assertEqual(result["removed_bytes"], 5)
+						self.assertFalse(build.exists())
+					elif scenario == "post-health":
+						with self.assertRaisesRegex(AssertionError, "forward HOLD"): guard.cleanup_owned_build(evidence, evidence / "acceptance.json")
+						self.assertFalse(build.exists())
+						self.assertEqual(guard.DDLReceipt.load(evidence / "cache-cleanup.json").state["status"], "applying")
+					else:
+						with self.assertRaises(AssertionError): guard.cleanup_owned_build(evidence, evidence / "acceptance.json")
+						self.assertTrue(build.exists())
+					self.assertFalse(any("prune" in call or "rm" in call for call in calls))
+
+	def test_native_generated_column_and_pointer_schema_keep_case_and_original_projection(self):
+		module = self.metadata_module()
+		self.assertTrue(hasattr(module, "_native_schema_additions"))
+		fake = types.SimpleNamespace(get_app_path=lambda app, name: str(ROOT / app / name))
+		with patch.dict(sys.modules, {"frappe": fake}): native = module._native_reversal_contract()
+		schema = JointReleaseGuardTests.schema(self)
+		schema["columns"]["name"] = module._je_column(0)
+		for key in ("integration_request_service", "status", "request_description"):
+			schema["columns"][key] = module._je_column(len(schema["columns"]))
+		for dt in native["tables"]:
+			with self.subTest(dt=dt):
+				original = {"schema": copy.deepcopy(schema), "original_columns": list(schema["columns"]), "rows": [{"name": "original", "status": "Completed"}]}
+				delta = module._native_schema_additions(original, native, dt)
+				self.assertEqual(len(delta["columns"]), 1)
+				self.assertEqual(len(delta["indexes"]), 1)
+				self.assertEqual(original["schema"], schema)
+				if dt == "Integration Request":
+					column = delta["columns"][native["activity_column"]]
+					self.assertEqual((column["type"], column["extra"]), ("tinyint(4)", "VIRTUAL GENERATED"))
+					self.assertIn("'Completed'", column["expression"])
+					self.assertEqual([row["column"] for row in delta["indexes"][native["activity_index"]]], native["activity_index_columns"])
 
 
 if __name__ == "__main__":

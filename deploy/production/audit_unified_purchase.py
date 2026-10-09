@@ -10,7 +10,7 @@ import frappe
 
 SITE = "deeplinkerp.com"
 BENCH = Path("/home/frappe/frappe-bench")
-REQUIRED_SOURCE_APPS = ("deeplinkerp_branding", "china_finance", "crm_integration")
+REQUIRED_SOURCE_APPS = ("deeplinkerp_branding", "china_finance", "crm_integration", "oa_purchase_request")
 OPERATING_MODELS = ("Operating Expense Company Map", "Operating Expense Source", "Operating Expense Mapping", "Operating Expense Event", "Operating Expense Sync Settings", "Purchase Fulfilment Link","Operating Expense Takeover","Operating Expense Payment")
 
 
@@ -26,7 +26,7 @@ def source_files(app):
 def verify_sources(manifest, phase):
 	assert phase in {"before", "after"}
 	for app, files in manifest["apps"].items():
-		assert app in {"deeplinkerp_branding", "crm_integration", "china_finance"}, "Unexpected overlay app"
+		assert app in set(REQUIRED_SOURCE_APPS), "Unexpected overlay app"
 		current = source_files(app)
 		for path, versions in files.items():
 			relative = PurePosixPath(path)
@@ -109,7 +109,7 @@ def table_schema(doctype):
 	return json.loads(json.dumps(result, default=str))
 
 
-def capture_audit(*, je_columns=None, oa_columns=None):
+def capture_audit(*, je_columns=None, oa_columns=None, native_columns=None):
 	"""Capture inside the caller's transaction; the CLI remains read-only."""
 	for app in set(REQUIRED_SOURCE_APPS) | set(frappe.get_installed_apps()):
 		assert (BENCH / "apps" / app / app).is_dir(), "Missing required/installed app source: " + app
@@ -129,6 +129,8 @@ def capture_audit(*, je_columns=None, oa_columns=None):
 		"Purchase Receipt",
 		"Purchase Invoice",
 		"Payment Entry",
+		"Repost Item Valuation",
+		"Integration Request",
 		"Payment Ledger Entry",
 		"China Accounting Voucher",
 		"Sales Order",
@@ -156,6 +158,8 @@ def capture_audit(*, je_columns=None, oa_columns=None):
 		"Purchase Receipt",
 		"Purchase Invoice",
 		"Payment Entry",
+		"Repost Item Valuation",
+		"Integration Request",
 		"Journal Entry",
 		"China Accounting Voucher",
 		"Sales Order",
@@ -176,21 +180,10 @@ def capture_audit(*, je_columns=None, oa_columns=None):
 		"site": frappe.local.site,
 		"tables": {},
 		"schemas": {},
-		"release_sources_all": {app: source_files(app) for app in ("deeplinkerp_branding", "china_finance", "crm_integration")},
+		"release_sources_all": {app: source_files(app) for app in sorted(set(REQUIRED_SOURCE_APPS) | set(frappe.get_installed_apps()))},
 		"preserved_apps": {
 			app: source_digest(app)
-			for app in [
-				"overseas_costing",
-				"mes_integration",
-				"oa_purchase_request",
-				"china_finance",
-				"draft_notifications",
-				"custom_filters",
-				"crm_integration",
-				"ai_assistant",
-				"client_akivision",
-				"mobile_operations",
-			]
+			for app in sorted(set(REQUIRED_SOURCE_APPS) | set(frappe.get_installed_apps())) if app != "deeplinkerp_branding"
 		},
 	}
 	for doctype in sorted(set(tables)):
@@ -199,7 +192,7 @@ def capture_audit(*, je_columns=None, oa_columns=None):
 		# Doctype names come only from this fixed allowlist and installed metadata; quote defensively.
 		table = ("tab" + doctype).replace("`", "``")
 		projection = "*"
-		original = je_columns if doctype == "Journal Entry" else oa_columns if doctype == "OA Purchase Request" else None
+		original = je_columns if doctype == "Journal Entry" else oa_columns if doctype == "OA Purchase Request" else (native_columns or {}).get(doctype)
 		if original is not None:
 			assert original and "name" in original and len(original) == len(set(original))
 			assert all(isinstance(field, str) and field.isidentifier() for field in original)
@@ -212,6 +205,15 @@ def capture_audit(*, je_columns=None, oa_columns=None):
 			).hexdigest(),
 		}
 		result["schemas"][doctype] = table_schema(doctype)
+	result["native_new_columns"] = {}
+	if native_columns:
+		from procurement_release_metadata import _native_reversal_contract
+		contract = _native_reversal_contract()
+		for dt, original in native_columns.items():
+			for key in set(result["schemas"][dt]["columns"]) - set(original):
+				assert key == (contract["activity_column"] if dt == "Integration Request" else contract["fieldname"]), "Unapproved native addition"
+				condition = _native_activity_mismatch(contract) if dt == "Integration Request" else "`" + key + "` is not null"
+				result["native_new_columns"][dt + "/" + key] = frappe.db.sql("select count(*) from `tab" + dt + "` where " + condition)[0][0]
 	# Original rows remain hashed using their frozen projection. Independently
 	# inspect every newly added OA column so later source writes cannot hide
 	# behind that projection during the fresh final release audit.
@@ -250,15 +252,20 @@ def capture_audit(*, je_columns=None, oa_columns=None):
 		).hexdigest()
 	result["maintenance_mode"] = maintenance_mode
 	if result["purchase_source_sync_enabled"]:
-		result["release_quiescent"] = maintenance_mode == 1 and os.environ.get("DEEPLINKERP_RELEASE_QUIESCENT") == "1"
+		from joint_release_guards import verified_quiescence
+		result["release_quiescent"] = maintenance_mode == 1 and verified_quiescence()
 	assets = BENCH / "sites/assets/assets.json"
 	result["assets_manifest_sha256"] = hashlib.sha256(assets.read_bytes()).hexdigest()
 	return result
 
 
-def capture_joint_state(*, original_columns=None, original_oa_columns=None):
+def _native_activity_mismatch(contract):
+	return "`" + contract["activity_column"] + "` is null or `" + contract["activity_column"] + "` <> (" + contract["activity_expression"] + ")"
+
+
+def capture_joint_state(*, original_columns=None, original_oa_columns=None, original_native_columns=None, native_only=False):
 	"""Private receipt snapshot. Raw JE projection and all scoped metadata stay private."""
-	from procurement_release_metadata import JOINT_MODELS, capture_joint_metadata
+	from procurement_release_metadata import JOINT_MODELS, capture_joint_metadata, _native_reversal_contract
 	assert OPERATING_MODELS == JOINT_MODELS, "Operating audit scope drift"
 
 	schema = table_schema("Journal Entry")
@@ -276,9 +283,18 @@ def capture_joint_state(*, original_columns=None, original_oa_columns=None):
 	for doctype in JOINT_MODELS:
 		model_schema = table_schema(doctype)
 		models[doctype] = {"schema": model_schema, "rows": frappe.db.sql("select * from `" + ("tab" + doctype).replace("`", "``") + "` order by name", as_dict=True) if model_schema else []}
-	result = {"audit": capture_audit(je_columns=columns, oa_columns=oa["original_columns"] if oa else None), "metadata": capture_joint_metadata(), "oa": oa,
+	native = {}
+	for dt in _native_reversal_contract()["tables"]:
+		definition = table_schema(dt)
+		assert definition, "Required native table missing: " + dt
+		projection = (original_native_columns or {}).get(dt) or list(definition["columns"])
+		assert "name" in projection and len(set(projection)) == len(projection) and all(key.isidentifier() for key in projection)
+		native[dt] = {"schema": definition, "original_columns": projection, "rows": frappe.db.sql("select " + ",".join("`" + key + "`" for key in projection) + " from `tab" + dt + "` order by name", as_dict=True)}
+	result = {"audit": capture_audit(je_columns=columns, oa_columns=oa["original_columns"] if oa else None, native_columns={dt: table["original_columns"] for dt, table in native.items()}), "metadata": capture_joint_metadata(native_only=True) if native_only else capture_joint_metadata(), "oa": oa, "native_tables": native,
 		"je": {"schema": schema, "original_columns": columns, "rows": rows}, "models": models,
 		"operating_singles": frappe.db.sql("select * from `tabSingles` where doctype='Operating Expense Sync Settings' order by field", as_dict=True)}
+	if native_only:
+		result["native_only"] = True
 	return json.loads(json.dumps(result, default=str, ensure_ascii=False))
 
 
@@ -290,8 +306,12 @@ def main():
 	parser.add_argument("--procurement-metadata", action="store_true")
 	parser.add_argument("--joint-metadata", action="store_true")
 	parser.add_argument("--joint-receipt")
+	from joint_release_guards import SHARED_SITES
+	parser.add_argument("--site", choices=SHARED_SITES, default=SITE)
+	parser.add_argument("--native-only", action="store_true")
 	args = parser.parse_args()
-	frappe.init(site=SITE, sites_path=str(BENCH / "sites"))
+	assert args.native_only == (args.site != SITE), "Main full/secondary native-only scope required"
+	frappe.init(site=args.site, sites_path=str(BENCH / "sites"))
 	frappe.connect()
 	try:
 		if args.purchase_payment_page_source:
@@ -300,22 +320,25 @@ def main():
 			assert args.release_manifest and not args.joint_receipt, "Current contract requires the frozen manifest, not a historical receipt"
 			verify_sources(json.loads(Path(args.release_manifest).read_text()), "after")
 			from procurement_release_metadata import verify_current_joint_contract
-			print(json.dumps(verify_current_joint_contract(), sort_keys=True, ensure_ascii=False))
+			print(json.dumps(verify_current_joint_contract(native_only=args.native_only), sort_keys=True, ensure_ascii=False))
 			return
-		original_columns = original_oa_columns = None
+		original_columns = original_oa_columns = original_native_columns = None
 		if args.joint_receipt:
 			from joint_release_guards import DDLReceipt
-			before = DDLReceipt.load(args.joint_receipt).state["before"]
+			state = DDLReceipt.load(args.joint_receipt).state
+			assert state["identity"]["site"] == args.site and state["identity"]["native_only"] == args.native_only, "Cross-site/scope audit receipt refused"
+			before = state["before"]
 			original_columns = before["je"]["original_columns"]
 			original_oa_columns = before["oa"]["original_columns"] if before.get("oa") else None
-		result = capture_audit(je_columns=original_columns, oa_columns=original_oa_columns)
+			original_native_columns = {dt: table["original_columns"] for dt, table in before.get("native_tables", {}).items()}
+		result = capture_audit(je_columns=original_columns, oa_columns=original_oa_columns, native_columns=original_native_columns)
 		if args.procurement_metadata:
 			from procurement_release_metadata import capture
 
 			result["procurement_metadata"] = capture()
 		if args.joint_metadata:
 			from procurement_release_metadata import capture_joint_metadata
-			result["joint_metadata"] = capture_joint_metadata()
+			result["joint_metadata"] = capture_joint_metadata(native_only=args.native_only)
 		if args.phase:
 			assert result["maintenance_mode"] == 1, "Release audit requires maintenance mode on"
 		if args.release_manifest:

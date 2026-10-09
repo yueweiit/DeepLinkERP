@@ -114,6 +114,32 @@ class DedicatedSourceHostTests(unittest.TestCase):
         self.assertEqual(container.call_args.kwargs["payload"], before)
         self.assertEqual(json.loads((self.host.STATE / "installation.json").read_text())["status"], "rolled-back")
 
+    def test_existing_timer_retarget_preserves_logging_queue_and_first_previous_config(self):
+        for scenario in ("idle", "active", "config-drift"):
+            with self.subTest(scenario=scenario):
+                original = {"version": 1, "config": self.config, "logging_before": {"jobs": [{"name": "old", "create_log": 0}]}, "status": "installed"}
+                self.host.save_json(self.host.STATE / "installation.json", original)
+                self.host.save_json(self.host.STATE / "config.json", self.config)
+                self.host.save_json(self.host.STATE / "run.json", {"active": {"run_id": "unknown"} if scenario == "active" else None})
+                if scenario == "config-drift":
+                    self.host.save_json(self.host.STATE / "config.json", {**self.config, "revision": "e" * 40})
+                target = {**self.config, "revision": "d" * 40}
+                before = (self.host.STATE / "installation.json").read_bytes()
+                with patch.object(self.host, "verify_identity"), patch.object(self.host, "systemctl") as timer, patch.object(self.host, "container_call", side_effect=AssertionError("Retarget must not require empty queued jobs or mutate logging/cancel/finalize")):
+                    if scenario != "idle":
+                        with self.assertRaisesRegex(RuntimeError, "HOLD"): self.host.retarget(target, start_timer=True)
+                        self.assertEqual((self.host.STATE / "installation.json").read_bytes(), before)
+                        timer.assert_not_called()
+                    else:
+                        self.host.retarget(target, start_timer=True)
+                        receipt = (self.host.STATE / "installation.json").read_bytes()
+                        self.host.retarget(target, start_timer=True)
+                        self.assertEqual((self.host.STATE / "installation.json").read_bytes(), receipt)
+                        state = json.loads(receipt)
+                        self.assertEqual(state["logging_before"], original["logging_before"])
+                        self.assertEqual(state["previous_config"], self.config)
+                        self.assertEqual([call.args for call in timer.call_args_list], [("start", "deeplinkerp-source-sync.timer")] * 2)
+
     def test_unit_timer_uses_user_service_quarter_hours_without_catch_up(self):
         timer = (ROOT / "deploy/production/systemd/deeplinkerp-source-sync.timer").read_text()
         service = (ROOT / "deploy/production/systemd/deeplinkerp-source-sync.service").read_text()
