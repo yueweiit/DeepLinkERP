@@ -2154,6 +2154,7 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         pi = make_purchase_invoice(pr.name).insert()
         pe = get_payment_entry(po.doctype, po.name, bank_account="Cash - QAB", party_amount=10).insert()
         stock_bin = frappe.get_doc("Bin", {"item_code": self.item, "warehouse": "Stores - QAB"})
+        self.commit_fixture()  # RIV producer is a separate native request after source seeding.
         riv = frappe.get_doc({"doctype": "Repost Item Valuation", "company": COMPANY,
             "based_on": "Item and Warehouse", "item_code": self.item, "warehouse": "Stores - QAB",
             "posting_date": nowdate(), "posting_time": "00:00:00"}).insert()
@@ -2721,14 +2722,13 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         self.remember_new_names()
         self.assertEqual(frappe.db.get_value("Integration Request", ordinary.name,
             ["integration_request_service", "status"], for_update=True), ("0", "Completed"))
-        from MySQLdb import ProgrammingError
         unsupported_name = (intent.PREFIX + uuid.uuid4().hex).encode("utf-8")
         unsupported = frappe.get_doc({"doctype": "Integration Request", "name": unsupported_name,
             "integration_request_service": "QA ordinary", "status": "Queued", "data": "{}"})
         before = frappe.db.count("Integration Request")
         with patch.object(frappe.db, "sql", wraps=frappe.db.sql) as sql:
-            with self.assertRaises(ProgrammingError):
-                unsupported.db_insert()  # existing QB current-name filter does not support bytes; no bypass/ACK
+            with self.assertRaisesRegex(ValueError, "Unsupported filters type: bytes"):
+                unsupported.db_insert()  # Native QB rejects current-name bytes before any INSERT/ACK.
             self.assertFalse(any(str(call.args[0]).lstrip().upper().startswith("INSERT") for call in sql.call_args_list))
         self.assertEqual(frappe.db.count("Integration Request"), before)
         self.assertEqual(frappe.db.sql("SELECT name FROM `tabIntegration Request` WHERE name=%s", (unsupported_name,)), ())
@@ -5056,9 +5056,15 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         self.assertTrue(all(row["system_effect"] for row in finance))
         replay = actions.record_receipt(po.name, changes, key, **args)
         self.assertTrue(replay["reused"])
+        self.commit_fixture()  # Preserve the completed receipt before the independent tampered replay.
+        original_receipt = frappe.db.get_value("Integration Request", audit.name, "output")
+        original_source = frappe.db.get_value("China Accounting Voucher", finance[0]["name"], "source_name")
         frappe.db.set_value("China Accounting Voucher", finance[0]["name"], "source_name", "QA-ATOMIC-TAMPER")
-        with self.assertRaises(frappe.ValidationError):
-            actions.record_receipt(po.name, changes, key, **args)
+        refused = actions.record_receipt(po.name, changes, key, **args)
+        self.assertTrue(refused["failed"])
+        self.assertEqual(refused["error"], "采购操作关联单据或流水已改变，请重新核对")
+        self.assertEqual(frappe.db.get_value("Integration Request", audit.name, "output"), original_receipt)
+        self.assertEqual(frappe.db.get_value("China Accounting Voucher", finance[0]["name"], "source_name"), original_source)
 
     def test_auto_invoice_respects_an_installed_native_workflow(self):
         from frappe.model.workflow import get_workflow_name
@@ -5334,8 +5340,10 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         root.insert().submit()
         warehouse2, warehouse3 = "Finished Goods - QAB", "Work In Progress - QAB"
         output, extra = self.scope_item(), self.scope_item()
+        self.commit_fixture()  # Each independent native stock producer starts after prior seeding commits.
         transfer = self.scope_stock_entry("Material Transfer", add_days(nowdate(), -2), [
             {"item_code": self.item, "qty": 1, "s_warehouse": "Stores - QAB", "t_warehouse": warehouse2}])
+        self.commit_fixture()
         repack = self.scope_stock_entry("Repack", add_days(nowdate(), -1), [
             {"item_code": self.item, "qty": 1, "s_warehouse": warehouse2},
             {"item_code": output, "qty": 1, "t_warehouse": warehouse2, "is_finished_item": 1,
@@ -5344,6 +5352,7 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         repack_sles = frappe.db.get_values("Stock Ledger Entry", {"voucher_type": repack.doctype, "voucher_no": repack.name},
             ["item_code", "warehouse", "dependant_sle_voucher_detail_no", "actual_qty"], as_dict=True)
         self.assertTrue(any(row.dependant_sle_voucher_detail_no for row in repack_sles), repack_sles)
+        self.commit_fixture()
         future = self.scope_stock_entry("Material Issue", nowdate(), [
             {"item_code": extra, "qty": 1, "s_warehouse": warehouse3}])
         self.commit_fixture()

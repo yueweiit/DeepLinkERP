@@ -646,8 +646,8 @@ def check_pending_reposts(doc, pairs=None):
     from pypika.terms import Criterion
     sources = [doc]
     sources.extend(service._current("Purchase Receipt", name) for name in sorted({
-        row.get("purchase_receipt") for row in doc.items if row.get("purchase_receipt")}))
-    pairs = pairs if pairs is not None else {(row.item_code, warehouse) for source in sources for row in source.items
+        row.get("purchase_receipt") for row in (doc.get("items") or []) if row.get("purchase_receipt")}))
+    pairs = pairs if pairs is not None else {(row.item_code, warehouse) for source in sources for row in (source.get("items") or [])
         for warehouse in (row.get("warehouse"), row.get("rejected_warehouse")) if warehouse and
         frappe.get_cached_value("Item", row.item_code, "is_stock_item")}
     if not pairs:
