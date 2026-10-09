@@ -270,10 +270,15 @@ class PurchaseSourceContractTest(unittest.TestCase):
         item=self.module.normalize(source(),detail_rows=[{"material_code":"ITEM","product_name":"A","quantity":"2","unit":"Nos","unit_price":"50","goods_value":"100"}])
         self.assertEqual(item["items"][0]["uom"],"Nos")
 
-    def test_new_blank_buyer_supplier_facts_do_not_change_bound_fingerprint(self):
+    def test_new_blank_optional_facts_do_not_change_bound_fingerprint(self):
         row=source(); original=self.module.normalize(row)
         row["form_component_values"].extend([{"name":"采购公司","value":None},{"name":"供应商","value":" "}])
         self.assertEqual(self.module.normalize(row),original)
+        for blank in (None,""," ","\t"):
+            with self.subTest(mapped_blank=blank):
+                mapped={"material_code":"ITEM","product_name":None,"spec_model":None,"quantity":"2","unit":"个",
+                    "unit_price":None,"goods_value":"100","purchase_currency":blank,"supplier":blank,"source_type":"PURCHASE_EXPENSE_OA"}
+                self.assertEqual(self.module.normalize(row,detail_rows=[mapped]),original)
 
     def test_selection_requires_explicit_values_and_reason_for_corrections(self):
         original = self.module.normalize(source())

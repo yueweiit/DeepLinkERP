@@ -128,7 +128,7 @@ def item_rows(value, parser=None):
             item["rate_invalid"] = True
         # Do not change old bound fingerprints merely by introducing empty facts.
         for key in ("rate", "currency", "supplier"):
-            if item[key] is None:
+            if not _populated([item[key]]):
                 item.pop(key)
         rows.append(item)
     return rows
