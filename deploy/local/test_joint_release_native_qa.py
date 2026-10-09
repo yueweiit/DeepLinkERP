@@ -88,7 +88,7 @@ class JointNativeRehearsal(unittest.TestCase):
 		cls.baseline = capture_joint_state()
 		assert all(model["schema"] is None for model in cls.baseline["models"].values()), "Rehearsal needs original pre-operating schema"
 		assert not set(release.CUSTOM_FIELD_ORDER) & set(cls.baseline["je"]["schema"]["columns"])
-		cls.run_prefix = str(os.getpid())
+		cls.run_prefix = CANDIDATE_SHA[:12] + "-" + str(os.getpid())
 
 	@classmethod
 	def tearDownClass(cls):
@@ -582,7 +582,7 @@ class CrossborderUpgradeNativeRehearsal(unittest.TestCase):
 		assert len(cls.original_jobs) == 2 and {row["method"] for row in cls.original_jobs} == set(release.SCHEDULED_METHODS) - {release.REVERSAL_METHOD}
 		cls.evidence = Path(frappe.get_site_path("private", "release-evidence", "crossborder-native-qa"))
 		cls.evidence.mkdir(parents=True, exist_ok=True)
-		cls.run_prefix = str(os.getpid())
+		cls.run_prefix = CANDIDATE_SHA[:12] + "-" + str(os.getpid())
 
 	@classmethod
 	def tearDownClass(cls):

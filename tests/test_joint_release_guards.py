@@ -1140,7 +1140,7 @@ class CombinedReleaseContractTests(unittest.TestCase):
 		module = self.metadata_module()
 		import inspect
 		self.assertIn("native_only", inspect.signature(module.capture_joint_metadata).parameters)
-		fake = types.SimpleNamespace(get_app_path=lambda app, name: str(ROOT / app / name), get_meta=lambda dt: types.SimpleNamespace(fields=[]))
+		fake = types.SimpleNamespace(get_app_path=lambda app, name: str(ROOT / app / name), get_meta=lambda dt, **kw: types.SimpleNamespace(fields=[]))
 		with patch.dict(sys.modules, {"frappe": fake}):
 			native = module._native_reversal_contract()
 		rows = {dt: [] for dt in ("DocType", "Custom Field", "Page", "Workspace", "Workspace Sidebar", "Scheduled Job Type", "Property Setter", "Custom DocPerm")}
@@ -1156,6 +1156,13 @@ class CombinedReleaseContractTests(unittest.TestCase):
 			self.assertEqual(result["scope"][dt], [])
 			self.assertEqual(result["outside_rows"][dt], rows[dt])
 		self.assertEqual(result["outside_rows"]["Scheduled Job Type"], rows["Scheduled Job Type"][:2])
+		before = {"metadata": {"scope": {dt: [] for dt in rows}}, "je": {"schema": {"columns": {}, "indexes": {}}}, "models": {}, "operating_singles": []}
+		definitions = {row["name"]: {"source": dict(row, doctype="Custom Field"), "native": {"Custom Field": [row]}} for row in rows["Custom Field"][:6]}
+		contract = {"native_only": True, "native_reversal": native, "definitions": definitions, "custom_fields": {}, "model_schemas": {}, "native_metadata_schemas": {"DocField": {"columns": {}}}}
+		fake.db = types.SimpleNamespace(sql=lambda *a, **kw: [], exists=lambda *a: True)
+		with patch.dict(sys.modules, {"frappe": fake, "frappe.model.meta": types.SimpleNamespace(Meta=object), "audit_unified_purchase": types.SimpleNamespace(table_schema=None)}), patch.object(module, "_native_rows", side_effect=lambda source, **kw: {"Custom Field": [{k: v for k, v in source.items() if k != "doctype"}]}), patch.object(module, "_native_reversal_plan", return_value={}), patch.object(module, "_desired_navigation", side_effect=AssertionError("Native-only touched navigation")):
+			plan = module._joint_plan(before, contract, when="frozen", seed="frozen", require_quiescent=False)
+		self.assertEqual([row["name"] for row in plan["scope"]["Custom Field"]], sorted(definitions))
 
 	def test_native_only_rollback_uses_shared_first_writer_marker(self):
 		module, guard = self.metadata_module(), self.module()

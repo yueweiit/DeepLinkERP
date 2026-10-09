@@ -663,7 +663,7 @@ def _joint_plan(before, contract, *, when, seed, require_quiescent=True):
 			_validate_oa_ddl(query, {key for key in source_fields if key not in oa["schema"]["columns"]}, source_fields)
 	if contract.get("native_reversal"):
 		_native_reversal_plan(before, contract)
-	return {"scope": expected, "new_definitions": new, "page_title_updates": page_title_updates}
+	return {"scope": {dt: sorted(rows, key=lambda row: row["name"]) for dt, rows in expected.items()}, "new_definitions": new, "page_title_updates": page_title_updates}
 
 
 def verify_current_joint_contract(*, native_only=False):
