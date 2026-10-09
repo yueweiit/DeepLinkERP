@@ -16,6 +16,8 @@ import uuid
 
 import frappe
 
+MAX_EPOCH_RECEIPT_BYTES = 4 * 1024 * 1024
+
 
 def _reject(reason):
     frappe.throw("采购库存保护：" + reason, frappe.ValidationError)
@@ -56,7 +58,31 @@ class Session:
     references: dict[str, int] = field(default_factory=dict)
     native_acquisitions: dict[str, tuple[str, int]] = field(default_factory=dict)
     transaction_calls: list[dict] = field(default_factory=list)
+    sql_sequence: int = 0
     begin_expected: bool = False
+    # Dormant private transaction-participant protocol, not business authority:
+    # prepare(identity) -> bounded JSON receipt; promote(detached receipt);
+    # invalidate(); resolve(identity, immutable candidate bytes) -> exact bytes
+    # or None. promote/invalidate are memory-only; neither can start SQL or a
+    # transaction method. The later owned native adapter supplies identity/lease/input
+    # authority; no hook, endpoint, worker or ownership publisher installs it.
+    receipt_participant: object = None
+    receipt_phase: str | None = None
+    receipt_resolution: dict | None = None
+
+    def invalidate_receipts(self):
+        if self.receipt_participant is not None:
+            previous_phase = self.receipt_phase
+            self.receipt_phase = "invalidate"
+            try:
+                self.receipt_participant.invalidate()
+            except Exception:
+                # Invalid evidence must never survive a failed cleanup. Keep
+                # the original error and stop this physical execution.
+                self.receipt_participant = None
+                self.poison("receipt_invalidation_failed")
+            finally:
+                self.receipt_phase = previous_phase
 
     def log(self, event):
         # No document payload, credentials or native exception string in logs.
@@ -71,6 +97,7 @@ class Session:
     def poison(self, event):
         if not self.poisoned:
             self.poisoned = True
+            self.invalidate_receipts()
             self.log(event)
             try:
                 self.connection.close()  # server releases all session locks
@@ -98,6 +125,10 @@ class Session:
             _reject("数据库连接已中断，请重新发起请求")
 
     def authority(self):
+        # All normal protected entries (sql/initialize/execution/acquire)
+        # meet here BEFORE raw lease SQL can bypass the sql wrapper.
+        if self.receipt_phase in ("promote", "invalidate"):
+            _reject("回执内存清理不能执行数据库语句")
         self.verify()
         keys = sorted(self.locks)
         for offset in range(0, len(keys), 128):
@@ -124,6 +155,7 @@ class Session:
         # callback's newly acquired lease.
         if not self.depth:
             self.release(tuple(self.locks))
+            self.receipt_participant = None
 
     def release(self, keys):
         self.verify()
@@ -176,11 +208,16 @@ class Session:
             self.db.before_commit.reset()
             self.db.after_commit.reset()
             self.db.before_rollback.run()
+            self.verify()  # callbacks may close/poison this physical owner
+            self.invalidate_receipts()
+            self.verify()  # cleanup must never let native SQL lazily reconnect
             self.connection.rollback()
             self.db.transaction_writes = 0
             self.db.value_cache.clear()
             self.transaction_end()
+            settled = (self.epoch, self.sql_sequence)
             self.db.after_rollback.run()
+            return settled  # later callback SQL belongs to a new pending attempt
         except Exception:
             self.poison("physical_rollback_failed")
 
@@ -188,6 +225,7 @@ class Session:
         native_close = self.db.close
         def close():
             self.poisoned = True
+            self.invalidate_receipts()
             try:
                 if self.db._conn is self.connection and not getattr(self.connection, "open", True):
                     self.db._cursor = self.db._conn = None
@@ -266,9 +304,13 @@ class Session:
                 raw_command, flags=re.S).strip().lower()
             ending = re.fullmatch(r"(?:commit|rollback)(?:\s+work)?(?:\s+and\s+(?:no\s+)?chain)?\s*;?", command)
             beginning = re.match(r"(?:begin\b|start\s+transaction\b)", command)
+            if self.receipt_phase == "prepare" and (ending or beginning):
+                _reject("回执写入不能结束或替换物理事务")
+            if self.receipt_participant is not None and arguments.arguments["auto_commit"]:
+                _reject("部分回执执行不支持自动提交选项")
             # Implicit commits/driver autocommit would bypass the proven SQL
             # epoch. Ordinary unrelated DDL remains native before leases exist.
-            if self.locks:
+            if self.locks or self.receipt_participant is not None:
                 if "/*!" in raw_command or re.match(r"(?:alter|create|drop|truncate|rename|grant|revoke|analyze|optimize|repair|flush|lock\s+tables|unlock\s+tables|set\s+(?:(?:session|local|global)\s+)?(?:@@(?:session\.)?)?autocommit)\b", command):
                     _reject("持有库存租约时不支持隐式提交")
                 if beginning and not self.begin_expected:
@@ -277,11 +319,69 @@ class Session:
                     _reject("未经核查的原生事务结束方式")
             if not ending:
                 self.begin_expected = False
+            if self.receipt_participant is not None and re.match(r"(?:savepoint\b|rollback\s+to\b|release\s+savepoint\b)", command):
+                _reject("部分回执执行不支持保存点，请使用完整事务")
             from .purchase_native_intent import adapt_query, observe_native_lock, protect_native_acquisition, protect_native_release
             protect_native_acquisition(query, arguments.arguments["values"], self)
             protect_native_release(query, arguments.arguments["values"], self)
             query = adapt_query(query, self)
-            result = native_sql(query, *args, **kwargs)
+            self.sql_sequence += 1
+            participant, prepared, candidate = self.receipt_participant, None, None
+            identity = {"execution_id": self.execution_id, "connection_id": self.connection_id, "epoch": self.epoch}
+            committing = bool(ending and command.startswith("commit"))
+            if ending and not committing:
+                self.invalidate_receipts()
+            if committing and participant is not None:
+                self.receipt_phase = "prepare"
+                try:
+                    # Native before_commit has already drained. This write is
+                    # still on the SAME physical transaction, including raw
+                    # and nested commit calls from that callback queue.
+                    prepared = participant.prepare(dict(identity))
+                    if not isinstance(prepared, dict) or any(
+                            prepared.get(key) != value or type(prepared.get(key)) is not type(value)
+                            for key, value in identity.items()):
+                        _reject("部分回执的物理执行身份无效")
+                    candidate = json.dumps(prepared, ensure_ascii=False, sort_keys=True).encode("utf-8")
+                    if len(candidate) > MAX_EPOCH_RECEIPT_BYTES:
+                        _reject("部分回执超过字节上限")
+                    # Detached immutable candidate survives poison/invalidate;
+                    # matching only execution/epoch is never durable proof.
+                    prepared = json.loads(candidate)
+                except Exception:
+                    settled = self.physical_rollback()
+                    if self.transaction_calls:
+                        self.transaction_calls[-1]["cleaned"] = settled
+                    raise
+                finally:
+                    self.receipt_phase = None
+            self.verify()  # participant cleanup/preparation cannot replace this owner
+            try:
+                result = native_sql(query, *args, **kwargs)
+            except Exception:
+                if committing and participant is not None:
+                    # SQL may have committed before the response was lost.
+                    # Close the old owner BEFORE fresh read-only resolution;
+                    # never retry or report this transaction uncommitted.
+                    self.poison("commit_response_unknown")
+                    self.receipt_resolution = {**identity, "candidate_sha256": hashlib.sha256(candidate).hexdigest(), "result": "unknown"}
+                    try:
+                        # poison preserves the first SQL error even if close
+                        # fails. Never resolve/replay with an unclosed owner.
+                        opened = getattr(self.connection, "open", None)
+                        if type(opened) in (bool, int) and opened == 0:
+                            durable = participant.resolve(dict(identity), candidate)
+                            self.receipt_resolution["result"] = "durable" if type(durable) is bytes and durable == candidate else (
+                                "absent" if durable is None else "mismatch")
+                        else:
+                            self.log("commit_owner_close_unconfirmed")
+                    except Exception:
+                        self.log("commit_receipt_resolution_failed")
+                elif ending and participant is not None:
+                    # A failed raw rollback cannot authorize a later control
+                    # commit of business writes whose evidence was discarded.
+                    self.poison("rollback_response_unknown")
+                raise
             observe_native_lock(query, arguments.arguments["values"], result, self)
             if ending:
                 # A nested/raw boundary inside before_* is not this native
@@ -290,12 +390,24 @@ class Session:
                 call = self.transaction_calls[-1] if self.transaction_calls else None
                 if call and not call["before"] and call["kind"] == command.split()[0].rstrip(";"):
                     call["completed"] = True
+                if committing and participant is not None:
+                    self.receipt_phase = "promote"
+                    try:
+                        participant.promote(prepared)
+                        self.verify()
+                    except Exception:
+                        self.poison("committed_receipt_promotion_failed")
+                        raise
+                    finally:
+                        self.receipt_phase = None
                 self.transaction_end()
             return result
 
         def transaction(kind, method, *args, **kwargs):
+            if self.receipt_phase is not None:
+                _reject("回执处理不能重入事务方法")
             self.authority()
-            call = {"kind": kind, "completed": False, "before": 0}
+            call = {"kind": kind, "completed": False, "before": 0, "cleaned": None}
             self.transaction_calls.append(call)
             try:
                 return method(*args, **kwargs)
@@ -305,7 +417,10 @@ class Session:
                     # opposite callback queue. Roll back physical pending work
                     # independently, retaining active execution's session locks.
                     self.log("transaction_failed_before_sql_boundary")
-                    self.physical_rollback()
+                    if call["cleaned"] != (self.epoch, self.sql_sequence):
+                        self.physical_rollback()
+                    else:
+                        self.invalidate_receipts()
                 raise  # preserve the first error, including after_commit
             finally:
                 self.transaction_calls.pop()

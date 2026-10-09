@@ -1,5 +1,6 @@
 """Session leases: native callback ordering is not the release authority."""
 import importlib
+import json
 import sys
 import unittest
 from unittest.mock import patch
@@ -27,6 +28,10 @@ class Connection:
 
     def close(self):
         self.closed = True
+
+    @property
+    def open(self):
+        return not self.closed  # same close observation as native mysqlclient
 
 
 class Database:
@@ -83,7 +88,8 @@ class Database:
         self.after_rollback.run()
 
     def close(self):
-        self._conn.close()
+        if self._conn is not None:
+            self._conn.close()
         self._conn = self._cursor = None
 
 
@@ -108,6 +114,368 @@ class RepostBoundarySessionTests(unittest.TestCase):
 
     def assert_locked(self, key="a", owner=101):
         self.assertEqual(Database.owners.get(key), owner)
+
+    def receipts(self, state):
+        """A transaction participant, not a business-ownership switch."""
+        class Participant:
+            def __init__(self):
+                self.pending = []
+                self.events = []
+            def prepare(self, identity):
+                receipt = {**identity, "effects": list(self.pending)}
+                self.events.append(("prepare", receipt))
+                state.db.sql("UPDATE own_receipt SET output=%s", (str(receipt),))
+                return receipt
+            def promote(self, receipt):
+                self.events.append(("promote", receipt, state.epoch))
+                self.pending.clear()
+            def invalidate(self):
+                self.events.append(("invalidate",))
+                self.pending.clear()
+            def resolve(self, identity, candidate):
+                self.events.append(("resolve", identity, state.poisoned, state.connection.closed, candidate))
+                return candidate
+        participant = Participant()
+        state.receipt_participant = participant
+        return participant
+
+    def test_partial_receipt_uses_physical_seam_after_callbacks_before_epoch_advance(self):
+        with self.boundary.execution(db=self.db), self.lease():
+            state = self.db._purchase_session
+            receipts = self.receipts(state)
+            receipts.pending.append("gl")
+            self.db.before_commit.add(lambda: receipts.pending.append("before"))
+            self.db.after_commit.reset()
+            self.db.commit()
+            self.assertEqual(len(receipts.events), 2, "Actual physical commit must prepare and promote a receipt")
+            prepared, promoted = receipts.events
+            self.assertEqual(prepared[1]["effects"], ["gl", "before"])
+            self.assertEqual(prepared[1]["epoch"], 0)
+            self.assertEqual(prepared[1]["execution_id"], state.execution_id)
+            self.assertEqual(prepared[1]["connection_id"], 101)
+            self.assertEqual(promoted[2], 0)
+            self.assertLess(self.db.queries.index("UPDATE own_receipt SET output=%s"), self.db.queries.index("commit"))
+            self.assertEqual(state.epoch, 1)
+
+    def test_nested_raw_boundary_and_callback_writes_have_distinct_receipt_epochs(self):
+        with self.boundary.execution(db=self.db), self.lease():
+            state = self.db._purchase_session
+            receipts = self.receipts(state)
+            receipts.pending.append("first")
+            def before():
+                self.db.sql("COMMIT")
+                receipts.pending.append("second")
+            self.db.before_commit.add(before)
+            self.db.after_commit.add(lambda: receipts.pending.append("third"))
+            self.db.commit()
+            self.db.commit()
+            prepared = [event[1] for event in receipts.events if event[0] == "prepare"]
+            self.assertEqual([(row["epoch"], row["effects"]) for row in prepared], [(0, ["first"]), (1, ["second"]), (2, ["third"])])
+
+    def test_receipt_previews_are_not_boundaries_and_owned_savepoints_refuse(self):
+        with self.boundary.execution(db=self.db), self.lease():
+            receipts = self.receipts(self.db._purchase_session)
+            for query in ("COMMIT", "ROLLBACK", "SAVEPOINT owned", "ROLLBACK TO SAVEPOINT owned"):
+                for options in ({"run": False}, {"explain": True}):
+                    with self.subTest(query=query, options=options):
+                        self.db.sql(query, **options)
+                        self.assertEqual(receipts.events, [])
+            for query in ("SAVEPOINT owned", "ROLLBACK TO SAVEPOINT owned", "RELEASE SAVEPOINT owned"):
+                with self.subTest(query=query), self.assertRaises(frappe.ValidationError):
+                    self.db.sql(query)
+                self.assertNotIn(query, self.db.queries)
+
+    def test_rollback_discards_gl_witness_before_later_failure_status_commit(self):
+        for rollback in ("native", "physical", "raw"):
+            with self.subTest(rollback=rollback):
+                db = Database(303)
+                try:
+                    with self.boundary.execution(db=db), self.lease(db=db):
+                        state = db._purchase_session
+                        receipts = self.receipts(state)
+                        receipts.pending.append("rolled_back_gl")
+                        if rollback == "native": db.rollback()
+                        elif rollback == "raw": db.sql("ROLLBACK")
+                        else: state.physical_rollback()
+                        db.commit()
+                        prepared = [event[1] for event in receipts.events if event[0] == "prepare"]
+                        self.assertEqual([row["effects"] for row in prepared], [[]])
+                finally:
+                    db.close()
+
+    def test_receipt_write_failure_rolls_back_business_before_any_commit(self):
+        with self.boundary.execution(db=self.db), self.lease():
+            state = self.db._purchase_session
+            receipts = self.receipts(state)
+            receipts.pending.append("gl")
+            native_sql = state.native_sql
+            def fail(query, *args, **kwargs):
+                if query == "UPDATE own_receipt SET output=%s":
+                    raise RuntimeError("receipt write failed")
+                return native_sql(query, *args, **kwargs)
+            with patch.object(state, "native_sql", side_effect=fail), self.assertRaisesRegex(RuntimeError, "receipt write failed"):
+                self.db.commit()
+            self.assertNotIn("commit", self.db.queries)
+            self.assertEqual(state.connection.rollbacks, 1)
+            self.assertFalse(receipts.pending)
+            self.db.commit()
+            self.assertEqual([event[1]["effects"] for event in receipts.events if event[0] == "promote"], [[]])
+
+    def test_commit_response_unknown_poisons_before_receipt_resolution_never_retries(self):
+        with self.boundary.execution(db=self.db), self.lease():
+            state = self.db._purchase_session
+            receipts = self.receipts(state)
+            receipts.pending.append("gl")
+            prepare = receipts.prepare
+            def aliased(identity):
+                receipt = prepare(identity)
+                receipt["effects"] = receipts.pending
+                return receipt
+            receipts.prepare = aliased
+            native_sql = state.native_sql
+            calls = []
+            def uncertain(query, *args, **kwargs):
+                if str(query).lower() == "commit":
+                    calls.append(query)
+                    native_sql(query, *args, **kwargs)
+                    raise RuntimeError("response unknown")
+                return native_sql(query, *args, **kwargs)
+            with patch.object(state, "native_sql", side_effect=uncertain), self.assertRaisesRegex(RuntimeError, "response unknown"):
+                self.db.commit()
+            resolved = [event for event in receipts.events if event[0] == "resolve"]
+            self.assertEqual(len(resolved), 1)
+            self.assertEqual(resolved[0][2:4], (True, True))
+            self.assertEqual(resolved[0][1]["epoch"], 0)
+            self.assertEqual(json.loads(resolved[0][4])["effects"], ["gl"])
+            self.assertEqual(state.receipt_resolution["result"], "durable")
+            self.assertEqual(calls, ["commit"])
+            self.assertEqual(state.connection.rollbacks, 0)
+            self.assertFalse(any(event[0] == "promote" for event in receipts.events))
+
+    def test_physical_close_invalidates_pending_receipt_and_future_boundary(self):
+        with self.boundary.execution(db=self.db), self.lease():
+            state = self.db._purchase_session
+            receipts = self.receipts(state)
+            receipts.pending.append("gl")
+            self.db.close()
+            self.assertFalse(receipts.pending)
+            with self.assertRaises(frappe.ValidationError): self.db.commit()
+
+    def test_unknown_commit_never_accepts_only_matching_identity_as_durable(self):
+        for resolution in ("absent", "mismatch", "error", "close_failure"):
+            with self.subTest(resolution=resolution):
+                db = Database(303)
+                try:
+                    with self.boundary.execution(db=db), self.lease(db=db):
+                        state = db._purchase_session
+                        receipts = self.receipts(state)
+                        receipts.pending.append("synthetic_effect")
+                        observed = []
+                        def resolve(identity, candidate):
+                            observed.append(json.loads(candidate))
+                            self.assertFalse(receipts.pending)
+                            if resolution == "error": raise RuntimeError("resolver unavailable")
+                            if resolution == "absent": return None
+                            return json.dumps({**identity, "effects": ["wrong_same_identity"]}).encode()
+                        receipts.resolve = resolve
+                        native_sql = state.native_sql
+                        native_close = state.connection.close
+                        def close():
+                            if resolution == "close_failure": raise RuntimeError("physical close failed")
+                            return native_close()
+                        def uncertain(query, *args, **kwargs):
+                            if str(query).lower() == "commit":
+                                native_sql(query, *args, **kwargs)
+                                raise RuntimeError("original commit response lost")
+                            return native_sql(query, *args, **kwargs)
+                        with patch.object(state.connection, "close", side_effect=close), patch.object(state, "native_sql", side_effect=uncertain), self.assertRaisesRegex(RuntimeError, "original commit response lost"):
+                            db.commit()
+                        self.assertEqual(len(observed), 0 if resolution == "close_failure" else 1)
+                        if observed: self.assertEqual(observed[0]["effects"], ["synthetic_effect"])
+                        self.assertEqual(state.receipt_resolution["result"], "unknown" if resolution in ("error", "close_failure") else resolution)
+                        self.assertEqual(state.connection.open, resolution == "close_failure")
+                        self.assertEqual(state.connection.rollbacks, 0)
+                finally:
+                    db.close()
+
+    def test_invalid_or_oversize_candidate_rolls_back_prepare_without_physical_commit(self):
+        for kind in ("identity", "mutates_identity", "bytes", "unserializable"):
+            with self.subTest(kind=kind):
+                db = Database(303)
+                try:
+                    with self.boundary.execution(db=db), self.lease(db=db):
+                        state = db._purchase_session
+                        receipts = self.receipts(state)
+                        original = receipts.prepare
+                        def invalid(identity):
+                            receipt = original(identity)
+                            if kind == "identity": receipt["epoch"] += 1
+                            elif kind == "mutates_identity":
+                                identity["epoch"] += 1
+                                receipt["epoch"] = identity["epoch"]
+                            elif kind == "bytes": receipt["large"] = "界" * 100
+                            else: receipt["opaque"] = object()
+                            return receipt
+                        receipts.prepare = invalid
+                        with patch.object(self.boundary, "MAX_EPOCH_RECEIPT_BYTES", 256, create=True), self.assertRaises((frappe.ValidationError, TypeError)):
+                            db.commit()
+                        self.assertNotIn("commit", db.queries)
+                        self.assertEqual(state.connection.rollbacks, 1)
+                        self.assertIsNone(state.receipt_resolution)
+                finally:
+                    db.close()
+
+    def test_promote_failure_after_known_commit_preserves_commit_and_closes_owner(self):
+        with self.boundary.execution(db=self.db), self.lease():
+            state = self.db._purchase_session
+            receipts = self.receipts(state)
+            def fail(receipt):
+                raise RuntimeError("original promotion failure")
+            receipts.promote = fail
+            with self.assertRaisesRegex(RuntimeError, "original promotion failure"):
+                self.db.commit()
+            self.assertIn("commit", self.db.queries)
+            self.assertEqual(state.connection.rollbacks, 0)
+            self.assertTrue(state.poisoned)
+
+    def test_preparing_receipt_cannot_end_or_replace_its_physical_transaction(self):
+        for command in ("COMMIT", "ROLLBACK", "START TRANSACTION"):
+            with self.subTest(command=command):
+                db = Database(303)
+                try:
+                    with self.boundary.execution(db=db), self.lease(db=db):
+                        state = db._purchase_session
+                        receipts = self.receipts(state)
+                        original = receipts.prepare
+                        def boundary_in_prepare(identity):
+                            result = original(identity)
+                            db.sql(command)
+                            return result
+                        receipts.prepare = boundary_in_prepare
+                        with self.assertRaises(frappe.ValidationError): db.commit()
+                        self.assertNotIn(command, db.queries)
+                        self.assertNotIn("commit", db.queries)
+                        self.assertEqual(state.connection.rollbacks, 1)
+                finally:
+                    db.close()
+
+    def test_physical_rollback_before_callback_commit_preserves_old_epoch_receipt_only(self):
+        with self.boundary.execution(db=self.db), self.lease():
+            state = self.db._purchase_session
+            receipts = self.receipts(state)
+            receipts.pending.append("before_callback_committed")
+            def before():
+                self.db.commit()
+                receipts.pending.append("after_callback_rolled_back")
+            self.db.before_rollback.add(before)
+            state.physical_rollback()
+            self.assertEqual([event[1]["effects"] for event in receipts.events if event[0] == "promote"], [["before_callback_committed"]])
+            self.assertFalse(receipts.pending)
+            self.db.commit()
+            self.assertEqual([event[1]["effects"] for event in receipts.events if event[0] == "promote"], [["before_callback_committed"], []])
+
+    def test_promote_and_invalidate_cannot_reenter_sql_or_transaction_methods(self):
+        for phase in ("promote", "invalidate"):
+            for action in ("sql", "method", "initialize", "execution", "acquire"):
+                with self.subTest(phase=phase, action=action):
+                    db = Database(303)
+                    try:
+                        with self.boundary.execution(db=db), self.lease(db=db):
+                            state = db._purchase_session
+                            receipts = self.receipts(state)
+                            entered = []
+                            reentry_queries = []
+                            def reenter(*args):
+                                if not entered:
+                                    entered.append(True)
+                                    before = len(db.queries)
+                                    try:
+                                        if action == "method": db.commit()
+                                        elif action == "sql": db.sql("UPDATE unexpected_business SET value=1")
+                                        elif action == "initialize": self.boundary.initialize(db)
+                                        elif action == "execution":
+                                            with self.boundary.execution(db=db): pass
+                                        else:
+                                            with self.lease(db=db): pass
+                                    finally:
+                                        reentry_queries.extend(db.queries[before:])
+                            setattr(receipts, phase, reenter)
+                            with self.assertRaises(frappe.ValidationError):
+                                if phase == "promote": db.commit()
+                                else: db.sql("ROLLBACK")
+                            self.assertTrue(state.poisoned)
+                            self.assertEqual(reentry_queries, [], "Memory-only callbacks must not even query lease authority")
+                            self.assertNotIn("UPDATE unexpected_business SET value=1", db.queries)
+                            self.assertEqual(db.queries.count("commit"), 1 if phase == "promote" else 0)
+                            self.assertEqual(state.connection.rollbacks, 0)
+                    finally:
+                        db.close()
+
+    def test_raw_rollback_error_closes_owner_before_later_writes_can_commit_without_receipt(self):
+        with self.boundary.execution(db=self.db), self.lease():
+            state = self.db._purchase_session
+            receipts = self.receipts(state)
+            receipts.pending.append("synthetic_pending")
+            native_sql = state.native_sql
+            def failed(query, *args, **kwargs):
+                if str(query).lower() == "rollback": raise RuntimeError("original raw rollback failure")
+                return native_sql(query, *args, **kwargs)
+            with patch.object(state, "native_sql", side_effect=failed), self.assertRaisesRegex(RuntimeError, "original raw rollback failure"):
+                self.db.sql("ROLLBACK")
+            self.assertTrue(state.poisoned)
+            self.assertTrue(state.connection.closed)
+            with self.assertRaises(frappe.ValidationError): self.db.commit()
+            self.assertFalse(receipts.pending)
+
+    def test_owned_auto_commit_sql_is_explicitly_refused_but_previews_remain_native(self):
+        with self.boundary.execution(db=self.db), self.lease():
+            state = self.db._purchase_session
+            receipts = self.receipts(state)
+            for query in ("COMMIT", "ROLLBACK", "UPDATE own_business SET value=1"):
+                for options in ({"run": False}, {"explain": True}):
+                    with self.subTest(query=query, options=options):
+                        self.db.sql(query, auto_commit=True, **options)
+                        self.assertFalse(receipts.events)
+                with self.subTest(query=query), self.assertRaises(frappe.ValidationError):
+                    self.db.sql(query, auto_commit=True)
+                self.assertNotIn(query, self.db.queries)
+
+    def test_caught_prepare_failure_then_new_callback_writes_and_error_reclean_new_epoch(self):
+        with self.boundary.execution(db=self.db), self.lease():
+            state = self.db._purchase_session
+            receipts = self.receipts(state)
+            prepare = receipts.prepare
+            def failed(identity):
+                raise RuntimeError("first prepare error")
+            receipts.prepare = failed
+            def callback():
+                with self.assertRaisesRegex(RuntimeError, "first prepare error"): self.db.sql("COMMIT")
+                receipts.prepare = prepare
+                self.db.sql("UPDATE new_epoch_business SET value=1")
+                receipts.pending.append("new_rolled_back_marker")
+                raise RuntimeError("original later callback error")
+            self.db.before_commit.add(callback)
+            with self.assertRaisesRegex(RuntimeError, "original later callback error"): self.db.commit()
+            self.assertEqual(state.connection.rollbacks, 2)
+            self.assertFalse(receipts.pending)
+            self.db.commit()
+            self.assertEqual([event[1]["effects"] for event in receipts.events if event[0] == "promote"], [[]])
+
+    def test_invalidation_close_cannot_execute_old_raw_sql_or_advance_its_epoch(self):
+        with self.boundary.execution(db=self.db), self.lease():
+            state = self.db._purchase_session
+            receipts = self.receipts(state)
+            entered = []
+            def close():
+                if not entered:
+                    entered.append(True)
+                    self.db.close()
+            receipts.invalidate = close
+            with self.assertRaises(frappe.ValidationError): self.db.sql("ROLLBACK")
+            self.assertTrue(state.poisoned)
+            self.assertIsNone(self.db._conn)
+            self.assertEqual(state.epoch, 0)
+            self.assertNotIn("ROLLBACK", self.db.queries)
 
     def test_real_ping_false_once_before_any_query_and_deeper_calls_verify_only(self):
         state = self.boundary.initialize(self.db)

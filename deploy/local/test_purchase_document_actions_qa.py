@@ -448,6 +448,416 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         self.addCleanup(lambda: database.close())
         return database
 
+    def epoch_receipts(self, database, name):
+        """Exact owned QA audit rows; exercise the actual physical seam."""
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        state = boundary.initialize(database)
+        case = self
+        class Participant:
+            def __init__(self):
+                self.pending, self.committed, self.resolutions = [], [], []
+            def prepare(self, identity):
+                prior = database.sql("SELECT data,output FROM `tabIntegration Request` WHERE name=%s FOR UPDATE", (name,))[0]
+                receipt = {**identity, "effects": list(self.pending)}
+                output = json.loads(prior[1] or "[]") + [receipt]
+                database.sql("UPDATE `tabIntegration Request` SET output=%s WHERE name=%s", (json.dumps(output), name))
+                return receipt
+            def promote(self, receipt):
+                self.committed.append(receipt)
+                case.assertEqual(state.epoch, receipt["epoch"])
+                self.pending.clear()
+            def invalidate(self):
+                self.pending.clear()
+            def resolve(self, identity, candidate):
+                case.assertTrue(state.poisoned)
+                case.assertFalse(state.connection.open)
+                fresh = case.boundary_database()
+                case.assertIsNot(fresh._conn, state.connection)
+                case.assertNotEqual(fresh._conn.thread_id(), state.connection_id)
+                fresh.begin(read_only=True)
+                result = fresh.sql("SELECT output FROM `tabIntegration Request` WHERE name=%s", (name,))[0][0]
+                self.resolutions.append([row for row in json.loads(result or "[]") if all(row[key] == value for key, value in identity.items())])
+                fresh.rollback()
+                matches = self.resolutions[-1]
+                return json.dumps(matches[0], ensure_ascii=False, sort_keys=True).encode("utf-8") if len(matches) == 1 else None
+        state.receipt_participant = Participant()
+        return state, state.receipt_participant
+
+    def test_native_epoch_partial_receipts_callbacks_nested_raw_commit_and_outer_fence(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        audit = self.pending_owner()
+        immutable = frappe.db.get_value("Integration Request", audit.name, "data")
+        self.commit_fixture(primary_doctype="Item", name_prefix="QA-ATOMIC-")
+        left, right = self.boundary_database(), self.boundary_database()
+        state = boundary.initialize(left)
+        key = boundary.lock_key("qa-epoch-receipt", self.item)
+        with boundary.execution(db=left), boundary.acquire((key,), db=left):
+            state, receipts = self.epoch_receipts(left, audit.name)
+            receipts.pending.append("first")
+            def before():
+                left.sql("COMMIT")
+                receipts.pending.append("second")
+            left.before_commit.add(before)
+            left.after_commit.reset()
+            left.commit()
+            left.after_commit.add(lambda: receipts.pending.append("later"))
+            left.commit()
+            left.commit()
+            self.assertEqual([row["effects"] for row in receipts.committed], [["first"], ["second"], [], ["later"]])
+            self.assertEqual([row["epoch"] for row in receipts.committed], list(range(4)))
+            self.assertEqual(right.sql("SELECT IS_USED_LOCK(%s)", (key,))[0][0], state.connection_id)
+            for command in ("SAVEPOINT own", "ROLLBACK TO SAVEPOINT own", "RELEASE SAVEPOINT own"):
+                with self.subTest(command=command), self.assertRaises(frappe.ValidationError): left.sql(command)
+            for options in ({"run": False}, {"explain": True}):
+                with self.subTest(options=options):
+                    left.sql("COMMIT", **options)
+                    self.assertEqual(state.epoch, 4)
+        self.assertEqual(right.sql("SELECT IS_USED_LOCK(%s)", (key,))[0][0], state.connection_id)
+        left.commit()  # supported outer physical boundary retains the owner until this point
+        self.assertIsNone(state.receipt_participant)
+        self.assertIsNone(right.sql("SELECT IS_USED_LOCK(%s)", (key,))[0][0])
+        right.rollback()
+        data, output, status = right.sql("SELECT data,output,status FROM `tabIntegration Request` WHERE name=%s", (audit.name,))[0]
+        self.assertEqual((data, status), (immutable, "Queued"))
+        self.assertEqual(len(json.loads(output)), 5)
+        print("C2A_PHYSICAL_EPOCHS=" + json.dumps(json.loads(output)), flush=True)
+
+    def test_native_epoch_receipt_write_failure_full_rollback_and_later_status_commit(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        audit = self.pending_owner()
+        self.commit_fixture(primary_doctype="Item", name_prefix="QA-ATOMIC-")
+        left, right = self.boundary_database(), self.boundary_database()
+        with boundary.execution(db=left), boundary.acquire((boundary.lock_key("qa-receipt-failure", self.item),), db=left):
+            state, receipts = self.epoch_receipts(left, audit.name)
+            left.sql("UPDATE tabItem SET item_name=%s WHERE name=%s", ("QA-ATOMIC-MUST-ROLLBACK", self.item))
+            receipts.pending.append("rolled_back_gl")
+            native_sql = state.native_sql
+            def fail(query, *args, **kwargs):
+                if str(query).startswith("UPDATE `tabIntegration Request` SET output="):
+                    raise RuntimeError("QA receipt write failure")
+                return native_sql(query, *args, **kwargs)
+            with patch.object(state, "native_sql", side_effect=fail), self.assertRaisesRegex(RuntimeError, "QA receipt write failure"):
+                left.commit()
+            self.assertEqual(right.sql("SELECT item_name FROM tabItem WHERE name=%s", (self.item,))[0][0], self.item)
+            self.assertFalse(receipts.pending)
+            left.sql("UPDATE `tabIntegration Request` SET status='Failed' WHERE name=%s", (audit.name,))
+            left.commit()
+            receipts.pending.append("second_rollback_gl")
+            left.sql("ROLLBACK")
+            left.commit()
+            self.assertEqual([row["effects"] for row in receipts.committed], [[], []])
+        left.commit()
+        right.rollback()
+        output, status = right.sql("SELECT output,status FROM `tabIntegration Request` WHERE name=%s", (audit.name,))[0]
+        self.assertEqual(status, "Failed")
+        self.assertFalse(any(row["effects"] for row in json.loads(output)))
+
+    def test_native_epoch_commit_response_unknown_resolves_durable_receipt_on_fresh_readonly_connection(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        for close_failure in (False, True):
+            with self.subTest(close_failure=close_failure):
+                audit = self.pending_owner()
+                self.commit_fixture(primary_doctype="Item", name_prefix="QA-ATOMIC-")
+                left, right = self.boundary_database(), self.boundary_database()
+                key = boundary.lock_key("qa-unknown-receipt", self.item)
+                with boundary.execution(db=left), boundary.acquire((key,), db=left):
+                    state, receipts = self.epoch_receipts(left, audit.name)
+                    receipts.pending.append("committed_synthetic_marker")
+                    left.sql("UPDATE tabItem SET item_name=%s WHERE name=%s", ("QA-ATOMIC-DURABLE", self.item))
+                    native_sql, commits, resolutions = state.native_sql, [], []
+                    native_resolve = receipts.resolve
+                    def resolve(identity, candidate):
+                        resolutions.append(identity)
+                        return native_resolve(identity, candidate)
+                    receipts.resolve = resolve
+                    physical = state.connection
+                    native_close = type(physical).close
+                    def close(connection, *args, **kwargs):
+                        # Fault only this actual mysqlclient owner's close;
+                        # keep the real native db/SQL/COMMIT implementation.
+                        if close_failure and connection is physical: raise RuntimeError("QA physical close failed")
+                        return native_close(connection, *args, **kwargs)
+                    def unknown(query, *args, **kwargs):
+                        result = native_sql(query, *args, **kwargs)
+                        if str(query).lower() == "commit":
+                            commits.append(query)
+                            raise RuntimeError("QA lost commit response")
+                        return result
+                    with patch.object(type(physical), "close", close), patch.object(state, "native_sql", side_effect=unknown), self.assertRaisesRegex(RuntimeError, "QA lost commit response"):
+                        left.commit()
+                    self.assertEqual(commits, ["commit"])
+                    self.assertEqual(len(resolutions), 0 if close_failure else 1)
+                    if not close_failure:
+                        self.assertEqual([row["effects"] for row in receipts.resolutions[0]], [["committed_synthetic_marker"]])
+                    self.assertFalse(receipts.committed)
+                    self.assertFalse(receipts.pending)
+                    self.assertEqual(state.receipt_resolution["result"], "unknown" if close_failure else "durable")
+                    self.assertEqual(bool(physical.open), close_failure)
+                    with self.assertRaises(frappe.ValidationError): left.commit()
+                left.close()  # exact own fixture owner after fault is removed
+                right.rollback()
+                self.assertEqual(right.sql("SELECT item_name FROM tabItem WHERE name=%s", (self.item,))[0][0], "QA-ATOMIC-DURABLE")
+                self.assertIsNone(right.sql("SELECT IS_USED_LOCK(%s)", (key,))[0][0])
+
+    def test_native_epoch_kill_close_poison_and_full_physical_rollback_discard_pending_markers(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        audit = self.pending_owner()
+        self.commit_fixture(primary_doctype="Item", name_prefix="QA-ATOMIC-")
+        for ending in ("kill", "close", "physical", "full"):
+            with self.subTest(ending=ending):
+                left, right = self.boundary_database(), self.boundary_database()
+                key = boundary.lock_key("qa-epoch-ending", self.item, ending)
+                with boundary.execution(db=left), boundary.acquire((key,), db=left):
+                    state, receipts = self.epoch_receipts(left, audit.name)
+                    receipts.pending.append("rolled_back_synthetic_marker")
+                    left.sql("UPDATE tabItem SET item_name=%s WHERE name=%s", ("QA-ATOMIC-ROLLBACK", self.item))
+                    if ending == "kill":
+                        right.sql("KILL CONNECTION %s", (state.connection_id,))
+                        with self.assertRaises(Exception): left.sql("SELECT CONNECTION_ID()")
+                    elif ending == "close": left.close()
+                    elif ending == "physical": state.physical_rollback()
+                    else: left.rollback()
+                    self.assertFalse(receipts.pending)
+                    self.assertEqual(right.sql("SELECT item_name FROM tabItem WHERE name=%s", (self.item,))[0][0], self.item)
+                    if ending in ("kill", "close"):
+                        self.assertTrue(state.poisoned)
+                        with self.assertRaises(frappe.ValidationError): left.commit()
+                        self.assertIsNone(right.sql("SELECT IS_USED_LOCK(%s)", (key,))[0][0])
+                    else:
+                        left.commit()
+                        self.assertEqual([row["effects"] for row in receipts.committed], [[]])
+                if not state.poisoned: left.commit()
+
+    def test_native_epoch_known_commit_promotion_failure_does_not_rollback_committed_business(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        audit = self.pending_owner()
+        self.commit_fixture(primary_doctype="Item", name_prefix="QA-ATOMIC-")
+        left, right = self.boundary_database(), self.boundary_database()
+        with boundary.execution(db=left), boundary.acquire((boundary.lock_key("qa-epoch-promote", self.item),), db=left):
+            state, receipts = self.epoch_receipts(left, audit.name)
+            receipts.pending.append("durable_synthetic_marker")
+            left.sql("UPDATE tabItem SET item_name=%s WHERE name=%s", ("QA-ATOMIC-KNOWN-COMMIT", self.item))
+            receipts.promote = lambda receipt: (_ for _ in ()).throw(RuntimeError("QA original promotion failure"))
+            with self.assertRaisesRegex(RuntimeError, "QA original promotion failure"): left.commit()
+            self.assertTrue(state.poisoned)
+        self.assertEqual(right.sql("SELECT item_name FROM tabItem WHERE name=%s", (self.item,))[0][0], "QA-ATOMIC-KNOWN-COMMIT")
+        output = right.sql("SELECT output FROM `tabIntegration Request` WHERE name=%s", (audit.name,))[0][0]
+        self.assertEqual([row["effects"] for row in json.loads(output)], [["durable_synthetic_marker"]])
+
+    def test_native_epoch_unknown_response_requires_exact_candidate_not_identity_only(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        audit = self.pending_owner()
+        self.commit_fixture(primary_doctype="Item", name_prefix="QA-ATOMIC-")
+        for result in ("mismatch", "absent"):
+            with self.subTest(result=result):
+                left = self.boundary_database()
+                with boundary.execution(db=left), boundary.acquire((boundary.lock_key("qa-epoch-resolution", self.item, result),), db=left):
+                    state, receipts = self.epoch_receipts(left, audit.name)
+                    receipts.pending.append("synthetic_candidate")
+                    native_sql = state.native_sql
+                    def unknown(query, *args, **kwargs):
+                        if str(query).lower() == "commit":
+                            output = json.loads(native_sql("SELECT output FROM `tabIntegration Request` WHERE name=%s", (audit.name,))[0][0])
+                            if result == "mismatch": output[-1]["effects"] = ["different_same_identity"]
+                            else: output = output[:-1]
+                            native_sql("UPDATE `tabIntegration Request` SET output=%s WHERE name=%s", (json.dumps(output), audit.name))
+                            native_sql(query, *args, **kwargs)
+                            raise RuntimeError("QA original unknown response")
+                        return native_sql(query, *args, **kwargs)
+                    with patch.object(state, "native_sql", side_effect=unknown), self.assertRaisesRegex(RuntimeError, "QA original unknown response"):
+                        left.commit()
+                    self.assertEqual(state.receipt_resolution["result"], result)
+                    self.assertFalse(receipts.pending)
+                    self.assertFalse(receipts.committed)
+                    self.assertTrue(state.poisoned)
+
+    def test_native_epoch_real_prepare_sql_error_never_commits_business_or_claims_durable(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        audit = self.pending_owner()
+        self.commit_fixture(primary_doctype="Item", name_prefix="QA-ATOMIC-")
+        left, right = self.boundary_database(), self.boundary_database()
+        with boundary.execution(db=left), boundary.acquire((boundary.lock_key("qa-epoch-prepare-sql", self.item),), db=left):
+            state, receipts = self.epoch_receipts(left, audit.name)
+            left.sql("UPDATE tabItem SET item_name=%s WHERE name=%s", ("QA-ATOMIC-UNCOMMITTED", self.item))
+            receipts.pending.append("synthetic_failed_prepare")
+            original = receipts.prepare
+            def invalid_sql(identity):
+                receipt = original(identity)
+                left.sql("UPDATE `tabIntegration Request` SET `qa_c2a_nonexistent_column`=1 WHERE name=%s", (audit.name,))
+                return receipt
+            with patch.object(receipts, "prepare", side_effect=invalid_sql), self.assertRaises(Exception) as caught: left.commit()
+            self.assertEqual(caught.exception.args[0], 1054)
+            self.assertIsNone(state.receipt_resolution)
+            self.assertFalse(state.poisoned)
+            self.assertFalse(receipts.pending)
+            self.assertEqual(right.sql("SELECT item_name FROM tabItem WHERE name=%s", (self.item,))[0][0], self.item)
+            self.assertIsNone(right.sql("SELECT output FROM `tabIntegration Request` WHERE name=%s", (audit.name,))[0][0])
+            left.sql("UPDATE `tabIntegration Request` SET status='Failed' WHERE name=%s", (audit.name,))
+            left.commit()
+            self.assertEqual([row["effects"] for row in receipts.committed], [[]])
+        left.commit()
+
+    def test_native_epoch_after_commit_new_participant_waits_for_its_own_physical_boundary(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        audit = self.pending_owner()
+        self.commit_fixture(primary_doctype="Item", name_prefix="QA-ATOMIC-")
+        left, right = self.boundary_database(), self.boundary_database()
+        key, later = (boundary.lock_key("qa-epoch-after", self.item, phase) for phase in ("old", "new"))
+        with boundary.execution(db=left), boundary.acquire((key,), db=left):
+            state, original = self.epoch_receipts(left, audit.name)
+            original.pending.append("old_synthetic_marker")
+        created = []
+        def callback():
+            with boundary.execution(db=left), boundary.acquire((later,), db=left):
+                _, participant = self.epoch_receipts(left, audit.name)
+                participant.pending.append("new_synthetic_marker")
+                left.sql("UPDATE tabItem SET item_name=%s WHERE name=%s", ("QA-ATOMIC-AFTER-COMMIT", self.item))
+                created.append(participant)
+            raise RuntimeError("QA original after commit failure")
+        left.after_commit.add(callback)
+        with self.assertRaisesRegex(RuntimeError, "QA original after commit failure"): left.commit()
+        self.assertEqual(original.committed[0]["epoch"], 0)
+        self.assertEqual(created[0].pending, ["new_synthetic_marker"])
+        self.assertFalse(created[0].committed)
+        self.assertIs(state.receipt_participant, created[0])
+        self.assertIsNone(right.sql("SELECT IS_USED_LOCK(%s)", (key,))[0][0])
+        self.assertEqual(right.sql("SELECT IS_USED_LOCK(%s)", (later,))[0][0], state.connection_id)
+        self.assertEqual(right.sql("SELECT item_name FROM tabItem WHERE name=%s", (self.item,))[0][0], self.item)
+        left.commit()
+        self.assertEqual([(row["epoch"], row["effects"]) for row in created[0].committed], [(1, ["new_synthetic_marker"])])
+        right.rollback()
+        self.assertEqual(right.sql("SELECT item_name FROM tabItem WHERE name=%s", (self.item,))[0][0], "QA-ATOMIC-AFTER-COMMIT")
+        self.assertIsNone(right.sql("SELECT IS_USED_LOCK(%s)", (later,))[0][0])
+        self.assertIsNone(state.receipt_participant)
+
+    def test_native_epoch_physical_rollback_callback_commit_preserves_prior_receipt_only(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        audit = self.pending_owner()
+        self.commit_fixture(primary_doctype="Item", name_prefix="QA-ATOMIC-")
+        left, right = self.boundary_database(), self.boundary_database()
+        with boundary.execution(db=left), boundary.acquire((boundary.lock_key("qa-epoch-rollback-callback", self.item),), db=left):
+            state, receipts = self.epoch_receipts(left, audit.name)
+            left.sql("UPDATE tabItem SET item_name=%s WHERE name=%s", ("QA-ATOMIC-CALLBACK-COMMITTED", self.item))
+            receipts.pending.append("old_committed_synthetic_marker")
+            def before():
+                left.commit()
+                left.sql("UPDATE tabItem SET item_name=%s WHERE name=%s", ("QA-ATOMIC-CALLBACK-ROLLED-BACK", self.item))
+                receipts.pending.append("new_rolled_back_synthetic_marker")
+            left.before_rollback.add(before)
+            state.physical_rollback()
+            self.assertEqual([row["effects"] for row in receipts.committed], [["old_committed_synthetic_marker"]])
+            self.assertFalse(receipts.pending)
+            self.assertEqual(right.sql("SELECT item_name FROM tabItem WHERE name=%s", (self.item,))[0][0], "QA-ATOMIC-CALLBACK-COMMITTED")
+            left.commit()
+            self.assertEqual([row["effects"] for row in receipts.committed], [["old_committed_synthetic_marker"], []])
+        left.commit()
+
+    def test_native_epoch_raw_rollback_failure_closes_pending_business_owner(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        audit = self.pending_owner()
+        self.commit_fixture(primary_doctype="Item", name_prefix="QA-ATOMIC-")
+        left, right = self.boundary_database(), self.boundary_database()
+        with boundary.execution(db=left), boundary.acquire((boundary.lock_key("qa-epoch-raw-rollback", self.item),), db=left):
+            state, receipts = self.epoch_receipts(left, audit.name)
+            left.sql("UPDATE tabItem SET item_name=%s WHERE name=%s", ("QA-ATOMIC-RAW-PENDING", self.item))
+            receipts.pending.append("raw_rollback_pending_marker")
+            native_sql = state.native_sql
+            def failed(query, *args, **kwargs):
+                if str(query).lower() == "rollback": raise RuntimeError("QA original raw rollback failure")
+                return native_sql(query, *args, **kwargs)
+            with patch.object(state, "native_sql", side_effect=failed), self.assertRaisesRegex(RuntimeError, "QA original raw rollback failure"): left.sql("ROLLBACK")
+            self.assertTrue(state.poisoned)
+            self.assertFalse(state.connection.open)
+            self.assertFalse(receipts.pending)
+            with self.assertRaises(frappe.ValidationError): left.commit()
+            self.assertEqual(right.sql("SELECT item_name FROM tabItem WHERE name=%s", (self.item,))[0][0], self.item)
+
+    def test_native_epoch_cleanup_close_never_lazily_reconnects_or_advances_old_epoch(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        audit = self.pending_owner()
+        self.commit_fixture(primary_doctype="Item", name_prefix="QA-ATOMIC-")
+        for rollback in ("raw", "physical"):
+            with self.subTest(rollback=rollback):
+                left = self.boundary_database()
+                with boundary.execution(db=left), boundary.acquire((boundary.lock_key("qa-epoch-cleanup-close", self.item, rollback),), db=left):
+                    state, receipts = self.epoch_receipts(left, audit.name)
+                    entered = []
+                    def close():
+                        if not entered:
+                            entered.append(True)
+                            left.close()
+                    receipts.invalidate = close
+                    if rollback == "raw":
+                        with self.assertRaises(frappe.ValidationError): left.sql("ROLLBACK")
+                    else: state.physical_rollback()
+                    self.assertTrue(state.poisoned)
+                    self.assertIsNone(left._conn)
+                    self.assertEqual(state.epoch, 0)
+
+    def test_native_epoch_prepare_failure_caught_then_new_callback_writes_are_rolled_back(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        audit = self.pending_owner()
+        self.commit_fixture(primary_doctype="Item", name_prefix="QA-ATOMIC-")
+        left, right = self.boundary_database(), self.boundary_database()
+        with boundary.execution(db=left), boundary.acquire((boundary.lock_key("qa-epoch-caught-prepare", self.item),), db=left):
+            state, receipts = self.epoch_receipts(left, audit.name)
+            prepare = receipts.prepare
+            receipts.prepare = lambda identity: (_ for _ in ()).throw(RuntimeError("QA first prepare error"))
+            def before():
+                with self.assertRaisesRegex(RuntimeError, "QA first prepare error"): left.sql("COMMIT")
+                receipts.prepare = prepare
+                left.sql("UPDATE tabItem SET item_name=%s WHERE name=%s", ("QA-ATOMIC-NEW-EPOCH-PENDING", self.item))
+                receipts.pending.append("new_failed_callback_marker")
+                raise RuntimeError("QA original later callback error")
+            left.before_commit.add(before)
+            with self.assertRaisesRegex(RuntimeError, "QA original later callback error"): left.commit()
+            self.assertFalse(receipts.pending)
+            self.assertEqual(right.sql("SELECT item_name FROM tabItem WHERE name=%s", (self.item,))[0][0], self.item)
+            left.sql("UPDATE `tabIntegration Request` SET status='Failed' WHERE name=%s", (audit.name,))
+            left.commit()
+            self.assertEqual([row["effects"] for row in receipts.committed], [[]])
+        left.commit()
+
+    def test_native_epoch_owned_auto_commit_and_promote_reentry_fail_closed(self):
+        from deeplinkerp_branding.services import purchase_repost_boundary as boundary
+        audit = self.pending_owner()
+        self.commit_fixture(primary_doctype="Item", name_prefix="QA-ATOMIC-")
+        left = self.boundary_database()
+        with boundary.execution(db=left), boundary.acquire((boundary.lock_key("qa-epoch-no-reentry", self.item),), db=left):
+            state, receipts = self.epoch_receipts(left, audit.name)
+            for query in ("COMMIT", "ROLLBACK"):
+                with self.subTest(query=query), self.assertRaises(frappe.ValidationError): left.sql(query, auto_commit=True)
+        for phase in ("promote", "invalidate"):
+            for action in ("sql", "method", "initialize", "execution", "acquire"):
+                with self.subTest(phase=phase, action=action):
+                    left = self.boundary_database()
+                    key = boundary.lock_key("qa-memory-reentry", self.item, phase, action)
+                    with boundary.execution(db=left), boundary.acquire((key,), db=left):
+                        state, receipts = self.epoch_receipts(left, audit.name)
+                        entered, reentry_queries = [], []
+                        native_sql = state.native_sql
+                        def observe(query, *args, **kwargs):
+                            reentry_queries.append(str(query))
+                            return native_sql(query, *args, **kwargs)
+                        def reenter(*args):
+                            if not entered:
+                                entered.append(True)
+                                with patch.object(state, "native_sql", side_effect=observe):
+                                    if action == "method": left.commit()
+                                    elif action == "sql": left.sql("SELECT 1")
+                                    elif action == "initialize": boundary.initialize(left)
+                                    elif action == "execution":
+                                        with boundary.execution(db=left): pass
+                                    else:
+                                        with boundary.acquire((key,), db=left): pass
+                        setattr(receipts, phase, reenter)
+                        with self.assertRaises(frappe.ValidationError):
+                            if phase == "promote": left.commit()
+                            else: left.sql("ROLLBACK")
+                        self.assertEqual(reentry_queries, [], "Memory-only callback must not query even IS_USED_LOCK")
+                        self.assertTrue(state.poisoned)
+                        self.assertFalse(state.connection.open)
+
     def test_native_session_lease_sql_epochs_callbacks_and_two_connection_authority(self):
         from deeplinkerp_branding.services import purchase_repost_boundary as boundary
         self.commit_fixture(primary_doctype="Item", name_prefix="QA-ATOMIC-")
