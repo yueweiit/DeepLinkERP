@@ -236,7 +236,7 @@
    for(const action of actions)$(`<button type="button" class="btn btn-primary dlp-batch-confirm">${esc(action==='Submit'?(targetType==='Purchase Receipt'?'确认全部入库':'确认全部应付'):action)}</button>`).appendTo(drawer.panel.find('footer')).on('click.dlpDrawer',()=>frappe.confirm('确认执行本批全部原生单据操作？',()=>write(1,action)));
    nextSteps(drawer,projections.map(row=>row.document),sourceType,sources);drawer.setBusy(false);
   }
-  async function load(){drawer.setBusy(true);try{
+  async function load(){drawer.setBusy(true);projections=[];sessions=[];drawer.panel.find('footer').find('.dlp-batch-save,.dlp-batch-confirm,.dlp-next-ap,.dlp-next-pay,.dlp-batch-retry,.dlp-batch-reload').remove();try{
    const pending=token.pending();
    if(pending){body(drawer,'<p class="text-warning">上次响应未确认，请核对记录后重试同一批次内容。</p>');$('<button type="button" class="btn btn-primary dlp-batch-retry">重试原操作</button>').appendTo(drawer.panel.find('footer')).on('click.dlpDrawer',()=>write(0,null,pending));return;}
    if(targetType==='Purchase Invoice'){
@@ -248,10 +248,10 @@
     }
    }
    const result=await call('preview_document_batch',context(),ACTIONS);if(!drawer.alive())return;await loadMetadata(targetType);if(drawer.alive())await display(result);
-  }catch(error){if(drawer.alive())body(drawer,`<p class="text-warning">${esc(error.message || '批量预览未完成，请核对原生单据。')}</p>${sources.map(row=>link(sourceType,row.name,'查看来源')).join(' · ')}`);}finally{if(drawer.alive())drawer.setBusy(false);}}
-  async function write(confirm,action=null,pending=null){if(drawer.busy)return;drawer.setBusy(true);try{
+  }catch(error){if(drawer.alive()){body(drawer,`<p class="text-warning">${esc(error.message || '批量预览未完成，请核对原生单据。')}</p>${sources.map(row=>link(sourceType,row.name,'查看来源')).join(' · ')}`);if(targetType==='Purchase Receipt')$('<button type="button" class="btn btn-primary dlp-batch-individual">逐单重新预览</button>').appendTo(drawer.panel.find('.dlp-payment-body')).on('click.dlpDrawer',()=>{if(drawer.busy)return;merge=0;return load();});}}finally{if(drawer.alive())drawer.setBusy(false);}}
+  async function write(confirm,action=null,pending=null){if(drawer.busy || (!pending && !projections.length))return;drawer.setBusy(true);try{
    const payload=pending || {...context(),changes:sessions.map(session=>session.changes()),confirm,workflow_action:action==='Submit'?null:action,...(projections.some(row=>row.document.name)?{documents:projections.map(row=>({doctype:targetType,name:row.document.name,modified:row.document.modified}))}:{})};
-   const result=await call('record_document_batch',{...payload,request_id:token.forPayload(payload)},ACTIONS);token.succeeded();if(!drawer.alive())return;await display(result);await refreshSurface();
+   const result=await call('record_document_batch',{...payload,request_id:token.forPayload(payload)},ACTIONS);token.succeeded();if(!drawer.alive())return;if(result.failed){drawer.error(new Error(result.error || '本批已回滚，请修改或重新预览。'));drawer.panel.find('footer').find('.dlp-batch-retry,.dlp-batch-reload').remove();$('<button type="button" class="btn btn-default dlp-batch-reload">重新预览</button>').appendTo(drawer.panel.find('footer')).on('click.dlpDrawer',load);return;}await display(result);await refreshSurface();
   }catch(error){if(drawer.alive())drawer.error(error);}finally{if(drawer.alive())drawer.setBusy(false);}}
   await load();
  }

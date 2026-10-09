@@ -402,6 +402,25 @@ class PaymentCompletionTests(unittest.TestCase):
             self.assertEqual(actions._confirm_payment(doc)["document"]["docstatus"], 0)
         submit.assert_not_called()
 
+    def test_batch_validation_acknowledges_only_after_rollback_but_runtime_failure_stays_unknown(self):
+        for error in (frappe.ValidationError("Stale source"), RuntimeError("Unknown response")):
+            with self.subTest(error=type(error).__name__):
+                rollback = Mock()
+                with patch.object(frappe, "session", SimpleNamespace(user="QA")), \
+                     patch.object(actions.purchase_operation, "_existing", return_value=None), \
+                     patch.object(actions.purchase_operation, "_reserve"), \
+                     patch.object(actions, "_batch_context", side_effect=error), \
+                     patch.object(frappe, "db", SimpleNamespace(rollback=rollback)):
+                    if isinstance(error, frappe.ValidationError):
+                        result = actions.record_document_batch([{"name": "PO", "modified": "stale"}], [{}],
+                            "12345678-1234-1234-1234-123456789abc")
+                        self.assertEqual(result, {"failed": True, "error": "Stale source"})
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "Unknown response"):
+                            actions.record_document_batch([{"name": "PO", "modified": "stale"}], [{}],
+                                "12345678-1234-1234-1234-123456789abc")
+                rollback.assert_called_once_with()
+
     def test_no_submit_permission_returns_native_pending_projection(self):
         doc = SimpleNamespace(name="PE", modified="v1")
         with patch("frappe.model.workflow.get_workflow_name", return_value=""), patch.object(actions, "_workflow_actions", return_value=[]), patch.object(actions, "_payment", return_value={"document": {"docstatus": 0}}), patch.object(actions, "submit_document") as submit:

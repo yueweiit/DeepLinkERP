@@ -843,7 +843,7 @@ def record_document_batch(sources, changes, request_id, source_doctype="Purchase
                     continue
             results.append(_projection(native, maximum, group))
         return {"documents": results, "reused": False}
-    return purchase_operation.run(request_id, [sources, changes, source_doctype, target_doctype, merge, confirm, workflow_action, documents], operation, _replay_native)
+    return _native_request(request_id, [sources, changes, source_doctype, target_doctype, merge, confirm, workflow_action, documents], operation)
 
 
 def _payment_request(request_id, payload, operation):

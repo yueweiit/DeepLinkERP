@@ -541,8 +541,9 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
                         [{"items": [{"key": orders[0].items[0].name, "warehouse": "All Warehouses - QAB"}]}, {}]):
             # Server groups are sorted by actual document identity.
             edits = sorted(zip(orders, changes), key=lambda pair: pair[0].name)
-            with self.subTest(changes=changes), self.assertRaises(frappe.ValidationError):
-                actions.record_document_batch(sources, [row[1] for row in edits], str(uuid.uuid4()), confirm=1)
+            with self.subTest(changes=changes):
+                failed = actions.record_document_batch(sources, [row[1] for row in edits], str(uuid.uuid4()), confirm=1)
+                self.assertTrue(failed.get("failed"))
             self.assertEqual(before, {dt: frappe.db.count(dt) for dt in self.types})
         # Another current receipt consumed the first order after the preview.
         taken = make_purchase_receipt(orders[0].name); taken.items[0].qty = 2; taken.insert().submit()
@@ -551,8 +552,10 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         self.assertEqual(next(row["document"]["items"][0]["max_qty"] for row in fresh["documents"]
             if row["document"]["items"][0]["source_name"] == orders[0].name), 1)
         stale = [{"name": po.name, "modified": "1900-01-01" if po == orders[0] else str(po.modified)} for po in orders]
-        with self.assertRaises(frappe.ValidationError):
-            actions.record_document_batch(stale, [{}, {}], str(uuid.uuid4()), confirm=1)
+        before_stale = {dt: frappe.db.count(dt) for dt in self.types}
+        failed = actions.record_document_batch(stale, [{}, {}], str(uuid.uuid4()), confirm=1)
+        self.assertTrue(failed.get("failed")); self.assertIn("改变", failed["error"])
+        self.assertEqual(before_stale, {dt: frappe.db.count(dt) for dt in self.types})
         for field, value in (("company", "YUEWEI MX"), ("currency", "USD"), ("conversion_rate", 2), ("discount_amount", 1)):
             with self.subTest(field=field):
                 old = orders[1].get(field); orders[1].set(field, value)

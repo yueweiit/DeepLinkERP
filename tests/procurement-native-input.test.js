@@ -76,6 +76,47 @@ test('batch receipt preview is read only and explicit draft preserves exact sour
  assert.equal(write.args.confirm,0);assert.equal(write.args.changes[0].items[0].key,'ITEM');assert.equal(write.args.changes[0].items[0].qty,2.345);
 });
 
+test('batch validation acknowledgment allows corrected input while unknown response keeps the original request',async()=>{
+ for(const unknown of [false,true]){
+  const values=new Map(),storage={getItem:key=>values.get(key) || null,setItem:(key,value)=>values.set(key,value),removeItem:key=>values.delete(key)};
+  const batch={documents:[projection('Purchase Receipt')],sources:[{name:'PO',modified:'v1'}]},h=harness({document:batch,storage});
+  let sequence=0;h.host.crypto.randomUUID=()=>`operation-${++sequence}`;
+  const nativeCall=h.host.frappe.call;
+  h.host.frappe.call=async request=>{if(request.method.endsWith('.record_document_batch')){h.requests.push(request);if(unknown)throw new Error('network response unknown');return {message:{failed:true,error:'单据已改变，请重新预览'}};}return nativeCall(request);};
+  await h.api.batchDocumentDrawer('Purchase Order',batch.sources);
+  await h.click('dlp-batch-save');
+  const original=h.requests.find(row=>row.method.endsWith('.record_document_batch'));
+  if(unknown){
+   assert.equal(values.size,1);h.routeClose();await h.api.batchDocumentDrawer('Purchase Order',batch.sources);
+   await h.click('dlp-batch-retry');
+   const retried=h.requests.filter(row=>row.method.endsWith('.record_document_batch')).at(-1);
+   assert.equal(JSON.stringify(retried.args),JSON.stringify(original.args));assert.equal(values.size,1);
+  }else{
+   assert.match(h.html(),/单据已改变，请重新预览/);assert.equal(values.size,0);
+   await h.controls.find(c=>c.df.fieldname==='qty').$input.emit('input','2,345');await h.click('dlp-batch-save');
+   const corrected=h.requests.filter(row=>row.method.endsWith('.record_document_batch')).at(-1);
+   assert.notEqual(corrected.args.request_id,original.args.request_id);assert.equal(corrected.args.changes[0].items[0].qty,2.345);
+   h.routeClose();await h.api.batchDocumentDrawer('Purchase Order',batch.sources);
+   assert.equal(h.requests.filter(row=>row.method.endsWith('.preview_document_batch')).length,2);
+  }
+ }
+});
+
+test('rejected merged receipt preview cannot submit stale individual rows and can explicitly re-preview individual mode',async()=>{
+ const batch={documents:[projection('Purchase Receipt'),projection('Purchase Receipt')],sources:[{name:'PO-A',modified:'v1'},{name:'PO-B',modified:'v2'}]},h=harness({document:batch});
+ const nativeCall=h.host.frappe.call;
+ h.host.frappe.call=async request=>{if(request.method.endsWith('.preview_document_batch')){h.requests.push(request);if(request.args.merge)throw new Error('固定税费请逐单入库');return {message:batch};}return nativeCall(request);};
+ await h.api.batchDocumentDrawer('Purchase Order',batch.sources);
+ const mode=h.surfaces[0].find('.dlp-batch-mode');mode.node.value='1';await mode.emit('change');
+ await h.click('dlp-batch-save');
+ assert.equal(h.requests.filter(row=>row.method.endsWith('.record_document_batch')).length,0);
+ assert.match(h.html(),/固定税费请逐单入库/);
+ await h.click('dlp-batch-individual');await h.click('dlp-batch-save');
+ assert.deepEqual(h.requests.filter(row=>row.method.endsWith('.preview_document_batch')).map(row=>row.args.merge),[0,1,0]);
+ const write=h.requests.find(row=>row.method.endsWith('.record_document_batch'));
+ assert.equal(write.args.merge,0);assert.equal(write.args.changes.length,2);
+});
+
 test('merged payment confirms each native invoice amount with fresh source versions',async()=>{
  const h=harness({record:async()=>({document:{doctype:'Payment Entry',name:'PE',docstatus:1,amount:30,currency:'USD'}})});
  const nativeCall=h.host.frappe.call;
