@@ -139,6 +139,47 @@ class RepostBoundarySessionTests(unittest.TestCase):
         state.receipt_participant = participant
         return participant
 
+    def test_function_audit_keeps_plain_contract_and_requires_frozen_request_cache_getter(self):
+        from types import FunctionType
+        from deeplinkerp_branding.services import purchase_native_intent as intent
+        def getter(*args, **kwargs):
+            raise AssertionError("Auditing must never execute the getter")
+        code, namespace = getter.__code__, getter.__globals__
+        self.assertTrue(intent._audited_function(getter, code, namespace))
+        self.assertTrue(intent._audited_function(FunctionType(code, namespace), code, namespace))
+        for change in ("globals", "defaults", "kwdefaults", "code", "not-function"):
+            with self.subTest(plain=change):
+                candidate = FunctionType(code, dict(namespace) if change == "globals" else namespace)
+                if change == "defaults": candidate.__defaults__ = (None,)
+                elif change == "kwdefaults": candidate.__kwdefaults__ = {"unknown": None}
+                elif change == "code": candidate.__code__ = code.replace(co_name="unknown")
+                elif change == "not-function": candidate = object()
+                self.assertFalse(intent._audited_function(candidate, code, namespace))
+        def with_closure(value):
+            def function():
+                raise AssertionError(value)
+            return function
+        closed = with_closure("Auditing must never execute a closure")
+        self.assertFalse(intent._audited_function(closed, closed.__code__, namespace))
+        def with_default(value=1):
+            raise AssertionError("Auditing must never execute a defaulted getter")
+        self.assertTrue(intent._audited_function(with_default, with_default.__code__, namespace, (1,)))
+        self.assertFalse(intent._audited_function(with_default, with_default.__code__, namespace, (True,)))
+        wrapped = frappe.request_cache(getter)
+        self.assertFalse(intent._audited_function(wrapped, code, namespace))
+        try:
+            supported = intent._audited_function(wrapped, code, namespace, request_cache_getter=getter)
+        except TypeError as error:
+            self.fail("Fixed request_cache audit is unavailable: " + str(error))
+        self.assertTrue(supported)
+        self.assertFalse(intent._audited_function(getter, code, namespace, request_cache_getter=getter),
+            "Explicit wrapper auditing must not fall through to the plain path")
+        clone = FunctionType(code, namespace)
+        self.assertFalse(intent._audited_function(frappe.request_cache(clone), code, namespace,
+            request_cache_getter=getter), "Same-code getter identity substitutions must refuse")
+        self.assertFalse(intent._audited_function(wrapped, code, namespace,
+            request_cache_getter=clone), "Expected identity must be independent of the candidate")
+
     def test_partial_receipt_uses_physical_seam_after_callbacks_before_epoch_advance(self):
         with self.boundary.execution(db=self.db), self.lease():
             state = self.db._purchase_session

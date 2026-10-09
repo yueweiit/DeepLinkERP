@@ -20,6 +20,7 @@ from types import CodeType, FunctionType
 import uuid
 
 import frappe
+from frappe.utils import caching as _request_caching
 
 from . import purchase_repost_boundary as boundary
 
@@ -32,6 +33,9 @@ NATIVE_SHA256 = "73cd5eb8d391b53383fd6512b8665bf32bf4604754aa2c43f9d7ffd3d87f255
 RETENTION_SHA256 = ("e3656896887da53c7472414470b6eb5cd067a98de6a95756f33abbfdd37ba856",
     "87ef9e5d7787809f6d827eb042d09ecb802448b5eb8b7106873c9ff339d0f4cb")
 RQ_QUEUE_SHA256 = "36f3f197561466dfb95c598ed6ade0783b4a0734ee17b9600cc51e9b7f3a6d85"
+REQUEST_CACHE_SHA256 = "95260b7ea1bda8133e1ac127a4bd90628f688450af4a7020e469bb57600329a5"
+_request_cache_namespace = _request_caching.__dict__
+_request_cache_source = Path(_request_caching.__file__)
 CLAIM_META = "deeplinkerp_native_bin_intent"
 MAX_RECORDS, MAX_PAIRS = 5000, 2500
 MAX_BODY_BYTES, MAX_TOTAL_BYTES = 4 * 1024 * 1024, 16 * 1024 * 1024
@@ -876,7 +880,30 @@ def _install_queue(*, strict):
     return True
 
 
-def _audited_function(function, code, namespace, defaults=None):
+def _audited_function(function, code, namespace, defaults=None, *, request_cache_getter=None):
+    if request_cache_getter is not None:
+        # Only the fixed Frappe wrapper, with an independently frozen getter.
+        # Candidate attributes cannot provide either expected namespace or code.
+        if (not isinstance(function, FunctionType) or function.__globals__ is not _request_cache_namespace or
+                function.__defaults__ is not None or function.__kwdefaults__ is not None or
+                function.__code__.co_freevars != ("func",) or function.__closure__ is None or
+                len(function.__closure__) != 1 or getattr(function, "__wrapped__", None) is not request_cache_getter):
+            return False
+        try:
+            if function.__closure__[0].cell_contents is not request_cache_getter:
+                return False
+            source = _request_cache_source.read_bytes()
+        except (ValueError, OSError):  # empty cell or unavailable pinned source
+            return False
+        if hashlib.sha256(source).hexdigest() != REQUEST_CACHE_SHA256:
+            return False
+        compiled = compile(source, str(_request_cache_source), "exec", dont_inherit=True)
+        parent = next(child for child in compiled.co_consts if isinstance(child, CodeType) and
+            child.co_name == "request_cache")
+        expected_wrapper = next(child for child in parent.co_consts if isinstance(child, CodeType) and
+            child.co_name == "wrapper")
+        return (function.__code__ == expected_wrapper and
+            _audited_function(request_cache_getter, code, namespace, defaults))
     return (isinstance(function, FunctionType) and function.__code__ == code and
         function.__globals__ is namespace and function.__closure__ is None and
         function.__defaults__ == defaults and (defaults is None or all(type(actual) is type(expected)

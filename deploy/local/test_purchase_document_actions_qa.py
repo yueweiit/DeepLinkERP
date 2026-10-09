@@ -2106,7 +2106,102 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
         finally:
             native.__code__ = original
 
+    def _assert_fixed_request_cache_getter_shapes(self):
+        from pathlib import Path
+        from types import CellType, CodeType, FunctionType
+        import hashlib
+        import frappe.utils.caching as caching
+        import erpnext.controllers.buying_controller as buying
+        import erpnext.accounts.general_ledger as gl
+        from deeplinkerp_branding.services import purchase_native_intent as intent
+        caching_source = Path(caching.__file__).read_bytes()
+        self.assertEqual(hashlib.sha256(caching_source).hexdigest(),
+            "95260b7ea1bda8133e1ac127a4bd90628f688450af4a7020e469bb57600329a5")
+        compiled = compile(caching_source, caching.__file__, "exec", dont_inherit=True)
+        parent = next(code for code in compiled.co_consts if isinstance(code, CodeType) and code.co_name == "request_cache")
+        wrapper_code = next(code for code in parent.co_consts if isinstance(code, CodeType) and code.co_name == "wrapper")
+        caching_namespace, decorator = caching.__dict__, caching.request_cache
+        aliases = [(module, name, getattr(module, name), getattr(module, name).__wrapped__)
+            for module, name in ((buying, "get_purchase_expense_account"), (gl, "get_cost_center_allocation_data"))]
+        sources = {module.__file__: hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
+            for module in (caching, buying, gl)}
+        self.assertEqual(sources, {caching.__file__: "95260b7ea1bda8133e1ac127a4bd90628f688450af4a7020e469bb57600329a5",
+            buying.__file__: "09d4da3ce8c43f0886e9bbece5207be71cf79febcdfc42c5d1080172fe0081cd",
+            gl.__file__: "c2228231802b3d979043bc91f0819b7d9e884c72c32051659456cbbe32f91b84"})
+        print("C2A2_CACHE_BEFORE=" + json.dumps({"sources": sources, "aliases":
+            {name: [id(outer), id(inner)] for _, name, outer, inner in aliases}}, sort_keys=True), flush=True)
+        try:
+            for module, name, outer, inner in aliases:
+                expected_code = intent._code_named(compile(Path(module.__file__).read_bytes(), module.__file__,
+                    "exec", dont_inherit=True), name)
+                expected_namespace = module.__dict__
+                def audited(candidate, expected_getter=inner):
+                    try:
+                        return intent._audited_function(candidate, expected_code, expected_namespace,
+                            request_cache_getter=expected_getter)
+                    except TypeError as error:
+                        self.fail("Fixed request_cache audit is unavailable: " + str(error))
+                with self.subTest(cached_getter=name, change="genuine"):
+                    self.assertTrue(audited(outer), "The genuine fixed wrapper must audit without executing its getter")
+                    self.assertFalse(intent._audited_function(outer, expected_code, expected_namespace))
+                clone = FunctionType(expected_code, expected_namespace)
+                for change in ("wrapper-code", "wrapper-globals", "wrapper-defaults", "wrapper-kwdefaults",
+                        "captured-clone", "wrapped-clone", "missing-wrapped", "extra-cell", "wrong-freevar",
+                        "empty-cell", "not-function"):
+                    with self.subTest(cached_getter=name, change=change):
+                        code = wrapper_code.replace(co_name="unknown") if change == "wrapper-code" else wrapper_code
+                        cells = (CellType(clone if change == "captured-clone" else inner),)
+                        if change == "extra-cell":
+                            code, cells = code.replace(co_freevars=("func", "extra")), cells + (CellType(None),)
+                        elif change == "wrong-freevar": code = code.replace(co_freevars=("unknown",))
+                        elif change == "empty-cell": cells = (CellType(),)
+                        candidate = FunctionType(code, dict(caching_namespace) if change == "wrapper-globals"
+                            else caching_namespace, closure=cells)
+                        candidate.__wrapped__ = clone if change == "wrapped-clone" else inner
+                        if change == "wrapper-defaults": candidate.__defaults__ = (None,)
+                        elif change == "wrapper-kwdefaults": candidate.__kwdefaults__ = {"unknown": None}
+                        elif change == "missing-wrapped": del candidate.__wrapped__
+                        elif change == "not-function": candidate = object()
+                        self.assertFalse(audited(candidate))
+                for change in ("getter-code", "getter-globals", "getter-defaults", "getter-kwdefaults", "forged-pair"):
+                    with self.subTest(cached_getter=name, change=change):
+                        # Detached getter identity is frozen before mutation. Native aliases stay untouched.
+                        captured = FunctionType(expected_code, dict(expected_namespace) if change == "getter-globals"
+                            else expected_namespace)
+                        candidate = decorator(captured)
+                        if change == "getter-code": captured.__code__ = expected_code.replace(co_name="unknown")
+                        elif change == "getter-defaults": captured.__defaults__ = (None,)
+                        elif change == "getter-kwdefaults": captured.__kwdefaults__ = {"unknown": None}
+                        self.assertFalse(audited(candidate, inner if change == "forged-pair" else captured))
+                with self.subTest(cached_getter=name, change="arbitrary-func-cell"):
+                    def arbitrary(func):
+                        def wrapper(*args, **kwargs):
+                            raise AssertionError("Auditing must never execute a wrapper", func)
+                        wrapper.__wrapped__ = func
+                        return wrapper
+                    self.assertFalse(audited(arbitrary(inner)))
+                for other in (caching.site_cache, caching.redis_cache, caching.http_cache()):
+                    with self.subTest(cached_getter=name, decorator=other.__name__):
+                        captured = FunctionType(expected_code, expected_namespace)
+                        self.assertFalse(audited(other(captured), captured))
+                with self.subTest(cached_getter=name, change="caching-source"):
+                    with patch.object(Path, "read_bytes", return_value=caching_source + b"\n"):
+                        self.assertFalse(audited(outer))
+        finally:
+            self.assertIs(frappe.request_cache, decorator)
+            self.assertIs(caching.request_cache, decorator)
+            self.assertIs(caching.__dict__, caching_namespace)
+            for module, name, outer, inner in aliases:
+                self.assertIs(getattr(module, name), outer)
+                self.assertIs(outer.__wrapped__, inner)
+                self.assertIs(outer.__closure__[0].cell_contents, inner)
+            after = {path: hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in sources}
+            self.assertEqual(after, sources)
+            print("C2A2_CACHE_AFTER=" + json.dumps({"sources": after, "aliases":
+                {name: [id(outer), id(inner)] for _, name, outer, inner in aliases}}, sort_keys=True), flush=True)
+
     def test_mes_all_loaded_dependency_code_and_unknown_callable_shape_close_only_protected_capability(self):
+        self._assert_fixed_request_cache_getter_shapes()
         import mes_integration.mes_integration.material_request as mes
         from deeplinkerp_branding.services import purchase_native_intent as intent, purchase_repost_boundary as boundary
         frappe.db.commit()
