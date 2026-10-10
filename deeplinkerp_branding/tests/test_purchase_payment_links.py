@@ -245,6 +245,8 @@ class CrossborderInvoiceChainTests(unittest.TestCase):
             self.assertEqual(chain["invoice_reason"], "已有应付草稿，请选择继续编辑" if names else "")
             self.assertEqual(chain["source_modified"], "v1")
             mapper.assert_not_called()
+
+    def test_direct_order_invoice_on_receipt_is_shared_whole_balance(self):
         invoice = native("Purchase Invoice", "PI", is_return=0, party_account_currency="CNY", disable_rounded_total=1,
             rounded_total=0, outstanding_amount=70, items=[frappe._dict(purchase_order="PO", purchase_receipt=None)])
         invoice.invoice_is_blocked = lambda: False
