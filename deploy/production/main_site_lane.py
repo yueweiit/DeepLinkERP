@@ -31,7 +31,16 @@ NETWORK = "frappe_docker_default"
 SITES_VOLUME = "frappe_docker_sites"
 DB_CONTAINER = "frappe_docker-db-1"
 ROUTE_TARGET = "/etc/nginx/conf.d/deeplinkerp-main.conf"
-CONTAINER_IDENTITY_FIELDS = ("id", "image", "pid", "started", "running", "config_sha256", "networks")
+CONTAINER_IDENTITY_FIELDS = (
+	"id",
+	"image",
+	"pid",
+	"started",
+	"running",
+	"config_format",
+	"config_sha256",
+	"networks",
+)
 
 
 def frontend_bind(source, binding):
@@ -486,25 +495,55 @@ def inspect(container):
 	return values[0]
 
 
-def container_identity(value):
-	return {
+def container_identity(value, *, legacy_config_sha256=None):
+	"""Only Docker's unordered Mounts list is normalized; every field stays hashed."""
+	mounts = value["Mounts"]
+	assert isinstance(mounts, list) and all(
+		isinstance(mount, dict)
+		and isinstance(mount.get("Destination"), str)
+		and mount["Destination"].startswith("/")
+		for mount in mounts
+	), "Unknown Docker Mounts shape; HOLD"
+	destinations = {mount["Destination"] for mount in mounts}
+	assert len(destinations) == len(mounts), "Duplicate Docker mount destinations; HOLD"
+	ordered = sorted(mounts, key=lambda mount: mount["Destination"])
+	configuration = {"Config": value["Config"], "HostConfig": value["HostConfig"], "Mounts": ordered}
+	identity = {
 		"id": value["Id"],
 		"image": value["Image"],
 		"pid": value["State"]["Pid"],
 		"started": value["State"]["StartedAt"],
 		"running": value["State"]["Running"],
-		"config_sha256": hashlib.sha256(
-			serialized({key: value[key] for key in ("Config", "HostConfig", "Mounts")})
-		).hexdigest(),
+		"config_format": "mounts-by-destination-v1",
+		"config_sha256": hashlib.sha256(serialized(configuration)).hexdigest(),
 		"networks": value["NetworkSettings"]["Networks"],
 	}
+	if legacy_config_sha256 is not None:
+		# Pre-version receipts recorded exactly logs/sites in either Docker order.
+		# Restore-only compatibility, removable once these receipts are restored.
+		assert destinations == {BENCH + "/logs", BENCH + "/sites"}, "Unknown legacy Docker mount scope; HOLD"
+		alternate = hashlib.sha256(serialized({**configuration, "Mounts": ordered[::-1]})).hexdigest()
+		identity.pop("config_format")
+		if legacy_config_sha256 in {identity["config_sha256"], alternate}:
+			identity["config_sha256"] = legacy_config_sha256
+	return identity
 
 
-def assert_original_processes(expected, reason):
-	current = {
-		service: container_identity(inspect("frappe_docker-" + service + "-1"))
-		for service in RELEASE_SERVICES
-	}
+def assert_original_processes(expected, reason, *, allow_legacy_mount_order=False):
+	current = {}
+	for service in RELEASE_SERVICES:
+		previous = expected.get(service, {})
+		legacy_sha = (
+			previous.get("config_sha256")
+			if allow_legacy_mount_order and "config_format" not in previous
+			else None
+		)
+		value = inspect("frappe_docker-" + service + "-1")
+		current[service] = (
+			container_identity(value, legacy_config_sha256=legacy_sha)
+			if legacy_sha is not None
+			else container_identity(value)
+		)
 	if current == expected:
 		return
 	error = AssertionError(reason)
@@ -1349,7 +1388,9 @@ def restore(root, build):
 		container = PROJECT + "-" + name + "-1"
 		if container in names:
 			assert not inspect(container)["State"]["Running"], "Candidate producer resumed; forward HOLD"
-	assert_original_processes(before["containers"], "Original processes drifted; HOLD")
+	assert_original_processes(
+		before["containers"], "Original processes drifted; HOLD", allow_legacy_mount_order=True
+	)
 	new_accounts = account_snapshot(contract["new_user"])
 	if new_accounts:
 		assert len(new_accounts) == 1 and new_accounts[0]["host"] == "%", "Unknown new principal scope; HOLD"

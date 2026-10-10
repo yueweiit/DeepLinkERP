@@ -34,6 +34,29 @@ class MainSiteLaneTests(unittest.TestCase):
 		spec.loader.exec_module(module)
 		return module
 
+	def container_inspection(self):
+		return {
+			"Id": "old-container",
+			"Image": "immutable-image",
+			"State": {"Pid": 42, "StartedAt": "original-start", "Running": True},
+			"Config": {"Env": ["DB_PASSWORD=SECRET_CONFIGURATION", "MODE=original"]},
+			"HostConfig": {"Binds": ["logs:/logs", "sites:/sites"], "ReadonlyRootfs": False},
+			"Mounts": [
+				{
+					"Type": "volume",
+					"Name": name,
+					"Source": "/var/lib/docker/volumes/" + name + "/_data",
+					"Destination": "/home/frappe/frappe-bench/" + name,
+					"Driver": "local",
+					"Mode": "rw",
+					"RW": True,
+					"Propagation": "",
+				}
+				for name in ("logs", "sites")
+			],
+			"NetworkSettings": {"Networks": {"original": {"IPAddress": "fixture-address"}}},
+		}
+
 	def test_future_frontend_bind_preserves_every_unrelated_dirty_compose_byte(self):
 		lane = self.module()
 		original = b"# local dirty note\nservices:\n  backend:\n    image: old\n  frontend:\n    image: old # keep\n    volumes:\n      - sites:/home/frappe/frappe-bench/sites\n    ports:\n      - '8888:8080'\nvolumes:\n  sites:\n    external: true\n"
@@ -671,6 +694,135 @@ class MainSiteLaneTests(unittest.TestCase):
 				self.assertNotIn("SECRET", stderr.getvalue())
 				self.assertFalse((root / "main-seal.json").exists())
 
+	def test_container_identity_ignores_only_unique_mount_order_not_full_configuration(self):
+		lane = self.module()
+		original = self.container_inspection()
+		untouched = copy.deepcopy(original)
+		baseline = lane.container_identity(original)
+		reordered = copy.deepcopy(original)
+		reordered["Mounts"].reverse()
+		self.assertEqual(
+			lane.container_identity(reordered), baseline, "Docker Mounts order is not config drift"
+		)
+		self.assertEqual(original, untouched)
+		self.assertEqual(baseline.get("config_format"), "mounts-by-destination-v1")
+		for section in ("Config", "HostConfig"):
+			for field in (*original[section], "unknown-extra-field"):
+				with self.subTest(section=section, field=field):
+					changed = copy.deepcopy(original)
+					value = changed[section].get(field)
+					changed[section][field] = value[::-1] if isinstance(value, list) else "changed"
+					self.assertNotEqual(lane.container_identity(changed), baseline)
+		for index, mount in enumerate(original["Mounts"]):
+			for field in (*mount, "unknown-extra-field"):
+				with self.subTest(mount=index, field=field):
+					changed = copy.deepcopy(original)
+					changed["Mounts"][index][field] = "/changed" if field == "Destination" else "changed"
+					self.assertNotEqual(lane.container_identity(changed), baseline)
+		for invalid in ("duplicate", "missing", "not-list", "not-object", "relative"):
+			with self.subTest(invalid=invalid):
+				changed = copy.deepcopy(original)
+				if invalid == "duplicate":
+					changed["Mounts"][1]["Destination"] = changed["Mounts"][0]["Destination"]
+				elif invalid == "missing":
+					changed["Mounts"][0].pop("Destination")
+				elif invalid == "not-list":
+					changed["Mounts"] = {}
+				elif invalid == "not-object":
+					changed["Mounts"][0] = None
+				else:
+					changed["Mounts"][0]["Destination"] = "relative"
+				with self.assertRaisesRegex(AssertionError, "Mount|mount"):
+					lane.container_identity(changed)
+
+	def test_legacy_restore_accepts_only_complete_two_mount_hashes_without_changing_receipt(self):
+		lane = self.module()
+		self.assertIn(
+			"allow_legacy_mount_order", inspect.signature(lane.assert_original_processes).parameters
+		)
+		original = self.container_inspection()
+		for order in (original["Mounts"], original["Mounts"][::-1]):
+			with self.subTest(order=order[0]["Destination"]), tempfile.TemporaryDirectory() as tmp:
+				old_identity = lane.container_identity(original)
+				old_identity.pop("config_format", None)
+				old_identity["config_sha256"] = hashlib.sha256(
+					lane.serialized(
+						{"Config": original["Config"], "HostConfig": original["HostConfig"], "Mounts": order}
+					)
+				).hexdigest()
+				baseline = {service: old_identity for service in lane.RELEASE_SERVICES}
+				receipt = lane.DDLReceipt.create(
+					Path(tmp) / "main-seal.json",
+					{"candidate_sha": "a" * 40, "contract_sha256": "b" * 64},
+					{"containers": baseline},
+					{},
+				)
+				frozen_bytes = receipt.path.read_bytes()
+				loaded = lane.DDLReceipt.load(receipt.path).state["before"]["containers"]
+				for current_order in (original["Mounts"], original["Mounts"][::-1]):
+					with patch.object(lane, "inspect", return_value={**original, "Mounts": current_order}):
+						lane.assert_original_processes(loaded, "drift; HOLD", allow_legacy_mount_order=True)
+						with self.assertRaises(AssertionError):
+							lane.assert_original_processes(loaded, "unversioned; HOLD")
+				for section in ("Config", "HostConfig", "State", "NetworkSettings"):
+					for field in original[section]:
+						with self.subTest(section=section, field=field):
+							changed = copy.deepcopy(original)
+							value = changed[section][field]
+							changed[section][field] = value[::-1] if isinstance(value, list) else "changed"
+							with (
+								patch.object(lane, "inspect", return_value=changed),
+								self.assertRaises(AssertionError),
+							):
+								lane.assert_original_processes(
+									loaded, "drift; HOLD", allow_legacy_mount_order=True
+								)
+				for index, mount in enumerate(original["Mounts"]):
+					for field in (*mount, "unknown-extra-field"):
+						with self.subTest(mount=index, field=field):
+							changed = copy.deepcopy(original)
+							changed["Mounts"][index][field] = (
+								"/changed" if field == "Destination" else "changed"
+							)
+							with (
+								patch.object(lane, "inspect", return_value=changed),
+								self.assertRaises(AssertionError),
+							):
+								lane.assert_original_processes(
+									loaded, "drift; HOLD", allow_legacy_mount_order=True
+								)
+				for invalid in (
+					"duplicate",
+					"third",
+					"missing",
+					"unknown-format",
+					"extra-identity",
+					"id",
+					"image",
+				):
+					with self.subTest(invalid=invalid):
+						changed, expected = copy.deepcopy(original), copy.deepcopy(loaded)
+						if invalid == "duplicate":
+							changed["Mounts"][1]["Destination"] = changed["Mounts"][0]["Destination"]
+						elif invalid == "third":
+							changed["Mounts"].append({"Destination": "/third"})
+						elif invalid == "missing":
+							changed["Mounts"].pop()
+						elif invalid in {"id", "image"}:
+							changed[{"id": "Id", "image": "Image"}[invalid]] = "changed"
+						else:
+							for value in expected.values():
+								value["config_format" if invalid == "unknown-format" else "extra"] = "unknown"
+						with (
+							patch.object(lane, "inspect", return_value=changed),
+							self.assertRaises(AssertionError),
+						):
+							lane.assert_original_processes(
+								expected, "drift; HOLD", allow_legacy_mount_order=True
+							)
+				self.assertEqual(receipt.path.read_bytes(), frozen_bytes)
+				self.assertEqual(lane.DDLReceipt.load(receipt.path).state["before"]["containers"], baseline)
+
 	def test_main_queue_persists_accepted_jobs_and_cache_remains_separate(self):
 		lane = self.module()
 		model = lane.lane_compose(
@@ -978,7 +1130,15 @@ class MainSiteLaneTests(unittest.TestCase):
 					"priv": {"authentication_string": "original"},
 					"grants": ["original"],
 				}
-				baseline = {service: {"id": service} for service in lane.RELEASE_SERVICES}
+				original = self.container_inspection()
+				identity = lane.container_identity(original)
+				identity.pop("config_format")
+				identity["config_sha256"] = hashlib.sha256(
+					lane.serialized({key: original[key] for key in ("Config", "HostConfig", "Mounts")})
+				).hexdigest()
+				baseline = {service: identity for service in lane.RELEASE_SERVICES}
+				reordered = copy.deepcopy(original)
+				reordered["Mounts"].reverse()
 				receipt = lane.DDLReceipt.create(
 					root / "main-seal.json",
 					{"candidate_sha": "a" * 40, "contract_sha256": "b" * 64},
@@ -1032,12 +1192,7 @@ class MainSiteLaneTests(unittest.TestCase):
 					patch.object(
 						lane,
 						"inspect",
-						side_effect=lambda name: {
-							"logical": name.removeprefix("frappe_docker-").removesuffix("-1")
-						},
-					),
-					patch.object(
-						lane, "container_identity", side_effect=lambda value: baseline[value["logical"]]
+						return_value=reordered,
 					),
 				):
 					if phase == "external-drift":
@@ -1048,6 +1203,9 @@ class MainSiteLaneTests(unittest.TestCase):
 						self.assertNotIn("restore-volume", events)
 					else:
 						lane.restore(root, root)
+						self.assertEqual(
+							lane.DDLReceipt.load(receipt.path).state["before"]["containers"], baseline
+						)
 						self.assertEqual(compose.read_bytes(), source)
 						self.assertFalse(route.exists())
 						self.assertLess(events.index("old-resume"), events.index("restore-volume"))
