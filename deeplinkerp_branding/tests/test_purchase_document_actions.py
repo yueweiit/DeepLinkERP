@@ -312,17 +312,21 @@ class OrderInvoiceMappingTests(unittest.TestCase):
             items=[frappe._dict(purchase_order="PO", po_detail="A", qty=2, rate=0, item_code="ITEM")])
         payload = ["Purchase Invoice", "PI", "source-v1", None]
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
-        cache = SimpleNamespace(lock=lambda *args, **kwargs: nullcontext(),
-            get_value=lambda key: {"name": "PI", "doctype": "Purchase Invoice", "digest": digest})
         operation = Mock()
         previous = frappe._dict(status="Completed", data=json.dumps({"user": "QA", "digest": digest}),
             output=json.dumps({"name": "PI", "doctype": "Purchase Invoice", "permission": "submit"}))
+        original_receipt = dict(previous)
+        rollback = Mock()
         with patch.object(frappe, "session", SimpleNamespace(user="QA")), \
+             patch.object(frappe, "db", SimpleNamespace(rollback=rollback)), patch.object(frappe, "logger", return_value=Mock()), \
              patch.object(actions.purchase_operation, "_existing", return_value=previous), \
-             patch.object(actions, "_locked", return_value=target), patch.object(actions, "_source", side_effect=frappe.PermissionError), \
+             patch.object(actions, "_locked", return_value=target), patch.object(actions, "_source", side_effect=frappe.PermissionError) as source_acl, \
              patch.object(actions, "_workflow_actions", return_value=[]), patch.object(actions, "_editable_fields", return_value=[]):
-            with self.assertRaises(frappe.PermissionError):
-                actions._native_request("12345678-1234-1234", payload, operation)
+            result = actions._native_request("12345678-1234-1234", payload, operation)
+        self.assertEqual(result, {"failed": True, "error": "采购操作权限不足，请联系管理员核对", "error_id": "native_permission_denied"})
+        source_acl.assert_called_once_with("Purchase Order", "PO")
+        rollback.assert_called_once_with()
+        self.assertEqual(dict(previous), original_receipt)
         operation.assert_not_called()
 
     def test_remaining_cap_limits_native_receipt_mapping_and_recalculates_native_schedule(self):
