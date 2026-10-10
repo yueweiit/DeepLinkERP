@@ -16,10 +16,14 @@
 	const quantity = value => exactDisplay(value, amount => root.DeepLinkERPPurchasePayments.formatQuantity(amount));
 	const poLink = name => `<a href="/desk/purchase-order/${encodeURIComponent(name)}">${esc(name)}</a>`;
 	const call = async (method, args, options = {}) => (await root.frappe.call({ method: SERVICE + method, args, silent: true, ...options })).message;
+	let syncToken;
 	async function sync() {
 		if (root.frappe.session?.user !== "Administrator" && !root.frappe.user_roles?.includes("System Manager")) throw new Error(t("采购来源同步需要管理员权限。"));
-		const result = await call("sync_purchase_sources", {}, { type: "POST" });
-		root.frappe.show_alert({ message: `${t("采购来源已同步")}${result?.count !== undefined ? ` · ${result.count} ${t("条")}` : ""}`, indicator: "green" });
+		syncToken ||= root.DeepLinkERPPurchasePayments.retryToken(() => root.crypto.randomUUID(), `dlp-source-sync:${root.frappe.boot?.sitename || root.location?.host}:${root.frappe.session?.user}`);
+		const result = await call("sync_purchase_sources", { request_id: syncToken.forPayload({}) }, { type: "POST" });
+		syncToken.succeeded();
+		if (result?.failed) throw new Error(result.error || t("采购来源同步未完成，请重新核对。"));
+		root.frappe.show_alert({ message: [["新建草稿", "created"], ["已关联", "already_linked"], ["待完善", "pending"], ["失效", "invalid"]].map(([label, key]) => `${t(label)} ${result?.[key] ?? 0}`).join(" · "), indicator: "green" });
 		return result;
 	}
 	function readable(value) {
@@ -48,7 +52,7 @@
 			return `<p>${available ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${text(file.filename || id)}</a>` : text(file.filename || id)} · ${esc(t(available ? "可下载证据" : "附件暂不可下载，请在原单核对"))}</p>`;
 		}).join("") || `<p>${esc(t("暂无已归档附件，请在原单核对。"))}</p>`;
 		const payments = (cashier.payments || []).map(payment => `<p>${text(payment.source_id)} · ${text(payment.payment_date)} · ${money(payment.amount, payment.currency)} · ${text(payment.payer)} · ${text(payment.evidence_status)}<br>${text(payment.remark)} · ${text(payment.bank_reference)}</p>`).join("") || `<p>${esc(t("尚无可核实的实际付款证据。"))}</p>`;
-		return `<section class="dlp-source-evidence"><h4>${esc(t("采购来源"))} · ${text(source.business_id || detail.name)}</h4><p>${originalLink(source)} · <a href="/desk/oa-purchase-request/${encodeURIComponent(detail.name)}">${esc(t("OA 来源记录"))}</a></p><div class="dlp-source-facts">${facts.map(([label, value]) => `<div><strong>${esc(t(label))}</strong><span>${value}</span></div>`).join("")}</div><p class="text-muted">${esc(t("出纳实付是原付款证据；ERP 登记付款和核销在订单中另列。"))}</p>${[...(source.issues || []), ...(cashier.issues || [])].map(issue => `<p class="text-warning">${esc(issue)}</p>`).join("")}<h5>${esc(t("原始采购明细（只读）"))}</h5>${table}<details><summary>${esc(t("原始申请内容"))}</summary>${readable(source.original_fields || {})}</details><details><summary>${esc(t("出纳付款证据"))}</summary>${payments}${attachments}</details></section>`;
+		return `<section class="dlp-source-evidence"><h4>${esc(t("采购来源"))} · ${text(source.business_id || detail.name)}</h4><p>${originalLink(source)} · <a href="/desk/oa-purchase-request/${encodeURIComponent(detail.name)}">${esc(t("OA 来源记录"))}</a></p><div class="dlp-source-facts">${facts.map(([label, value]) => `<div><strong>${esc(t(label))}</strong><span>${value}</span></div>`).join("")}</div><p class="text-muted">${esc(t("出纳实付是原付款证据；ERP 登记付款和核销在订单中另列。"))}</p>${[detail.pending_reason, ...(source.issues || []), ...(cashier.issues || [])].filter(Boolean).map(issue => `<p class="text-warning">${esc(issue)}</p>`).join("")}<h5>${esc(t("原始采购明细（只读）"))}</h5>${table}<details><summary>${esc(t("原始申请内容"))}</summary>${readable(source.original_fields || {})}</details><details><summary>${esc(t("出纳付款证据"))}</summary>${payments}${attachments}</details></section>`;
 	}
 	function value(control) {
 		const raw = control?.$input?.val?.();

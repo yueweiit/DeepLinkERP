@@ -18,6 +18,7 @@
 		["approval_status", "审批状态", 120], ["oa_amount", "来源明细金额", 180],
 		["requested_amount", "来源申请金额", 180], ["cashier_paid_amount", "出纳实付（证据）", 180],
 	].map(([fieldname, label, width]) => ({ fieldname, label, width }));
+	const itemColumns = [["warehouse", "仓库", 112], ["item_code", "物料编码", 100], ["item_name", "物料名称", 150], ["qty", "数量", 72], ["uom", "单位", 54], ["rate", "单价", 100], ["amount", "金额", 112], ["received_qty", "已入库数量", 86]].map(([fieldname, label, width]) => ({ fieldname, label, width }));
 	function filters(controller) {
 		const quick = controller.quick || {}, result = { scope: controller.providerScope };
 		for (const key of ["search", "from_date", "to_date", "company", "beneficiary_company", "progress_phase", "source", "approval_status", "status", "advance_payment_status"]) {
@@ -197,7 +198,7 @@
 		if (root.frappe.session?.user === "Administrator" || root.frappe.user_roles?.includes("System Manager")) $("<button type='button' class='btn btn-default btn-sm dlp-source-sync'>同步钉钉</button>").appendTo(controller.$providerControls).on("click.dlpUnified", async event => {
 			const button = $(event.currentTarget).prop("disabled", true);
 			try {
-				if (!root.deeplinkerp?.purchaseSource?.sync) await root.frappe.require("/assets/deeplinkerp_branding/js/purchase_source.js");
+				if (!root.deeplinkerp?.purchaseSource?.sync) await root.frappe.require("/assets/deeplinkerp_branding/js/purchase_source.js?v=0.0.2");
 				await root.deeplinkerp.purchaseSource.sync(); await controller.refresh();
 			} catch (error) { root.frappe.msgprint({ message: error.message || "采购来源同步失败，请核对系统提示。", indicator: "red" }); }
 			finally { button.prop("disabled", false); }
@@ -218,7 +219,7 @@
 			}
 			controller.setPage(0); controller.refresh();
 		});
-		controller.setProviderScope("all", false);
+		controller.setProviderScope("orders", false);
 		onActivate(controller);
 	}
 	function onActivate(controller) {
@@ -270,15 +271,13 @@
 		if (root.document.readyState === "loading") root.document.addEventListener("DOMContentLoaded", start, { once: true }); else start();
 	}
 	function configure(nativeColumns) {
-		const columns = nativeColumns.map(col => ({ ...col, ...(groups.find(group => group.fieldname === col.fieldname) || {}), ...(col.fieldname === "transaction_date" ? { label: "单据日期" } : {}) }));
+		const columns = nativeColumns.map(col => ({ ...col }));
 		const seen = new Set(columns.map(c => c.fieldname));
-		for (const col of [...groups, ...additions]) if (!seen.has(col.fieldname)) { columns.push(col); seen.add(col.fieldname); }
-		const old8 = ["name", "supplier_name", "grand_total", "order_settled", "order_unpaid", "per_received", "status", "receipt_action"];
-		const scalar = ["transaction_date", "name", "supplier_name", "status", "schedule_date", "company", "currency", "grand_total", "advance_paid", "advance_payment_status", "order_settled", "order_unpaid", "per_received", "per_billed", "project", "owner", "receipt_action"];
-		const legacy = [old8, [...old8.slice(0, 3), "requested_amount", "cashier_paid_amount", ...old8.slice(3)], scalar, scalar.filter(field => field !== "receipt_action"), scalar.filter(field => !["order_settled", "order_unpaid"].includes(field)), scalar.filter(field => !["order_settled", "order_unpaid", "receipt_action"].includes(field))];
-		const defaultColumns = groups.map(c => c.fieldname);
-		const migratePreferences = value => value?.version !== 2 && legacy.some(fields => Array.isArray(value?.columns) && value.columns.length === fields.length && fields.every((field, i) => value.columns[i] === field)) ? { ...value, columns: defaultColumns } : value;
-		return { columns, defaultColumns, migratePreferences, preferenceVersion: 2, inheritPreferences: true, alwaysActive: true, freezeUntil: "supplier_name", virtualFields: [...virtualFields], useNativeIndicator: doc => doc.row_type === "purchase_order", getArgs, request, formLink, renderLink, renderValue, summary, exportCurrent, mountControls, onActivate, onPayload, sortFields: ["transaction_date", "name", "supplier_name", "company", "status", "grand_total", "oa_amount", "approval_status"] };
+		for (const col of [...groups, ...additions, ...itemColumns]) if (!seen.has(col.fieldname)) { columns.push(col); seen.add(col.fieldname); }
+		const oldDefault = groups.map(c => c.fieldname);
+		const defaultColumns = ["name", "status", "supplier_name", ...itemColumns.map(c => c.fieldname), "grand_total", "order_settled", "order_unpaid", "receipt_action"];
+		const migratePreferences = value => value?.version === 2 && Array.isArray(value.columns) && value.columns.length === oldDefault.length && oldDefault.every((field, i) => value.columns[i] === field) ? { ...value, columns: defaultColumns } : value;
+		return { columns, defaultColumns, migratePreferences, preferenceVersion: 3, inheritPreferences: true, alwaysActive: true, freezeUntil: "supplier_name", virtualFields: [...virtualFields, ...itemColumns.map(c => c.fieldname)], useNativeIndicator: doc => doc.row_type === "purchase_order", getArgs, request, formLink, renderLink, renderValue, summary, exportCurrent, mountControls, onActivate, onPayload, sortFields: ["transaction_date", "name", "supplier_name", "company", "status", "grand_total", "oa_amount", "approval_status"] };
 	}
 	return { configure, getArgs, request, formLink, renderValue, summary, exportColumns, exportCurrent, shouldHideOANavigation, installNavigation };
 });

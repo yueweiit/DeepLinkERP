@@ -27,25 +27,25 @@ add_to_apps_screen = [
 # include js, css files in header of desk.html
 app_include_css = [
 	"/assets/deeplinkerp_branding/css/deeplinkerp_navigation.css?v=0.0.10",
-	"/assets/deeplinkerp_branding/css/purchase_payments.css?v=0.0.8",
-	"/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.19",
-    "/assets/deeplinkerp_branding/css/operating_expenses.css?v=0.0.5",
+	"/assets/deeplinkerp_branding/css/purchase_payments.css?v=0.0.9",
+	"/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.21",
+    "/assets/deeplinkerp_branding/css/operating_expenses.css?v=0.0.6",
 	"/assets/deeplinkerp_branding/css/sales_order_list.css?v=0.0.8",
 	"/assets/deeplinkerp_branding/css/inventory_detail.bundle.css?v=0.0.3",
 ]
 app_include_js = [
-	"/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.19",
-	"/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.19",
+	"/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.22",
+	"/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.26",
 	"/assets/deeplinkerp_branding/js/crossborder_procurement.js?v=0.0.5",
-	"/assets/deeplinkerp_branding/js/purchase_source.js?v=0.0.1",
-    "/assets/deeplinkerp_branding/js/operating_payment_panel.js?v=0.0.7",
-	"/assets/deeplinkerp_branding/js/operating_expense_drawer.js?v=0.0.14",
-	"/assets/deeplinkerp_branding/js/operating_expenses.js?v=0.0.6",
-	"/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.9",
+	"/assets/deeplinkerp_branding/js/purchase_source.js?v=0.0.2",
+    "/assets/deeplinkerp_branding/js/operating_payment_panel.js?v=0.0.8",
+	"/assets/deeplinkerp_branding/js/operating_expense_drawer.js?v=0.0.16",
+	"/assets/deeplinkerp_branding/js/operating_expenses.js?v=0.0.8",
+	"/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.11",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_navigation.js?v=0.0.20",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_interface_mode.js?v=0.0.3",
 	"/assets/deeplinkerp_branding/js/deeplinkerp_branding.js?v=0.0.28",
-	"/assets/deeplinkerp_branding/js/inventory_detail.bundle.js?v=0.0.2",
+	"/assets/deeplinkerp_branding/js/inventory_detail.bundle.js?v=0.0.4",
 	"/assets/deeplinkerp_branding/js/selection_dropdown.bundle.js",
 ]
 
@@ -152,6 +152,7 @@ after_migrate = [
 	"deeplinkerp_branding.operating_expense_install.after_migrate",
 	"deeplinkerp_branding.purchase_source_install.after_migrate",
 	"deeplinkerp_branding.purchase_fulfilment_install.after_migrate",
+	"deeplinkerp_branding.purchase_reversal_install.after_migrate",
 	"deeplinkerp_branding.operating_navigation.ensure_operating_navigation",
 ]
 
@@ -173,8 +174,38 @@ doc_events = {
 }
 doc_events["OA Purchase Request"] = {"validate":"deeplinkerp_branding.services.purchase_source_service.validate_managed_source","before_rename":"deeplinkerp_branding.services.purchase_source_service.protect_managed_source_identity","on_trash":"deeplinkerp_branding.services.purchase_source_service.protect_managed_source_identity"}
 doc_events["Purchase Order"] = {"validate":"deeplinkerp_branding.services.purchase_source_service.validate_managed_order","before_submit":"deeplinkerp_branding.services.purchase_source_service.validate_source_before_submit"}
+for procurement_doctype in ("Purchase Order", "Purchase Receipt", "Purchase Invoice", "Payment Entry"):
+    events = doc_events.setdefault(procurement_doctype, {})
+    for procurement_event in ("on_update", "on_submit", "on_cancel", "on_update_after_submit"):
+        events[procurement_event] = "deeplinkerp_branding.services.purchase_consistency.register_document"
+doc_events["Integration Request"] = {
+    "on_trash": "deeplinkerp_branding.services.purchase_operation.protect_audit",
+    "before_rename": "deeplinkerp_branding.services.purchase_operation.protect_audit",
+}
+doc_events["Repost Item Valuation"] = {"on_submit": "deeplinkerp_branding.services.purchase_consistency.check_native_repost",
+    "on_trash": "deeplinkerp_branding.services.purchase_native_repost.protect_task",
+    "before_rename": "deeplinkerp_branding.services.purchase_native_repost.protect_task"}
+extend_doctype_class = {
+    "File": ["deeplinkerp_branding.services.purchase_native_repost.CheckpointFileBoundary"],
+    **{doctype: ["deeplinkerp_branding.services.purchase_consistency.ProcurementControllerBoundary"]
+       for doctype in ("Purchase Order", "Purchase Receipt", "Purchase Invoice", "Payment Entry")},
+    "Integration Request": ["deeplinkerp_branding.services.purchase_operation.ProcurementAuditRetention"],
+    **{doctype: ["deeplinkerp_branding.services.purchase_repost_boundary.NativeRangeBoundary"]
+       for doctype in ("Stock Entry", "Delivery Note", "Sales Invoice", "Stock Reconciliation", "Landed Cost Voucher", "Material Request")},
+    **{doctype: ["deeplinkerp_branding.services.purchase_repost_boundary.PointerBoundary"]
+       for doctype in ("Bin", "Repost Item Valuation")},
+}
+before_request = ["deeplinkerp_branding.services.purchase_repost_boundary.before_execution"]
+for _status_doctype in ("Purchase Order", "Purchase Receipt", "Material Request"):
+    extend_doctype_class[_status_doctype].append("deeplinkerp_branding.services.purchase_repost_boundary.NativeStatusBoundary")
+before_job = ["deeplinkerp_branding.services.purchase_repost_boundary.before_execution"]
 override_whitelisted_methods = {"oa_purchase_request.oa_purchase_request.oa_purchase_request.create_purchase_order":"deeplinkerp_branding.services.purchase_source_service.legacy_create_purchase_order"}
-scheduler_events = {"cron": {"*/15 * * * *": ["deeplinkerp_branding.services.operating_expenses.scheduled_sync", "deeplinkerp_branding.services.purchase_source_service.scheduled_sync"]}}
+override_whitelisted_methods.update({"frappe.desk.form.save.savedocs": "deeplinkerp_branding.services.purchase_consistency.savedocs",
+    "frappe.desk.form.save.cancel": "deeplinkerp_branding.services.purchase_consistency.cancel",
+    "erpnext.buying.doctype.purchase_order.purchase_order.update_status": "deeplinkerp_branding.services.purchase_repost_boundary.update_purchase_order_status",
+    "erpnext.buying.doctype.purchase_order.purchase_order.close_or_unclose_purchase_orders": "deeplinkerp_branding.services.purchase_repost_boundary.close_or_unclose_purchase_orders",
+    "erpnext.controllers.accounts_controller.update_child_qty_rate": "deeplinkerp_branding.services.purchase_repost_boundary.update_child_qty_rate"})
+scheduler_events = {"cron": {"*/15 * * * *": ["deeplinkerp_branding.services.operating_expenses.scheduled_sync", "deeplinkerp_branding.services.purchase_source_service.scheduled_sync", "deeplinkerp_branding.services.purchase_reversal_progress.recover"]}}
 website_context = {
 	"favicon": "/assets/deeplinkerp_branding/logo/tab_logo.svg?v=0.0.6",
 	"splash_image": "/assets/deeplinkerp_branding/logo/deeplinkerp_logo_radius.png?v=0.0.6",

@@ -35,7 +35,7 @@ function harness({document=projection(), drafts=[], precision, floatPrecision=3,
  };
  host.window=host;host.globalThis=host;
  host.frappe.require=async()=>{};
- const nativeCall=host.frappe.call;host.frappe.call=async request=>{if(request.method.endsWith('.list_attachments') || request.method.endsWith('.discard')){requests.push(request);return {message:[]};}return nativeCall(request);};
+ const nativeCall=host.frappe.call;host.frappe.call=async request=>{if(request.method.endsWith('.get_progress')){requests.push(request);return {message:host.reversal || null};}if(request.method.endsWith('.list_attachments') || request.method.endsWith('.discard')){requests.push(request);return {message:[]};}return nativeCall(request);};
  host.frappe.ui.FileUploader=class {constructor(options){this.options=options;this.transfers=[];this.uploader={files:[],add_files:files=>this.uploader.files.push(...files.map(file=>({name:file.name,uploading:false,request_succeeded:false}))),upload_file:file=>{this.transfers.push(file.name);return Promise.resolve();}};uploaders.push(this);}ack(index,name){const doc={doctype:'File',name,file_name:this.uploader.files[index].name,file_url:'/private/files/'+name,is_private:1};Object.assign(this.uploader.files[index],{doc,request_succeeded:true});this.options.on_success(doc);}};
  const context=vm.createContext(host);
  for(const file of ['frappe-native-number-format.js','frappe-native-number-controls.js'])vm.runInContext(fs.readFileSync(path.join(__dirname,'fixtures',file),'utf8'),context);
@@ -61,6 +61,130 @@ function harness({document=projection(), drafts=[], precision, floatPrecision=3,
  const delegatedClick=async(className,dataset)=>{const button={tagName:'BUTTON',dataset,classList:{contains:name=>name===className}};const event={target:{closest:selector=>selector.includes('.'+className)?button:null},preventDefault(){},stopPropagation(){}};for(const entry of documentEvents.filter(entry=>entry.type==='click'))entry.fn(event);await new Promise(resolve=>setImmediate(resolve));};
  return {api:host.DeepLinkERPPurchasePayments,host,controls,requests,loaded,surfaces,confirms,uploaders,documentEvents,metadataReads,delegatedClick,click,html,confirm:()=>confirms.shift()(),routeClose:()=>listeners.change()};
 }
+
+test('accepted reversal blocks existing batch, payment and saved-payment drawers before preview',async()=>{
+ for(const open of [h=>h.api.batchDocumentDrawer('Purchase Order',[{name:'PO'}]),h=>h.api.batchPay('Purchase Receipt',[{name:'PR'}]),h=>h.api.pay('Purchase Receipt','PR'),h=>h.api.paymentDrawer('PE')]){
+  const h=harness();h.host.reversal={operation_id:'IR',stage:'failed',safe_reason:'native_repost_failed',can_retry:false};
+  await open(h);
+  assert.match(h.html(),/失败待处理/);
+  assert.equal(h.controls.length,0);
+  assert.equal(h.requests.filter(row=>/preview_|get_purchase_chain|record_|complete_payment/.test(row.method)).length,0);
+ }
+});
+
+test('batch receipt preview is read only and explicit draft preserves exact source row edits',async()=>{
+ const p=projection('Purchase Receipt');p.editable_item_fields=['qty','warehouse'];p.document.sources=[{name:'PO-A',modified:'v1'}];
+ const batch={documents:[p],sources:[{name:'PO-A',modified:'v1'},{name:'PO-B',modified:'v2'}]};
+ const h=harness({document:batch});
+ assert.equal(typeof h.api.batchDocumentDrawer,'function');
+ await h.api.batchDocumentDrawer('Purchase Order',batch.sources,'Purchase Receipt');
+ assert.ok(h.requests.some(row=>row.method.endsWith('.preview_document_batch')));
+ assert.equal(h.requests.filter(row=>/record_document_batch|submit_document/.test(row.method)).length,0);
+ await h.controls.find(c=>c.df.fieldname==='qty').$input.emit('input','2,345');
+ await h.click('dlp-batch-save');
+ const write=h.requests.find(row=>row.method.endsWith('.record_document_batch'));
+ assert.equal(write.args.confirm,0);assert.equal(write.args.changes[0].items[0].key,'ITEM');assert.equal(write.args.changes[0].items[0].qty,2.345);
+});
+
+test('batch validation acknowledgment allows corrected input while unknown response keeps the original request',async()=>{
+ for(const unknown of [false,true]){
+  const values=new Map(),storage={getItem:key=>values.get(key) || null,setItem:(key,value)=>values.set(key,value),removeItem:key=>values.delete(key)};
+  const batch={documents:[projection('Purchase Receipt')],sources:[{name:'PO',modified:'v1'}]},h=harness({document:batch,storage});
+  let sequence=0;h.host.crypto.randomUUID=()=>`operation-${++sequence}`;
+  const nativeCall=h.host.frappe.call;
+  h.host.frappe.call=async request=>{if(request.method.endsWith('.record_document_batch')){h.requests.push(request);if(unknown)throw new Error('network response unknown');return {message:{failed:true,error:'单据已改变，请重新预览'}};}return nativeCall(request);};
+  await h.api.batchDocumentDrawer('Purchase Order',batch.sources);
+  await h.click('dlp-batch-save');
+  const original=h.requests.find(row=>row.method.endsWith('.record_document_batch'));
+  if(unknown){
+   assert.equal(values.size,1);h.routeClose();await h.api.batchDocumentDrawer('Purchase Order',batch.sources);
+   await h.click('dlp-batch-retry');
+   const retried=h.requests.filter(row=>row.method.endsWith('.record_document_batch')).at(-1);
+   assert.equal(JSON.stringify(retried.args),JSON.stringify(original.args));assert.equal(values.size,1);
+  }else{
+   assert.match(h.html(),/单据已改变，请重新预览/);assert.equal(values.size,0);
+   await h.controls.find(c=>c.df.fieldname==='qty').$input.emit('input','2,345');await h.click('dlp-batch-save');
+   const corrected=h.requests.filter(row=>row.method.endsWith('.record_document_batch')).at(-1);
+   assert.notEqual(corrected.args.request_id,original.args.request_id);assert.equal(corrected.args.changes[0].items[0].qty,2.345);
+   h.routeClose();await h.api.batchDocumentDrawer('Purchase Order',batch.sources);
+   assert.equal(h.requests.filter(row=>row.method.endsWith('.preview_document_batch')).length,2);
+  }
+ }
+});
+
+test('rejected merged receipt preview cannot submit stale individual rows and can explicitly re-preview individual mode',async()=>{
+ const batch={documents:[projection('Purchase Receipt'),projection('Purchase Receipt')],sources:[{name:'PO-A',modified:'v1'},{name:'PO-B',modified:'v2'}]},h=harness({document:batch});
+ const nativeCall=h.host.frappe.call;
+ h.host.frappe.call=async request=>{if(request.method.endsWith('.preview_document_batch')){h.requests.push(request);if(request.args.merge)throw new Error('固定税费请逐单入库');return {message:batch};}return nativeCall(request);};
+ await h.api.batchDocumentDrawer('Purchase Order',batch.sources);
+ const mode=h.surfaces[0].find('.dlp-batch-mode');mode.node.value='1';await mode.emit('change');
+ await h.click('dlp-batch-save');
+ assert.equal(h.requests.filter(row=>row.method.endsWith('.record_document_batch')).length,0);
+ assert.match(h.html(),/固定税费请逐单入库/);
+ await h.click('dlp-batch-individual');await h.click('dlp-batch-save');
+ assert.deepEqual(h.requests.filter(row=>row.method.endsWith('.preview_document_batch')).map(row=>row.args.merge),[0,1,0]);
+ const write=h.requests.find(row=>row.method.endsWith('.record_document_batch'));
+ assert.equal(write.args.merge,0);assert.equal(write.args.changes.length,2);
+});
+
+test('merged payment confirms each native invoice amount with fresh source versions',async()=>{
+ const h=harness({record:async()=>({document:{doctype:'Payment Entry',name:'PE',docstatus:1,amount:30,currency:'USD'}})});
+ const nativeCall=h.host.frappe.call;
+ h.host.frappe.call=async request=>{if(request.method.endsWith('.preview_payment_batch')){h.requests.push(request);return {message:{company:'C',supplier:'S',currency:'USD',sources:[{name:'PR-A',modified:'fresh-a'},{name:'PR-B',modified:'fresh-b'}],invoices:[{name:'PI-SHARED',outstanding:30,currency:'USD'},{name:'PI-B',outstanding:10,currency:'USD'}]}};}return nativeCall(request);};
+ assert.equal(typeof h.api.batchPay,'function');
+ await h.api.batchPay('Purchase Receipt',[{name:'PR-A'},{name:'PR-B'}]);
+ assert.equal(h.requests.filter(request=>request.method.endsWith('.record_payment')).length,0);
+ await h.click('dlp-create');
+ const request=h.requests.find(row=>row.method.endsWith('.record_payment'));
+ assert.equal(request.args.confirm,0);assert.equal(request.args.sources[0].modified,'fresh-a');assert.equal(request.args.sources[1].modified,'fresh-b');
+ assert.equal(request.args.allocations.length,2);assert.equal(request.args.allocations[0].name,'PI-SHARED');assert.equal(request.args.allocations[0].amount,30);
+});
+
+for(const invalid of ['-5','not-a-number','Infinity'])test(`merged payment rejects native allocation ${invalid} without dropping input or dispatching`,async()=>{
+ const h=harness(),nativeCall=h.host.frappe.call,nativeDocfield=h.host.frappe.meta.get_docfield;
+ h.host.frappe.meta.get_docfield=(doctype,field)=>({...nativeDocfield(doctype,field),...(field==='allocated_amount'?{fieldtype:'Currency',options:'currency',precision:4}:{})});
+ h.host.frappe.call=async request=>{if(request.method.endsWith('.preview_payment_batch')){h.requests.push(request);return {message:{company:'C',supplier:'S',currency:'USD',sources:[{name:'PR',modified:'fresh'}],invoices:[{name:'PI-A',outstanding:30,currency:'USD'},{name:'PI-B',outstanding:10,currency:'USD'}]}};}return nativeCall(request);};
+ await h.api.batchPay('Purchase Receipt',[{name:'PR'}]);
+ const amount=h.controls.find(control=>control.df.fieldname==='allocated_amount');await amount.$input.emit('input',invalid);
+ await h.click('dlp-create');
+ assert.equal(h.requests.filter(request=>request.method.endsWith('.record_payment')).length,0);
+ assert.equal(amount.$input.val(),invalid);assert.match(h.html(),/有效.*非负/);
+ await amount.$input.emit('input','0');await h.click('dlp-create');
+ const write=h.requests.find(request=>request.method.endsWith('.record_payment'));
+ assert.equal(write.args.allocations.length,1);assert.equal(write.args.allocations[0].name,'PI-B');assert.equal(write.args.allocations[0].amount,10);
+});
+
+test('merged payment filters only real zero and retains native positive partial allocations',async()=>{
+ const h=harness(),nativeCall=h.host.frappe.call,nativeDocfield=h.host.frappe.meta.get_docfield;
+ h.host.frappe.meta.get_docfield=(doctype,field)=>({...nativeDocfield(doctype,field),...(field==='allocated_amount'?{fieldtype:'Currency',options:'currency',precision:4}:{})});
+ h.host.frappe.call=async request=>{if(request.method.endsWith('.preview_payment_batch')){h.requests.push(request);return {message:{company:'C',supplier:'S',currency:'USD',sources:[{name:'PR',modified:'fresh'}],invoices:['PI-A','PI-B','PI-C'].map(name=>({name,outstanding:30,currency:'USD'}))}};}return nativeCall(request);};
+ await h.api.batchPay('Purchase Receipt',[{name:'PR'}]);
+ const amounts=h.controls.filter(control=>control.df.fieldname==='allocated_amount');
+ for(const [index,value] of ['0','10','2,3456'].entries())await amounts[index].$input.emit('input',value);
+ await h.click('dlp-create');
+ const write=h.requests.find(request=>request.method.endsWith('.record_payment'));
+ assert.equal(JSON.stringify(write.args.allocations),JSON.stringify([{name:'PI-B',amount:10},{name:'PI-C',amount:2.3456}]));
+});
+
+test('submitted receipt next step replaces the singleton drawer and previews AP without writing',async()=>{
+ const p=projection('Purchase Receipt');p.document.name='PR';p.document.docstatus=1;p.editable_item_fields=[];
+ const h=harness({document:p});
+ const nativeCall=h.host.frappe.call;
+ h.host.frappe.call=async request=>{if(request.method.endsWith('.preview_document_batch')){h.requests.push(request);return {message:{documents:[projection()],sources:[{name:'PR',modified:'v1'}]}};}return nativeCall(request);};
+ await h.api.documentDrawer('Purchase Order','PO','Purchase Receipt','PR');
+ await h.click('dlp-next-ap');
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.ok(h.requests.some(row=>row.method.endsWith('.preview_document_batch')));
+ assert.equal(h.requests.filter(row=>row.method.endsWith('.record_document_batch')).length,0);
+});
+
+test('automatic submitted AP is shown in the same workflow without creating a second invoice',async()=>{
+ const h=harness({chain:{can_create_invoice:false,invoices:[{name:'PI-AUTO',docstatus:1}],draft_invoices:[]}});
+ await h.api.batchDocumentDrawer('Purchase Receipt',[{name:'PR'}],'Purchase Invoice');
+ assert.match(h.html(),/PI-AUTO/);
+ assert.equal(h.requests.filter(row=>/preview_document_batch|record_document_batch/.test(row.method)).length,0);
+ assert.ok(h.surfaces.some(row=>String(row.value).includes('dlp-next-pay')));
+});
 
 test('one native parent with multiple PO item joins resumes its unique receipt draft',async()=>{
  const h=harness({document:projection('Purchase Receipt'),drafts:[{name:'PR-ONE',modified:'v2'},{name:'PR-ONE',modified:'v2'}]});
@@ -91,7 +215,8 @@ test('PO to payable reads fresh invoice chain, resumes its PI draft and saves bo
  const document=projection();document.document.name='PI-DRAFT';document.document.modified='target-current';document.source_modified='po-preview-current';
  const h=harness({document,drafts:[{name:'PR-WRONG'}],chain:{can_create_invoice:false,draft_invoices:[{name:'PI-DRAFT',modified:'target-current'}],source_modified:'po-chain-current'}});
  await h.api.documentDrawer('Purchase Order','PO','Purchase Invoice');
- assert.equal(h.requests[0].method,'deeplinkerp_branding.services.purchase_payment_service.get_purchase_chain');
+ assert.equal(h.requests[0].method,'deeplinkerp_branding.services.purchase_reversal_progress.get_progress');
+ assert.equal(h.requests[1].method,'deeplinkerp_branding.services.purchase_payment_service.get_purchase_chain');
  assert.equal(h.requests.filter(r=>r.method==='frappe.client.get_list').length,0);
  assert.equal(h.requests.find(r=>r.method.endsWith('.preview_document')).args.target_name,'PI-DRAFT');
  assert.match(h.surfaces[0].value,/采购订单→确认应付（不更新库存）/);
@@ -103,17 +228,17 @@ test('PO to payable shows only actual PI draft choices without previewing a gues
  const h=harness({drafts:[{name:'PR-WRONG'}],chain:{can_create_invoice:false,draft_invoices:[{name:'PI-A'},{name:'PI-B'}],source_modified:'po-current'}});
  await h.api.documentDrawer('Purchase Order','PO','Purchase Invoice');
  assert.match(h.html(),/2 张可见应付草稿/);assert.match(h.html(),/data-target="PI-A"/);assert.match(h.html(),/data-target="PI-B"/);
- assert.doesNotMatch(h.html(),/PR-WRONG|新建另一张剩余入库/);assert.equal(h.requests.length,1);
+ assert.doesNotMatch(h.html(),/PR-WRONG|新建另一张剩余入库/);assert.equal(h.requests.length,2);
 });
 test('PO invoice refusal displays fresh invoice reason inside the drawer without mapping or saving',async()=>{
  const h=harness({chain:{can_create_invoice:false,draft_invoices:[],invoice_reason:'订单尚未提交，请核对原生订单',source_modified:'po-current'}});
  await h.api.documentDrawer('Purchase Order','PO','Purchase Invoice');
- assert.match(h.html(),/订单尚未提交，请核对原生订单/);assert.equal(h.controls.length,0);assert.equal(h.requests.length,1);
+ assert.match(h.html(),/订单尚未提交，请核对原生订单/);assert.equal(h.controls.length,0);assert.equal(h.requests.length,2);
 });
 test('PO invoice clicked draft that is no longer visible is refused rather than replaced',async()=>{
  const h=harness({chain:{can_create_invoice:true,draft_invoices:[{name:'OTHER'}],invoice_reason:'请刷新'}});
  await h.api.documentDrawer('Purchase Order','PO','Purchase Invoice','REMOVED');
- assert.match(h.html(),/草稿已变化或不可见/);assert.equal(h.requests.length,1);assert.equal(h.controls.length,0);
+ assert.match(h.html(),/草稿已变化或不可见/);assert.equal(h.requests.length,2);assert.equal(h.controls.length,0);
 });
 test('native default Float precision3 accepts qty0.004 while drawer display is only2',async()=>{
  const h=harness();await h.api.documentDrawer('Purchase Receipt','PR','Purchase Invoice');
@@ -692,9 +817,9 @@ test('crossborder row and generic PO invoice controls share the one existing cap
  const cross=crossHarness();assert.equal(cross.documentEvents.filter(entry=>entry.type==='click').length,1);assert.equal(cross.documentEvents.find(entry=>entry.type==='click').capture,true);
  await cross.delegatedClick('dlp-crossborder-open',{crossborderOrder:'PO',crossborderTab:'logistics'});assert.equal(cross.calls.filter(r=>r.method.endsWith('.get_order_progress')).length,1);assert.match(cross.html(),/手工核对节点/);
  const document=projection();document.document.name='PI-DRAFT';document.source_modified='po-current';const order=harness({document,chain:{can_create_invoice:false,draft_invoices:[{name:'PI-DRAFT'}]}});
- await order.delegatedClick('dlp-receipt-invoice',{name:'PO',sourceDoctype:'Purchase Order',target:'PI-DRAFT'});assert.equal(order.requests[0].args.source_doctype,'Purchase Order');assert.equal(order.requests.find(r=>r.method.endsWith('.preview_document')).args.source_doctype,'Purchase Order');assert.equal(order.requests.find(r=>r.method.endsWith('.preview_document')).args.target_name,'PI-DRAFT');
- const row=harness({document:{...projection(),source_modified:'po-current'},chain:{can_create_invoice:true,draft_invoices:[]}});await row.delegatedClick('dlp-order-invoice',{name:'PO'});assert.equal(row.requests[0].args.source_doctype,'Purchase Order');assert.equal(row.requests.filter(r=>r.method==='frappe.client.get_list').length,0);
- const receipt=harness();await receipt.delegatedClick('dlp-receipt-invoice',{name:'PR'});assert.equal(receipt.requests[0].args.source_doctype,'Purchase Receipt');assert.equal(receipt.requests[0].args.target_doctype,'Purchase Invoice');
+ await order.delegatedClick('dlp-receipt-invoice',{name:'PO',sourceDoctype:'Purchase Order',target:'PI-DRAFT'});assert.equal(order.requests[0].args.doctype,'Purchase Order');assert.equal(order.requests.find(r=>r.method.endsWith('.preview_document')).args.source_doctype,'Purchase Order');assert.equal(order.requests.find(r=>r.method.endsWith('.preview_document')).args.target_name,'PI-DRAFT');
+ const row=harness({document:{...projection(),source_modified:'po-current'},chain:{can_create_invoice:true,draft_invoices:[]}});await row.delegatedClick('dlp-order-invoice',{name:'PO'});assert.equal(row.requests[0].args.doctype,'Purchase Order');assert.equal(row.requests.filter(r=>r.method==='frappe.client.get_list').length,0);
+ const receipt=harness();await receipt.delegatedClick('dlp-receipt-invoice',{name:'PR'});assert.equal(receipt.requests[0].args.doctype,'Purchase Receipt');assert.equal(receipt.requests.find(r=>r.method.endsWith('.preview_document')).args.target_doctype,'Purchase Invoice');
 });
 test('actual crossborder close followed by a payment drawer leaves that payment live on list cancellation',async()=>{
  const document=projection('Payment Entry');document.document.name='PE';document.allowed_actions=['Submit'];

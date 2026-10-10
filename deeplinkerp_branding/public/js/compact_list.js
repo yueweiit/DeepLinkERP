@@ -257,6 +257,7 @@
 			page: 0, pageSize: 100, requestId: 0, querySignature: null, total: null, summary: [],
 			translate: root.__ || ((label) => label),
 			setPage(page) {
+				config.onPageChange?.(this);
 				this.page = Math.max(0, Number(page) || 0);
 				list.start = this.page * this.pageSize;
 				list.page_length = this.pageSize;
@@ -277,6 +278,7 @@
 				this.total = null; this.summary = []; this.querySignature = null; this.requestId++;
 				this.setPage(0); this.savePreferences(); this.activate();
 				this.$providerScope?.val(scope);
+				config.onScopeChange?.(this);
 				this.$providerControls?.toggle(providerActive(this));
 				for (const field of config.quickFields || []) if (field !== "company") this.controls[field]?.$wrapper?.toggle(!providerReadonly(this));
 				if (providerReadonly(this)) { list.page?.hide_actions_menu?.(); list.page?.clear_primary_action?.(); }
@@ -453,11 +455,18 @@
 			this.$result?.find(".list-row-container").remove();
 			this.$list_head_subject = null;
 			this.$checkbox_actions = null;
-			this.render_header();
-			currentRows(controller).forEach((doc, index) => {
-				doc._idx = index;
-				this.$result?.append(this.get_list_row_html(doc));
-			});
+			if (config.renderTable) {
+				currentRows(controller).forEach((doc, index) => { doc._idx = index; });
+				this.$result?.append(config.renderTable(controller, currentRows(controller)));
+				this.$list_head_subject = this.$result?.find(".list-header-subject");
+				this.$checkbox_actions = this.$result?.find(".checkbox-actions");
+			} else {
+				this.render_header();
+				currentRows(controller).forEach((doc, index) => {
+					doc._idx = index;
+					this.$result?.append(this.get_list_row_html(doc));
+				});
+			}
 			config.afterRender?.(controller);
 			if (providerActive(controller) && !currentRows(controller).length) this.$result?.append('<div class="list-row-container dlp-provider-empty text-muted text-center" role="status">没有符合条件的采购记录</div>');
 		};
@@ -531,11 +540,12 @@
 	function layout(controller) {
 		const cols = controller.preferences.columns.map((field) => displayColumns(controller).find((col) => col.fieldname === field)).filter(Boolean);
 		const lastFrozen = cols.findIndex((col) => col.fieldname === (providerActive(controller) ? config.provider.freezeUntil : config.freezeUntil));
-		let left = 76;
+		const frozenFields = providerActive(controller) ? config.provider.freezeFields : config.freezeFields;
+		let left = config.freezeSelection === false ? 0 : config.hideSequence ? 36 : 76;
 		return cols.map((col, index) => {
-			const frozen = lastFrozen >= 0 && index <= lastFrozen;
+			const frozen = frozenFields ? frozenFields.includes(col.fieldname) : lastFrozen >= 0 && index <= lastFrozen;
 			const result = { ...col, frozen, left };
-			left += col.width;
+			if (!frozenFields || frozen) left += col.width;
 			return result;
 		});
 	}
@@ -546,17 +556,22 @@
 	}
 
 	function template(controller) {
-		return `36px 40px ${layout(controller).map((col) => `${col.width}px`).join(" ")}`;
+		return `36px ${config.hideSequence ? "" : "40px "}${layout(controller).map((col) => `${col.width}px`).join(" ")}`;
 	}
 
 	function selectionCell(html, sequence) {
-		return `<div class="dlp-po-grid-cell dlp-po-frozen select-like" data-fieldname="_select" style="--dlp-po-left:0px;width:36px">${html}</div><div class="dlp-po-grid-cell dlp-po-frozen dlp-po-number" data-fieldname="_sequence" style="--dlp-po-left:36px;width:40px">${sequence}</div>`;
+		const frozen = config.freezeSelection === false ? "" : " dlp-po-frozen";
+		return `<div class="dlp-po-grid-cell${frozen} select-like" data-fieldname="_select" style="--dlp-po-left:0px;width:36px">${html}</div>` + (config.hideSequence ? "" : `<div class="dlp-po-grid-cell${frozen} dlp-po-number" data-fieldname="_sequence" style="--dlp-po-left:36px;width:40px">${sequence}</div>`);
+	}
+	function readonlyCheckbox(translate) {
+		return config.disabledSelectionLabel ? `<input type="checkbox" disabled aria-label="${escapeHTML(translate(config.disabledSelectionLabel))}" title="${escapeHTML(translate(config.disabledSelectionLabel))}">` : "";
 	}
 
 	function headerHTML(controller) {
+		if (config.renderHeader) return config.renderHeader(controller);
 		const { translate: t, list } = controller;
 		const provider = providerActive(controller), readonly = providerReadonly(controller);
-		const checkbox = readonly ? "" : `<input class="list-header-checkbox list-check-all" type="checkbox" title="${escapeHTML(t("Select All"))}">`;
+		const checkbox = readonly ? readonlyCheckbox(t) : `<input class="list-header-checkbox list-check-all" type="checkbox" title="${escapeHTML(t("Select All"))}">`;
 		const columns = layout(controller).map((col) => {
 			const label = t(col.label);
 			return cellHTML(col, escapeHTML(label), label, provider ? (config.provider.sortFields || []).includes(col.fieldname) : controller.allowed.has(col.fieldname), provider);
@@ -565,6 +580,7 @@
 	}
 
 	function rowHTML(controller, doc) {
+		if (config.renderRow) return config.renderRow(controller, doc);
 		const { list, root } = controller;
 		const provider = providerActive(controller), readonly = !rowSelectable(controller, doc);
 		const formatters = {
@@ -573,7 +589,7 @@
 			number: (value, field) => formatNumber(root, value, field),
 			date: (value) => root.frappe.datetime?.str_to_user ? root.frappe.datetime.str_to_user(value) : value,
 		};
-		const checkbox = readonly ? "" : `<input type="checkbox" class="list-row-checkbox" data-doctype="${DOCTYPE}" data-name="${escapeHTML(doc.name)}">`;
+		const checkbox = readonly ? readonlyCheckbox(controller.translate) : `<input type="checkbox" class="list-row-checkbox" data-doctype="${DOCTYPE}" data-name="${escapeHTML(doc.name)}">`;
 		const cells = layout(controller).map((col) => {
 			let value = (provider ? config.provider.renderValue?.(col.fieldname, doc, formatters, escapeHTML) : undefined) ?? renderValue(col.fieldname, doc, formatters);
 			if (col.fieldname === "name") value = config.renderLink?.(controller, doc, value) ?? (provider ? config.provider.renderLink?.(controller, doc, value, escapeHTML) : undefined) ?? `<a href="${escapeHTML(provider ? config.provider.formLink(doc) : list.get_form_link(doc))}" data-name="${escapeHTML(doc.name)}">${value}</a>`;
@@ -798,8 +814,15 @@
 		}
 		const key = preferenceKey(frappe.boot?.sitename || root.location?.host, frappe.session?.user);
 		let saved; try { saved = JSON.parse(root.localStorage?.getItem(key) || 'null'); } catch (_) { /* Optional preferences. */ }
+		const preferences = normalizePreferences(saved, permitted, config.provider.columns);
+		if (config.backupMigratedPreferences && saved && preferences.version !== saved.version) {
+			try {
+				const backupKey = `${key}:backup:${saved.version ?? "legacy"}`;
+				if (root.localStorage?.getItem(backupKey) == null) root.localStorage?.setItem(backupKey, JSON.stringify(saved));
+			} catch (_) { /* Migration must remain usable when optional browser storage is disabled. */ }
+		}
 		const c = { pageSurface: true, root, list: surface, nativeAllowed, allowed: permitted, displayAllowed: permitted, providerAllowed: permitted,
-			preferences: normalizePreferences(saved, permitted, config.provider.columns), controls: {}, quick: {}, resetting: false,
+			preferences, controls: {}, quick: {}, resetting: false,
 			providerRows: [], providerPayload: null, providerOrderBy: config.defaultSort || 'posting_date desc', page: 0, pageSize: 100, total: null, requestId: 0, querySignature: null,
 			translate: root.__ || (x => x),
 			setPage(value) { this.page = Math.max(0, Number(value) || 0); },

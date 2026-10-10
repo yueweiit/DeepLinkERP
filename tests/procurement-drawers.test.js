@@ -16,6 +16,98 @@ test('operating expenses can reuse the accessible procurement drawer shell facto
   assert.equal(typeof payments().createDrawer,'function');
 });
 
+function drawerHost(mobile=false,paths=['account','operating-expenses','sales-order'],initialIndex=1) {
+ const listeners={},surfaces=[],location={href:'https://erp.test/desk/operating-expenses'};
+ const entries=paths.map(path=>({url:`https://erp.test/desk/${path}`,state:null}));let index=initialIndex,pending;
+ location.href=entries[index].url;
+ const surface={attrs:{},appendTo(){return this;},find(){return this;},on(){return this;},trigger(){return this;},toggleClass(){return this;},attr(key,value){this.attrs[key]=value;return this;},prop(){return this;},remove(){this.removed=true;return this;},filter(){return this;},toArray(){return [];}};
+ const history={get state(){return entries[index].state;},replaceState(state,_title,url){entries[index]={state,url};location.href=url;},pushState(state,_title,url){entries.splice(index+1);entries.push({state,url});index++;location.href=url;},go(delta){index+=delta;location.href=entries[index].url;pending=Promise.resolve().then(()=>router.route());}};
+ const router={on:(type,handler)=>listeners[type]=handler,async route(){router.renders=(router.renders||0)+1;listeners.change();},async set_route(path){history.pushState(null,'',`https://erp.test/desk/${path}`);await this.route();}};
+ const nativeRoute=router.route,nativeSetRoute=router.set_route;
+ const navigation={get currentEntry(){return {index};}};
+ const api=payments(undefined,{$:markup=>{surfaces.push(markup);return surface;},location,history,navigation,addEventListener:(type,handler)=>listeners[type]=handler,removeEventListener:type=>delete listeners[type],matchMedia:()=>({matches:mobile}),document:{body:{},activeElement:{focus(){}},addEventListener:(type,handler)=>listeners[type]=handler,removeEventListener:type=>delete listeners[type]},frappe:{router}});
+ return {api,router,nativeRoute,nativeSetRoute,location,navigation,surface,surfaces,listeners,entries,get index(){return index;},async traverse(delta){index+=delta;location.href=entries[index].url;await router.route();await pending;}};
+}
+test('operating opt-in is nonmodal on desktop, modal on mobile, and leaves procurement modal by default',async()=>{
+ for(const [mobile,optIn,modal] of [[false,true,false],[true,true,true],[false,false,true]]) {
+  const h=drawerHost(mobile),d=h.api.createDrawer('Details',true,optIn?{desktopNonModal:true,guardNavigation:true}:undefined);
+  assert.match(h.surfaces[0],new RegExp(`aria-modal="${modal}"`));
+  assert.equal(h.surfaces[0].includes('dlp-drawer-desktop-nonmodal'),optIn);
+  d.close(true);
+ }
+});
+test('guarded navigation confirms before native routing, preserves declined inputs, and disposes accepted drawer',async()=>{
+ const h=drawerHost(),d=h.api.createDrawer('Details',true,{desktopNonModal:true,guardNavigation:true});
+ let resolve,checks=0;d.beforeClose=()=>{checks++;return new Promise(done=>resolve=done);};
+ const rejected=h.router.set_route('account');
+ assert.equal(h.location.href,'https://erp.test/desk/operating-expenses');
+ assert.equal(h.router.renders,undefined);resolve(false);await rejected;
+ assert.equal(d.alive(),true);assert.equal(h.surface.removed,undefined);
+ const accepted=h.router.set_route('account');resolve(true);await accepted;
+ assert.equal(checks,2);assert.equal(d.alive(),false);assert.equal(h.router.renders,1);
+ assert.equal(h.router.route,h.nativeRoute);assert.equal(h.router.set_route,h.nativeSetRoute);
+});
+test('guarded browser history and saving never render a route while the operating drawer must stay open',async()=>{
+ const h=drawerHost(),d=h.api.createDrawer('Details',true,{guardNavigation:true});
+ d.setBusy(true);await h.router.set_route('account');
+ assert.equal(h.router.renders,undefined);assert.equal(d.alive(),true);
+ await h.traverse(-1);
+ assert.equal(h.location.href,'https://erp.test/desk/operating-expenses');assert.equal(h.router.renders,undefined);
+ d.setBusy(false);d.beforeClose=async()=>false;
+ await h.traverse(-1);
+ assert.equal(d.alive(),true);assert.equal(h.router.renders,undefined);
+ d.beforeClose=async()=>true;await h.traverse(-1);
+ assert.equal(d.alive(),false);assert.equal(h.router.renders,1);
+});
+test('cancelled browser Back and Forward preserve native history entries and the original cursor',async()=>{
+ for(const [paths,index,delta] of [[['account','operating-expenses'],1,-1],[['operating-expenses','account'],0,1]]) {
+  for(const blocked of ['dirty','write']) {
+   const h=drawerHost(false,paths,index),original=JSON.parse(JSON.stringify(h.entries)),d=h.api.createDrawer('Details',true,{guardNavigation:true});
+   d.beforeClose=async()=>false;if(blocked==='write')d.setBusy(true,'write');
+   await h.traverse(delta);
+   assert.deepEqual(h.entries,original,`${blocked} cancellation must not rewrite a traversed entry`);
+   assert.equal(h.index,index);assert.equal(h.location.href,original[index].url);assert.equal(h.router.renders,undefined);
+   d.setBusy(false);d.beforeClose=async()=>true;await h.traverse(delta);
+   assert.equal(h.location.href,original[index+delta].url);assert.equal(h.router.renders,1);assert.equal(d.alive(),false);
+  }
+ }
+});
+test('history without an entry index keeps dirty and write guards without rewriting entries',async()=>{
+ const h=drawerHost(false,['account','operating-expenses'],1),original=JSON.parse(JSON.stringify(h.entries));delete h.navigation.currentEntry;
+ const d=h.api.createDrawer('Details',true,{guardNavigation:true});d.beforeClose=async()=>false;
+ await h.traverse(-1);
+ assert.deepEqual(h.entries,original);assert.equal(d.alive(),true);assert.equal(h.router.renders,undefined);
+ d.setBusy(true,'write');await h.router.set_route('sales-order');
+ assert.deepEqual(h.entries,original);assert.equal(d.alive(),true);assert.equal(h.router.renders,undefined);
+ d.setBusy(false);d.beforeClose=async()=>true;await d.close();await Promise.resolve();
+ assert.equal(h.location.href,original[0].url);assert.equal(h.index,0);assert.equal(h.router.renders,1);
+});
+test('operating navigation cancels readonly loading but waits for writes without changing procurement defaults',async()=>{
+ for(const [operation,allowed] of [['read',true],['write',false]]) {
+  const h=drawerHost(),d=h.api.createDrawer('Details',true,{guardNavigation:true});
+  d.setBusy(true,operation);await h.router.set_route('account');
+  assert.equal(d.alive(),!allowed);assert.equal(h.router.renders,allowed?1:undefined);
+ }
+ const h=drawerHost(),d=h.api.createDrawer('Procurement');d.setBusy(true,'read');
+ assert.equal(d.close(),false,'Procurement keeps its original busy close behavior');d.close(true);
+});
+test('operating full-document departure warns only for dirty inputs or writes and removes its opt-in listener on close',()=>{
+ for(const [dirty,operation,blocked] of [[false,null,false],[false,'read',false],[false,'write',true],[true,null,true],[true,'read',true]]) {
+  const h=drawerHost(),d=h.api.createDrawer('Details',true,{guardNavigation:true});d.beforeUnloadShouldBlock=()=>dirty;
+  if(operation)d.setBusy(true,operation);
+  const event={prevented:false,preventDefault(){this.prevented=true;}};
+  assert.equal(typeof h.listeners.beforeunload,'function');h.listeners.beforeunload(event);
+  assert.equal(event.prevented,blocked);assert.equal(event.returnValue,blocked?'':undefined);
+  d.close(true);assert.equal(h.listeners.beforeunload,undefined);
+ }
+ const h=drawerHost();h.api.createDrawer('Procurement');assert.equal(h.listeners.beforeunload,undefined);
+});
+test('unsupported router hosts retain legacy route cleanup instead of leaving a guarded drawer alive',()=>{
+ const h=drawerHost();delete h.router.set_route;
+ const d=h.api.createDrawer('Details',true,{guardNavigation:true});
+ h.listeners.change();assert.equal(d.alive(),false);assert.equal(h.surface.removed,true);
+});
+
 test('shared procurement numeric presentation helpers keep business parse precision unchanged', () => {
   const api=payments();
   assert.equal(typeof api.formatMoney,'function'); assert.equal(typeof api.formatQuantity,'function'); assert.equal(typeof api.formatNumericInput,'function');
@@ -64,7 +156,7 @@ test('records advanced controls reuse two native FilterGroups with parent permis
 });
 test('PO form invoice actions use the fresh chain and preserve the actual source type',async()=>{
  let html='';const box={find(){return {on(){}};},prependTo(){return this;}};
- const api=payments(async()=>({message:{source_doctype:'Purchase Order',orders:[],invoices:[],payments:[],balances:[],draft_invoices:[{name:'DRAFT-PI'}],can_create_invoice:true}}),{$:value=>{html=value;return box;}});
+ const api=payments(async request=>({message:request.method.endsWith('get_progress')?null:{source_doctype:'Purchase Order',orders:[],invoices:[],payments:[],balances:[],draft_invoices:[{name:'DRAFT-PI'}],can_create_invoice:true}}),{$:value=>{html=value;return box;}});
  await api.formRefresh({doctype:'Purchase Order',doc:{name:'PO'},is_new:()=>false,$wrapper:{find:()=>({remove(){}})},layout:{wrapper:{}}});
   assert.match(html,/dlp-receipt-invoice[^>]+data-source-doctype="Purchase Order"[^>]+data-target="DRAFT-PI"/);
   assert.match(html,/data-source-doctype="Purchase Order"[^>]*>确认应付/);
@@ -76,6 +168,34 @@ test('submitted PO exposes payable action using native invoice permissions even 
   const denied=payments(undefined,{frappe:{model:{can_read:()=>false,can_create:()=>false}}});
   assert.doesNotMatch(denied.orderReceiptAction({name:'PO',docstatus:1,per_received:100,per_billed:0}),/dlp-order-invoice/);
 });
+test('reversal poll failure retains last trusted pending state and blocks dependent actions',async()=>{
+ let failure=false;
+ const api=payments(async()=>{if(failure)throw new Error('connection lost');return {message:{operation_id:'IR-1',stage:'waiting_inventory',safe_reason:null,can_retry:false}};},
+  {frappe:{model:{can_read:()=>true,can_create:()=>true}}});
+ const doc={doctype:'Purchase Order',name:'PO',docstatus:1,status:'To Receive and Bill',per_received:0,per_billed:0};
+ const first=await api.refreshReversal(doc);
+ assert.equal(first.stage,'waiting_inventory');assert.match(api.reversalHTML(first),/待库存重算/);
+ assert.doesNotMatch(api.orderReceiptAction({...doc,reversal:first}),/dlp-order-pay|dlp-order-receipt|dlp-order-invoice/);
+ failure=true;
+ const second=await api.refreshReversal(doc);
+ assert.equal(second.stage,'waiting_inventory');assert.equal(second.operation_id,'IR-1');
+ assert.equal(second.refresh_failed,true);assert.match(api.reversalHTML(second),/进度刷新失败/);
+ for(const stage of ['recalculating','verifying','failed'])assert.doesNotMatch(api.orderReceiptAction({...doc,reversal:{stage}}),/dlp-order-pay|dlp-order-receipt/);
+ assert.match(api.orderReceiptAction({...doc,reversal:{stage:'completed'}}),/dlp-order-receipt/);
+});
+test('same-doctype new form clears pending status, timer and late progress loads',async()=>{
+ let resolve,host,removed=0,next=0;const timers=new Map(),box={find:()=>({on(){}}),prependTo(){return box;}};
+ const api=payments(()=>new Promise(done=>resolve=done),{$:()=>box,
+  setTimeout:fn=>{timers.set(++next,fn);return next;},clearTimeout:id=>timers.delete(id)},value=>{host=value;});
+ const frm={doctype:'Purchase Invoice',doc:{doctype:'Purchase Invoice',name:'PI-OLD'},is_new:()=>Boolean(frm.doc.__islocal),
+  $wrapper:{find:()=>({remove(){removed++;}})},layout:{wrapper:{}}};host.cur_frm=frm;
+ const pending=api.formRefresh(frm);resolve({message:{operation_id:'IR-OLD',stage:'waiting_inventory'}});await pending;
+ assert.equal(timers.size,1);
+ const stale=api.formRefresh(frm);
+ frm.doc={doctype:'Purchase Invoice',name:'new-purchase-invoice-a',__islocal:1};await api.formRefresh(frm);
+ resolve({message:{operation_id:'IR-OLD',stage:'failed'}});await stale;
+ assert.equal(frm.dlpReversal,null);assert.equal(timers.size,0);assert.equal(removed>=2,true);
+});
 test('owned drawer controls release native datepicker and their handlers once',()=>{
  let destroyed=0,unbound=0;const cleanup=functionFrom('disposeControls');const controls=[{datepicker:{destroy:()=>destroyed++},$input:{off:()=>unbound++}}];
  cleanup(controls);cleanup(controls);assert.equal(destroyed,1);assert.equal(unbound,1);assert.equal(controls.length,0);
@@ -84,7 +204,7 @@ test('real pay async initialization stops after route cancellation, without crea
  let routeClose,resolveFirst,started,created=0,dateCreated=0,removed=0;
  const firstStarted=new Promise(resolve=>started=resolve);
  const surface={appendTo(){return this;},find(){return this;},on(){return this;},off(){return this;},html(){return this;},trigger(){return this;},toggleClass(){return this;},attr(){return this;},prop(){return this;},remove(){removed++;return this;}};
- const api=payments(async()=>({message:{can_create:true,invoices:[{name:'PI',can_pay:true,outstanding:100,currency:'USD'}],company:'C',balances:[]}}),{$:()=>surface,document:{body:{},addEventListener(){},removeEventListener(){}},crypto:{randomUUID:()=> 'uuid'},frappe:{router:{on:(type,fn)=>routeClose=fn},datetime:{get_today:()=> '2026-10-04'},ui:{form:{make_control:({df})=>{created++;if(df.fieldtype==='Date')dateCreated++;return {$input:surface,get_value:()=>'',set_value:()=>created===1?new Promise(resolve=>{resolveFirst=resolve;started();}):Promise.resolve()};}}}}});
+ const api=payments(async request=>({message:request.method.endsWith('.get_progress')?null:{can_create:true,invoices:[{name:'PI',can_pay:true,outstanding:100,currency:'USD'}],company:'C',balances:[]}}),{$:()=>surface,document:{body:{},addEventListener(){},removeEventListener(){}},crypto:{randomUUID:()=> 'uuid'},frappe:{router:{on:(type,fn)=>routeClose=fn},datetime:{get_today:()=> '2026-10-04'},ui:{form:{make_control:({df})=>{created++;if(df.fieldtype==='Date')dateCreated++;return {$input:surface,get_value:()=>'',set_value:()=>created===1?new Promise(resolve=>{resolveFirst=resolve;started();}):Promise.resolve()};}}}}});
  const pending=api.pay('Purchase Receipt','PR');await firstStarted;routeClose();resolveFirst();await pending;
  assert.equal(created,1);assert.equal(dateCreated,0);assert.equal(removed,1);
 });
@@ -92,7 +212,7 @@ test('real date control initialized before route cancellation is destroyed and c
  let routeClose,resolveFirst,started,created=0,destroyed=0;
  const firstStarted=new Promise(resolve=>started=resolve);
  const surface={appendTo(){return this;},find(){return this;},on(){return this;},off(){return this;},html(){return this;},trigger(){return this;},toggleClass(){return this;},attr(){return this;},prop(){return this;},remove(){return this;}};
- const api=payments(async()=>({message:{document:{name:'PE',posting_date:'2026-10-04',docstatus:0,references:[]},editable_fields:['posting_date'],allowed_actions:[]}}),{$:()=>surface,document:{body:{},addEventListener(){},removeEventListener(){}},frappe:{router:{on:(type,fn)=>routeClose=fn},ui:{form:{make_control:({df})=>{created++;return {$input:surface,...(df.fieldtype==='Date'?{datepicker:{destroy:()=>destroyed++}}:{}),get_value:()=>'',set_value:()=>created===1?new Promise(resolve=>{resolveFirst=resolve;started();}):Promise.resolve()};}}}}});
+ const api=payments(async request=>({message:request.method.endsWith('.get_progress')?null:{document:{name:'PE',posting_date:'2026-10-04',docstatus:0,references:[]},editable_fields:['posting_date'],allowed_actions:[]}}),{$:()=>surface,document:{body:{},addEventListener(){},removeEventListener(){}},frappe:{router:{on:(type,fn)=>routeClose=fn},ui:{form:{make_control:({df})=>{created++;return {$input:surface,...(df.fieldtype==='Date'?{datepicker:{destroy:()=>destroyed++}}:{}),get_value:()=>'',set_value:()=>created===1?new Promise(resolve=>{resolveFirst=resolve;started();}):Promise.resolve()};}}}}});
  const pending=api.paymentDrawer('PE');await firstStarted;routeClose();resolveFirst();await pending;
  assert.equal(created,1);assert.equal(destroyed,1);
 });

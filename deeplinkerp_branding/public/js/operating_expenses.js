@@ -13,27 +13,33 @@
 				({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char])
 		);
 	const columns = [
-		["request_date", "申请日期", 110],
-		["source_id", "申请编号 / 摘要", 240],
-		["effective_application_type", "申请类型", 115],
+		["source_id", "钉钉申请单号", 210],
+		["source_status", "付款状态", 170],
+		["source_company", "应付款公司", 180],
 		["applicant", "申请人", 110],
+		["account_nature", "账户性质", 100],
+		["summary", "摘要", 310],
+		["amount", "应付金额", 140],
+		["paid_amount", "已支付金额", 140],
+		["pending_amount", "待付款金额", 140],
+		["currency", "货币类型", 85],
+		["project", "项目归属", 160],
 		["payee_name", "收款人", 160],
+		["needed_payment_date", "需求付款日期", 125],
+		["general_manager_approval", "总经理审批", 135],
+		["remark", "备注", 200],
+		["actions", "操作", 180],
+		["request_date", "申请日期", 110],
+		["effective_application_type", "申请类型", 115],
+		["company", "法律公司", 170],
 		["approval_state", "审批状态", 100],
 		["current_approver", "当前审批人", 145],
-		["amount", "申请金额", 145],
-		["paid_amount", "累计已付", 145],
-		["pending_amount", "剩余待付", 145],
-		["source_status", "付款状态", 110],
-		["actions", "操作", 180],
-		["company", "法律公司", 170],
-		["project", "项目", 150],
 		["source_system", "来源", 140],
-		["summary", "摘要", 250],
-		["currency", "币种", 75],
 		["finance_status", "凭证状态", 135],
 	].map(([fieldname, label, width]) => ({ fieldname, label, width }));
-	const defaultColumns = ["request_date","source_id","effective_application_type","applicant","payee_name","approval_state","current_approver","amount","paid_amount","pending_amount","source_status","actions"];
-	const quickTabs = [["all","全部申请"],["pending_payment","待付款"],["approvals_running","审批中"],["paid","已付清"],["reconciliation","待核对"]];
+	const defaultColumns = columns.slice(0, 16).map(col => col.fieldname);
+	const preferenceVersion = 3;
+	const quickTabs = [["pending_work","待办理"],["all","全部申请"],["approvals_running","审批中"],["paid","已付清"],["reconciliation","待核对"]];
 	const approvalLabels = {pending:"审批中",approved:"已通过",rejected:"已拒绝",terminated:"已终止",withdrawn:"已撤回",unknown:"待核对",eligible:"来源审批通过",blocked:"需复核"};
 	const sortFields = ["request_date", "amount", "applicant", "source_id", "company", "modified"];
 	const filterFields = [
@@ -47,30 +53,10 @@
 		"date_to",
 		"quick_tab",
 	];
-	const exportFields = new Set([
-		"company",
-		"source_id",
-		"approval_no",
-		"effective_application_type",
-		"application_type_raw",
-		"applicant",
-		"payee_name",
-		"summary",
-		"request_date",
-		"currency",
-		"amount",
-		"paid_amount",
-		"pending_amount",
-		"source_status",
-		"approval_state",
-		"current_approver",
-		"project",
-		"source_system",
-		"finance_status",
-		"issues",
-		"source_company",
-		"source_sheet",
-	]);
+	const exportFields = new Set(columns.filter(col => col.fieldname !== "actions").map(col => col.fieldname));
+	function migratePreferences(value) {
+		return value?.version === preferenceVersion ? value : { ...value, columns: defaultColumns };
+	}
 	function filters(values = {}) {
 		const result = {};
 		for (const field of filterFields)
@@ -80,7 +66,7 @@
 			["application_type", ["payment", "reimbursement", "unclassified"], "申请类型"],
 			["source_status", ["未付款", "部分付款", "已付款", "付款待核对"], "来源付款状态"],
 			["approval_state", Object.keys(approvalLabels), "审批状态"],
-			["quick_tab", quickTabs.map(row=>row[0]), "快捷筛选"],
+			["quick_tab", [...quickTabs.map(row=>row[0]), "pending_payment"], "快捷筛选"],
 		]) {
 			if (result[field] && !allowed.includes(result[field]))
 				throw new Error(t(`${label}无效`));
@@ -96,12 +82,15 @@
 		return {
 			method: API + "get_operating_expenses",
 			args: {
-				filters: JSON.stringify(filters(c.quick)),
+				filters: JSON.stringify(currentFilters(c)),
 				order_by: orderBy(c.providerOrderBy),
 				start: c.page * c.pageSize,
 				page_length: c.pageSize,
 			},
 		};
+	}
+	function currentFilters(c) {
+		return filters({ quick_tab: "pending_work", ...c.quick });
 	}
 	// Display rounds decimal text without changing the exact text used by financial controls.
 	function money(value) {
@@ -141,38 +130,39 @@
 						row.incomplete
 							? ` <span class="text-warning">${esc(t("金额不完整，需复核"))}</span>`
 							: ""
+					}${row.anomaly_count > 0 ? ` <span class="text-danger">${esc(t("异常付款"))} ${esc(row.anomaly_count)} · ${esc(t("未计入正常余额"))}</span>` : ""
 					}`
 			)
 			.join("<br>");
 	}
 	function renderValue(field, doc) {
-		if (field === "source_id") return `<div class="dlp-operating-identity"><span class="dlp-operating-ellipsis" title="${esc(doc.source_id)}">${esc(doc.approval_no || doc.source_id || "—")}</span><small class="dlp-operating-ellipsis text-muted" title="${esc(doc.summary||"")}">${esc(doc.summary||"—")}</small></div>`;
-		if (["amount", "paid_amount", "pending_amount"].includes(field)) return money(doc[field])+(doc.currency?` <small class="text-muted">${esc(doc.currency)}</small>`:"");
+		if (doc.projection_conflicts?.includes(field)) return `<span class="dlp-operating-ellipsis text-warning" title="${esc(t("来源字段冲突，待核对"))}">${esc(t("待核对"))}</span>`;
+		if (field === "source_id") {
+			const original = root.DeepLinkERPOperatingExpenseDrawer?.dingTalkOriginalLink(doc.original_url);
+			return original ? `<a class="dlp-operating-ellipsis" href="${esc(original.desktop_url)}" title="${esc(t("需安装并登录钉钉，原单权限由钉钉校验。"))}">${esc(doc.approval_no || "—")}</a>` : `<span class="dlp-operating-ellipsis" title="${esc(doc.approval_no || "")}">${esc(doc.approval_no || "—")}</span>`;
+		}
+		if (["amount", "paid_amount", "pending_amount"].includes(field)) return money(doc[field]);
 		if (field === "effective_application_type") return esc(typeLabel(doc[field]));
 		if (field === "approval_state")
 			return `<span class="${
 				["eligible","approved"].includes(doc[field]) ? "is-approved" : ["pending"].includes(doc[field]) ? "is-pending" : "is-review"
 			} dlp-operating-badge">${esc(approvalLabel(doc[field]))}</span>`;
-		if (field === "source_status") return `<span class="dlp-operating-badge ${doc[field]==="已付款"?"is-approved":doc[field]==="部分付款"?"is-pending":"is-review"}">${esc(t(doc[field]||"待核对"))}</span>`;
+		if (field === "source_status") {
+			const blocker = String(doc.blocking_reason || "").split("；").map(t).join("；");
+			return `<div class="dlp-operating-work-status"><div><span class="dlp-operating-badge ${doc[field]==="已付款"?"is-approved":doc[field]==="部分付款"?"is-pending":"is-review"}">${esc(t(doc[field]||"待核对"))}</span><small class="text-muted">${esc(approvalLabel(doc.approval_state))}</small></div>${blocker ? `<small class="dlp-operating-ellipsis text-warning" title="${esc(blocker)}">${esc(blocker)}</small>` : ""}</div>`;
+		}
 		if (field === "finance_status") return esc(t(doc[field] || "未确认"));
 		if (field === "actions")
 			return `<div class="dlp-operating-row-actions">${[["payments","付款明细"],["approvals","查看审批"]].map(([tab,label])=>`<button type="button" class="btn btn-link btn-xs dlp-operating-open" data-source="${esc(doc.source_id||doc.name)}" data-tab="${tab}">${esc(t(label))}</button>`).join("")}</div>`;
 		return `<span class="dlp-operating-ellipsis" title="${esc(
 			doc[field] ?? ""
-		)}">${esc(doc[field] ?? "—")}</span>`;
+		)}">${esc(doc[field] === "" || doc[field] == null ? "—" : doc[field])}</span>`;
 	}
 	async function exportCurrent(c) {
 		const args = {
-			filters: JSON.stringify(filters(c.quick)),
+			filters: JSON.stringify(currentFilters(c)),
 			order_by: orderBy(c.providerOrderBy),
-			columns: JSON.stringify([
-				...new Set([
-					...c.preferences.columns.flatMap(field=>field==="source_id"?["display_source_id","summary"]:exportFields.has(field)?[field]:[]),
-					"currency",
-					"approval_no",
-					"source_id",
-				]),
-			]),
+			columns: JSON.stringify(c.preferences.columns.filter(field => exportFields.has(field)).map(field => field === "source_id" ? "display_source_id" : field)),
 		};
 		if (!root.DeepLinkERPPurchaseOrderExport?.downloadWorkbook)
 			await root.frappe.require("/assets/deeplinkerp_branding/js/purchase_order_export.js");
@@ -202,8 +192,14 @@
 		});
 	}
 	function mountControls(c) {
+		c.quick.quick_tab ||= "pending_work";
 		c.$operatingTabs=root.$(`<nav class="dlp-operating-list-tabs" aria-label="${esc(t("运营支出筛选"))}">${quickTabs.map(([value,label])=>`<button type="button" class="btn btn-default btn-sm" data-quick-tab="${value}">${esc(t(label))}</button>`).join("")}</nav>`).insertBefore(c.$toolbar);
-		c.updateOperatingTabs=()=>{for(const [value] of quickTabs)c.$operatingTabs.find(`[data-quick-tab="${value}"]`).toggleClass("active",value===(c.quick.quick_tab||"all")).attr("aria-pressed",String(value===(c.quick.quick_tab||"all")));};
+		c.updateOperatingTabs=()=>{
+			const selected=c.quick.quick_tab||"pending_work", counts=c.providerPayload?.tab_counts;
+			for(const [value,label] of quickTabs) c.$operatingTabs.find(`[data-quick-tab="${value}"]`)
+				.text(t(label)+(Number.isInteger(counts?.[value]) ? ` (${counts[value]})` : ""))
+				.toggleClass("active",value===selected).attr("aria-pressed",String(value===selected));
+		};
 		c.$operatingTabs.on("click.dlpOperating","[data-quick-tab]",async event=>{c.quick.quick_tab=event.currentTarget.dataset.quickTab;c.setPage(0);c.updateOperatingTabs();await c.refresh();});
 		c.updateOperatingTabs();
 		root.$(`<button type="button" class="btn btn-default btn-sm">${esc(t("恢复推荐列"))}</button>`).appendTo(c.$toolbar).on("click.dlpOperating",()=>c.setColumns(defaultColumns));
@@ -243,7 +239,7 @@
 			});
 		c.$operatingNotice = root
 			.$('<p class="text-muted dlp-operating-notice"></p>')
-			.text(t("仅登记已发生的付款，不向银行转账；凭证另行保存草稿。"))
+			.text(t("仅登记已发生的付款，不向银行转账；凭证另行保存草稿。") + " " + t("本页不提供批量付款"))
 			.insertAfter(c.$filters);
 	}
 	function grid() {
@@ -259,6 +255,10 @@
 			application_type: "effective_application_type",
 			current_approver: "approval_state",
 			project: "issues",
+			account_nature: "issues",
+			needed_payment_date: "issues",
+			general_manager_approval: "issues",
+			remark: "issues",
 		});
 		const controls = [
 			["keyword", "Data", null, "申请编号 / 摘要 / 收款人"],
@@ -282,11 +282,17 @@
 			routeClass: "dlp-operating-expense-grid-active",
 			columns,
 			defaultColumns,
+			preferenceVersion,
+			migratePreferences,
+			backupMigratedPreferences: true,
+			hideSequence: true,
+			freezeSelection: false,
+			disabledSelectionLabel: "本页不提供批量付款",
 			defaultSort: "request_date desc",
 			pageFieldMap,
 			controls,
 			numbers: ["amount", "paid_amount", "pending_amount"],
-			dates: ["request_date"],
+			dates: ["request_date", "needed_payment_date"],
 			dismissInitialOnboarding: true,
 			optionLabels: {
 				application_type: {
@@ -299,7 +305,7 @@
 			provider: {
 				columns,
 				defaultColumns,
-				freezeUntil: "source_id",
+				freezeFields: ["source_id"],
 				sortFields,
 				request,
 				renderValue,

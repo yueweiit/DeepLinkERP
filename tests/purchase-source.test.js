@@ -57,6 +57,7 @@ function host(detail = projection(), overrides = {}) {
 	const drawer = { panel: new Surface(), controls: [], busy: false, loadId: 0, alive: () => alive,
 		close() { alive = false; }, setBusy(value) { this.busy = value; }, error(error) { this.errorMessage = error.message; } };
 	const root = {
+		crypto: require("node:crypto"),
 		$: markup => new Surface(markup), document: { addEventListener: (event, fn) => handlers.set(event, fn) },
 		DeepLinkERPCompactList: require("../deeplinkerp_branding/public/js/compact_list.js"),
 		DeepLinkERPPurchasePayments: { createDrawer: () => drawer, disposeControls: owned => owned.splice(0), openNative: (type, name) => routes.push(["Form", type, name]) },
@@ -91,7 +92,8 @@ function host(detail = projection(), overrides = {}) {
 }
 
 test("source drawer shows separate original, requested and actual paid evidence with protected file links", async () => {
-	const h = host(); assert.equal(typeof h.api.open, "function"); await h.api.open("OA/1");
+	const detail = projection(); detail.pending_reason="采购公司待完善 <原单>";
+	const h = host(detail); assert.equal(typeof h.api.open, "function"); await h.api.open("OA/1");
 	const html = h.html();
 	assert.match(html, /来源申请金额/); assert.match(html, /来源明细金额/); assert.match(html, /出纳实付（证据）/);
 	assert.match(html, /25\.12345/); assert.match(html, /计划支付100/); assert.match(html, /&lt;img src=x onerror=write\(\)&gt;原文/);
@@ -99,6 +101,7 @@ test("source drawer shows separate original, requested and actual paid evidence 
 	assert.match(html, /download_source_attachment\?name=OA%2F1&amp;attachment_id=file%2F1&amp;version=file-v1/);
 	assert.match(html, /待归档|尚未归档/);
 	assert.doesNotMatch(html, /attachment_id=pending/);
+	assert.match(html,/采购公司待完善 &lt;原单&gt;/);
 	assert.equal(h.calls.length, 1);
 });
 
@@ -294,13 +297,32 @@ test("source numeric controls retain native currency context and precision witho
 	assert.equal(rate.get_doc().currency, "CNY");
 });
 
-test("manager source synchronization uses a POST cache sync while ordinary buyers cannot invoke it", async () => {
-	const h = host(); assert.equal(typeof h.api.sync, "function");
+test("manager source synchronization keeps a durable retry key and displays native draft outcomes", async () => {
+	const alerts = [];
+	const h = host(projection(), { show_alert: value => alerts.push(value) }); assert.equal(typeof h.api.sync, "function");
 	await assert.rejects(h.api.sync(), /管理员|权限/); assert.equal(h.calls.length, 0);
 	h.root.frappe.user_roles = ["System Manager"];
+	const originalCall = h.root.frappe.call; let failed = false;
+	h.root.frappe.call = async request => { await originalCall(request); if (!failed) { failed=true; throw new Error("response lost"); } return { message: { created:2, already_linked:3, pending:4, invalid:1 } }; };
+	await assert.rejects(h.api.sync(), /response lost/);
 	await h.api.sync();
 	assert.equal(h.calls[0].method, "deeplinkerp_branding.services.purchase_source_service.sync_purchase_sources");
 	assert.equal(h.calls[0].type, "POST"); assert.equal(h.calls[0].args.items, undefined);
+	assert.match(h.calls[0].args.request_id, /^[a-f0-9-]{36}$/);
+	assert.equal(h.calls[1].args.request_id,h.calls[0].args.request_id);
+	assert.match(alerts[0].message,/新建草稿.*2.*已关联.*3.*待完善.*4.*失效.*1/);
+});
+
+test("acknowledged source sync rejection clears its retry key without a green outcome", async () => {
+	const alerts = [], h = host(projection(), { show_alert: value => alerts.push(value) });
+	h.root.frappe.user_roles = ["System Manager"];
+	h.root.frappe.call = async request => { h.calls.push(request); return { message: h.calls.length === 1 ?
+		{ failed:true, error:"采购来源已变化，请重新同步核对" } : { created:1 } }; };
+	await assert.rejects(h.api.sync(), /来源已变化/);
+	assert.equal(alerts.length,0);
+	await h.api.sync();
+	assert.notEqual(h.calls[0].args.request_id,h.calls[1].args.request_id);
+	assert.equal(alerts.length,1);
 });
 
 test("historical payment reconciliation selects existing native payments with an explicit confirmation", async () => {

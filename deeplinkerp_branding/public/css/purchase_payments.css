@@ -4,6 +4,10 @@
 .dlp-payment-overlay { position: fixed; inset: 0; z-index: 1050; background: rgba(15,23,42,.22); }
 .dlp-payment-drawer { position: absolute; right: 0; top: 0; bottom: 0; width: min(480px,100vw); background: var(--fg-color,#fff); display: flex; flex-direction: column; box-shadow: -5px 0 25px #0002; font-size: 13px; }
 .dlp-document-drawer { width: min(840px,100vw); }
+@media (min-width: 768px) {
+ .dlp-payment-overlay.dlp-drawer-desktop-nonmodal { background: transparent; pointer-events: none; }
+ .dlp-drawer-desktop-nonmodal > .dlp-payment-drawer { pointer-events: auto; max-width: calc(100vw - var(--sidebar-width, 240px) - 16px); }
+}
 .dlp-payment-drawer header, .dlp-payment-drawer footer { padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border-color,#e1e8f0); flex-shrink: 0; }
 .dlp-payment-drawer header h3 { margin: 0; font-size: 18px; }
 .dlp-payment-body { flex: 1; min-height: 0; overflow: auto; overflow-wrap: anywhere; padding: 16px; }

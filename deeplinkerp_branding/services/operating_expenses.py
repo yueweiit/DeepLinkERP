@@ -22,7 +22,7 @@ from frappe.utils import now_datetime, getdate
 
 from deeplinkerp_branding.services.operating_expense_contract import (
     SOURCE_SYSTEM, SOURCE_URL, MAX_JSON_BYTES, attachment_path, digest, identifier,
-    validate_source, money, expense_facts, event_fingerprint, payment_decision, payment_status, quick_tab_matches, currency_totals,
+    validate_source, money, expense_facts, event_fingerprint, payment_decision, payment_status, worklist_summary, QUICK_TABS,
 )
 from deeplinkerp_branding.services.purchase_payment_service import _require_fields
 from deeplinkerp_branding.services.unified_purchase_service import _require_export_permission
@@ -48,6 +48,8 @@ RAW_SOURCE_PERMISSIONS = {
     "workflow_summary": "approval_state", "payment_eligibility": "approval_state",
     "current_approver": "approval_state", "approval_state": "approval_state",
     "project": "issues",
+    "account_nature": "issues", "general_manager_approval": "approval_state", "remark": "summary",
+    "projection_conflicts": "issues",
 }
 SOURCE_FIELDS = set(RAW_SOURCE_PERMISSIONS.values()) | {"company", "issues", "effective_application_type"}
 
@@ -146,13 +148,37 @@ def _maps(settings):
 
 
 def _mapped_company(item, maps):
-    legal = item.get("source_company")
+    # Displayed source organization does not silently change bookkeeping rules.
+    legal = item.get("company_mapping_source", item.get("source_company"))
     return maps.get("source:" + item["source_id"]) or (maps.get(legal) if isinstance(legal, str) else None)
 
 
 def _save(doc):
     with managed_write():
         return doc.save(ignore_permissions=True)
+
+
+def _assert_financial_fields(record, expected, notice):
+    for field, value in expected.items():
+        actual = record.get(field)
+        if isinstance(value, dict):
+            actual = json.loads(actual or "{}")
+            matches = actual == value
+        else:
+            matches = str("" if actual is None else actual) == str("" if value is None else value)
+        if not matches:
+            frappe.throw(notice)
+
+
+def _audit_financial(operation, source, document, amount, result, *, error=None, stage=None):
+    # This records validation, not a claim that the RPC already committed.
+    # Do not copy exception text or private party/bank/form data into this log.
+    # The original exception is re-raised by the caller for native RPC handling.
+    entry = {"operation": operation, "source": source, "document": document,
+             "amount": str(amount or ""), "result": result}
+    if error is not None:
+        entry.update(error_type=type(error).__name__, error_code="financial_postcondition_failed", stage=stage)
+    frappe.logger("operating_finance", allow_site=True).info(entry)
 
 
 @frappe.whitelist()
@@ -795,16 +821,12 @@ def _event_key(doc, payment_id=None):
 
 
 def _recognition(doc, mapping, item):
-    name = frappe.db.get_value(EVENT, _event_key(doc), "journal_entry", for_update=True)
-    if not name:
+    event_key = _event_key(doc)
+    if not frappe.db.get_value(EVENT, event_key, "journal_entry", for_update=True):
         frappe.throw("请先生成或关联费用确认凭证")
-    recognition = _read("Journal Entry", name, {"company", "accounts", "docstatus"})
-    if recognition.docstatus == 2 or recognition.company != doc.company:
-        frappe.throw("费用确认凭证已取消或公司不符，需要人工复核")
-    expected = _expense_lines(item, mapping)
-    _match_journal(recognition, expected)
-    _match_date(recognition, mapping["posting_date"])
-    return recognition
+    preview = {"event_key": event_key, "fingerprint": event_fingerprint(item, mapping),
+               "posting_date": mapping["posting_date"], "accounts": _expense_lines(item, mapping), "recognition": None}
+    return _checked_voucher_result(doc, preview, operation="recognition")
 
 
 def _match_journal(doc, rows):
@@ -890,6 +912,45 @@ def preview_voucher(source_id, payment_source_id=None):
     return _preview(doc, item, voucher_mapping(doc, payment_source_id), payment_source_id)
 
 
+def _checked_voucher_result(doc, preview, payment_source_id=None, journal_name=None, *, created=False, operation="voucher"):
+    """Current-read the persisted association and native parent/children together."""
+    amount = sum((money(row.get("debit", "0")) for row in preview["accounts"]), Decimal(0))
+    stage = "event_read"
+    try:
+        event = _read(EVENT, preview["event_key"], {"source", "company", "operation", "fingerprint"}, for_update=True)
+        stage = "event_association"
+        _assert_financial_fields(event, {"source": doc.name, "company": doc.company,
+            "operation": "payment" if payment_source_id else "expense", "payment_source_id": payment_source_id,
+            "fingerprint": preview["fingerprint"], "recognition": preview["recognition"]}, "凭证事件关联写后校验不一致，请人工复核")
+        if journal_name and event.journal_entry != journal_name:
+            frappe.throw("凭证事件与原生凭证关联不一致，请人工复核")
+        stage = "journal_read"
+        journal = _read("Journal Entry", event.journal_entry, {"company", "accounts", "docstatus", "posting_date"}, for_update=True)
+        stage = "journal_state"
+        if journal.company != doc.company or journal.docstatus not in {0, 1} or (created and journal.docstatus != 0):
+            frappe.throw("凭证公司或状态写后校验不一致，请人工复核")
+        stage = "journal_association"
+        linked = json.loads(event.provenance_json or "{}").get("operation") == "link_existing"
+        if created and linked:
+            frappe.throw("新建凭证事件不得变更为历史关联，请人工复核")
+        if linked:
+            if event.operation != "expense" or journal.get("custom_operating_event_key"):
+                frappe.throw("现有凭证关联写后校验不一致，请人工复核")
+        else:
+            _assert_financial_fields(journal, {"custom_operating_event_key": event.name,
+                "custom_operating_source": doc.name, "custom_operating_fingerprint": preview["fingerprint"],
+                "custom_operating_recognition": preview["recognition"]}, "原生凭证事件写后校验不一致，请人工复核")
+        stage = "journal_accounts"
+        _match_journal(journal, preview["accounts"])
+        stage = "journal_date"
+        _match_date(journal, preview["posting_date"])
+    except Exception as error:
+        _audit_financial(operation, doc.name, journal_name or preview["event_key"], amount, "rejected", error=error, stage=stage)
+        raise
+    _audit_financial(operation, doc.name, journal.name, amount, "validated")
+    return journal
+
+
 def _create_voucher_draft(source_id, expected_fingerprint, payment_source_id=None):
     _finance()
     doc = _source(source_id, write=True)
@@ -902,11 +963,7 @@ def _create_voucher_draft(source_id, expected_fingerprint, payment_source_id=Non
         frappe.throw("预览事实已变化，请重新预览")
     existing = frappe.db.get_value(EVENT, preview["event_key"], ["journal_entry", "fingerprint"], as_dict=True, for_update=True)
     if existing:
-        journal = _read("Journal Entry", existing.journal_entry, {"company", "accounts", "docstatus"}, for_update=True)
-        if existing.fingerprint != preview["fingerprint"] or journal.docstatus == 2:
-            frappe.throw("现有凭证已取消或事实变化，请人工复核，不能重复生成")
-        _match_journal(journal, preview["accounts"])
-        _match_date(journal, preview["posting_date"])
+        journal = _checked_voucher_result(doc, preview, payment_source_id, existing.journal_entry)
         return {"journal_entry": journal.name, "docstatus": journal.docstatus, "existing": True, "settlement_state": preview["settlement_state"]}
     journal = frappe.get_doc({"doctype": "Journal Entry", "voucher_type": "Journal Entry", "company": doc.company,
         "posting_date": preview["posting_date"], "multi_currency": 1, "user_remark": item.get("summary") or "运营费用",
@@ -918,7 +975,8 @@ def _create_voucher_draft(source_id, expected_fingerprint, payment_source_id=Non
             "operation": "payment" if payment_source_id else "expense", "payment_source_id": payment_source_id,
             "fingerprint": preview["fingerprint"], "source_version": item["version"], "journal_entry": journal.name,
             "recognition": preview["recognition"], "provenance_json": json.dumps({"source": item, "mapping": mapping, "actor": frappe.session.user}, ensure_ascii=False)}).insert(ignore_permissions=True)
-    return {"journal_entry": journal.name, "docstatus": 0, "existing": False, "settlement_state": preview["settlement_state"]}
+    journal = _checked_voucher_result(doc, preview, payment_source_id, journal.name, created=True)
+    return {"journal_entry": journal.name, "docstatus": journal.docstatus, "existing": False, "settlement_state": preview["settlement_state"]}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -945,7 +1003,7 @@ def link_existing(source_id, journal_entry, expected_fingerprint):
     preview = _preview(doc, item, mapping)
     if expected_fingerprint != preview["fingerprint"] or frappe.db.exists(EVENT, preview["event_key"]):
         frappe.throw("费用确认已存在或预览变化，请刷新")
-    journal = _read("Journal Entry", journal_entry, {"company", "accounts", "docstatus"})
+    journal = _read("Journal Entry", journal_entry, {"company", "accounts", "docstatus"}, for_update=True)
     if journal.company != doc.company or journal.docstatus == 2 or journal.get("custom_operating_event_key"):
         frappe.throw("凭证公司、状态或运营费用关联不符")
     _match_journal(journal, preview["accounts"])
@@ -956,10 +1014,17 @@ def link_existing(source_id, journal_entry, expected_fingerprint):
         frappe.get_doc({"doctype": EVENT, "event_key": preview["event_key"], "source": doc.name, "company": doc.company,
             "operation": "expense", "fingerprint": preview["fingerprint"], "source_version": item["version"], "journal_entry": journal.name,
             "provenance_json": json.dumps({"source": item, "mapping": mapping, "actor": frappe.session.user, "operation": "link_existing"}, ensure_ascii=False)}).insert(ignore_permissions=True)
+    journal = _checked_voucher_result(doc, preview, journal_name=journal.name)
     return {"journal_entry": journal.name, "docstatus": journal.docstatus}
 
 
 def validate_operating_journal(doc, method=None):
+    # Shared-image sites need not install Operating. Ordinary native journals
+    # stay independent, but unauditable operating associations cannot be accepted.
+    if not frappe.db.exists("DocType", EVENT):
+        if any(doc.get(field) for field in ("custom_operating_event_key", "custom_operating_source", "custom_operating_fingerprint", "custom_operating_recognition")):
+            frappe.throw("当前账套未启用运营费用，不能设置运营费用凭证关联")
+        return
     key = doc.get("custom_operating_event_key")
     if not doc.is_new():
         old_key = frappe.db.get_value("Journal Entry", doc.name, "custom_operating_event_key")
@@ -969,7 +1034,7 @@ def validate_operating_journal(doc, method=None):
         return
     # Existing recognition links are audited in Event without modifying historical
     # native JE fields. Resolve that association in reverse, including draft saves.
-    event = frappe.db.get_value(EVENT, key if key else {"journal_entry": doc.name}, ["source", "fingerprint", "journal_entry", "operation", "payment_source_id", "provenance_json"], as_dict=True)
+    event = frappe.db.get_value(EVENT, key if key else {"journal_entry": doc.name}, ["source", "fingerprint", "journal_entry", "operation", "payment_source_id", "provenance_json"], as_dict=True, for_update=True)
     if not key and not event:
         return  # Unrelated native journals are unaffected.
     if not event or event.journal_entry != doc.name:
@@ -1039,9 +1104,13 @@ EXPORT_COLUMNS["display_source_id"] = "申请编号"
 EXPORT_COLUMNS["current_approver"] = "当前办理人"
 EXPORT_COLUMNS["source_system"] = "来源"
 EXPORT_COLUMNS["project"] = "项目"
+EXPORT_COLUMNS.update(source_status="付款状态", display_source_id="钉钉申请单号", source_company="应付款公司",
+    amount="应付金额", paid_amount="已支付金额", pending_amount="待付款金额", currency="货币类型",
+    project="项目归属", account_nature="账户性质", needed_payment_date="需求付款日期",
+    general_manager_approval="总经理审批", remark="备注", blocking_reason="办理阻碍")
 
 
-def _list_rows(filters=None, order_by="request_date desc"):
+def _list_rows(filters=None, order_by="request_date desc", with_summary=False):
     _require_fields(SOURCE, set(LIST_FIELDS))
     filters = frappe.parse_json(filters) if isinstance(filters, str) else filters or {}
     allowed = {"company", "application_type", "applicant", "source_status", "approval_state", "date_from", "date_to", "keyword", "quick_tab"}
@@ -1106,11 +1175,10 @@ def _list_rows(filters=None, order_by="request_date desc"):
     if keyword:
         rows = [r for r in rows if any(keyword in str(r.get(field) or "").casefold() for field in ("source_id", "approval_no", "summary", "payee_name", "applicant"))]
     tab = filters.get("quick_tab") or "all"
-    if tab not in {"all", "pending_payment", "approvals_running", "paid", "reconciliation"}:
+    if tab not in QUICK_TABS:
         frappe.throw("快捷筛选无效")
-    if tab != "all":
-        rows = [r for r in rows if quick_tab_matches(r, tab)]
-    return rows
+    selected, counts, totals = worklist_summary(rows, tab)
+    return (selected, counts, totals) if with_summary else selected
 
 
 @frappe.whitelist()
@@ -1118,11 +1186,10 @@ def get_operating_expenses(filters=None, order_by="request_date desc", page_leng
     page_length, start = int(page_length), int(start)
     if page_length not in {20, 100, 500, 2500} or start < 0:
         frappe.throw("分页参数无效")
-    rows = _list_rows(filters, order_by)
-    totals = currency_totals(rows)
+    rows, counts, totals = _list_rows(filters, order_by, with_summary=True)
     page = rows[start:start + page_length]
     _enrich_page(page)
-    return {"rows": page, "total_count": len(rows), "currency_totals": totals}
+    return {"rows": page, "total_count": len(rows), "currency_totals": totals, "tab_counts": counts}
 
 
 def _enrich_page(rows):
@@ -1212,7 +1279,8 @@ def _readable_source_numbers(rows):
     _require_fields(SOURCE, {"source_id", "source_system", "approval_state", "issues"})
     # Names already passed get_list's native/company permissions. Select only
     # aliased facts, not payment histories or private attachments, in <=500 chunks.
-    paths = ("approval_no", "approvals", "current_approver", "payment_eligibility", "source_conflict", "currency_conflict", "project")
+    paths = ("approval_no", "approvals", "current_approver", "payment_eligibility", "source_conflict", "currency_conflict", "project",
+             "source_company", "account_nature", "needed_payment_date", "general_manager_approval", "remark", "projection_conflicts", "original_url")
     expressions = ",".join("JSON_EXTRACT(CASE WHEN JSON_VALID(source_json) THEN source_json ELSE '{}' END,'$." + field + "') AS `" + field + "`" for field in paths)
     raw = {}
     for offset in range(0, len(rows), 500):
@@ -1224,14 +1292,23 @@ def _readable_source_numbers(rows):
         item["source_system"] = row["source_system"]
         value = item.get("approval_no")
         row["approval_no"] = value if isinstance(value, str) and len(value) <= 140 else None
+        value = item.get("original_url")
+        row["original_url"] = value if isinstance(value, str) else None
         approvals = item.get("approvals")
         original = approvals.get("raw") if isinstance(approvals, dict) else None
         original = original if isinstance(original, dict) else {}
+        row["source_withdrawn"] = bool(original.get("scope") == "withdrawn" or original.get("deleted_at"))
         row["approval_state"] = "unknown" if original.get("scope") == "withdrawn" or original.get("deleted_at") else approval_state(original.get("status"), original.get("result"))
         row["current_approver"] = item.get("current_approver") or ""
         row["payment_eligibility"] = payment_decision(item)
-        project = item.get("project")
-        row["project"] = project if isinstance(project, str) else None
+        for field in ("project", "account_nature", "needed_payment_date", "general_manager_approval", "remark"):
+            value = item.get(field)
+            row[field] = value if isinstance(value, str) else None
+        # Only an explicit canonical organization can replace the cached scalar.
+        if isinstance(item.get("source_company"), str):
+            row["source_company"] = item["source_company"]
+        conflicts = item.get("projection_conflicts")
+        row["projection_conflicts"] = conflicts if isinstance(conflicts, list) else []
         for field in ("source_conflict", "currency_conflict"):
             row[field] = bool(item.get(field))
 
@@ -1258,7 +1335,7 @@ def export_operating_expenses(filters=None, order_by="request_date desc", column
             sheet.write(0, column_index, EXPORT_COLUMNS[field])
         for row_index, row in enumerate(rows, 1):
             for column_index, field in enumerate(selected):
-                value = row.get("approval_no") or row["source_id"] if field == "display_source_id" else row.get(field)
+                value = (row.get("approval_no") or "—") if field == "display_source_id" else row.get(field)
                 monetary = field in money_fields
                 if monetary:
                     try:

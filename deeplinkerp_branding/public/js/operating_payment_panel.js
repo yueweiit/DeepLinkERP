@@ -53,8 +53,12 @@
   return !Array.isArray(payments)||payments.length===0||payments.some(payment=>payment.evidence_status!=="recorded");
  }
  const canTakeover=(detail,finance)=>!takeoverIssue(detail,finance);
+ function paymentHistoryKnown(detail) {
+  try {cents(detail?.erp_payments?.balance?.paid_amount);cents(detail?.erp_payments?.balance?.pending_amount);return true;}
+  catch (_) {return false;}
+ }
  function canRegister(detail, finance) {
-  try { return Boolean(!paymentEligibilityIssue(detail,finance) && detail.erp_payments?.managed && cents(detail.erp_payments.balance?.pending_amount)>0n); }
+  try { return Boolean(!paymentEligibilityIssue(detail,finance) && detail.erp_payments?.managed && paymentHistoryKnown(detail) && cents(detail.erp_payments.balance?.pending_amount)>0n); }
   catch (_) { return false; }
  }
  function timelineHTML(row) {
@@ -103,23 +107,27 @@
   const policy=source.payment_eligibility??detail.payment_eligibility;
   if(policy?.can_register_payment===true&&policy.reason==="required_approvals_passed_cashier_only")
    root.$('<p class="text-success" role="status"></p>').text(t("必要审批已通过，待出纳办理。")).insertAfter(body.find(".dlp-operating-payment-heading"));
-  if (!detail.erp_payments?.managed) {
-   let zeroConfirmed=false,needsZeroConfirmation=needsHistoryConfirmation(detail),confirmationControl=null;
+  if (!detail.erp_payments?.managed || !paymentHistoryKnown(detail)) {
+   let zeroConfirmed=false,needsZeroConfirmation=!detail.erp_payments?.managed && needsHistoryConfirmation(detail),confirmationControl=null;
+   drawer.paymentDirty=()=>zeroConfirmed;
    const issue=takeoverIssue(detail,canFinance());
    const review=root.$('<div class="dlp-operating-history-review"></div>').insertAfter(body.find(".dlp-operating-payment-heading"));
    const status=root.$('<p class="text-muted" role="status"></p>').appendTo(review);
    async function requireHistoryConfirmation(){if(confirmationControl||issue)return;confirmationControl=await makeControl(drawer,root.$('<div></div>').appendTo(review),{fieldname:"zero_history_confirmed",fieldtype:"Check",label:t("已核对完整历史，确认这笔申请此前没有实际付款")},0,value=>{zeroConfirmed=Boolean(value);drawer.refreshEligibility();});}
    if(needsZeroConfirmation)await requireHistoryConfirmation();
-   status.text(issue||t(needsZeroConfirmation?"历史付款待核对，请核对钉钉原单和请款记录后确认。":"核对历史付款后，后续付款可在 ERP 登记。"));
+   status.text(issue||detail.erp_payments?.notice||t(needsZeroConfirmation?"历史付款待核对，请核对钉钉原单和请款记录后确认。":"核对历史付款后，后续付款可在 ERP 登记。"));
    action(drawer,actions,"核对历史付款",async()=>{
-    const preview=await uiTask(drawer,()=>request("preview_takeover",{source_id:sourceId,zero_history_confirmed:zeroConfirmed}));
-    if (!mounted() || !preview) return;
-    status.text(`${t("历史付款")} ${preview.history_count??"—"} ${t("笔")} · ${t("已付")} ${money(preview.balance?.paid_amount)} ${preview.currency||"—"} · ${t("待付")} ${money(preview.balance?.pending_amount)} ${preview.currency||"—"}`);
-    if(preview.needs_zero_history_confirmation===true){needsZeroConfirmation=true;await requireHistoryConfirmation();if(!zeroConfirmed){drawer.refreshEligibility();return;}}
-    if (!preview.existing && !(await confirm(`${esc(t("已核对历史"))} ${esc(preview.history_count??"—")} ${esc(t("笔，待付"))} ${esc(preview.balance?.pending_amount??"—")} ${esc(preview.currency||"—")}。${esc(t("启用后，对应申请在请款网站不能再登记付款。确认接管？"))}`))) return;
-    if (!mounted()) return;
-    if (!preview.existing) await uiTask(drawer,()=>request("claim_takeover",{source_id:sourceId,expected_source_version:preview.source_version,expected_history_version:preview.history_version,...(preview.eligibility_fingerprint?{expected_eligibility_fingerprint:preview.eligibility_fingerprint}:{}),request_id:root.crypto.randomUUID(),zero_history_confirmed:zeroConfirmed}));
-    if (drawer.alive()) await reload();
+    const claimed=await uiTask(drawer,async current=>{
+     const preview=await request("preview_takeover",{source_id:sourceId,zero_history_confirmed:zeroConfirmed});
+     if (!mounted() || !current() || !preview) return;
+     status.text(`${t("历史付款")} ${preview.history_count??"—"} ${t("笔")} · ${t("已付")} ${money(preview.balance?.paid_amount)} ${preview.currency||"—"} · ${t("待付")} ${money(preview.balance?.pending_amount)} ${preview.currency||"—"}`);
+     if(preview.needs_zero_history_confirmation===true){needsZeroConfirmation=true;await requireHistoryConfirmation();if(!zeroConfirmed){drawer.refreshEligibility();return;}}
+     if (!preview.existing && !(await confirm(`${esc(t("已核对历史"))} ${esc(preview.history_count??"—")} ${esc(t("笔，待付"))} ${esc(preview.balance?.pending_amount??"—")} ${esc(preview.currency||"—")}。${esc(t("启用后，对应申请在请款网站不能再登记付款。确认接管？"))}`))) return;
+     if (!mounted() || !current()) return;
+     if (!preview.existing) await request("claim_takeover",{source_id:sourceId,expected_source_version:preview.source_version,expected_history_version:preview.history_version,...(preview.eligibility_fingerprint?{expected_eligibility_fingerprint:preview.eligibility_fingerprint}:{}),request_id:root.crypto.randomUUID(),zero_history_confirmed:zeroConfirmed});
+     return true;
+    });
+    if (claimed && mounted()) await reload();
    },()=>Boolean(canTakeover(detail,canFinance()) && (!needsZeroConfirmation||zeroConfirmed)));
   } else if (canRegister(detail,canFinance())) {
    const values={payment_date:root.frappe.datetime.get_today(),amount:"",bank_amount:"",bank_account:"",party_type:detail.mapping?.party_type||((source.effective_application_type||source.application_type)==="reimbursement"?"Employee":"Supplier"),party:detail.mapping?.party||"",bank_reference:"",remark:""};
@@ -132,7 +140,9 @@
    const advanced=root.$(`<details class="dlp-operating-advanced"><summary>${esc(t("跨币种与会计设置"))}</summary><div class="dlp-operating-fields"></div></details>`).appendTo(form);
    const ratesFields=root.$('<div class="dlp-operating-exchange-rates"></div>').appendTo(advanced);
    const formActions=root.$('<div class="dlp-operating-actions"></div>').appendTo(form);
-   let opened=false,uploadProof=false,accounts=[],accountsIssue="",bankAmountControl,bankRateControl;
+   const initialValues=JSON.stringify(values);
+   let opened=false,uploadProof=false,recorded=false,accounts=[],accountsIssue="",bankAmountControl,bankRateControl;
+   drawer.paymentDirty=()=>!recorded && (JSON.stringify(values)!==initialValues || uploadProof);
    try{const response=await request("get_payment_accounts",{source_id:sourceId});if(!current())return;accounts=Array.isArray(response)?response:[];}catch(error){if(!current())return;accountsIssue=error.message;}
    const accountMap=new Map(accounts.map(account=>[account.name,account]));
    function update() {
@@ -159,15 +169,23 @@
    await makeControl(drawer,partyHolder,{fieldname:"party",fieldtype:"Link",options:values.party_type,label:"维护收款往来方",reqd:true},values.party,value=>{values.party=String(value??"");update();},values.party_type==="Employee"?()=>({filters:{company:detail.company}}):undefined);
    for (const [fieldname,fieldtype,options,label] of [["advance_account","Link","Account","预付款 / 往来科目"],["exchange_difference_account","Link","Account","汇兑损益科目"],["cost_center","Link","Cost Center","成本中心"],["project","Link","Project","项目"]]) {if(!current())return;await makeControl(drawer,root.$("<div></div>").appendTo(advanced.find(".dlp-operating-fields")),{fieldname,fieldtype,options,label},"",value=>{if(value) values[fieldname]=String(value);else delete values[fieldname];update();},options?()=>({filters:{company:detail.company}}):undefined);}
    await makeControl(drawer,root.$("<div></div>").appendTo(form),{fieldname:"upload_proof",fieldtype:"Check",label:"保存后上传付款回单（可选）"},0,value=>{uploadProof=Boolean(value);});
-   const ready=()=>{try {paymentPreview(detail.erp_payments.balance,values.amount);const account=accountMap.get(values.bank_account),needsRates=account?.currency!==source.currency||Boolean(values.advance_account);return current()&&opened&&canRegister(detail,canFinance())&&Boolean(account?.currency&&values.party&&values.payment_date)&&cents(values.bank_amount)>0n&&(!needsRates||(positiveRate(values.source_exchange_rate)&&positiveRate(values.bank_exchange_rate)));}catch(_){return false;}};
-   action(drawer,actions,"新增付款",()=>{opened=true;form.prop("hidden",false);update();},()=>canRegister(detail,canFinance()),true);
+   const ready=()=>{try {paymentPreview(detail.erp_payments.balance,values.amount);const account=accountMap.get(values.bank_account),needsRates=account?.currency!==source.currency||Boolean(values.advance_account);return !recorded&&current()&&opened&&canRegister(detail,canFinance())&&Boolean(account?.currency&&values.party&&values.payment_date)&&cents(values.bank_amount)>0n&&(!needsRates||(positiveRate(values.source_exchange_rate)&&positiveRate(values.bank_exchange_rate)));}catch(_){return false;}};
+   const hasPayments=(source.payments||[]).length || (detail.erp_payments.payments||[]).length || cents(detail.erp_payments.balance.paid_amount)>0n;
+   action(drawer,actions,hasPayments?"新增付款":"录入第一笔付款",()=>{opened=true;form.prop("hidden",false);update();},()=>!recorded&&canRegister(detail,canFinance()),true);
    action(drawer,formActions,"取消",()=>{opened=false;form.prop("hidden",true);drawer.refreshEligibility();});
    action(drawer,formActions,"保存付款记录",async()=>{
-    if (!(await confirm(esc(t("确认已经实际支付并登记本笔付款？此操作不向银行转账，不自动记账。"))))) return;
-    if (!current()) return;
-    const result=await uiTask(drawer,()=>request("register_payment",{source_id:sourceId,values:JSON.stringify(values),expected_source_version:source.version,request_id:requestId}));
+    if(drawer.busy || !ready())return;
+    const payload=JSON.stringify(values),addProof=uploadProof;
+    const result=await uiTask(drawer,async isCurrent=>{
+     if (!(await confirm(esc(t("确认已经实际支付并登记本笔付款？此操作不向银行转账，不自动记账。"))))) return;
+     if (!current() || !isCurrent()) return;
+     const response=await request("register_payment",{source_id:sourceId,values:payload,expected_source_version:source.version,request_id:requestId});
+     if(response?.payment_id)recorded=true;
+     return response;
+    });
+    if(!result)return;
     const paymentId=result?.payment_id;
-    if(current()&&uploadProof&&paymentId&&root.frappe.ui?.FileUploader)new root.frappe.ui.FileUploader(proofUploaderOptions(paymentId,()=>{if(drawer.alive())reload();}));
+    if(current()&&addProof&&paymentId&&root.frappe.ui?.FileUploader)new root.frappe.ui.FileUploader(proofUploaderOptions(paymentId,()=>{if(drawer.alive())reload();}));
     if (drawer.alive()) await reload();
    },ready,true);
    form.append(`<p class="text-muted">${esc(t("仅登记已发生的付款，不向银行转账，不自动记账。回单可稍后补传。"))}</p>`);
@@ -185,9 +203,15 @@
     root.frappe.prompt({fieldname:"reason",fieldtype:"Small Text",label:t("撤销原因"),reqd:1},async values=>{
      if(!drawer.alive())return;
      const draft=(detail.events||[]).some(event=>event.payment_source_id==="erp-payment:"+payment.name&&event.docstatus===0);
-     if(draft&&!(await confirm(esc(t("此付款有未记账凭证草稿。确认弃用该草稿并撤销付款登记？草稿保留恢复记录和事件审计，不会提交、记账或转账。")))))return;
-     if(!drawer.alive())return;
-     try {await uiTask(drawer,()=>request("reverse_payment",{source_id:sourceId,payment_id:payment.name,reason:values.reason,request_id:root.crypto.randomUUID(),discard_drafts:draft}));if(drawer.alive())await reload();} catch(error){if(drawer.alive())drawer.error(error);}
+     try {
+      const reversed=await uiTask(drawer,async current=>{
+       if(draft&&!(await confirm(esc(t("此付款有未记账凭证草稿。确认弃用该草稿并撤销付款登记？草稿保留恢复记录和事件审计，不会提交、记账或转账。")))))return;
+       if(!mounted() || !current())return;
+       await request("reverse_payment",{source_id:sourceId,payment_id:payment.name,reason:values.reason,request_id:root.crypto.randomUUID(),discard_drafts:draft});
+       return true;
+      });
+      if(reversed && mounted())await reload();
+     } catch(error){if(drawer.alive())drawer.error(error);}
     },t("撤销付款登记"));
    },()=>canFinance());
    if(payment.advance_configured && payment.status==="Registered") {
@@ -196,14 +220,17 @@
     const association=(detail.events||[]).find(event=>event.payment_source_id==="erp-payment:"+payment.name);
     if(association) card.append(`<p>${esc(t("对应凭证"))} · ${esc(association.journal_entry||association.issue||"—")}</p>`);
     action(drawer,card.find(".dlp-operating-actions"),"预览预付款凭证",async()=>{
-     voucher=await uiTask(drawer,()=>helpers.voucherRequest("preview_voucher",{source_id:sourceId,payment_source_id:"erp-payment:"+payment.name}));
+     voucher=await uiTask(drawer,()=>helpers.voucherRequest("preview_voucher",{source_id:sourceId,payment_source_id:"erp-payment:"+payment.name}),"read");
      if(drawer.alive()&&voucher) card.find(".dlp-operating-payment-voucher-preview").html(helpers.previewHTML(voucher));
     },()=>canFinance()&&!association);
     action(drawer,card.find(".dlp-operating-actions"),"保存预付款凭证草稿",async()=>{
-     if(!(await confirm(esc(t("确认保存预付款凭证草稿？不确认费用、不自动记账。")))))return;
-     if(!drawer.alive())return;
-     await uiTask(drawer,()=>helpers.voucherRequest("create_voucher_draft",{source_id:sourceId,payment_source_id:"erp-payment:"+payment.name,expected_fingerprint:voucher.fingerprint}));
-     if(drawer.alive())await reload();
+     const saved=await uiTask(drawer,async current=>{
+      if(!(await confirm(esc(t("确认保存预付款凭证草稿？不确认费用、不自动记账。")))))return;
+      if(!mounted() || !current())return;
+      await helpers.voucherRequest("create_voucher_draft",{source_id:sourceId,payment_source_id:"erp-payment:"+payment.name,expected_fingerprint:voucher.fingerprint});
+      return true;
+     });
+     if(saved && mounted())await reload();
     },()=>canFinance()&&Boolean(voucher)&&!association);
    }
   }

@@ -21,6 +21,21 @@ def run_js(body: str) -> dict:
 	return json.loads(result.stdout)
 
 
+def test_reversal_stage_blocks_existing_inventory_movement_without_losing_selection():
+	result = run_js("""
+const group={item_code:'I',warehouse:'W',reversal:{stage:'failed'},locations:[{}]};
+const key=inventory.selectionKey(group),selected=new Map([[key,{item_code:'I',source_warehouse:'W'}]]);
+const next=inventory.updateCurrentPageSelection([group],selected,true);
+const html=inventory.renderMaterialRows([group],new Set([key]));
+const button={length:1,text(){},prop(k,v){this[k]=v;},attr(){}};
+inventory.InventoryDetailPage.prototype.updateMovementButton.call({$movementButton:button,selected:next,canCreateStockEntry:true});
+console.log(JSON.stringify({disabled:button.disabled,selected:next.size,html}));
+""")
+	assert result["disabled"] is True
+	assert result["selected"] == 1
+	assert "失败待处理" in result["html"]
+
+
 def test_material_rows_use_one_selectable_checkbox_per_item_warehouse_group() -> None:
 	result = run_js(
 		"""
@@ -124,6 +139,33 @@ function makePage(){
 const group=(code)=>({item_code:code,item_name:'Name '+code,warehouse:'W1',locations:[]});
 global.frappe={msgprint(){},call:async()=>({message:{company:'C1',groups:[group('A')],can_create_stock_entry:true}})};
 """
+
+
+def test_pending_inventory_auto_refresh_updates_selection_and_disposes_stale_page():
+	result = run_js(LIFECYCLE_SETUP + """
+(async()=>{
+ const handlers=new Map(),timers=new Map();let tick=0,calls=0;
+ global.setTimeout=fn=>{timers.set(++tick,fn);return tick};global.clearTimeout=id=>timers.delete(id);
+ frappe.realtime={on:(event,fn)=>handlers.set(event,fn),off:(event,fn)=>{if(handlers.get(event)===fn)handlers.delete(event)}};
+ const {page}=makePage();const row={...group('A'),reversal:{operation_id:'OP',stage:'waiting_inventory'}};
+ page.currentGroups=[row];page.selected=inventory.updateCurrentPageSelection([row],page.selected,true);
+ frappe.call=async()=>{calls++;throw Error('poll failed')};
+ page.fitViewport(true);const subscribed=handlers.has('purchase_reversal_progress'),scheduled=timers.size;
+ const poll=timers.values().next().value;timers.clear();await poll();
+ const failed={stage:page.selected.values().next().value.reversal.stage,blocked:!page.canCreateStockEntry,rows:page.currentGroups.length};
+ frappe.call=async()=>{calls++;return {message:{company:'C1',groups:[group('B')],can_create_stock_entry:true,
+  selected_reversals:[{item_code:'A',warehouse:'W1',reversal:null}]}}};
+ await handlers.get('purchase_reversal_progress')({operation_id:'OP',stage:'completed'});
+ const completed={size:page.selected.size,reversal:page.selected.values().next().value.reversal,canMove:page.canCreateStockEntry,timers:timers.size};
+ let resolve;frappe.call=()=>new Promise(r=>{resolve=r});const pending=page.refresh();page.fitViewport(false);
+ resolve({message:{company:'C1',groups:[group('STALE')],can_create_stock_entry:true}});await pending;
+ console.log(JSON.stringify({subscribed,scheduled,failed,completed,disposed:{handlers:handlers.size,timers:timers.size,code:page.currentGroups[0].item_code},calls}));
+})();
+""")
+	assert result == {"subscribed": True, "scheduled": 1,
+		"failed": {"stage": "waiting_inventory", "blocked": True, "rows": 1},
+		"completed": {"size": 1, "reversal": None, "canMove": True, "timers": 0},
+		"disposed": {"handlers": 0, "timers": 0, "code": "B"}, "calls": 2}
 
 
 @pytest.mark.parametrize("category", ["material", "semi_finished", "finished_goods", "mold"])

@@ -43,27 +43,27 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 
 	def test_unified_adapter_loads_after_cache_busted_shared_engine(self):
 		scripts = hooks.app_include_js
-		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.19"
-		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.9"
+		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.22"
+		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.11"
 		self.assertIn(engine, scripts)
 		self.assertIn(adapter, scripts)
 		self.assertLess(scripts.index(engine), scripts.index(adapter))
 		payments = next(path for path in scripts if path.startswith("/assets/deeplinkerp_branding/js/purchase_payments.js?v="))
 		self.assertLess(scripts.index(engine), scripts.index(payments))
-		source = "/assets/deeplinkerp_branding/js/purchase_source.js?v=0.0.1"
+		source = "/assets/deeplinkerp_branding/js/purchase_source.js?v=0.0.2"
 		self.assertLess(scripts.index(payments), scripts.index(source))
 		self.assertLess(scripts.index(source), scripts.index(adapter))
 
 	def test_crossborder_drawer_reuses_the_loaded_payment_shell_once(self):
 		scripts = hooks.app_include_js
-		payments = "/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.19"
+		payments = "/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.26"
 		crossborder = "/assets/deeplinkerp_branding/js/crossborder_procurement.js?v=0.0.5"
 		self.assertIn(payments, scripts)
 		self.assertIn(crossborder, scripts)
 		self.assertEqual(sum("/crossborder_procurement.js" in path for path in scripts), 1)
 		self.assertLess(scripts.index(payments), scripts.index(crossborder))
-		self.assertLess(scripts.index(crossborder), scripts.index("/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.9"))
-		self.assertIn("/assets/deeplinkerp_branding/css/purchase_payments.css?v=0.0.8", hooks.app_include_css)
+		self.assertLess(scripts.index(crossborder), scripts.index("/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.11"))
+		self.assertIn("/assets/deeplinkerp_branding/css/purchase_payments.css?v=0.0.9", hooks.app_include_css)
 		self.assertNotIn("crossborder_procurement", str(getattr(hooks, "web_include_js", None)))
 
 	def test_desk_loads_compact_styles_without_changing_website_assets(self):
@@ -83,13 +83,13 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		self.assertIsNotNone(rule, "Only the classic PO menu should override the global right anchor")
 		self.assertRegex(rule.group(1), r"left:\s*0\s*;")
 		self.assertRegex(rule.group(1), r"right:\s*auto\s*;")
-		self.assertIn("/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.19", hooks.app_include_css)
+		self.assertIn("/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.21", hooks.app_include_css)
 
-	def test_grouped_source_identity_stays_one_line_instead_of_overlapping_its_date(self):
+	def test_purchase_source_identity_stays_one_line_in_the_physical_table(self):
 		css = (Path(__file__).resolve().parents[1] / "deeplinkerp_branding/public/css/purchase_order_list.css").read_text()
-		selector = r"body\.dlp-purchase-order-grid-active \.dlp-po-group > button\[data-purchase-source\]"
+		selector = r"body\.dlp-purchase-order-grid-active \.dlp-purchase-table button\[data-purchase-source\]"
 		rule = re.search(selector + r"\s*\{([^}]+)\}", css)
-		self.assertIsNotNone(rule, "Only the grouped OA identity should override the native fixed button height")
+		self.assertIsNotNone(rule, "The physical OA identity overrides the native fixed button height")
 		for property_name, value in (("display", "block"), ("height", "auto"), ("white-space", "nowrap"), ("overflow", "hidden"), ("text-overflow", "ellipsis"), ("text-align", "left"), ("max-width", "100%")):
 			self.assertRegex(rule.group(1), re.escape(property_name) + r":\s*" + re.escape(value) + r"\s*;")
 

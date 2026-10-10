@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 
 import frappe
 from deeplinkerp_branding.services import operating_expenses as service
+from deeplinkerp_branding.tests._purchase_test_support import install_native_throw
 
 
 class OperatingExpenseSchedulingTests(unittest.TestCase):
@@ -69,3 +70,48 @@ class OperatingExpenseSchedulingTests(unittest.TestCase):
                 service.scheduled_sync()
         save.assert_not_called()
         self.db.set_single_value.assert_called_once_with(service.SETTINGS, "last_error", "同步失败，请管理员重试")
+
+
+class OperatingJournalCompatibilityTests(unittest.TestCase):
+    def setUp(self):
+        self.db = Mock()
+        self.db.exists.return_value = False
+        guard = patch.object(frappe, "db", self.db)
+        guard.start()
+        self.addCleanup(guard.stop)
+        install_native_throw(self)
+
+    def journal(self, *, new=False, **fields):
+        return frappe._dict(name="JE-COMPATIBILITY", is_new=lambda: new, **fields)
+
+    def test_missing_module_leaves_new_and_existing_native_journals_untouched(self):
+        self.db.get_value.side_effect = RuntimeError("Optional module table/column query")
+        for new in (False, True):
+            with self.subTest(new=new):
+                journal = self.journal(new=new)
+                before = dict(journal)
+                service.validate_operating_journal(journal)
+                self.assertEqual(dict(journal), before)
+        self.db.get_value.assert_not_called()
+
+    def test_missing_module_rejects_any_forged_operating_association(self):
+        self.db.get_value.side_effect = RuntimeError("Optional module table/column query")
+        for field in ("custom_operating_event_key", "custom_operating_source", "custom_operating_fingerprint", "custom_operating_recognition"):
+            for new in (False, True):
+                with self.subTest(field=field, new=new), self.assertRaisesRegex(frappe.ValidationError, "未启用运营费用"):
+                    service.validate_operating_journal(self.journal(new=new, **{field: "forged"}))
+        self.db.get_value.assert_not_called()
+
+    def test_installed_module_still_protects_removal_of_existing_event_key(self):
+        self.db.exists.return_value = True
+        self.db.get_value.return_value = "existing-event"
+        with self.assertRaisesRegex(frappe.ValidationError, "事件关联不可移除或修改"):
+            service.validate_operating_journal(self.journal())
+
+    def test_installed_module_still_checks_reverse_associations_without_event_key(self):
+        self.db.exists.return_value = True
+        journal = self.journal()
+        self.db.get_value.side_effect = [None, frappe._dict(journal_entry=journal.name, operation="payment")]
+        with self.assertRaisesRegex(frappe.ValidationError, "事件关联不可移除或修改"):
+            service.validate_operating_journal(journal)
+        self.assertEqual(self.db.get_value.call_args.args[:2], (service.EVENT, {"journal_entry": journal.name}))

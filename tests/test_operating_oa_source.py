@@ -56,6 +56,76 @@ class OriginalOperatingSourceTest(unittest.TestCase):
         self.assertIsNone(item["pending_amount"])
         self.assertEqual(item["payments"], [])
 
+    def test_display_projection_prefers_explicit_organization_and_keeps_legal_resolution_separate(self):
+        row = approval()
+        row['form_component_values'].extend([{'name': n, 'value': v} for n, v in (
+            ('申请部门/组织 Departamento Solicitante', '来源组织'),
+            ('项目归属Pertenencia del proyecto', '项目 A'), ('账户性质Tipo de cuenta', '公户'), ('备注', '来源备注'))])
+        cashier = {'source_id': 'r', 'corp_id': 'corp', 'process_instance_id': 'instance-1',
+            'amount': '100', 'currency': 'CNY', 'source_company': '记账法律公司',
+            'general_manager_approval': '同意付款', 'projection_conflicts': [],
+            'approvals': {'raw': {'general_manager_approval': '同意付款'}}}
+        resolution = {'status': 'matched', 'assigned_department': '目录组织'}
+        item = self.source.merge_application(row, [cashier], resolution)
+        self.assertEqual({k: item[k] for k in ('source_company', 'account_nature', 'project',
+                                             'needed_payment_date', 'general_manager_approval', 'remark')}, {
+            'source_company': '来源组织', 'account_nature': '公户', 'project': '项目 A',
+            'needed_payment_date': '2026-01-09', 'general_manager_approval': '同意付款', 'remark': '来源备注'})
+        self.assertEqual(item['company_resolution'], resolution)
+        self.assertEqual(item['company_mapping_source'], '目录组织')
+        self.assertEqual(item['source_sheet'], '目录组织')
+        self.assertEqual(item['projection_conflicts'], [])
+        self.assertEqual(item['projection_sources']['source_company'], 'oa.form.source_company')
+        self.assertEqual(item['projection_sources']['general_manager_approval'], 'cashier.general_manager_approval')
+        self.assertFalse(item['payment_eligibility']['can_register_payment'])
+
+        row['form_component_values'][-4]['value'] = '新展示组织'
+        changed = self.source.merge_application(row, [cashier], resolution)
+        self.assertEqual(changed['source_company'], '新展示组织')
+        for key in ('company_resolution', 'company_mapping_source', 'source_sheet', 'approval_state', 'payment_eligibility'):
+            self.assertEqual(changed[key], item[key])
+
+        missing = self.source.merge_application(approval(), [], resolution)
+        self.assertIsNone(missing['source_company'])
+        self.assertNotIn('source_company', missing['projection_sources'])
+        self.assertEqual(missing['company_mapping_source'], '目录组织')
+        self.assertEqual(missing['company_resolution'], resolution)
+
+    def test_projection_conflicts_do_not_choose_a_value_or_infer_account_nature(self):
+        row = approval()
+        row['form_component_values'].extend([{'name': n, 'value': v} for n, v in (
+            ('申请部门/组织', '组织 A'), ('项目归属', '项目 A'), ('项目归属Pertenencia', '项目 B'),
+            ('账户性质', '某银行个人卡'), ('备注', ['not scalar']))])
+        cashier = {'source_id': 'r', 'corp_id': 'corp', 'process_instance_id': 'instance-1',
+            'amount': '100', 'currency': 'CNY', 'source_organization': '组织 B', 'project': '项目 A',
+            'account_nature': '私户', 'remark': '人工备注'}
+        item = self.source.merge_application(row, [cashier], {})
+        self.assertEqual(set(item['projection_conflicts']), {'source_company', 'project', 'account_nature', 'remark'})
+        for key in item['projection_conflicts']:
+            self.assertIsNone(item[key])
+
+    def test_matched_cashier_display_fields_are_used_only_with_exact_identity(self):
+        cashier = {'source_id': 'r', 'corp_id': 'corp', 'process_instance_id': 'instance-1',
+            'amount': '100', 'currency': 'CNY', 'source_organization': '原始归属组织',
+            'source_company': '不用于列表的法人', 'project': '人工项目', 'account_nature': '私户',
+            'needed_payment_date': '2026-01-09', 'remark': '人工备注',
+            'general_manager_approval': '同意付款'}
+        item = self.source.merge_application(approval(), [cashier], {'status': 'matched', 'assigned_department': '目录组织'})
+        self.assertEqual(item['source_company'], '原始归属组织')
+        self.assertEqual(item['project'], '人工项目')
+        self.assertEqual(item['account_nature'], '私户')
+        self.assertEqual(item['remark'], '人工备注')
+        self.assertEqual(item['projection_sources']['project'], 'cashier.project')
+        foreign = self.source.merge_application(approval(), [{**cashier, 'corp_id': 'foreign'}], {})
+        for key in ('source_company', 'project', 'account_nature', 'remark', 'general_manager_approval'):
+            self.assertIsNone(foreign[key])
+        number_only = {**cashier, 'approval_no': approval()['business_id'],
+                       'approval_identity_status': 'explicit'}
+        number_only.pop('process_instance_id')
+        legacy = self.source.merge_application(approval(), [number_only], {})
+        for key in ('source_company', 'project', 'account_nature', 'remark', 'general_manager_approval'):
+            self.assertIsNone(legacy[key])
+
     def test_workflow_corrects_originator_without_relabeling_current_approver(self):
         row = approval(); row.update(status="RUNNING", result="NONE", originator_user_id="supervisor")
         evidence = {"source_id": self.source.application_id(row), "corp_id": "corp", "process_instance_id": "instance-1",
@@ -141,7 +211,8 @@ class OriginalOperatingSourceTest(unittest.TestCase):
         company = {"status": "matched", "assigned_department": "拉丁购", "match_source": "user_id"}
         item = self.source.merge_application(raw, [cashier], company)
         self.assertEqual(item["payments"], cashier["payments"])
-        self.assertEqual(item["source_company"], "拉丁购")
+        self.assertIsNone(item["source_company"])
+        self.assertEqual(item["company_mapping_source"], "拉丁购")
         self.assertEqual(item["paid_amount"], "20")
         self.assertEqual(item["cashier_source_id"], "legacy-root")
         self.assertEqual(item["source_id"], self.source.application_id(raw))
@@ -215,7 +286,7 @@ class OriginalOperatingSourceTest(unittest.TestCase):
         self.assertIn("CASE WHEN jsonb_typeof(form_component_values)='array' THEN", query.sql)
         self.assertIn("jsonb_agg(jsonb_build_object('name',component->'name','value',component->'value') ORDER BY ordinal),'[]'::jsonb)", query.sql)
         self.assertIn("jsonb_array_elements(form_component_values) WITH ORDINALITY AS form(component,ordinal)", query.sql)
-        self.assertIn("WHERE jsonb_typeof(component)='object' AND component->>'name' ~ '申请类型|执行地区|金额|币种|事项说明|收款人|付款日期|归属项目|项目'", query.sql)
+        self.assertIn("WHERE jsonb_typeof(component)='object' AND component->>'name' ~ '申请类型|执行地区|金额|币种|事项说明|收款人|付款日期|归属项目|项目|申请部门/组织|部门/组织|部门Departamento|账户性质|备注'", query.sql)
         self.assertIn("ELSE form_component_values END)::text AS form_component_values", query.sql)
         self.assertNotIn("btrim", query.sql)
         self.assertNotIn("DISTINCT", query.sql)

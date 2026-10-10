@@ -1,5 +1,23 @@
 # 采购付款与紧凑列表验收
 
+## 子站归档后的共享发布（2026-10-10）
+
+复用 `deploy/production/deploy_unified_purchase.sh` 原有六服务、锁、原生控制器审计和回滚。新可选前置参数为 `--retirement-receipt <容器内绝对路径> <已批准SHA256>`；后面的维护批准只填 `deeplinkerp.com`，子站原生字段批准留空。它不是隔离 `--main-only`，不新建服务、不删除数据库、不迁移或重新过账历史业务。
+
+回执位于 `sites/.deeplinkerp-retired-sites/YYYY-MM-DD/retirement-receipt.json`，最小契约为 `version=1,status=complete,original_sites=原四站,active_sites=[deeplinkerp.com],databases_retained=true`；三个 `retired_sites` 项各含移动后 `directory`、原始 `config_sha256`、目录内 `archives` 相对路径及每件的 `sha256/local_sha256`。主站原始配置字节摘要为 `main_config_sha256`；去掉且仅去掉 `maintenance_mode` 后，按 `json.dumps(sort_keys=True,ensure_ascii=False,default=str)` 默认空格编码得到 `main_config_without_maintenance_sha256`。`nginx` 含精确 `.conf` 容器路径及文件摘要。
+
+发布先核对回执摘要、实际 Frappe `get_sites`、原顶层目录已移走、配置/全部列明备份实物与离线摘要相符、主站配置不变。持久只读 Nginx bind 必须实际加载单个 server（8080，精确三个子域，HTTP 410）；切换前后核对公网 410，staged 阶段核对真实 bind。然后原有预检、维护、元数据、前后审计、回滚和清缓存只处理核实过的活动主站。历史 `SHARED_SITES` 不缩减，Redis/RQ 对退休站历史的归属与安全校验继续保留。
+
+清理仍仅删除在线浏览器验收过的本次、无容器占用、散列和身份一致的构建解压目录；先后重新验证活动站点、退休证明、路由、当前/回滚镜像与 raw RQ，不清数据库、附件、退休目录、镜像或队列。备份恢复试验、子站真正停用和线上验收由唯一生产发布负责人记录，本地测试不代表已完成这些操作。
+
+旧四站共享和已批准的隔离入口为现有调用方保留；只有旧调用方停用且相应发布/回滚证据不再需要该入口后才可另行删除，本次不删除它们。没有新增平行发布流程。本次测试在原测试文件增加归档契约、参数传递与维护范围场景，并参数化扩展原审计/清理用例；保留既有业务、权限、源码和恢复测试。
+
+### 只读探针运行目录修复（2026-10-10）
+
+生产检查发现 Docker 默认工作目录为 `/home/frappe`，原生 Frappe 连接尝试打开该目录下不存在的日志。复用原有 `_container_read` 和 `_command_rq_snapshot`，显式设置 `--workdir /home/frappe/frappe-bench/sites`；不改变镜像、网络、只读挂载、原生安全检查或 RQ 历史归属。原两项缺工作目录的 argv 回归先失败、修后通过；完整专项 175 tests PASS（3 skipped），独立复核 58 tests PASS，实际 Frappe 16.23.0 文件系统场景 6 tests PASS，实际发出的 Docker cwd 在既有本地 QA 中成功连接且未产生业务记录。
+
+仅清理本次新增的规范诊断。固定 Ruff 0.14.10 比较三个修改的 Python 文件，基线/当前诊断数分别相同（1、69、0），无新增诊断；全仓 Linters 仍有已确认的遗留问题，不能记为全绿。生产首次真实停服务还发现原先一律对 PID1 发 TERM 不适用于 scheduler、websocket 和 bash 包装的 Nginx；该排空契约仍需根据实际进程树和原生信号复核。本节局部修复不代表该阻断已解决，也不代表已部署；生产负责人已恢复原配置和原服务，旧 drain 证据保留，不重复信号或强制退出。
+
 ## 实现范围
 
 - 采购入库默认展示独立收货状态、关联订单、关联应付的已付/核销与未付。公司、币种等重复字段可从列设置打开；原生高级筛选和批量操作保留在原生视图。

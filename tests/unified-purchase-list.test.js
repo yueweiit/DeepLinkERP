@@ -49,7 +49,7 @@ test('real unified provider PO rows reuse native workflow indicator while OA row
  controller.setProviderScope('all',false);
  const po={name:'PO',row_type:'purchase_order',status:'To Receive and Bill',docstatus:1,supplier_name:'S'};
  const html=list.get_list_row_html(po);assert.match(html,/indicator-pill blue/);assert.match(html,/待收货待开票/);assert.equal(calls[0][0],po);assert.equal(calls[0][1],true);
- const oa=list.get_list_row_html({name:'OA',row_type:'oa_request',status:'OA 待办',supplier_name:'S'});assert.match(oa,/OA 待办/);assert.doesNotMatch(oa,/indicator-pill/);assert.equal(calls.length,1);
+ const count=calls.length,oa=list.get_list_row_html({name:'OA',row_type:'oa_request',status:'OA 待办',supplier_name:'S'});assert.match(oa,/OA 待办/);assert.doesNotMatch(oa,/indicator-pill/);assert.equal(calls.length,count);
  assert.equal(controller.providerScope,'all');assert.equal(controller.list.data.length,0);
 });
 
@@ -185,12 +185,12 @@ test("explicit header sorting wins until a native sort choice and both controls 
 	assert.equal(adapter.getArgs(controller).order_by, "name asc"); assert.equal(controller.page, 0); assert.equal(nativeChanges, 1);
 });
 
-test("unified list uses one scope and source labels without a separate source view", () => {
+test("unified procurement controls start with real orders and source filtering stays on the same provider", () => {
 	const markup = [];
 	const surface = { prependTo() { return this; }, insertAfter() { return this; }, on() { return this; } };
 	let scope;
 	adapter.configure([]).mountControls({ root: { $: html => { markup.push(html); return surface; }, frappe: {} }, list: { $result: surface }, $toolbar: surface, $filters: surface, setProviderScope: value => scope = value });
-	assert.equal(scope, "all");
+	assert.equal(scope, "orders");
 	assert.doesNotMatch(markup.join(""), /dlp-po-scope|仅订单|仅 OA|仅查看/);
 	assert.match(markup.join(""), /钉钉/); assert.match(markup.join(""), /其他来源/);
 });
@@ -379,21 +379,21 @@ test("export captures clicked native filters and columns before lazy library loa
 const groupedDefaults = ["name", "supplier_name", "project_context", "external_payment", "internal_settlement", "receipt_logistics", "receipt_action"];
 const nativePOColumns = require("../deeplinkerp_branding/public/js/purchase_order_list.js").COLUMNS;
 
-test("seven purchase groups migrate only known default orders while retaining density and custom order", () => {
+test("only the exact version 2 seven-column purchase default migrates to physical detail columns", () => {
 	const provider = adapter.configure(nativePOColumns);
-	assert.deepEqual(provider.defaultColumns, groupedDefaults);
+	assert.ok(provider.defaultColumns.includes("item_code"));
 	const old8 = ["name", "supplier_name", "grand_total", "order_settled", "order_unpaid", "per_received", "status", "receipt_action"];
 	const old10 = [...old8.slice(0, 3), "requested_amount", "cashier_paid_amount", ...old8.slice(3)];
 	const old16 = nativePOColumns.map(c => c.fieldname).filter(field => field !== "receipt_action");
 	const allowed = new Set([...provider.columns.map(c => c.fieldname), ...provider.virtualFields]);
 	const grid = engine.create({ doctype: "Purchase Order", columns: nativePOColumns, provider });
-	for (const columns of [old8, old10, old16, nativePOColumns.map(c => c.fieldname)]) {
-		const input = { density: "standard", columns }, before = JSON.stringify(input);
+	for (const density of ["standard", "tight"]) {
+		const input = { density, version: 2, columns: groupedDefaults }, before = JSON.stringify(input);
 		const prefs = grid.normalizePreferences(input, allowed, provider.columns);
-		assert.deepEqual(prefs.columns, groupedDefaults); assert.equal(prefs.density, "standard"); assert.equal(prefs.version, 2);
+		assert.deepEqual(prefs.columns, provider.defaultColumns); assert.equal(prefs.density, density); assert.equal(prefs.version, 3);
 		assert.equal(JSON.stringify(input), before);
 	}
-	for (const columns of [["supplier_name", "name", "grand_total"], [...old8].reverse(), ["name", "status"]]) {
+	for (const columns of [old8, old10, old16, nativePOColumns.map(c => c.fieldname), ["supplier_name", "name", "grand_total"], [...groupedDefaults].reverse(), ["name", "status"]]) {
 		assert.deepEqual(grid.normalizePreferences({ density: "standard", columns }, allowed, provider.columns).columns, columns);
 	}
 	assert.ok(provider.columns.some(c => c.fieldname === "advance_paid"));
