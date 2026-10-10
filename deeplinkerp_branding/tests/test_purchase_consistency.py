@@ -185,6 +185,7 @@ class ConsistencyTests(unittest.TestCase):
 
     def test_gl_allocation_accepts_native_mapping_and_voucher_child_documents(self):
         from frappe.model.base_document import BaseDocument
+        from frappe.model.document import Document
         values = dict(account="A", account_currency="USD", debit=10, credit=0,
             debit_in_account_currency=2, credit_in_account_currency=0)
         parent_meta = SimpleNamespace(_table_doctypes={"entries": "China Accounting Voucher Entry"})
@@ -193,7 +194,8 @@ class ConsistencyTests(unittest.TestCase):
         # lookup is a collaborator, so this also works without the Finance app.
         with patch.object(frappe, "get_meta", side_effect=lambda dt: parent_meta
                 if dt == "China Accounting Voucher" else child_meta), \
-                patch("frappe.model.base_document.get_controller", return_value=BaseDocument):
+                patch.object(frappe, "local", SimpleNamespace(valid_columns={"China Accounting Voucher Entry": list(values)})), \
+                patch("frappe.model.base_document.get_controller", return_value=Document):
             voucher = BaseDocument.__new__(BaseDocument)
             voucher.flags = frappe._dict()
             voucher.__init__({"doctype": "China Accounting Voucher", "name": "V"})

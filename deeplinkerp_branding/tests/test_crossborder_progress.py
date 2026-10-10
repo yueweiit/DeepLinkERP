@@ -139,6 +139,7 @@ class NativeMemory:
                 if value[0] == "in" and row.get(key) not in value[1]: return False
                 if value[0] == "!=" and row.get(key) == value[1]: return False
                 if value[0] == "=" and row.get(key) != value[1]: return False
+                if value[0] == "is" and (row.get(key) not in (None, "")) != (value[1] == "set"): return False
             elif row.get(key) != value:
                 return False
         return True
@@ -151,7 +152,11 @@ class NativeMemory:
             return list(dict.fromkeys(row[kwargs["pluck"]] for row in result))
         return result
     def get_values(self, dt, filters, fields, **kwargs):
-        return self.rows(dt, filters)
+        rows = self.rows(dt, filters)
+        if fields != "*":
+            fields = [fields] if isinstance(fields, str) else fields
+            rows = [frappe._dict({field: row.get(field) for field in fields}) for row in rows]
+        return rows if kwargs.get("as_dict") else [tuple(row.values()) for row in rows]
     def get_value(self, dt, name, field, **kwargs):
         row = self.records.get((dt, name), {}) if isinstance(name, str) else next(iter(self.rows(dt, name)), {})
         if isinstance(field, (list, tuple)):
@@ -596,6 +601,23 @@ class CrossborderProgressTests(unittest.TestCase):
         for dt, filters in self.memory.queries:
             if dt in ("Purchase Receipt Item", "Purchase Invoice Item") and filters and "purchase_order" in filters:
                 self.assertEqual(filters["purchase_order"][1], [result["rows"][0]["name"]])
+
+    def test_real_unified_reversal_projection_selects_only_orders_with_pending_pointer(self):
+        from deeplinkerp_branding.services import unified_purchase_service as unified
+        from deeplinkerp_branding.services import purchase_reversal_progress as reversal
+        pointer = "custom_purchase_reversal_operation"
+        self.memory.records["Purchase Order", "EXT"][pointer] = "PENDING"
+        self.memory.po("EMPTY")[pointer] = ""
+        self.memory.po("UNBOUND")
+        with patch.object(unified, "get_permitted_fields", side_effect=self.memory.fields), \
+             patch.object(unified, "get_workflow_name", return_value=""), \
+             patch.object(reversal, "projection", return_value={"stage": "waiting_inventory"}):
+            result = unified.get_unified_purchase_list()
+        rows = {row["name"]: row for row in result["rows"]}
+        self.assertEqual(rows["EXT"]["reversal"], {"stage": "waiting_inventory"})
+        self.assertIsNone(rows["EMPTY"]["reversal"])
+        self.assertIsNone(rows["UNBOUND"]["reversal"])
+        self.assertEqual(self.memory.locks, [("Purchase Order", "EXT")])
 
     def test_source_required_fields_restrict_before_quick_filters_totals_and_page_progress(self):
         from deeplinkerp_branding.services import unified_purchase_service as unified

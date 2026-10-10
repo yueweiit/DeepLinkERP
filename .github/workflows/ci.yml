@@ -17,6 +17,12 @@ jobs:
     strategy:
       fail-fast: false
     name: Server
+    env:
+      # The native procurement adapters audit this supported production release.
+      # Upstream upgrades require a separate audit; never replace the source pins.
+      FRAPPE_RELEASE: v16.23.0
+      ERPNEXT_RELEASE: v16.23.0
+      OVERSEAS_COSTING_COMMIT: a8070a92fb963f7fad97ef40bc2cdac90e4b10bc
 
     services:
       redis-cache:
@@ -100,12 +106,20 @@ jobs:
       - name: Setup
         run: |
           pip install frappe-bench
-          bench init --frappe-branch version-16 --skip-redis-config-generation --skip-assets --python "$(which python)" ~/frappe-bench
+          bench init --frappe-branch "$FRAPPE_RELEASE" --skip-redis-config-generation --skip-assets --python "$(which python)" ~/frappe-bench
 
       - name: Install
         working-directory: /home/runner/frappe-bench
         run: |
-          bench get-app --branch version-16 erpnext https://github.com/frappe/erpnext
+          bench get-app --branch "$ERPNEXT_RELEASE" erpnext https://github.com/frappe/erpnext
+          # Exercise the real optional approval helpers without installing their schema.
+          costing_source="$RUNNER_TEMP/overseas_costing"
+          git clone --depth 1 --no-checkout --branch overseas_costing https://github.com/yueweiit/DeepLinkERP "$costing_source"
+          git -C "$costing_source" fetch --depth 1 origin "$OVERSEAS_COSTING_COMMIT"
+          git -C "$costing_source" checkout --detach "$OVERSEAS_COSTING_COMMIT"
+          bench get-app --skip-assets overseas_costing "$costing_source"
+          git -C apps/overseas_costing rev-parse HEAD
+          test "$(git -C apps/overseas_costing rev-parse HEAD)" = "$OVERSEAS_COSTING_COMMIT"
           bench get-app deeplinkerp_branding $GITHUB_WORKSPACE
           bench setup requirements --dev
           bench new-site --db-root-password root --admin-password admin test_site
@@ -119,6 +133,7 @@ jobs:
         working-directory: /home/runner/frappe-bench
         run: |
           ./env/bin/pip install pytest
+          ./env/bin/python -c 'import frappe, erpnext; from deeplinkerp_branding.services.purchase_native_repost import install; from overseas_costing.scripts.import_oa_logistics import COMPLETED_APPROVAL_STATUSES, resolve_approval_decision; install(); print("Supported native runtime:", frappe.__version__, erpnext.__version__)'
           ./env/bin/python -m pytest -q "$GITHUB_WORKSPACE/deeplinkerp_branding/tests"
           bench --site test_site set-config allow_tests true
           bench --site test_site run-tests --app deeplinkerp_branding
