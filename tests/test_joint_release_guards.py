@@ -657,17 +657,25 @@ class JointReleaseGuardTests(unittest.TestCase):
 	def test_native_planning_virtualizes_cache_fills_but_forbids_real_cache_sql_and_commit_mutations(self):
 		module = self.metadata_module()
 		events = []
-		cache = types.SimpleNamespace(**{name: lambda *a, **kw: events.append("real-cache") for name in ("get_value", "set_value", "delete_value", "set", "delete", "hset", "hdel", "sadd", "srem", "publish", "flushdb", "flushall")})
+		cache = types.SimpleNamespace(**{name: lambda *a, **kw: events.append("real-cache") for name in ("get_value", "set_value", "delete_value", "hget", "set", "delete", "hset", "hdel", "sadd", "srem", "publish", "flushdb", "flushall")})
 		fake = types.SimpleNamespace(get_meta=lambda *a, **kw: "meta", cache=cache, client_cache=types.SimpleNamespace(get_value=cache.get_value, set_value=cache.set_value, delete_value=cache.delete_value), db=types.SimpleNamespace(sql=lambda query, *a, **kw: [query], sql_ddl=lambda *a, **kw: events.append("real-ddl"), commit=lambda: events.append("commit"), rollback=lambda: events.append("rollback")))
 		with patch.dict(sys.modules, {"frappe": fake}), module._read_only_native_planning() as queries:
 			fake.cache.set_value("columns", ["name"])
 			self.assertEqual(fake.cache.get_value("columns"), ["name"])
 			self.assertEqual(fake.cache.get_value("generated", generator=lambda: 2), 2)
+			generated = []
+			def user_doc():
+				generated.append("Administrator")
+				return {"name": "Administrator"}
+			self.assertEqual(fake.cache.hget("user_doc", "Administrator", user_doc), {"name": "Administrator"})
+			self.assertEqual(fake.cache.hget("user_doc", "Administrator", user_doc), {"name": "Administrator"})
+			self.assertEqual(generated, ["Administrator"])
+			self.assertIsNone(fake.cache.hget("user_doc", "Administrator", shared=True))
 			fake.client_cache.set_value("native-meta", "value")
 			self.assertEqual(fake.client_cache.get_value("native-meta"), "value")
 			self.assertEqual(fake.db.sql("select 1"), ["select 1"])
 			fake.db.sql_ddl("captured-only")
-			for action in (lambda: fake.db.sql("update anything"), fake.db.commit, fake.db.rollback, lambda: fake.cache.set("key", "value"), fake.cache.flushdb):
+			for action in (lambda: fake.db.sql("update anything"), fake.db.commit, fake.db.rollback, lambda: fake.cache.set("key", "value"), lambda: fake.cache.hset("user_doc", "Administrator", {}), fake.cache.flushdb):
 				with self.assertRaises(AssertionError):
 					action()
 			self.assertEqual(queries, ["captured-only"])

@@ -292,6 +292,13 @@ def _read_only_native_planning():
 		return local_cache.get(identity)
 	def cache_set(key, value, user=None, expires_in_sec=None, shared=False):
 		local_cache[("redis", key, user, shared)] = value
+	def cache_hash_get(name, key, generator=None, shared=False):
+		# Native sidebar controllers lazily fill user_doc through hget's generator.
+		# Evaluate each identity once locally, without its implicit Redis hset.
+		identity = ("hash", name, key, shared)
+		if identity not in local_cache and generator:
+			local_cache[identity] = generator()
+		return local_cache.get(identity)
 	with contextlib.ExitStack() as stack:
 		stack.enter_context(patch.object(frappe, "get_meta", native_get_meta))
 		stack.enter_context(patch.object(frappe.db, "sql", read_sql))
@@ -305,6 +312,7 @@ def _read_only_native_planning():
 		# Native table-column reads fill the ordinary Redis cache too. Keep that
 		# fill entirely local; direct Redis mutations remain forbidden.
 		stack.enter_context(patch.object(frappe.cache, "get_value", cache_get))
+		stack.enter_context(patch.object(frappe.cache, "hget", cache_hash_get))
 		stack.enter_context(patch.object(frappe.cache, "set_value", cache_set))
 		stack.enter_context(patch.object(frappe.cache, "delete_value", lambda key, *a, **kw: None))
 		for name in ("set", "delete", "hset", "hdel", "sadd", "srem", "publish", "flushdb", "flushall"):
