@@ -204,7 +204,8 @@ def retirement_site_proof(path, digest, *, original_config=False):
 	assert path.is_file() and not path.is_symlink(), "Retirement receipt missing/linked; HOLD"
 	for parent in path.parents:
 		assert not parent.is_symlink(), "Linked retirement receipt directory; HOLD"
-		if parent == BENCH_SITES: break
+		if parent == BENCH_SITES:
+			break
 	path = path.resolve(strict=True)
 	assert path.name == "retirement-receipt.json" and path.parent.parent == root / ".deeplinkerp-retired-sites", "Unapproved retirement receipt location; HOLD"
 	assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", path.parent.name), "Unapproved retirement directory; HOLD"
@@ -717,7 +718,7 @@ def _container_read(service, tool, action):
 	if action == "--runtime-proof" and os.environ.get("DEEPLINKERP_RETIREMENT_RECEIPT"):
 		for key in ("DEEPLINKERP_RETIREMENT_RECEIPT", "DEEPLINKERP_RETIREMENT_SHA256"):
 			environment += ["-e", key + "=" + os.environ[key]]
-	return json.loads(_host_call(["docker", "exec", *environment, "frappe_docker-" + service + "-1", "/home/frappe/frappe-bench/env/bin/python", "/tmp/joint_release_guards.py", action]))
+	return json.loads(_host_call(["docker", "exec", "--workdir", str(BENCH_SITES), *environment, "frappe_docker-" + service + "-1", "/home/frappe/frappe-bench/env/bin/python", "/tmp/joint_release_guards.py", action]))
 
 
 def _command_rq_snapshot(backend, tool, *, action="--rq-snapshot", arguments=()):
@@ -726,7 +727,7 @@ def _command_rq_snapshot(backend, tool, *, action="--rq-snapshot", arguments=())
 	assert len(sites_mounts) == 1 and sites_mounts[0]["Type"] in {"bind", "volume"}, "Unknown shared sites mount"
 	site_source = sites_mounts[0].get("Name") if sites_mounts[0]["Type"] == "volume" else sites_mounts[0]["Source"]
 	assert action in {"--rq-snapshot", "--retirement-proof"}, "Only readonly shared probes permitted"
-	return json.loads(_host_call(["docker", "run", "--rm", "--network", backend["HostConfig"]["NetworkMode"], "--mount", "type=bind,source=" + str(Path(tool).resolve()) + ",target=/tmp/joint_release_guards.py,readonly", "-v", site_source + ":/home/frappe/frappe-bench/sites:ro", "--entrypoint", "/home/frappe/frappe-bench/env/bin/python", backend["Image"], "/tmp/joint_release_guards.py", action, *arguments]))
+	return json.loads(_host_call(["docker", "run", "--rm", "--workdir", str(BENCH_SITES), "--network", backend["HostConfig"]["NetworkMode"], "--mount", "type=bind,source=" + str(Path(tool).resolve()) + ",target=/tmp/joint_release_guards.py,readonly", "-v", site_source + ":/home/frappe/frappe-bench/sites:ro", "--entrypoint", "/home/frappe/frappe-bench/env/bin/python", backend["Image"], "/tmp/joint_release_guards.py", action, *arguments]))
 
 
 def drain_release(path, tool, candidate_sha, *, timeout=360):

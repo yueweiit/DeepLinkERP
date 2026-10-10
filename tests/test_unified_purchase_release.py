@@ -50,7 +50,8 @@ class ReleaseRecoveryTests(unittest.TestCase):
 		for mode in ("legacy", "bare-main", "retired", "mixed-isolated", "missing-pin"):
 			with self.subTest(mode=mode):
 				flags = [] if mode in {"legacy", "bare-main"} else ["--retirement-receipt", "/home/frappe/frappe-bench/sites/.deeplinkerp-retired-sites/2026-10-10/retirement-receipt.json", "d" * 64 if mode != "missing-pin" else ""]
-				if mode == "mixed-isolated": flags.insert(0, "--main-only")
+				if mode == "mixed-isolated":
+					flags.insert(0, "--main-only")
 				approval = ("deeplinkerp.com,akivision.deeplinkerp.com,latingo.deeplinkerp.com,yuewei.deeplinkerp.com", "akivision.deeplinkerp.com,latingo.deeplinkerp.com,yuewei.deeplinkerp.com") if mode == "legacy" else ("deeplinkerp.com", "")
 				args = ["archive", "a" * 40, "old-image", "old-id", "", "", "finance", "b" * 40, "oa", "c" * 40, *approval]
 				result = subprocess.run(["bash", "-c", prefix, "release-test", *flags, *args], capture_output=True, text=True)
