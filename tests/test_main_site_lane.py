@@ -1,9 +1,11 @@
 """Main-only topology/account/route boundaries; never contact a live host."""
 
 import base64
+import contextlib
 import copy
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -148,6 +150,141 @@ class MainSiteLaneTests(unittest.TestCase):
 						root, [{"Mounts": [{"Type": "bind", "Source": str(exposed)}]}]
 					)
 
+	def test_private_runtime_access_rejects_public_groups_and_shares_only_host_inputs(self):
+		lane = self.module()
+		self.assertTrue(hasattr(lane, "runtime_access"), "Cross-UID private input access is missing")
+		owner = types.SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid(), pw_name="release")
+		group = types.SimpleNamespace(gr_mem=[])
+		with tempfile.TemporaryDirectory() as tmp:
+			root = Path(tmp)
+			(root / "before.json").write_text('{"private":"receipt"}')
+			(root / "host-only.py").write_text("private host tool")
+			(root / "main_site_lane.py").write_text("frozen main helper")
+			os.chmod(root / "main_site_lane.py", 0o600)
+			os.chmod(root, 0o700)
+			os.chmod(root / "before.json", 0o600)
+			os.chmod(root / "host-only.py", 0o600)
+			with (
+				patch.object(lane.pwd, "getpwuid", return_value=owner),
+				patch.object(lane.pwd, "getpwall", return_value=[owner]),
+				patch.object(lane.grp, "getgrgid", return_value=group),
+			):
+				result = lane.runtime_access(root)
+				self.assertEqual(result, {"private_gid": os.getgid(), "host_uid": os.getuid()})
+				self.assertEqual(root.stat().st_mode & 0o777, 0o750)
+				self.assertEqual((root / "before.json").stat().st_mode & 0o777, 0o640)
+				self.assertEqual((root / "host-only.py").stat().st_mode & 0o777, 0o600)
+				self.assertEqual((root / "main_site_lane.py").stat().st_mode & 0o777, 0o640)
+				self.assertEqual((root / "before.json").stat().st_uid, os.getuid())
+				lane.DDLReceipt(root / "before.json", {})._write(b'{"private":"updated"}')
+				self.assertEqual((root / "before.json").stat().st_mode & 0o777, 0o600)
+				lane.runtime_access(root)
+				self.assertEqual((root / "before.json").stat().st_mode & 0o777, 0o640)
+				for foreign in ("primary", "supplemental", "symlink"):
+					with self.subTest(foreign=foreign):
+						others = (
+							[owner, types.SimpleNamespace(pw_uid=os.getuid() + 1, pw_gid=os.getgid())]
+							if foreign == "primary"
+							else [owner]
+						)
+						members = ["another-user"] if foreign == "supplemental" else []
+						if foreign == "symlink":
+							(root / "outside.json").symlink_to(root / "before.json")
+						with (
+							patch.object(lane.pwd, "getpwall", return_value=others),
+							patch.object(
+								lane.grp, "getgrgid", return_value=types.SimpleNamespace(gr_mem=members)
+							),
+							self.assertRaisesRegex(AssertionError, "private|owned|symlink"),
+						):
+							lane.runtime_access(root)
+						if foreign == "symlink":
+							(root / "outside.json").unlink()
+
+	def test_new_main_services_and_command_runner_share_frozen_private_group_without_changing_user(self):
+		lane = self.module()
+		self.assertIn(
+			"private_gid", lane.lane_compose.__code__.co_varnames, "Main runtime private group is missing"
+		)
+		model = lane.lane_compose(
+			"candidate",
+			"redis",
+			"/private/release",
+			".deeplinkerp-main-lane/release/deeplinkerp.com",
+			private_gid=1001,
+		)
+		for name, service in model["services"].items():
+			self.assertNotIn("user", service)
+			if name.startswith("main-redis-"):
+				self.assertNotIn("group_add", service)
+			else:
+				self.assertEqual(service["group_add"], ["1001"])
+
+	def test_private_access_cli_failure_retains_private_identity_report_without_other_changes(self):
+		lane = self.module()
+		with tempfile.TemporaryDirectory() as tmp:
+			root = Path(tmp)
+			(root / "before.json").write_text('{"unchanged":true}')
+			stderr = io.StringIO()
+			with (
+				patch.object(lane, "runtime_access", side_effect=AssertionError("public group")),
+				patch.object(sys, "argv", ["main_site_lane", "runtime-access", "--evidence", str(root)]),
+				contextlib.redirect_stderr(stderr),
+			):
+				self.assertEqual(lane.main(), 1)
+			report = json.loads(stderr.getvalue())
+			self.assertEqual(report["outcome"], "PRIVATE_ACCESS_FAILED")
+			self.assertEqual(report.get("host_uid"), os.getuid())
+			self.assertEqual(report.get("private_gid"), os.getgid())
+			self.assertEqual(json.loads((root / "private-access-failure.json").read_bytes()), report)
+			self.assertEqual((root / "private-access-failure.json").stat().st_mode & 0o777, 0o600)
+			self.assertEqual((root / "before.json").read_text(), '{"unchanged":true}')
+			self.assertFalse((root / "main-seal.json").exists())
+
+	def test_private_scaffold_keeps_config_read_only_and_logs_group_writable(self):
+		lane = self.module()
+		with tempfile.TemporaryDirectory() as tmp:
+			root = Path(tmp)
+			volume = {
+				"common": base64.b64encode(b"{}").decode(),
+				"apps": base64.b64encode(b"frappe\nerpnext\n").decode(),
+			}
+			lane.private_roots(root, volume, {"db_password": "fixture", "maintenance_mode": 1})
+			for name in ("main-sites", "main-sites/deeplinkerp.com", "main-sites/assets"):
+				self.assertEqual((root / name).stat().st_mode & 0o7777, 0o750)
+			self.assertEqual((root / "main-sites/logs").stat().st_mode & 0o7777, 0o2770)
+			for name in (
+				"main-sites/apps.txt",
+				"main-sites/common_site_config.json",
+				"main-site-config.json",
+			):
+				self.assertEqual((root / name).stat().st_mode & 0o777, 0o640)
+				self.assertEqual((root / name).stat().st_uid, os.getuid())
+
+	def test_owned_cleanup_image_tools_keep_private_access_when_build_is_evidence(self):
+		lane = self.module()
+		owner = types.SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid(), pw_name="release")
+		with tempfile.TemporaryDirectory() as tmp:
+			root = Path(tmp)
+			for name in ("main_site_lane.py", "joint_release_guards.py"):
+				(root / name).write_text("frozen helper")
+				os.chmod(root / name, 0o600)
+			with (
+				patch.object(lane.pwd, "getpwuid", return_value=owner),
+				patch.object(lane.pwd, "getpwall", return_value=[owner]),
+				patch.object(lane.grp, "getgrgid", return_value=types.SimpleNamespace(gr_mem=[])),
+				patch.object(lane, "host_call", return_value="{}") as call,
+			):
+				lane.image_call("frozen-base", root, "volume", payload={"action": "proof"})
+			command = call.call_args.args[0]
+			self.assertIn("--group-add", command)
+			self.assertEqual(command[command.index("--group-add") + 1], str(os.getgid()))
+			self.assertIn(
+				"type=bind,source=" + str(root.resolve()) + ",target=/release-tools,readonly", command
+			)
+			for name in ("main_site_lane.py", "joint_release_guards.py"):
+				self.assertEqual((root / name).stat().st_mode & 0o777, 0o640)
+
 	def test_original_auth_intent_survives_a_partial_host_lock_failure(self):
 		lane = self.module()
 		with tempfile.TemporaryDirectory() as tmp:
@@ -249,6 +386,7 @@ class MainSiteLaneTests(unittest.TestCase):
 				"base_image": "sha256:" + "c" * 64,
 				"redis_image_id": "sha256:" + "b" * 64,
 				"subpath": ".deeplinkerp-main-lane/release/deeplinkerp.com",
+				"private_gid": 1001,
 			}
 			lane.DDLReceipt.create(
 				root / "main-seal.json",
@@ -259,10 +397,19 @@ class MainSiteLaneTests(unittest.TestCase):
 			(root / "main.compose.json").write_text(
 				json.dumps(
 					lane.lane_compose(
-						contract["image_id"], contract["redis_image_id"], str(root), contract["subpath"]
+						contract["image_id"],
+						contract["redis_image_id"],
+						str(root),
+						contract["subpath"],
+						private_gid=1001,
 					)
 				)
 			)
+			binding = patch.object(
+				lane, "runtime_access", return_value={"private_gid": 1001, "host_uid": os.getuid()}
+			)
+			binding.start()
+			self.addCleanup(binding.stop)
 			command = lane.runner_command(
 				root,
 				"/frozen/build",
@@ -271,6 +418,7 @@ class MainSiteLaneTests(unittest.TestCase):
 				["/release/deploy/production/audit_unified_purchase.py"],
 				"a" * 40,
 			)
+			self.assertEqual(command[command.index("--group-add") + 1], "1001")
 			mounts = [command[i + 1] for i, item in enumerate(command[:-1]) if item == "--mount"]
 			self.assertTrue(
 				any(
@@ -314,6 +462,11 @@ class MainSiteLaneTests(unittest.TestCase):
 				with self.assertRaises(RuntimeError):
 					lane.install_route(receipt, maintenance=True, first=True)
 			self.assertIn("server_name deeplinkerp.com;", route.read_text())
+			self.assertEqual(
+				route.stat().st_mode & 0o777,
+				0o644,
+				"Non-secret Nginx route must be readable by the unchanged frontend UID",
+			)
 			self.assertEqual(
 				compose.read_bytes().replace(
 					("      - " + json.dumps(str(route) + ":" + lane.ROUTE_TARGET + ":ro") + "\n").encode(),
@@ -522,6 +675,7 @@ class MainSiteLaneTests(unittest.TestCase):
 					"new_user": "new_main",
 					"database": "main_db",
 					"original_hosts": ["%"],
+					"private_gid": os.getgid(),
 				}
 				baseline = {service: {"id": service} for service in lane.RELEASE_SERVICES}
 				old_account = {"user": "old_main", "host": "%", "priv": {"authentication_string": "original"}}
@@ -724,6 +878,96 @@ class MainSiteLaneTests(unittest.TestCase):
 				(root / "oversized-audit.json").write_bytes(b"a" * 1000)
 				with self.assertRaisesRegex(AssertionError, "receipt|budget"):
 					lane.receipt_budget(root, root)
+
+	@unittest.skipUnless(
+		os.environ.get("DEEPLINKERP_MAIN_LANE_DOCKER_QA") == "1", "Explicit owned local Docker QA only"
+	)
+	def test_owned_linux_cross_uid_private_inputs_and_serving_permissions(self):
+		context = subprocess.run(["docker", "context", "show"], capture_output=True, text=True, check=True)
+		self.assertEqual(context.stdout.strip(), "desktop-linux")
+		endpoint = subprocess.run(
+			["docker", "context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"],
+			capture_output=True,
+			text=True,
+			check=True,
+		)
+		self.assertEqual(json.loads(endpoint.stdout), "unix:///Users/smk/.docker/run/docker.sock")
+		image = os.environ.get(
+			"DEEPLINKERP_MAIN_LANE_QA_IMAGE",
+			"sha256:07b192aca907fe5880a8817077896c1b32307679c08ba858f62de49c4b23aebe",
+		)
+		code = r"""
+import base64,json,os,subprocess,sys,tempfile
+from pathlib import Path
+Path('/etc/passwd').write_text('root:x:0:0::/root:/bin/sh\nfrappe:x:1000:1000::/tmp:/bin/sh\nrelease:x:1001:1001::/tmp:/bin/sh\nintruder:x:1002:1002::/tmp:/bin/sh\n')
+Path('/etc/group').write_text('root:x:0:\nfrappe:x:1000:\nrelease:x:1001:\nintruder:x:1002:\n')
+assert 1001 in os.getgroups(), 'Actual Docker supplemental group missing'
+sys.path.insert(0,'/release-tools')
+root=Path(tempfile.mkdtemp(prefix='private-uid-proof.'))
+os.chown(root,1001,1001);os.chmod(root,0o700)
+private=root/'before.json';private.write_text('{"private":"fixture"}')
+os.chown(private,1001,1001);os.chmod(private,0o600)
+prefix="import os,sys,json,base64;from pathlib import Path;sys.path.insert(0,'/release-tools');import main_site_lane as lane;root=Path("+repr(str(root))+");"
+def child(uid,gid,groups,source,expected=0):
+ def identity():
+  os.setgroups(groups);os.setgid(gid);os.setuid(uid)
+ result=subprocess.run([sys.executable,'-c',prefix+source],capture_output=True,text=True,preexec_fn=identity)
+ assert result.returncode==expected,(uid,gid,groups,result.returncode,result.stderr)
+ return result
+read="assert json.loads((root/'before.json').read_bytes())['private']=='fixture'"
+child(1000,1000,[1001],read,1)
+child(1001,1001,[],"[(root/name).write_bytes((Path('/release-tools')/name).read_bytes()) for name in ('main_site_lane.py','joint_release_guards.py')];lane.runtime_access(root);lane.private_roots(root,{'common':base64.b64encode(b'{}').decode(),'apps':base64.b64encode(b'frappe\\nerpnext\\n').decode()},{'db_password':'fixture','maintenance_mode':1})")
+assert private.stat().st_uid==1001 and private.stat().st_gid==1001 and private.stat().st_mode&0o777==0o640
+assert root.stat().st_mode&0o777==0o750
+child(1000,1000,[1001],read+";assert (root/'main-sites/apps.txt').read_bytes()==b'frappe\\nerpnext\\n';assert (root/'main_site_lane.py').read_bytes();assert (root/'joint_release_guards.py').read_bytes();assert json.loads((root/'main-sites/common_site_config.json').read_bytes());assert json.loads((root/'main-site-config.json').read_bytes())['maintenance_mode']==1;os.umask(0o007);(root/'main-sites/logs/runtime.log').write_text('fixture')")
+child(1000,1000,[1001],"(root/'main-site-config.json').write_text('{}')",1)
+for uid,gid,groups in ((1000,1000,[]),(1002,1002,[])):
+ child(uid,gid,groups,read,1)
+config=root/'main-site-config.json';inode=config.stat().st_ino
+child(1001,1001,[],"receipt=lane.DDLReceipt.create(root/'seal.json',{'candidate_sha':'a'*40,'contract_sha256':'b'*64},{},{});lane.private_maintenance(receipt,root,enable=False);assert (root/'main-sites/logs/runtime.log').read_text()=='fixture';lane.DDLReceipt(root/'before.json',{})._write(b'{\"private\":\"fixture\"}')")
+assert config.stat().st_ino==inode
+child(1000,1000,[1001],read,1)
+child(1001,1001,[],"lane.runtime_access(root)")
+child(1000,1000,[1001],read+";assert json.loads((root/'main-site-config.json').read_bytes())['maintenance_mode']==0")
+Path('/etc/group').write_text('root:x:0:\nfrappe:x:1000:\nrelease:x:1001:intruder\nintruder:x:1002:\n')
+failed=child(1001,1001,[],"sys.argv=['main_site_lane','runtime-access','--evidence',str(root)];sys.exit(lane.main())",1)
+report=json.loads(failed.stderr)
+assert report['outcome']=='PRIVATE_ACCESS_FAILED' and report['host_uid']==1001 and report['private_gid']==1001
+assert (root/'private-access-failure.json').stat().st_mode&0o777==0o600
+assert not (root/'main-seal.json').exists()
+print('UID 1001 host / UID 1000 runtime: private read, denied write/unauthorized read, setgid logs, stable config, refreshed receipt and failure report verified')
+"""
+		result = subprocess.run(
+			[
+				"docker",
+				"run",
+				"--rm",
+				"-i",
+				"--read-only",
+				"--network",
+				"none",
+				"--user",
+				"0",
+				"--group-add",
+				"1001",
+				"--tmpfs",
+				"/tmp",
+				"--tmpfs",
+				"/etc",
+				"--mount",
+				"type=bind,source=" + str(ROOT / "deploy/production") + ",target=/release-tools,readonly",
+				"--entrypoint",
+				"/home/frappe/frappe-bench/env/bin/python",
+				image,
+				"-",
+			],
+			input=code,
+			capture_output=True,
+			text=True,
+			timeout=45,
+		)
+		self.assertEqual(result.returncode, 0, result.stderr)
+		self.assertIn("UID 1001 host / UID 1000 runtime", result.stdout)
 
 	@unittest.skipUnless(
 		os.environ.get("DEEPLINKERP_MAIN_LANE_DOCKER_QA") == "1", "Explicit owned local Docker QA only"

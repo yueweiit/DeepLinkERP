@@ -1,9 +1,11 @@
 """One-time main site namespace/authentication/route split; no business metadata."""
 
 import base64
+import grp
 import hashlib
 import json
 import os
+import pwd
 import re
 import secrets
 import subprocess
@@ -75,8 +77,9 @@ server {
 """
 
 
-def lane_compose(image, redis_image, evidence, subpath):
+def lane_compose(image, redis_image, evidence, subpath, *, private_gid=None):
 	root = str(Path(evidence).resolve())
+	private_gid = os.getgid() if private_gid is None else private_gid
 	assert re.fullmatch(r"\.deeplinkerp-main-lane/[a-zA-Z0-9_-]+/deeplinkerp\.com", subpath)
 	mounts = [
 		{"type": "bind", "source": root + "/main-sites", "target": BENCH + "/sites"},
@@ -149,6 +152,7 @@ def lane_compose(image, redis_image, evidence, subpath):
 			value["command"] = command
 		if not name.startswith("redis-"):
 			value["volumes"] = mounts
+			value["group_add"] = [str(private_gid)]
 		if name == "redis-queue":
 			value["volumes"] = [{"type": "volume", "source": "main-rq", "target": "/data"}]
 		if name == "frontend":
@@ -384,24 +388,34 @@ def frozen_model(root, receipt):
 	model = json.loads((root / "main.compose.json").read_bytes())
 	contract = receipt.state["contract"]
 	assert model == lane_compose(
-		contract["image_id"], contract["redis_image_id"], root, contract["subpath"]
+		contract["image_id"],
+		contract["redis_image_id"],
+		root,
+		contract["subpath"],
+		private_gid=contract["private_gid"],
 	), "Main Compose topology differs from its frozen receipt; HOLD"
 	return model
 
 
 def runner_command(evidence, build, image, entrypoint, argv, candidate_sha):
 	root = Path(evidence).resolve()
+	access = runtime_access(root)
 	receipt = DDLReceipt.load(root / "main-seal.json")
 	assert candidate_sha == receipt.state["identity"]["candidate_sha"] and image in {
 		receipt.state["contract"]["base_image"],
 		receipt.state["contract"]["image_id"],
 	}, "Unknown bounded main runner image/identity; HOLD"
 	model = frozen_model(root, receipt)
+	assert access["private_gid"] == receipt.state["contract"]["private_gid"], (
+		"Private runtime group drift; HOLD"
+	)
 	command = [
 		"docker",
 		"run",
 		"--rm",
 		"--read-only",
+		"--group-add",
+		str(access["private_gid"]),
 		"--network",
 		NETWORK,
 		"--workdir",
@@ -498,6 +512,8 @@ def image_call(image, build, action, *, payload=None, writable=False, assets_onl
 	tools = Path(build).resolve()
 	if (tools / "deploy/production").is_dir():
 		tools = tools / "deploy/production"
+	else:
+		runtime_access(tools)
 	assert (tools / "main_site_lane.py").is_file() and (tools / "joint_release_guards.py").is_file(), (
 		"Frozen main inspection tools missing; HOLD"
 	)
@@ -518,6 +534,8 @@ def image_call(image, build, action, *, payload=None, writable=False, assets_onl
 				"-i",
 				"--rm",
 				"--read-only",
+				"--group-add",
+				str(os.getgid()),
 				"--network",
 				"none",
 				"--tmpfs",
@@ -593,7 +611,7 @@ def install_route(receipt, *, maintenance, first=False):
 	route.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 	assert not route.is_symlink() and not compose_path.is_symlink()
 	DDLReceipt(route, {})._write(content)
-	os.chmod(route, 0o600)
+	os.chmod(route, 0o644)  # Static routing only; no credentials or audit data.
 	if first:
 		mode = compose_path.stat().st_mode & 0o777
 		DDLReceipt(compose_path, {})._write(changed)
@@ -662,10 +680,39 @@ def wait_sessions(user, *, timeout=120):
 		time.sleep(1)
 
 
+def runtime_access(root):
+	"""Keep host-owned inputs private; only scoped runners join its sole-user group."""
+	root = Path(root)
+	uid, gid = os.getuid(), os.getgid()
+	owner = pwd.getpwuid(uid)
+	assert (
+		gid != 0
+		and {entry.pw_uid for entry in pwd.getpwall() if entry.pw_gid == gid} == {uid}
+		and set(grp.getgrgid(gid).gr_mem) <= {owner.pw_name}
+	), "Host primary group is not private; access refused"
+	paths = [
+		root,
+		*root.glob("*.json"),
+		*(root / name for name in ("main_site_lane.py", "joint_release_guards.py") if (root / name).exists()),
+	]
+	for path in paths:
+		stats = path.lstat()
+		assert (
+			not path.is_symlink()
+			and stats.st_uid == uid
+			and stats.st_gid == gid
+			and (path.is_dir() if path == root else path.is_file())
+		), "Private runtime input is not host-owned or is a symlink; access refused"
+	for path in paths:
+		os.chmod(path, 0o750 if path == root else 0o640)
+	return {"private_gid": gid, "host_uid": uid}
+
+
 def private_roots(root, volume, config):
 	sites = root / "main-sites"
 	for path in (sites, sites / SITE, sites / "assets", sites / "logs"):
 		path.mkdir(parents=True, exist_ok=True, mode=0o700)
+		os.chmod(path, 0o2770 if path == sites / "logs" else 0o750)
 	common = json.loads(base64.b64decode(volume["common"]))
 	for key in ("redis_queue", "redis_socketio"):
 		common[key] = "redis://" + PROJECT + "-redis-queue-1:6379"
@@ -673,10 +720,13 @@ def private_roots(root, volume, config):
 	DDLReceipt(sites / "common_site_config.json", {})._write(serialized(common))
 	DDLReceipt(sites / "apps.txt", {})._write(base64.b64decode(volume["apps"]))
 	DDLReceipt(root / "main-site-config.json", {})._write(serialized(config))
+	for path in (sites / "common_site_config.json", sites / "apps.txt", root / "main-site-config.json"):
+		os.chmod(path, 0o640)
 
 
 def preflight(root, build, base_image, image, candidate_sha):
 	assert re.fullmatch(r"[0-9a-f]{40}", candidate_sha)
+	private_gid = runtime_access(root)["private_gid"]
 	originals = {service: inspect("frappe_docker-" + service + "-1") for service in RELEASE_SERVICES}
 	assert_private_host_boundary(root, originals.values())
 	baseline = {service: container_identity(value) for service, value in originals.items()}
@@ -788,7 +838,11 @@ def preflight(root, build, base_image, image, candidate_sha):
 	for key in ("redis_queue", "redis_socketio", "redis_cache"):
 		private_config.pop(key, None)
 	model = lane_compose(
-		image, redis[0]["Image"], str(root), ".deeplinkerp-main-lane/" + root.name + "/" + SITE
+		image,
+		redis[0]["Image"],
+		str(root),
+		".deeplinkerp-main-lane/" + root.name + "/" + SITE,
+		private_gid=private_gid,
 	)
 	running_names = host_call(["docker", "ps", "-a", "--format", "{{.Names}}"]).splitlines()
 	assert not any(value["container_name"] in running_names for value in model["services"].values()), (
@@ -831,6 +885,7 @@ def preflight(root, build, base_image, image, candidate_sha):
 		"route_path": str(route),
 		"compose_path": str(compose_path),
 		"candidate_sha": candidate_sha,
+		"private_gid": private_gid,
 	}
 	before = {
 		"volume": volume,
@@ -1352,6 +1407,7 @@ def main():
 			"pre-resume",
 			"old-resume",
 			"evidence-budget",
+			"runtime-access",
 		),
 	)
 	parser.add_argument("--evidence", type=Path)
@@ -1432,6 +1488,8 @@ def main():
 					and state["contract"]["image_id"] == payload["image_id"]
 				)
 				result = state["contract"]
+		elif args.action == "runtime-access":
+			result = runtime_access(args.evidence)
 		elif args.action == "prepare":
 			result = prepare(args.evidence, args.build, args.base_image, args.image_id, args.candidate_sha)
 		elif args.action == "proof":
@@ -1472,6 +1530,19 @@ def main():
 		print(json.dumps(result, sort_keys=True))
 		return 0
 	except Exception:
+		if args.action == "runtime-access":
+			failure = {
+				"outcome": "PRIVATE_ACCESS_FAILED",
+				"phase": "runtime-access",
+				"host_uid": os.getuid(),
+				"private_gid": os.getgid(),
+				"reason": "Private group, ownership or access is unconfirmed",
+			}
+			root = args.evidence
+			if root and root.is_dir() and not root.is_symlink() and root.stat().st_uid == os.getuid():
+				DDLReceipt(root / "private-access-failure.json", {})._write(serialized(failure))
+			print(json.dumps(failure, sort_keys=True), file=sys.stderr)
+			return 1
 		print(
 			'{"outcome":"HOLD","reason":"Main isolation action unconfirmed; inspect the private durable receipt"}',
 			file=sys.stderr,

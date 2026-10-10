@@ -126,9 +126,10 @@ command_runner() {
     main_lane run --image-id "$image" --entrypoint "$entrypoint" --candidate-sha "$branding_sha" -- "$@"
     return
   fi
+  main_lane runtime-access > /dev/null
   local drain_env=()
   if [[ -f "$release_dir/drain.json" ]]; then drain_env=(-e "DEEPLINKERP_RELEASE_DRAIN_RECEIPT=/release-evidence/drain.json"); fi
-  docker run --rm --read-only --network "$release_network" --workdir /home/frappe/frappe-bench/sites \
+  docker run --rm --read-only --group-add "$private_runtime_gid" --network "$release_network" --workdir /home/frappe/frappe-bench/sites \
     --tmpfs /tmp --mount "type=bind,source=$build_dir,target=/release,readonly" \
     --mount "type=bind,source=$(pwd)/$release_dir,target=/release-evidence,readonly" \
     -v "$sites_spec:/home/frappe/frappe-bench/sites" \
@@ -438,7 +439,8 @@ print(json.dumps(scope['release_space_budget'](sys.argv[1:4],sys.argv[4],main_on
 PY
 build_dir=$(mktemp -d /tmp/unified-purchase-build.XXXXXX)
 prepare_sources
-test "$(docker exec frappe_docker-backend-1 id -u)" = "$(id -u)" # Private mounted evidence stays readable only by its actual owner.
+main_lane runtime-access > "$release_dir/private-access.json"
+private_runtime_gid=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["private_gid"])' "$release_dir/private-access.json")
 chmod -R a+rX "$build_dir" # Source only; private audit/backup files are separate.
 cp "$build_dir/deploy/production/joint_release_guards.py" "$release_dir/joint_release_guards.py"
 if (( main_only )); then cp "$build_dir/deploy/production/main_site_lane.py" "$release_dir/main_site_lane.py"; fi
