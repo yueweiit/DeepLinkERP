@@ -154,16 +154,19 @@ test('records advanced controls reuse two native FilterGroups with parent permis
  groups[0].on_change();assert.equal(page,0);assert.equal(refresh,1);
  groups[0].filters=[['Payment Entry','company','=','A']];groups[1].filters=[['Payment Entry','name','like','PE%']];c.resetAdvancedFilters();assert.deepEqual(groups.map(g=>g.filters),[[],[]]);
 });
-test('PO form invoice actions use the fresh chain and preserve the actual source type',async()=>{
+test('form procurement actions keep PO receipt-only while retaining receipt payable and historical records',async()=>{
  let html='';const box={find(){return {on(){}};},prependTo(){return this;}};
- const api=payments(async request=>({message:request.method.endsWith('get_progress')?null:{source_doctype:'Purchase Order',orders:[],invoices:[],payments:[],balances:[],draft_invoices:[{name:'DRAFT-PI'}],can_create_invoice:true}}),{$:value=>{html=value;return box;}});
- await api.formRefresh({doctype:'Purchase Order',doc:{name:'PO'},is_new:()=>false,$wrapper:{find:()=>({remove(){}})},layout:{wrapper:{}}});
-  assert.match(html,/dlp-receipt-invoice[^>]+data-source-doctype="Purchase Order"[^>]+data-target="DRAFT-PI"/);
-  assert.match(html,/data-source-doctype="Purchase Order"[^>]*>确认应付/);
+ for(const doctype of ['Purchase Order','Purchase Receipt']){
+  const api=payments(async request=>({message:request.method.endsWith('get_progress')?null:{source_doctype:doctype,orders:[],invoices:[{name:'DRAFT-PI',docstatus:0}],payments:[],balances:[],draft_invoices:[{name:'DRAFT-PI'}],can_create_invoice:true,can_create:true,can_prepay:true,receipt_eligibility:{allowed:true,reason:''}}}),{$:value=>{html=value;return box;}});
+  await api.formRefresh({doctype,doc:{name:'SOURCE',docstatus:1},is_new:()=>false,$wrapper:{find:()=>({remove(){}})},layout:{wrapper:{}}});
+  assert.match(html,/dlp-records/);assert.match(html,/DRAFT-PI/);
+  if(doctype==='Purchase Order'){assert.match(html,/dlp-order-receipt/);assert.doesNotMatch(html,/dlp-receipt-invoice|dlp-order-invoice|dlp-order-pay|class="btn btn-primary btn-sm dlp-pay"/);}
+  else {assert.match(html,/dlp-receipt-invoice[^>]+data-source-doctype="Purchase Receipt"[^>]+data-target="DRAFT-PI"/);assert.match(html,/data-source-doctype="Purchase Receipt"[^>]*>确认应付/);assert.match(html,/dlp-pay/);}
+ }
 });
-test('submitted PO exposes payable action using native invoice permissions even without receipt or payment eligibility',()=>{
+test('submitted PO never exposes procurement payable action regardless of native invoice permissions',()=>{
   const api=payments(undefined,{frappe:{model:{can_read:type=>type==='Purchase Invoice',can_create:type=>type==='Purchase Invoice'}}});
-  assert.match(api.orderReceiptAction({name:'PO',docstatus:1,status:'To Bill',per_received:100,per_billed:20}),/dlp-order-invoice/);
+  assert.doesNotMatch(api.orderReceiptAction({name:'PO',docstatus:1,status:'To Bill',per_received:100,per_billed:20,receipt_eligibility:{allowed:false,reason:'已全部收货'}}),/dlp-order-invoice|dlp-order-pay|dlp-order-receipt/);
   for(const doc of [{docstatus:0},{docstatus:2},{docstatus:1,status:'Closed'},{docstatus:1,status:'On Hold'},{docstatus:1,per_billed:100}])assert.doesNotMatch(api.orderReceiptAction({name:'PO',per_received:100,per_billed:20,...doc}),/dlp-order-invoice/);
   const denied=payments(undefined,{frappe:{model:{can_read:()=>false,can_create:()=>false}}});
   assert.doesNotMatch(denied.orderReceiptAction({name:'PO',docstatus:1,per_received:100,per_billed:0}),/dlp-order-invoice/);
@@ -172,7 +175,7 @@ test('reversal poll failure retains last trusted pending state and blocks depend
  let failure=false;
  const api=payments(async()=>{if(failure)throw new Error('connection lost');return {message:{operation_id:'IR-1',stage:'waiting_inventory',safe_reason:null,can_retry:false}};},
   {frappe:{model:{can_read:()=>true,can_create:()=>true}}});
- const doc={doctype:'Purchase Order',name:'PO',docstatus:1,status:'To Receive and Bill',per_received:0,per_billed:0};
+ const doc={doctype:'Purchase Order',name:'PO',docstatus:1,status:'To Receive and Bill',per_received:0,per_billed:0,receipt_eligibility:{allowed:true,reason:''}};
  const first=await api.refreshReversal(doc);
  assert.equal(first.stage,'waiting_inventory');assert.match(api.reversalHTML(first),/待库存重算/);
  assert.doesNotMatch(api.orderReceiptAction({...doc,reversal:first}),/dlp-order-pay|dlp-order-receipt|dlp-order-invoice/);
@@ -239,8 +242,8 @@ test('PO stock receipt action only appears for real eligible native orders, neve
   assert.equal(action({row_type:'oa_request',name:'OA',docstatus:1}), '');
   assert.match(action({name:'PO',docstatus:0}), /确认订单/);
   assert.equal(action({name:'PO',docstatus:1,per_received:100,status:'Completed'}), '');
-  assert.match(action({name:'PO<&',docstatus:1,per_received:50,status:'To Receive'}), /dlp-order-receipt/);
-  assert.doesNotMatch(action({name:'PO<&',docstatus:1,per_received:50,status:'To Receive'}),/data-name="PO<&"/);
+  assert.match(action({name:'PO<&',docstatus:1,per_received:50,status:'To Receive',receipt_eligibility:{allowed:true,reason:''}}), /dlp-order-receipt/);
+  assert.doesNotMatch(action({name:'PO<&',docstatus:1,per_received:50,status:'To Receive',receipt_eligibility:{allowed:true,reason:''}}),/data-name="PO<&"/);
 });
 test('voucher rendering includes number AND status AND event and escapes supplied text', () => {
   const html=functionFrom('vouchersHTML')([{name:'V<&',statutory_number:'记-1',status:'Reversed',source_event:'Cancellation'}]);
