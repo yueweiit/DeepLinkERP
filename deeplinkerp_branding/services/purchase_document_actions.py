@@ -6,12 +6,13 @@ import json
 import re
 
 import frappe
-from .purchase_repost_boundary import procurement_entry
 from frappe.model import get_permitted_fields
 from frappe.utils import getdate
 
-from deeplinkerp_branding.services import purchase_payment_service as service
 from deeplinkerp_branding.services import purchase_operation
+from deeplinkerp_branding.services import purchase_payment_service as service
+
+from .purchase_repost_boundary import procurement_entry
 
 TARGETS = {("Purchase Receipt", "Purchase Invoice"), ("Purchase Order", "Purchase Receipt"),
            ("Purchase Order", "Purchase Invoice")}
@@ -361,7 +362,7 @@ def _projection(doc, maximum=None, source=None):
         linkfield = _link_fields(source_type, doc.doctype)[0]
         _fields(doc.doctype + " Item", {linkfield}, parenttype=doc.doctype)
         out["sources"] = [{"name": row.name, "modified": str(row.modified)} for row in _sources(source)]
-        for projected, native in zip(out["items"], doc.items):
+        for projected, native in zip(out["items"], doc.items, strict=False):
             projected["source_name"] = native.get(linkfield)
     if advanced:
         out["allowed_actions"] = []
@@ -733,7 +734,7 @@ def _batch_context(sources, source_doctype, target_doctype, merge, check_version
         frappe.throw("此批量转换仅支持订单入库及入库确认应付")
     locked_orders = {}
     originals = _locked_source(source_doctype, [row["name"] for row in sources], target_doctype, locked_orders)
-    for original, selected in zip(originals, sources):
+    for original, selected in zip(originals, sources, strict=False):
         _source(source_doctype, original.name)
         if check_versions:
             _version(original, selected.get("modified"))
@@ -819,7 +820,7 @@ def record_document_batch(sources, changes, request_id, source_doctype="Purchase
         if len(groups) != len(changes):
             frappe.throw("草稿或来源范围已改变，请刷新")
         results = []
-        for index, ((group, draft), edits) in enumerate(zip(groups, changes)):
+        for index, ((group, draft), edits) in enumerate(zip(groups, changes, strict=False)):
             expected = documents[index] if documents is not None else {}
             if not isinstance(expected, dict) or expected.get("name") != (draft.name if draft else None):
                 frappe.throw("所选来源已有入库或应付草稿，请先预览并明确继续已有草稿；整批未修改")

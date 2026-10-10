@@ -13,6 +13,7 @@ from frappe.model import get_permitted_fields
 from frappe.utils import getdate, nowdate
 
 from deeplinkerp_branding.services.unified_purchase_service import _require_export_permission
+
 from .purchase_repost_boundary import procurement_entry
 
 SOURCES = {"Purchase Receipt", "Purchase Order"}
@@ -1040,14 +1041,14 @@ def create_payment_draft(source_doctype, source_name, purchase_invoice=None, amo
             if any(row["name"] not in by_name for row in allocation_rows):
                 frappe.throw("应付单不属于所选真实采购链或当前不可付款")
             targets = [(by_name[row["name"]][0], by_name[row["name"]][1], amount(row["amount"])) for row in allocation_rows]
-        for target, balance, allocated in targets:
+        for _target, balance, allocated in targets:
             if allocated > amount(balance["outstanding"]):
                 frappe.throw("本次金额超过最新未付余额，请刷新")
         _bank_account(bank_account, source.company, targets[0][1]["currency"], for_update=True)
         from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
         entry = None
         compatible = ("company", "party", "party_type", "payment_type", "paid_from", "paid_to", "paid_from_account_currency", "paid_to_account_currency", "source_exchange_rate", "target_exchange_rate", "book_advance_payments_in_separate_party_account")
-        for target, balance, allocated in targets:
+        for target, _balance, allocated in targets:
             native = get_payment_entry(target.doctype, target.name, bank_account=bank_account, bank_amount=float(allocated))
             _require_fields("Payment Entry", set(compatible) | {"deductions", "references"})
             _require_fields("Payment Entry Reference", {"reference_doctype", "reference_name", "outstanding_amount", "allocated_amount", "payment_term"}, "Payment Entry")
@@ -1084,8 +1085,8 @@ def create_payment_draft(source_doctype, source_name, purchase_invoice=None, amo
 
     def replay(previous):
         # Read the complete native context and current ACLs; never trust audit output.
-        from .purchase_operation import replay_artifacts
         from .purchase_document_actions import _payment
+        from .purchase_operation import replay_artifacts
         replay_artifacts(previous)
         entry = _current("Payment Entry", previous["name"])
         entry.check_permission("write")
@@ -1111,7 +1112,7 @@ def _payment_batch_targets(source_doctype, sources, check_versions=False):
     selected = _batch_sources(sources)
     originals = _locked_source(source_doctype, [row["name"] for row in selected], "Purchase Invoice")
     if check_versions:
-        for original, chosen in zip(originals, selected):
+        for original, chosen in zip(originals, selected, strict=False):
             _version(original, chosen.get("modified"))
     if any(doc.docstatus != 1 or doc.get("is_return") for doc in originals):
         frappe.throw("所选来源必须已提交且非退货")

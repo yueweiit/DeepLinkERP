@@ -7,13 +7,12 @@ import importlib.util
 import json
 import os
 import stat
+import sys
 import tempfile
 import types
-import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-
 
 ROOT = Path(__file__).parents[1]
 
@@ -1216,7 +1215,8 @@ class CombinedReleaseContractTests(unittest.TestCase):
 			self.assertEqual(path.read_bytes(), first)
 			for corrupt in (False, True):
 				with self.subTest(corrupt=corrupt):
-					if corrupt: path.write_text("broken")
+					if corrupt:
+						path.write_text("broken")
 					with self.assertRaisesRegex(AssertionError, "forward|HOLD"):
 						guard.assert_pre_resume(path)
 
@@ -1238,14 +1238,16 @@ class CombinedReleaseContractTests(unittest.TestCase):
 		self.assertTrue(hasattr(guard, "raw_rq_snapshot"), "Read-only raw RQ inventory required")
 		class Redis:
 			worker = None
-			def scan(self, cursor, **kwargs): return 0, [b"rq:queues", b"rq:workers", b"rq:queue:bench:short", b"rq:job:queued"] + ([b"rq:worker:old"] if self.worker is not None else [])
-			def type(self, key): return b"set" if key in {"rq:queues", "rq:workers"} else b"list" if key == "rq:queue:bench:short" else b"hash" if key == "rq:job:queued" or key == "rq:worker:old" and self.worker is not None else b"none"
+			historical = False
+			orphan_queue = False
+			def scan(self, cursor, **kwargs): return 0, [b"rq:queues", b"rq:workers", b"rq:queue:bench:short", b"rq:job:queued"] + ([b"rq:worker:old"] if self.worker is not None else []) + ([b"rq:queue:unknown"] if self.orphan_queue else [])
+			def type(self, key): return b"set" if key in {"rq:queues", "rq:workers"} else b"list" if key == "rq:queue:bench:short" or (key == "rq:queue:unknown" and self.orphan_queue) else b"zset" if self.historical and key == "rq:finished:bench:short" else b"hash" if key == "rq:job:queued" or (key == "rq:worker:old" and self.worker is not None) else b"none"
 			def scard(self, key): return len(self.smembers(key))
 			def smembers(self, key): return {b"rq:queue:bench:short"} if key == "rq:queues" else set()
-			def llen(self, key): return 2 if key == "rq:queue:bench:short" else 0
-			def lrange(self, key, *args): return [b"queued", b"queued"] if key == "rq:queue:bench:short" else []
-			def zcard(self, key): return 0
-			def zrange(self, key, *args, **kwargs): return []
+			def llen(self, key): return 2 if key == "rq:queue:bench:short" else int(self.orphan_queue and key == "rq:queue:unknown")
+			def lrange(self, key, *args): return [b"queued", b"queued"] if key == "rq:queue:bench:short" else [b"deeplinkerp.com||orphan"] if key == "rq:queue:unknown" and self.orphan_queue else []
+			def zcard(self, key): return int(self.historical and key == "rq:finished:bench:short")
+			def zrange(self, key, *args, **kwargs): return [(b"old-finished", 1)] if self.historical and key == "rq:finished:bench:short" else []
 			def hlen(self, key): return 4
 			def hstrlen(self, key, field): return 4
 			def hmget(self, key, fields): return [{"status": b"queued", "origin": b"bench:short"}.get(field) for field in fields]
@@ -1256,6 +1258,15 @@ class CombinedReleaseContractTests(unittest.TestCase):
 		self.assertEqual(snapshot["queues"]["bench:short"], ["queued", "queued"])
 		self.assertEqual(snapshot["workers"], {})
 		self.assertEqual(snapshot["jobs"]["queued"]["status"], "queued")
+		historical = Redis()
+		historical.historical = True
+		with self.assertRaisesRegex(AssertionError, "missing"):
+			guard.raw_rq_snapshot(historical)
+		self.assertEqual(guard.raw_rq_snapshot(historical, main_only=True)["historical_orphans"], {"finished:bench:short": [["old-finished", 1]]})
+		self.assertTrue(historical.historical)
+		historical.orphan_queue = True
+		with self.assertRaisesRegex(AssertionError, "Unknown|Orphan"):
+			guard.raw_rq_snapshot(historical, main_only=True)
 		redis = Redis()
 		redis.worker = dict(pid="1", hostname="native", birth="2026-10-09T00:00:00Z", state="idle", queues="bench:short")
 		with self.assertRaisesRegex(AssertionError, "Orphan/stale"):
@@ -1271,45 +1282,84 @@ class CombinedReleaseContractTests(unittest.TestCase):
 
 	def test_owned_build_cleanup_rejects_drift_shared_mount_or_asset_without_deleting(self):
 		guard = self.module()
-		for scenario in ("exact", "extra-file", "changed-file", "extra-directory", "hardlink", "special", "shared-mount", "asset-url", "asset-origin", "asset-body", "redis-pre", "redis-post", "post-health"):
+		for scenario in ("exact", "main-exact", "main-helper-drift", "main-old-asset-drift", "extra-file", "changed-file", "extra-directory", "hardlink", "special", "shared-mount", "asset-url", "asset-origin", "asset-body", "redis-pre", "redis-post", "post-health"):
 			with self.subTest(scenario=scenario), tempfile.TemporaryDirectory(prefix="unified-purchase-build.", dir="/tmp") as build_name, tempfile.TemporaryDirectory() as evidence_name:
 				build, evidence = Path(build_name), Path(evidence_name)
 				(build / "release-source-manifest.json").write_bytes(b"{}")
 				(build / "raw.js").write_bytes(b"raw")
 				files = {item.name: hashlib.sha256(item.read_bytes()).hexdigest() for item in build.iterdir()}
-				stats = build.stat(); image = "sha256:" + "b" * 64
+				stats = build.stat()
+				image = "sha256:" + "b" * 64
 				owned = {"path": str(build), "identity": [stats.st_dev, stats.st_ino, stats.st_uid], "files": files, "directories": [], "manifest_sha256": files["release-source-manifest.json"], "max_bytes": 100, "candidate_sha": "a" * 40, "image_id": image, "rollback_image_id": "sha256:" + "c" * 64, "raw_assets": {"/assets/raw.js?v=1": files["raw.js"]}}
+				if scenario.startswith("main-"):
+					owned.update(lane="main-only", main_helper_sha256=hashlib.sha256(b"frozen").hexdigest(), old_raw_assets=owned["raw_assets"])
+					(evidence / "main_site_lane.py").write_bytes(b"drift" if scenario == "main-helper-drift" else b"frozen")
 				(evidence / "build-ownership.json").write_text(json.dumps(owned))
 				accepted = {"browser_accepted": True, "candidate_sha": owned["candidate_sha"], "image_id": image, "loaded_assets": [{"url": "https://deeplinkerp.com/assets/raw.js?v=" + ("0" if scenario == "asset-url" else "1"), "body_sha256": "d" * 64 if scenario == "asset-body" else files["raw.js"]}]}
-				if scenario == "asset-origin": accepted["loaded_assets"][0]["url"] = "http://localhost/assets/raw.js?v=1"
+				if scenario == "asset-origin":
+					accepted["loaded_assets"][0]["url"] = "http://localhost/assets/raw.js?v=1"
 				(evidence / "acceptance.json").write_text(json.dumps(accepted))
-				if scenario == "extra-file": (build / "not-this-release.txt").write_text("keep")
-				if scenario == "changed-file": (build / "raw.js").write_text("new")
-				if scenario == "extra-directory": (build / "unowned").mkdir()
-				if scenario == "hardlink": os.link(build / "raw.js", evidence / "shared.js")
-				if scenario == "special": os.mkfifo(build / "unowned-pipe")
+				if scenario == "extra-file":
+					(build / "not-this-release.txt").write_text("keep")
+				if scenario == "changed-file":
+					(build / "raw.js").write_text("new")
+				if scenario == "extra-directory":
+					(build / "unowned").mkdir()
+				if scenario == "hardlink":
+					os.link(build / "raw.js", evidence / "shared.js")
+				if scenario == "special":
+					os.mkfifo(build / "unowned-pipe")
 				calls = []
 				def host_call(args):
 					calls.append(args)
-					if args == ["docker", "ps", "-aq"]: return "container-id"
-					if args[:2] == ["docker", "inspect"]: return json.dumps([{"Mounts": [{"Source": str(build.resolve())}]}] if scenario == "shared-mount" else [{"Mounts": []}])
-					if args[:3] == ["docker", "image", "inspect"]: return json.dumps([{"Id": args[-1]}])
-					if args[:2] == ["docker", "run"]: return json.dumps({"redis_ping": not (scenario == "redis-pre" or scenario == "redis-post" and not build.exists()), "queues": {"bench:short": ["preserved"]}, "workers": {}, "executions": {}, "jobs": {}, "registries": {}})
+					if "main_site_lane.py" in args[1]:
+						return json.dumps({"main_running": True, "rq_aof": True})
+					if args == ["docker", "ps", "-aq"]:
+						return "container-id"
+					if args[:2] == ["docker", "inspect"]:
+						return json.dumps(
+							[{"Mounts": [{"Source": str(build.resolve())}]}]
+							if scenario == "shared-mount"
+							else [{"Mounts": []}]
+						)
+					if args[:3] == ["docker", "image", "inspect"]:
+						return json.dumps([{"Id": args[-1]}])
+					if args[:2] == ["docker", "run"]:
+						return json.dumps(
+							{
+								"redis_ping": not (
+									scenario == "redis-pre" or (scenario == "redis-post" and not build.exists())
+								),
+								"queues": {"bench:short": ["preserved"]},
+								"workers": {},
+								"executions": {},
+								"jobs": {},
+								"registries": {},
+							}
+						)
 					return "pong"
 				def inspect(service):
+					self.assertFalse(scenario.startswith("main-"), "Main cleanup must not expect old six containers to run the candidate image")
 					return {"Image": image, "State": {"Running": not (scenario == "post-health" and not build.exists())}, "Mounts": [{"Destination": "/home/frappe/frappe-bench/sites", "Type": "volume", "Name": "sites"}], "HostConfig": {"NetworkMode": "release-net"}}
-				with patch.object(guard, "_host_call", side_effect=host_call), patch.object(guard, "_container_inspect", side_effect=inspect), patch.object(guard.subprocess, "run", return_value=types.SimpleNamespace(stdout=b"raw")):
-					if scenario == "exact":
+				def body(args, **kwargs):
+					return types.SimpleNamespace(stdout=b"drift" if scenario == "main-old-asset-drift" and "https://akivision" in args[-1] else b"raw")
+				with patch.object(guard, "_host_call", side_effect=host_call), patch.object(guard, "_container_inspect", side_effect=inspect), patch.object(guard.subprocess, "run", side_effect=body):
+					if scenario in {"exact", "main-exact"}:
 						result = guard.cleanup_owned_build(evidence, evidence / "acceptance.json")
 						self.assertEqual(result["removed_bytes"], 5)
-						self.assertEqual(result["redis_rq"]["queues"], {"bench:short": ["preserved"]})
+						if scenario == "exact":
+							self.assertEqual(result["redis_rq"]["queues"], {"bench:short": ["preserved"]})
+						else:
+							self.assertTrue(result["redis_rq"]["rq_aof"])
 						self.assertFalse(build.exists())
 					elif scenario in {"post-health", "redis-post"}:
-						with self.assertRaisesRegex(AssertionError, "forward HOLD"): guard.cleanup_owned_build(evidence, evidence / "acceptance.json")
+						with self.assertRaisesRegex(AssertionError, "forward HOLD"):
+							guard.cleanup_owned_build(evidence, evidence / "acceptance.json")
 						self.assertFalse(build.exists())
 						self.assertEqual(guard.DDLReceipt.load(evidence / "cache-cleanup.json").state["status"], "applying")
 					else:
-						with self.assertRaises(AssertionError): guard.cleanup_owned_build(evidence, evidence / "acceptance.json")
+						with self.assertRaises(AssertionError):
+							guard.cleanup_owned_build(evidence, evidence / "acceptance.json")
 						self.assertTrue(build.exists())
 					self.assertFalse(any("prune" in call or "rm" in call for call in calls))
 
@@ -1317,7 +1367,8 @@ class CombinedReleaseContractTests(unittest.TestCase):
 		module = self.metadata_module()
 		self.assertTrue(hasattr(module, "_native_schema_additions"))
 		fake = types.SimpleNamespace(get_app_path=lambda app, name: str(ROOT / app / name))
-		with patch.dict(sys.modules, {"frappe": fake}): native = module._native_reversal_contract()
+		with patch.dict(sys.modules, {"frappe": fake}):
+			native = module._native_reversal_contract()
 		schema = JointReleaseGuardTests.schema(self)
 		schema["columns"]["name"] = module._je_column(0)
 		for key in ("integration_request_service", "status", "request_description"):
@@ -1334,6 +1385,46 @@ class CombinedReleaseContractTests(unittest.TestCase):
 					self.assertEqual((column["type"], column["extra"]), ("tinyint(4)", "VIRTUAL GENERATED"))
 					self.assertIn("'Completed'", column["expression"])
 					self.assertEqual([row["column"] for row in delta["indexes"][native["activity_index"]]], native["activity_index_columns"])
+
+	def test_main_scope_blocks_live_native_work_without_stopping_other_tenants(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "assert_main_rq_empty"), "Scoped native main drain is missing")
+		base = {"queues": {"bench:short": []}, "intermediate": {"bench:short": []}, "registries": {}, "workers": {}, "jobs": {}, "executions": {}, "historical_orphans": {"rq:finished:bench:short": [["old-finished", 1]]}}
+		base["queues"]["bench:short"] = ["akivision.deeplinkerp.com||accepted"]
+		base["jobs"]["akivision.deeplinkerp.com||accepted"] = {"status": "queued"}
+		before = copy.deepcopy(base)
+		result = guard.assert_main_rq_empty(base)
+		self.assertEqual(base, before)
+		self.assertEqual(result["historical_orphans"], base["historical_orphans"])
+		self.assertTrue(result["shared_strict_hold"])
+		for kind in ("queued", "intermediate", "wip", "deferred", "scheduled", "callback", "unknown"):
+			with self.subTest(kind=kind):
+				value = copy.deepcopy(base)
+				job = "unknown-live" if kind == "unknown" else "deeplinkerp.com||accepted"
+				if kind == "queued":
+					value["queues"]["bench:short"].append(job)
+				elif kind == "intermediate":
+					value["intermediate"]["bench:short"].append(job)
+				elif kind in {"wip", "deferred", "scheduled"}:
+					value["registries"][kind + ":bench:short"] = [
+						[job + (":execution" if kind == "wip" else ""), 1]
+					]
+				elif kind == "callback":
+					value["workers"]["rq:worker:shared"] = {"current_job": job}
+				else:
+					value["jobs"][job] = {"status": "started"}
+				with self.assertRaisesRegex(AssertionError, "main|Unknown"):
+					guard.assert_main_rq_empty(value)
+
+	def test_main_seal_requires_fresh_all_host_auth_namespace_and_stopped_producer_proof(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "validate_main_seal"), "Real main auth/namespace seal receipt is missing")
+		state = {"identity": {"candidate_sha": "a" * 40}, "status": "applied", "contract": {"old_user": "_old", "new_user": "dlp_main_new", "database": "_db", "original_hosts": ["%", "172.18.0.5", "172.18.0.9"]}}
+		proof = {"candidate_sha": "a" * 40, "observed_at": guard.time.time(), "old_hosts": ["%", "172.18.0.5", "172.18.0.9"], "old_accounts_locked": True, "old_sessions": 0, "discovered_sites": list(guard.SHARED_SITES[1:]), "private_config": True, "source_idle": True, "old_containers_unchanged": True, "producer_containers_stopped": True, "new_user": "dlp_main_new", "database": "_db"}
+		guard.validate_main_seal(state, proof, "a" * 40)
+		for field, value in (("old_hosts", ["%"]), ("old_accounts_locked", False), ("old_sessions", 1), ("discovered_sites", list(guard.SHARED_SITES)), ("producer_containers_stopped", False), ("private_config", False), ("old_containers_unchanged", False), ("observed_at", 0), ("new_user", "_old")):
+			with self.subTest(field=field), self.assertRaisesRegex(AssertionError, "seal|HOLD"):
+				guard.validate_main_seal(state, dict(proof, **{field: value}), "a" * 40)
 
 
 if __name__ == "__main__":

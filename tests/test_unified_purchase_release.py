@@ -21,6 +21,21 @@ class ReleaseRecoveryTests(unittest.TestCase):
 	def release_source(self):
 		return (Path(__file__).parents[1] / "deploy/production/deploy_unified_purchase.sh").read_text()
 
+	def test_explicit_main_only_entrypoint_reuses_build_and_never_enters_shared_cutover(self):
+		source = self.release_source()
+		self.assertIn("--main-only", source, "Explicit authorized main-only lane is missing")
+		self.assertIn("run_main_only_release() {", source)
+		main = self.shell_function("run_main_only_release")
+		self.assertIn('--joint-apply --receipt "$native_receipt"', main)
+		self.assertIn('capture_release_audit before "$release_dir/before.json"', main)
+		self.assertIn('capture_release_audit after "$release_dir/after.json"', main)
+		self.assertNotIn("--native-only", main)
+		self.assertNotIn("--with-files", main)
+		self.assertNotIn('"${dc[@]}"', main)
+		self.assertNotIn("assets.json", main)
+		self.assertLess(main.index("--record-resume"), main.index("main_lane resume"))
+		self.assertIn('if (( main_only )); then run_main_only_release; exit; fi', source)
+
 	def worker_staging_commands(self):
 		return [
 			shlex.split(line.strip())[1:]
@@ -48,7 +63,8 @@ class ReleaseRecoveryTests(unittest.TestCase):
 		self.assertLess(source.index('approved_native_schema_sites=${12:-}'), source.index('systemctl --user stop'))
 		self.assertIn('--site "$site" --native-only', source)
 		self.assertIn('metadata_started_sites+=("$site")', source)
-		self.assertIn('for site in "${sites[@]}"; do', source.split('verify_joint_audit_delta', 1)[0])
+		legacy = source.split('# All six containers are staged stopped.', 1)[1]
+		self.assertLess(legacy.index('for site in "${sites[@]}"; do'), legacy.index('verify_audit_ownership'))
 		self.assertLess(source.index("for site in sites:"), source.index('--producer candidate-serving'))
 		self.assertIn('for ((i=${#metadata_started_sites[@]}-1; i>=0; i--)); do', source)
 
@@ -532,8 +548,8 @@ printf '%s|%s|%s|%s' "$crm_sha" "$finance_sha" "$current_finance" "$current_oa"
 				self.assertEqual(result.stdout, "crm-current|preserved|" + ("" if finance == "<no value>" else finance) + "|")
 
 	def compare_audits(self, before, after, manifest):
-		source = self.release_source()
-		code = source.rsplit('python3 - "$release_dir" "$build_dir" "$branding_sha" "$new_image_id" "$old_image_id" <<\'PY\'\n', 1)[1].split("\nstats=", 1)[0]
+		_source = self.release_source()
+		code = self.shell_function('verify_audit_ownership').split("<<'PY'\n", 1)[1].split("\nstats=", 1)[0]
 		with tempfile.TemporaryDirectory() as tmp:
 			root = Path(tmp)
 			roles = [{"name": "original-child-" + str(index)} for index in range(5)]
@@ -578,7 +594,7 @@ printf '%s|%s|%s|%s' "$crm_sha" "$finance_sha" "$current_finance" "$current_oa"
 				for phase, value in (("before", before), ("after", after), ("joint-receipt", receipt)):
 					(root / (site + "." + phase + ".json")).write_text(json.dumps(value))
 			(root / "release-source-manifest.json").write_text(json.dumps(manifest))
-			return subprocess.run([sys.executable, "-c", code, tmp, tmp], capture_output=True, text=True)
+			return subprocess.run([sys.executable, "-c", code, tmp, tmp, "candidate", "image", "old-image", "0"], capture_output=True, text=True)
 
 	def test_finance_manifest_preserves_crm_and_rejects_unlisted_or_wrong_sources(self):
 		manifest = {

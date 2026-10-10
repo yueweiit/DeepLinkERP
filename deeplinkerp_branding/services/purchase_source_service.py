@@ -11,16 +11,17 @@ import re
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from decimal import Decimal
 from urllib.parse import urlencode
 
 import frappe
 from frappe.model import get_permitted_fields
 
-from . import operating_oa_source as oa, purchase_source_contract as contract
+from . import operating_oa_source as oa
+from . import purchase_source_contract as contract
 from .operating_expense_contract import digest
-from .purchase_repost_boundary import procurement_entry, initialize
+from .purchase_repost_boundary import initialize, procurement_entry
 
 DOCTYPE = "OA Purchase Request"
 SOURCE_FIELD = "custom_purchase_source_json"
@@ -115,7 +116,10 @@ def _source(name, write=False):
 
 def _normalize(row, *, occurrences=None):
     # Reuse the existing DingTalk table/text extractor, not a second table parser.
-    from overseas_costing.scripts.import_oa_logistics import extract_purchase_expense_rows, _iter_form_components
+    from overseas_costing.scripts.import_oa_logistics import (
+        _iter_form_components,
+        extract_purchase_expense_rows,
+    )
     from overseas_costing.utils.field_mapper import map_purchase_expense_row_to_item
     prepared = copy.deepcopy(row)
     if isinstance(prepared.get("form_component_values"), str):
@@ -296,9 +300,9 @@ def _role_projections(records, sources, permitted, purchase_orders):
     Company/Project discovery is batched and each candidate is checked once.
     This read-only projection does not change confirmation or synchronization.
     """
-    from .purchase_payment_service import _record_reader, _read, _quiet_link_errors
-    from .purchase_order_progress import _ProgressReader, _FieldScope
     from .purchase_fulfilment_service import _company
+    from .purchase_order_progress import _FieldScope, _ProgressReader
+    from .purchase_payment_service import _quiet_link_errors, _read, _record_reader
     records = list(records)
     reader = _record_reader.get() or _ProgressReader(get_permitted_fields); token = _record_reader.set(reader)
     try:
@@ -513,7 +517,7 @@ def _check_automatic_amounts(order, source):
     original = source.get("items") or []
     if order.docstatus != 0 or order.currency != source.get("currency") or len(order.items) != len(original):
         frappe.throw("原生采购币种或明细与来源不符，待人工核对")
-    for row, raw in zip(order.items,original):
+    for row, raw in zip(order.items,original,strict=False):
         if (row.item_code != raw.get("item_code") or row.uom != raw.get("uom")
                 or not equal(row,"qty",row.qty,raw.get("qty")) or not equal(row,"amount",row.amount,raw.get("amount"))
                 or (raw.get("rate") is not None and not equal(row,"rate",row.rate,raw["rate"]))):
@@ -532,7 +536,10 @@ def _check_automatic_price_writes(order):
         return
     from erpnext.accounts.party import _get_party_details
     from erpnext.stock.get_item_details import (
-        ItemDetailsCtx, get_basic_details, get_price_list_details, get_price_list_rate_for,
+        ItemDetailsCtx,
+        get_basic_details,
+        get_price_list_details,
+        get_price_list_rate_for,
     )
     # Use the same native supplier defaults as BuyingController, before its
     # set_missing_item_details calls get_price_list_rate -> insert_item_price.
@@ -670,7 +677,7 @@ def get_purchase_source_detail(name, fresh=0):
 
 @frappe.whitelist()
 def download_source_attachment(name, attachment_id, version):
-    from .operating_expenses import _finance,_request
+    from .operating_expenses import _finance, _request
     _finance(); doc = _source(name)
     from .unified_purchase_service import cashier_evidence_readable
     if not cashier_evidence_readable():
@@ -779,44 +786,79 @@ def _reconcile_cached_sources(connection,until,seen,cashier):
 
 
 def _read_sync_snapshot(until):
-    from .operating_expenses import _oa_connection,_request
-    snapshots=[]; count=0; cursor=None; seen=set()
-    cashier = _cashier_snapshot(until)
-    connection=_oa_connection()._connection
-    bridge_companies = set(frappe.get_all("Company", filters={"name":["in",sorted(set(oa.COMPANY_BRIDGES.values()))]}, pluck="name"))
-    for _ in range(MAX_SOURCE_ROWS // SOURCE_PAGE_SIZE):
-        rows,cursor = oa.read_page(connection,SOURCE_PAGE_SIZE,until,cursor=cursor,process_codes=contract.PROCESS_CODES)
-        prepared = [(row,contract._field_occurrences(row)) for row in rows]
-        scoped = [(row,occurrences,contract.in_scope(row,occurrences=occurrences)) for row,occurrences in prepared]
-        selected = [(row,occurrences) for row,occurrences,in_scope in scoped if in_scope]
-        applicants = [oa.resolution_applicant(row,cashier) for row,_ in selected]
-        resolutions = _request("/api/integrations/erp/resolve-applicant-companies",data={"applicants":applicants})["items"] if applicants else []
-        if len(resolutions) != len(applicants):
-            frappe.throw("采购申请人归属数量不符")
-        for (row,occurrences),applicant,resolution in zip(selected,applicants,resolutions):
-            if any(resolution.get(k) != applicant[k] for k in ("user_id","employee_name")):
-                frappe.throw("采购申请人归属身份不符")
-            source = _normalize(row,occurrences=occurrences)
-            legal = oa.COMPANY_BRIDGES.get(resolution.get("assigned_department")) if resolution.get("status") == "matched" else None
-            company = legal if legal in bridge_companies else None
-            if source["source_id"] in seen:
-                frappe.throw("采购来源身份重复，请核对本次快照")
-            snapshots.append((source,contract.payment_evidence(source,cashier),company)); count+=1; seen.add(source["source_id"])
-        # Retain previously imported but withdrawn/out-of-scope applications as audit evidence.
-        for row,_,in_scope in scoped:
-            if in_scope:
-                continue
-            doc = _cached_doc({"source_id":oa.application_id(row),"oa_identity":{"corp_id":row["corp_id"],"process_instance_id":row["process_instance_id"]}})
-            if doc and doc.get(SOURCE_FIELD):
-                old=_invalidate_source(_json(doc.get(SOURCE_FIELD)),"钉钉采购原单已移出中国/墨西哥2026范围，请先核对",row)
-                snapshots.append((old,contract.payment_evidence(old,cashier),None))
-                seen.add(old["source_id"])
-        if cursor is None:
-            snapshots.extend(_reconcile_cached_sources(connection,until,seen,cashier))
-            if len(snapshots)>MAX_SOURCE_ROWS:
-                frappe.throw("采购来源及已接入来源超过本次同步上限")
-            return snapshots, count
-    frappe.throw("采购來源超过本次同步上限")
+	from .operating_expenses import _oa_connection, _request
+
+	snapshots = []
+	count = 0
+	cursor = None
+	seen = set()
+	cashier = _cashier_snapshot(until)
+	connection = _oa_connection()._connection
+	bridge_companies = set(
+		frappe.get_all(
+			"Company", filters={"name": ["in", sorted(set(oa.COMPANY_BRIDGES.values()))]}, pluck="name"
+		)
+	)
+	for _ in range(MAX_SOURCE_ROWS // SOURCE_PAGE_SIZE):
+		rows, cursor = oa.read_page(
+			connection, SOURCE_PAGE_SIZE, until, cursor=cursor, process_codes=contract.PROCESS_CODES
+		)
+		prepared = [(row, contract._field_occurrences(row)) for row in rows]
+		scoped = [
+			(row, occurrences, contract.in_scope(row, occurrences=occurrences))
+			for row, occurrences in prepared
+		]
+		selected = [(row, occurrences) for row, occurrences, in_scope in scoped if in_scope]
+		applicants = [oa.resolution_applicant(row, cashier) for row, _ in selected]
+		resolutions = (
+			_request("/api/integrations/erp/resolve-applicant-companies", data={"applicants": applicants})[
+				"items"
+			]
+			if applicants
+			else []
+		)
+		if len(resolutions) != len(applicants):
+			frappe.throw("采购申请人归属数量不符")
+		for (row, occurrences), applicant, resolution in zip(selected, applicants, resolutions, strict=False):
+			if any(resolution.get(k) != applicant[k] for k in ("user_id", "employee_name")):
+				frappe.throw("采购申请人归属身份不符")
+			source = _normalize(row, occurrences=occurrences)
+			legal = (
+				oa.COMPANY_BRIDGES.get(resolution.get("assigned_department"))
+				if resolution.get("status") == "matched"
+				else None
+			)
+			company = legal if legal in bridge_companies else None
+			if source["source_id"] in seen:
+				frappe.throw("采购来源身份重复，请核对本次快照")
+			snapshots.append((source, contract.payment_evidence(source, cashier), company))
+			count += 1
+			seen.add(source["source_id"])
+		# Retain previously imported but withdrawn/out-of-scope applications as audit evidence.
+		for row, _, in_scope in scoped:
+			if in_scope:
+				continue
+			doc = _cached_doc(
+				{
+					"source_id": oa.application_id(row),
+					"oa_identity": {
+						"corp_id": row["corp_id"],
+						"process_instance_id": row["process_instance_id"],
+					},
+				}
+			)
+			if doc and doc.get(SOURCE_FIELD):
+				old = _invalidate_source(
+					_json(doc.get(SOURCE_FIELD)), "钉钉采购原单已移出中国/墨西哥2026范围，请先核对", row
+				)
+				snapshots.append((old, contract.payment_evidence(old, cashier), None))
+				seen.add(old["source_id"])
+		if cursor is None:
+			snapshots.extend(_reconcile_cached_sources(connection, until, seen, cashier))
+			if len(snapshots) > MAX_SOURCE_ROWS:
+				frappe.throw("采购来源及已接入来源超过本次同步上限")
+			return snapshots, count
+	frappe.throw("采购來源超过本次同步上限")
 
 
 def _sync_replay(receipt):
@@ -833,41 +875,79 @@ def _sync_replay(receipt):
 
 @frappe.whitelist(methods=["POST"])
 def sync_purchase_sources(request_id=None):
-    from .operating_expenses import _manager
-    from . import purchase_operation as operation
-    _manager()
-    if not frappe.db.exists("DocType",DOCTYPE) or not frappe.get_meta(DOCTYPE).has_field(PENDING_FIELD):
-        frappe.throw("采购来源元数据未安装")
-    def write():
-        until = datetime.now(timezone.utc).isoformat()
-        with frappe.cache.lock("purchase-source-sync:"+frappe.local.site,timeout=300):
-            snapshots,count = _read_sync_snapshot(until)
-            result = {"count":count,"until":until,"created":0,"already_linked":0,"pending":0,"invalid":0}
-            documents=[]; acknowledgements=[]
-            for source,evidence,proposal in snapshots:
-                existing = _cached_doc(source)
-                plan, reason = (None,"") if existing and existing.get("purchase_order") else _automatic_order(existing or frappe._dict(),source)
-                name = _cache_source(source,evidence,proposal)
-                doc = _source(name,write=True)
-                if doc.get("purchase_order"):
-                    _native("Purchase Order",doc.purchase_order)
-                    result["already_linked"] += 1
-                elif not source.get("eligible"):
-                    result["invalid"] += 1
-                elif plan is None:
-                    result["pending"] += 1
-                else:
-                    order,beneficiary,project = plan
-                    documents.append(_insert_purchase_order(doc,order,source,evidence,beneficiary_company=beneficiary,project=project,automatic=True))
-                    result["created"] += 1
-                # Preserve linked manual fields and their old bound_version. A
-                # changed source stays stale until the existing human recheck.
-                if not doc.get("purchase_order") and plan is None:
-                    frappe.db.set_value(DOCTYPE,name,PENDING_FIELD,reason,update_modified=False)
-                bound = frappe.db.get_value(DOCTYPE,name,"purchase_order")
-                acknowledgements.append({"doctype":DOCTYPE,"name":name,"version":_version(source,evidence),"purchase_order":bound})
-            return {**result,"result":result,"documents":documents,"acknowledgements":acknowledgements}
-    return operation.run(request_id or str(uuid.uuid4()),{"operation":"sync_purchase_sources","process_codes":contract.PROCESS_CODES},write,_sync_replay,acknowledge_validation=True)
+	from . import purchase_operation as operation
+	from .operating_expenses import _manager
+
+	_manager()
+	if not frappe.db.exists("DocType", DOCTYPE) or not frappe.get_meta(DOCTYPE).has_field(PENDING_FIELD):
+		frappe.throw("采购来源元数据未安装")
+
+	def write():
+		until = datetime.now(UTC).isoformat()
+		with frappe.cache.lock("purchase-source-sync:" + frappe.local.site, timeout=300):
+			snapshots, count = _read_sync_snapshot(until)
+			result = {
+				"count": count,
+				"until": until,
+				"created": 0,
+				"already_linked": 0,
+				"pending": 0,
+				"invalid": 0,
+			}
+			documents = []
+			acknowledgements = []
+			for source, evidence, proposal in snapshots:
+				existing = _cached_doc(source)
+				plan, reason = (
+					(None, "")
+					if existing and existing.get("purchase_order")
+					else _automatic_order(existing or frappe._dict(), source)
+				)
+				name = _cache_source(source, evidence, proposal)
+				doc = _source(name, write=True)
+				if doc.get("purchase_order"):
+					_native("Purchase Order", doc.purchase_order)
+					result["already_linked"] += 1
+				elif not source.get("eligible"):
+					result["invalid"] += 1
+				elif plan is None:
+					result["pending"] += 1
+				else:
+					order, beneficiary, project = plan
+					documents.append(
+						_insert_purchase_order(
+							doc,
+							order,
+							source,
+							evidence,
+							beneficiary_company=beneficiary,
+							project=project,
+							automatic=True,
+						)
+					)
+					result["created"] += 1
+				# Preserve linked manual fields and their old bound_version. A
+				# changed source stays stale until the existing human recheck.
+				if not doc.get("purchase_order") and plan is None:
+					frappe.db.set_value(DOCTYPE, name, PENDING_FIELD, reason, update_modified=False)
+				bound = frappe.db.get_value(DOCTYPE, name, "purchase_order")
+				acknowledgements.append(
+					{
+						"doctype": DOCTYPE,
+						"name": name,
+						"version": _version(source, evidence),
+						"purchase_order": bound,
+					}
+				)
+			return {**result, "result": result, "documents": documents, "acknowledgements": acknowledgements}
+
+	return operation.run(
+		request_id or str(uuid.uuid4()),
+		{"operation": "sync_purchase_sources", "process_codes": contract.PROCESS_CODES},
+		write,
+		_sync_replay,
+		acknowledge_validation=True,
+	)
 
 
 def cashier_payment_reason(evidence,reconciliation=None):
@@ -882,7 +962,7 @@ def cashier_payment_reason(evidence,reconciliation=None):
 
 
 def _verify_reconciliation(doc,evidence,names):
-    from .purchase_payment_service import _read,_invoice_names,_invoice_row,PI_FIELDS
+    from .purchase_payment_service import PI_FIELDS, _invoice_names, _invoice_row, _read
     if not isinstance(names,list) or not names or len(names)>100 or len(set(names))!=len(names) or any(not isinstance(n,str) for n in names):
         frappe.throw("请明确选择不重复的原生付款单")
     if evidence.get("payment_evidence_status") != "recorded" or contract.oa.exact_amount(evidence.get("paid_amount")) is None:

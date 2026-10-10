@@ -8,9 +8,9 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import frappe
+
 from deeplinkerp_branding.services import purchase_order_progress as progress
 from deeplinkerp_branding.services import purchase_payment_service as payment
-
 
 LINK = "Purchase Fulfilment Link"
 PO_FIELDS = {"company", "supplier", "currency", "grand_total", "items", "per_received", "status"}
@@ -75,119 +75,249 @@ class NativeDoc(SimpleNamespace):
 
 
 class NativeMemory:
-    def __init__(self):
-        self.records = {}; self.children = {}; self.denied = set(); self.hidden = {}; self.queries = []
-        self.invoice_iterations = 0; self.next_version = 1; self.locks = []; self.installed_cost = False
-        self.current_reads = []; self.events = []
-        self.savepoints = {}; self.rollbacks = []
-        self.db = Mock(get_values=self.get_values, get_value=self.get_value, exists=self.exists, sql=self.allocation_sql,
-                       savepoint=self.savepoint, rollback=self.rollback, release_savepoint=self.release_savepoint)
+	def __init__(self):
+		self.records = {}
+		self.children = {}
+		self.denied = set()
+		self.hidden = {}
+		self.queries = []
+		self.invoice_iterations = 0
+		self.next_version = 1
+		self.locks = []
+		self.installed_cost = False
+		self.current_reads = []
+		self.events = []
+		self.savepoints = {}
+		self.rollbacks = []
+		self.db = Mock(
+			get_values=self.get_values,
+			get_value=self.get_value,
+			exists=self.exists,
+			sql=self.allocation_sql,
+			savepoint=self.savepoint,
+			rollback=self.rollback,
+			release_savepoint=self.release_savepoint,
+		)
 
-    def savepoint(self, name):
-        self.events.append(("savepoint", name))
-        self.savepoints[name] = copy.deepcopy((self.records, self.children))
-    def rollback(self, *, save_point=None):
-        if save_point is None:
-            raise AssertionError("optional logistics may not roll back the surrounding source-sync transaction")
-        self.events.append(("rollback", save_point)); self.rollbacks.append(save_point)
-        self.records, self.children = copy.deepcopy(self.savepoints[save_point])
-    def release_savepoint(self, name):
-        self.events.append(("release", name))
-        del self.savepoints[name]
+	def savepoint(self, name):
+		self.events.append(("savepoint", name))
+		self.savepoints[name] = copy.deepcopy((self.records, self.children))
 
-    def allocation_sql(self, query, values=None, **kwargs):
-        self.current_reads.append((query, values))
-        self.events.append(("allocations", tuple(values)))
-        return [frappe._dict(copy.deepcopy(row)) for (dt, _), row in self.records.items()
-                if dt == LINK and row.get("active") and (row["external_order"] == values[0] or
-                    (len(values) > 1 and row.get("internal_order") == values[1]))]
-    def add(self, dt, name, **values):
-        data = {"doctype": dt, "name": name, "modified": "v1", "docstatus": 0, **values}
-        self.records[dt, name] = data
-        child_dt = CHILDREN.get(dt)
-        field = "references" if dt == "Payment Entry" else "items"
-        if child_dt:
-            self.children[child_dt] = [row for row in self.children.get(child_dt, []) if row["parent"] != name]
-        for index, row in enumerate(data.get(field, []), 1):
-            child = {"parent": name, "parenttype": dt, "parentfield": field, "idx": index, **row}
-            self.children.setdefault(child_dt, []).append(child)
-        return data
-    def po(self, name="EXT", company="BUYER", supplier="EXTERNAL", *, qty=10, currency="CNY", submitted=True):
-        self.add("Company", company)
-        self.add("Item", "M", is_stock_item=1, stock_uom="Nos")
-        return self.add("Purchase Order", name, company=company, supplier=supplier, currency=currency,
-            grand_total=qty * 10, docstatus=1 if submitted else 0, status="To Receive and Bill", per_received=0,
-            items=[dict(name=name + "-I", item_code="M", item_name="Material", qty=qty, uom="Nos", stock_uom="Nos",
-                        conversion_factor=1, rate=10, amount=qty * 10, received_qty=0)])
-    def received(self, name, qty, percent):
-        self.records["Purchase Order", name]["per_received"] = percent
-        for row in self.records["Purchase Order", name]["items"]:
-            row["received_qty"] = qty
-        for row in self.children["Purchase Order Item"]:
-            if row["parent"] == name:
-                row["received_qty"] = qty
-    def invoice(self, name="PI", po="EXT", *, total=100, outstanding=0, currency="CNY", docstatus=1, **changes):
-        source = self.records["Purchase Order", po]
-        return self.add("Purchase Invoice", name, company=source["company"], supplier=source["supplier"],
-            currency=currency, party_account_currency=currency, grand_total=total, rounded_total=0,
-            disable_rounded_total=1, base_grand_total=total, base_rounded_total=0, outstanding_amount=outstanding,
-            is_return=0, docstatus=docstatus, items=[dict(purchase_order=po, purchase_receipt=None)], **changes)
-    @staticmethod
-    def matches(row, filters):
-        for key, value in (filters or {}).items():
-            if isinstance(value, (tuple, list)):
-                if value[0] == "in" and row.get(key) not in value[1]: return False
-                if value[0] == "!=" and row.get(key) == value[1]: return False
-                if value[0] == "=" and row.get(key) != value[1]: return False
-                if value[0] == "is" and (row.get(key) not in (None, "")) != (value[1] == "set"): return False
-            elif row.get(key) != value:
-                return False
-        return True
-    def rows(self, dt, filters=None, or_filters=None, **kwargs):
-        self.queries.append((dt, filters))
-        rows = self.children.get(dt, []) if dt in CHILDREN.values() else [row for (kind, _), row in self.records.items() if kind == dt]
-        result = [frappe._dict(copy.deepcopy(row)) for row in rows if self.matches(row, filters) and (
-            not or_filters or any(self.matches(row, {entry[-3]: [entry[-2], entry[-1]]}) for entry in or_filters))]
-        if kwargs.get("pluck"):
-            return list(dict.fromkeys(row[kwargs["pluck"]] for row in result))
-        return result
-    def get_values(self, dt, filters, fields, **kwargs):
-        rows = self.rows(dt, filters)
-        if fields != "*":
-            fields = [fields] if isinstance(fields, str) else fields
-            rows = [frappe._dict({field: row.get(field) for field in fields}) for row in rows]
-        return rows if kwargs.get("as_dict") else [tuple(row.values()) for row in rows]
-    def get_value(self, dt, name, field, **kwargs):
-        row = self.records.get((dt, name), {}) if isinstance(name, str) else next(iter(self.rows(dt, name)), {})
-        if isinstance(field, (list, tuple)):
-            return frappe._dict({key: row.get(key) for key in field})
-        return row.get(field)
-    def exists(self, dt, name):
-        if dt == "DocType":
-            return name != "Overseas Cost Batch" or self.installed_cost
-        return (dt, name) in self.records
-    def get_doc(self, dt, name=None, **kwargs):
-        if isinstance(dt, dict):
-            return NativeDoc(self, dict(dt))
-        if kwargs.get("for_update"):
-            self.locks.append((dt, name))
-            self.events.append(("lock", dt, name))
-        row = self.records.get((dt, name))
-        if row is None: raise frappe.DoesNotExistError(name)
-        return NativeDoc(self, copy.deepcopy(row))
-    def fields(self, dt, **kwargs):
-        fields = set(PO_FIELDS | ITEM_FIELDS | payment.PI_FIELDS | {"name", "modified", "docstatus", "purchase_order",
-            "purchase_receipt", "purchase_order_item", "po_detail", "is_return", "warehouse", "received_qty",
-            "represents_company", "is_internal_supplier", "is_internal_customer", "disabled", "customer",
-            "default_currency", "stock_qty", "posting_date", "is_group", "references",
-            "reference_doctype", "reference_name", "allocated_amount"})
-        fields.update(rowkey for (kind, _), row in self.records.items() if kind == dt for rowkey in row)
-        return fields - self.hidden.get((dt, kwargs.get("permission_type", "read")), set())
-    def meta(self, dt):
-        child = CHILDREN.get(dt)
-        tables = [frappe._dict(fieldname="references" if dt == "Payment Entry" else "items", options=child)] if child else []
-        return SimpleNamespace(get_table_fields=lambda: tables, fields=[], get_permlevel_access=lambda **kwargs: [0],
-                               has_field=lambda field: field in self.fields(dt))
+	def rollback(self, *, save_point=None):
+		if save_point is None:
+			raise AssertionError(
+				"optional logistics may not roll back the surrounding source-sync transaction"
+			)
+		self.events.append(("rollback", save_point))
+		self.rollbacks.append(save_point)
+		self.records, self.children = copy.deepcopy(self.savepoints[save_point])
+
+	def release_savepoint(self, name):
+		self.events.append(("release", name))
+		del self.savepoints[name]
+
+	def allocation_sql(self, query, values=None, **kwargs):
+		self.current_reads.append((query, values))
+		self.events.append(("allocations", tuple(values)))
+		return [
+			frappe._dict(copy.deepcopy(row))
+			for (dt, _), row in self.records.items()
+			if dt == LINK
+			and row.get("active")
+			and (
+				row["external_order"] == values[0]
+				or (len(values) > 1 and row.get("internal_order") == values[1])
+			)
+		]
+
+	def add(self, dt, name, **values):
+		data = {"doctype": dt, "name": name, "modified": "v1", "docstatus": 0, **values}
+		self.records[dt, name] = data
+		child_dt = CHILDREN.get(dt)
+		field = "references" if dt == "Payment Entry" else "items"
+		if child_dt:
+			self.children[child_dt] = [
+				row for row in self.children.get(child_dt, []) if row["parent"] != name
+			]
+		for index, row in enumerate(data.get(field, []), 1):
+			child = {"parent": name, "parenttype": dt, "parentfield": field, "idx": index, **row}
+			self.children.setdefault(child_dt, []).append(child)
+		return data
+
+	def po(self, name="EXT", company="BUYER", supplier="EXTERNAL", *, qty=10, currency="CNY", submitted=True):
+		self.add("Company", company)
+		self.add("Item", "M", is_stock_item=1, stock_uom="Nos")
+		return self.add(
+			"Purchase Order",
+			name,
+			company=company,
+			supplier=supplier,
+			currency=currency,
+			grand_total=qty * 10,
+			docstatus=1 if submitted else 0,
+			status="To Receive and Bill",
+			per_received=0,
+			items=[
+				dict(
+					name=name + "-I",
+					item_code="M",
+					item_name="Material",
+					qty=qty,
+					uom="Nos",
+					stock_uom="Nos",
+					conversion_factor=1,
+					rate=10,
+					amount=qty * 10,
+					received_qty=0,
+				)
+			],
+		)
+
+	def received(self, name, qty, percent):
+		self.records["Purchase Order", name]["per_received"] = percent
+		for row in self.records["Purchase Order", name]["items"]:
+			row["received_qty"] = qty
+		for row in self.children["Purchase Order Item"]:
+			if row["parent"] == name:
+				row["received_qty"] = qty
+
+	def invoice(
+		self, name="PI", po="EXT", *, total=100, outstanding=0, currency="CNY", docstatus=1, **changes
+	):
+		source = self.records["Purchase Order", po]
+		return self.add(
+			"Purchase Invoice",
+			name,
+			company=source["company"],
+			supplier=source["supplier"],
+			currency=currency,
+			party_account_currency=currency,
+			grand_total=total,
+			rounded_total=0,
+			disable_rounded_total=1,
+			base_grand_total=total,
+			base_rounded_total=0,
+			outstanding_amount=outstanding,
+			is_return=0,
+			docstatus=docstatus,
+			items=[dict(purchase_order=po, purchase_receipt=None)],
+			**changes,
+		)
+
+	@staticmethod
+	def matches(row, filters):
+		for key, value in (filters or {}).items():
+			if isinstance(value, (tuple, list)):
+				if value[0] == "in" and row.get(key) not in value[1]:
+					return False
+				if value[0] == "!=" and row.get(key) == value[1]:
+					return False
+				if value[0] == "=" and row.get(key) != value[1]:
+					return False
+				if value[0] == "is" and (row.get(key) not in (None, "")) != (value[1] == "set"):
+					return False
+			elif row.get(key) != value:
+				return False
+		return True
+
+	def rows(self, dt, filters=None, or_filters=None, **kwargs):
+		self.queries.append((dt, filters))
+		rows = (
+			self.children.get(dt, [])
+			if dt in CHILDREN.values()
+			else [row for (kind, _), row in self.records.items() if kind == dt]
+		)
+		result = [
+			frappe._dict(copy.deepcopy(row))
+			for row in rows
+			if self.matches(row, filters)
+			and (
+				not or_filters
+				or any(self.matches(row, {entry[-3]: [entry[-2], entry[-1]]}) for entry in or_filters)
+			)
+		]
+		if kwargs.get("pluck"):
+			return list(dict.fromkeys(row[kwargs["pluck"]] for row in result))
+		return result
+
+	def get_values(self, dt, filters, fields, **kwargs):
+		rows = self.rows(dt, filters)
+		if fields != "*":
+			fields = [fields] if isinstance(fields, str) else fields
+			rows = [frappe._dict({field: row.get(field) for field in fields}) for row in rows]
+		return rows if kwargs.get("as_dict") else [tuple(row.values()) for row in rows]
+
+	def get_value(self, dt, name, field, **kwargs):
+		row = (
+			self.records.get((dt, name), {}) if isinstance(name, str) else next(iter(self.rows(dt, name)), {})
+		)
+		if isinstance(field, (list, tuple)):
+			return frappe._dict({key: row.get(key) for key in field})
+		return row.get(field)
+
+	def exists(self, dt, name):
+		if dt == "DocType":
+			return name != "Overseas Cost Batch" or self.installed_cost
+		return (dt, name) in self.records
+
+	def get_doc(self, dt, name=None, **kwargs):
+		if isinstance(dt, dict):
+			return NativeDoc(self, dict(dt))
+		if kwargs.get("for_update"):
+			self.locks.append((dt, name))
+			self.events.append(("lock", dt, name))
+		row = self.records.get((dt, name))
+		if row is None:
+			raise frappe.DoesNotExistError(name)
+		return NativeDoc(self, copy.deepcopy(row))
+
+	def fields(self, dt, **kwargs):
+		fields = set(
+			PO_FIELDS
+			| ITEM_FIELDS
+			| payment.PI_FIELDS
+			| {
+				"name",
+				"modified",
+				"docstatus",
+				"purchase_order",
+				"purchase_receipt",
+				"purchase_order_item",
+				"po_detail",
+				"is_return",
+				"warehouse",
+				"received_qty",
+				"represents_company",
+				"is_internal_supplier",
+				"is_internal_customer",
+				"disabled",
+				"customer",
+				"default_currency",
+				"stock_qty",
+				"posting_date",
+				"is_group",
+				"references",
+				"reference_doctype",
+				"reference_name",
+				"allocated_amount",
+			}
+		)
+		fields.update(rowkey for (kind, _), row in self.records.items() if kind == dt for rowkey in row)
+		return fields - self.hidden.get((dt, kwargs.get("permission_type", "read")), set())
+
+	def meta(self, dt):
+		child = CHILDREN.get(dt)
+		tables = (
+			[frappe._dict(fieldname="references" if dt == "Payment Entry" else "items", options=child)]
+			if child
+			else []
+		)
+		return SimpleNamespace(
+			get_table_fields=lambda: tables,
+			fields=[],
+			get_permlevel_access=lambda **kwargs: [0],
+			has_field=lambda field: field in self.fields(dt),
+		)
 
 
 def api():
@@ -603,8 +733,8 @@ class CrossborderProgressTests(unittest.TestCase):
                 self.assertEqual(filters["purchase_order"][1], [result["rows"][0]["name"]])
 
     def test_real_unified_reversal_projection_selects_only_orders_with_pending_pointer(self):
-        from deeplinkerp_branding.services import unified_purchase_service as unified
         from deeplinkerp_branding.services import purchase_reversal_progress as reversal
+        from deeplinkerp_branding.services import unified_purchase_service as unified
         pointer = "custom_purchase_reversal_operation"
         self.memory.records["Purchase Order", "EXT"][pointer] = "PENDING"
         self.memory.po("EMPTY")[pointer] = ""
@@ -713,8 +843,8 @@ class CrossborderProgressTests(unittest.TestCase):
         self.assertNotIn("237", str(data))
 
     def test_source_role_field_acl_blocks_hidden_confirmed_beneficiary_from_list_and_count(self):
-        from deeplinkerp_branding.services import unified_purchase_service as unified
         from deeplinkerp_branding.services import purchase_source_service as source_service
+        from deeplinkerp_branding.services import unified_purchase_service as unified
         self.memory.add("Company", "FACTORY", company_name="Factory")
         self.memory.add("OA Purchase Request", "OA", target_company="BUYER", purchase_order="EXT", oa_code="DT-ORIGINAL",
             custom_purchase_source_id="source", custom_purchase_company_confirmed=1,

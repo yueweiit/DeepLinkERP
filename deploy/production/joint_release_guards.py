@@ -1,14 +1,14 @@
 """Pure bounded-schema and durable-receipt guards; no database writes here."""
 
-import copy
 import base64
+import copy
 import hashlib
 import json
 import os
 import re
 import stat
-import tempfile
 import subprocess
+import tempfile
 import time
 from pathlib import Path, PurePosixPath
 
@@ -118,7 +118,7 @@ def filesystem_budget(operations, *, reserve_bytes=2 * 1024**3):
 	return list(devices.values())
 
 
-def release_space_budget(archives, image_id):
+def release_space_budget(archives, image_id, *, main_only=False):
 	"""Uncompressed extraction/build/full-with-files backup demands, before any of them."""
 	import tarfile
 	archives = [Path(value).resolve(strict=True) for value in archives if value]
@@ -127,6 +127,17 @@ def release_space_budget(archives, image_id):
 		with tarfile.open(path, "r:gz") as archive:
 			expanded += sum(member.size for member in archive.getmembers() if member.isfile())
 	assert expanded > 0
+	if main_only:
+		image = json.loads(_host_call(["docker", "image", "inspect", image_id]))[0]
+		assert image["Id"] == image_id and image["Size"] > 0 and image["RootFS"]["Layers"], "Unknown real shared image layers; HOLD"
+		docker_root = json.loads(_host_call(["docker", "info", "--format", "{{json .DockerRootDir}}"])).strip()
+		# COPY overlays share the existing base. Bound the actual copied bytes and
+		# layer overhead; post-build verifies the observed image size against this.
+		overlay = expanded * 2 + 64 * 1024**2
+		operations = {"extraction": ("/tmp", expanded), "candidate_overlay": (docker_root, overlay), "metadata_audit_receipts": (str(Path.cwd()), 256 * 1024**2), "persistent_main_rq": (docker_root, 256 * 1024**2)}
+		for index, path in enumerate(archives):
+			operations["compressed_archive_" + str(index)] = (path.parent, path.stat().st_size)
+		return {"filesystems": filesystem_budget(operations), "expanded_archive_bytes": expanded, "compressed_archive_bytes": sum(path.stat().st_size for path in archives), "base_image_bytes": image["Size"], "overlay_limit_bytes": overlay, "receipt_limit_bytes": 256 * 1024**2, "archives": {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in archives}}
 	backend = _container_inspect("backend")
 	sites = [item for item in backend["Mounts"] if item["Destination"] == "/home/frappe/frappe-bench/sites"]
 	assert len(sites) == 1 and sites[0]["Type"] in {"bind", "volume"}, "Unknown backup filesystem; HOLD"
@@ -172,8 +183,8 @@ NATIVE_RELAY_SOURCES = {
 def native_runtime_proof():
 	"""Known native relay/scheduler only; site handlers cannot add financial writers."""
 	import frappe
-	import rq
 	import gunicorn
+	import rq
 	bench = Path("/home/frappe/frappe-bench")
 	assert (frappe.__version__, rq.__version__, gunicorn.__version__) == ("16.23.0", "2.6.1", "23.0.0"), "Unknown native drain version; HOLD"
 	for name, expected in NATIVE_RELAY_SOURCES.items():
@@ -201,6 +212,19 @@ def native_runtime_proof():
 def verified_quiescence():
 	"""A raw isolated drain or this release's durable actual host drain, not an env claim."""
 	import frappe
+	main_path = os.environ.get("DEEPLINKERP_MAIN_SEAL_RECEIPT")
+	if main_path:
+		state = DDLReceipt.load(main_path).state
+		proof = json.loads(Path(os.environ["DEEPLINKERP_MAIN_SEAL_PROOF"]).read_bytes())
+		validate_main_seal(state, proof, os.environ["DEEPLINKERP_RELEASE_CANDIDATE_SHA"])
+		assert frappe.local.site == "deeplinkerp.com" and frappe.conf.maintenance_mode == 1, "Main physical maintenance seal required; HOLD"
+		assert frappe.conf.db_name == state["contract"]["database"] and frappe.conf.db_user == state["contract"]["new_user"], "Main private authentication seal differs; HOLD"
+		assert frappe.db.sql("SELECT CURRENT_USER()")[0][0] == state["contract"]["new_user"] + "@%", "Main command uses another principal; HOLD"
+		assert frappe.db.get_single_value("System Settings", "enable_scheduler") in (0, "0", False), "Main global scheduler must remain disabled; HOLD"
+		processes = native_processes()
+		assert set(processes) == {"1"} and Path(processes["1"]["argv"][0]).name.startswith("python"), "Only the bounded main metadata command may run before resume; HOLD"
+		assert_pre_resume(os.environ["DEEPLINKERP_RELEASE_RESUME_RECEIPT"])
+		return True
 	if getattr(getattr(frappe, "local", None), "site", None) == "operating-release-qa.localhost":
 		import redis
 		assert frappe.conf.db_host == "db" and frappe.conf.db_name == "_f8a4c563227c1ef2" and frappe.conf.maintenance_mode == 1
@@ -213,7 +237,8 @@ def verified_quiescence():
 		assert not queue["workers"] and not queue["executions"] and not any(rows for key, rows in queue["registries"].items() if key.startswith("wip:")), "Isolated native workers still active"
 		return True
 	path = os.environ.get("DEEPLINKERP_RELEASE_DRAIN_RECEIPT")
-	if not path: return False
+	if not path:
+		return False
 	state = DDLReceipt.load(path).state
 	assert state["identity"]["candidate_sha"] == os.environ.get("DEEPLINKERP_RELEASE_CANDIDATE_SHA"), "Drain belongs to another candidate; HOLD"
 	assert state["status"] == "applied" and set(state["after"]["containers"]) == set(RELEASE_SERVICES), "Actual bounded drain incomplete; HOLD"
@@ -223,30 +248,47 @@ def verified_quiescence():
 	return True
 
 
-def raw_rq_snapshot(redis):
+def validate_main_seal(state, proof, candidate_sha):
+	"""Require an actual fresh all-Host authentication and namespace observation."""
+	assert state["status"] == "applied" and state["identity"]["candidate_sha"] == proof["candidate_sha"] == candidate_sha, "Main seal belongs to another/incomplete release; HOLD"
+	assert 0 <= time.time() - proof["observed_at"] <= 120, "Main seal proof is stale; HOLD"
+	assert sorted(proof["old_hosts"]) == sorted(state["contract"]["original_hosts"]) and proof["old_accounts_locked"] is True and proof["old_sessions"] == 0, "Main all-Host authentication seal incomplete; HOLD"
+	assert sorted(proof["discovered_sites"]) == sorted(SHARED_SITES[1:]), "Main physical namespace seal incomplete; HOLD"
+	assert all(proof.get(key) is True for key in ("private_config", "source_idle", "old_containers_unchanged", "producer_containers_stopped")), "Main producer/private credential seal unconfirmed; HOLD"
+	assert proof["new_user"] == state["contract"]["new_user"] and proof["database"] == state["contract"]["database"], "Main private DB seal differs; HOLD"
+
+
+def raw_rq_snapshot(redis, *, main_only=False):
 	"""RQ 2.6.1 inventory using raw Redis reads, never native cleanup helpers."""
-	decode = lambda value: value.decode("utf-8", "strict") if isinstance(value, bytes) else value
+	def decode(value):
+		return value.decode("utf-8", "strict") if isinstance(value, bytes) else value
 	keys, cursor = set(), 0
 	for _ in range(1000):
 		cursor, found = redis.scan(cursor, match="rq:*", count=1000)
 		keys.update(decode(key) for key in found)
 		assert len(keys) <= 10000, "RQ key inventory exceeds bound; HOLD"
-		if cursor == 0: break
-	else: raise AssertionError("Incomplete RQ key inventory; HOLD")
+		if cursor == 0:
+			break
+	else:
+		raise AssertionError("Incomplete RQ key inventory; HOLD")
+
 	def typed(key, kind):
 		actual = decode(redis.type(key))
 		assert actual in {kind, "none"}, "Unexpected Redis key type: " + key
 		return actual != "none"
 	def members(key):
-		if not typed(key, "set"): return []
+		if not typed(key, "set"):
+			return []
 		assert redis.scard(key) <= 50000, "RQ set exceeds bound"
 		return sorted(decode(value) for value in redis.smembers(key))
 	def listing(key):
-		if not typed(key, "list"): return []
+		if not typed(key, "list"):
+			return []
 		assert redis.llen(key) <= 50000, "RQ queue exceeds bound"
 		return [decode(value) for value in redis.lrange(key, 0, -1)]
 	def registry(key):
-		if not typed(key, "zset"): return []
+		if not typed(key, "zset"):
+			return []
 		assert redis.zcard(key) <= 50000, "RQ registry exceeds bound"
 		return [[decode(value), score] for value, score in redis.zrange(key, 0, -1, withscores=True)]
 	def raw_hash(key):
@@ -259,13 +301,17 @@ def raw_rq_snapshot(redis):
 	queues = members("rq:queues")
 	assert all(key.startswith("rq:queue:") and key.count(":") >= 3 for key in queues), "Unknown RQ queue key"
 	result = {"queues": {}, "intermediate": {}, "registries": {}, "workers": {}, "tombstones": {}, "jobs": {}, "executions": {}, "worker_sets": {}}
+	if main_only:
+		result["historical_orphans"] = {}
 	job_ids, execution_keys = set(), set()
 	for key in queues:
 		queue = key.removeprefix("rq:queue:")
 		result["queues"][queue] = listing(key)
 		result["intermediate"][queue] = listing(key + ":intermediate")
-		assert not result["intermediate"][queue], "Unexplained intermediate RQ jobs; HOLD"
+		if not main_only:
+			assert not result["intermediate"][queue], "Unexplained intermediate RQ jobs; HOLD"
 		job_ids.update(result["queues"][queue])
+		job_ids.update(result["intermediate"][queue])
 		result["worker_sets"][queue] = members("rq:workers:" + queue)
 		for kind in ("wip", "deferred", "scheduled", "finished", "failed", "canceled"):
 			rows = registry("rq:" + kind + ":" + queue)
@@ -277,7 +323,15 @@ def raw_rq_snapshot(redis):
 					execution_keys.add("rq:execution:" + member)
 					assert execution and job, "Empty started execution ID"
 					job_ids.add(job)
-				else: job_ids.add(member)
+				else:
+					job_ids.add(member)
+	if main_only:
+		known_queues = set(queues) | {key + ":intermediate" for key in queues}
+		for key in keys:
+			if key.startswith("rq:queue:") and key not in known_queues:
+				assert not listing(key), "Unknown/orphan live RQ queue; HOLD"
+			if any(key.startswith("rq:" + kind + ":") for kind in ("wip", "deferred", "scheduled")) and key.removeprefix("rq:") not in result["registries"]:
+				assert not registry(key), "Unknown/orphan live RQ registry; HOLD"
 	worker_keys = members("rq:workers")
 	assert all(key.startswith("rq:worker:") for key in worker_keys), "Malformed worker identity"
 	for key in sorted({key for key in keys if key.startswith("rq:worker:")} | set(worker_keys)):
@@ -286,7 +340,8 @@ def raw_rq_snapshot(redis):
 		if key in worker_keys:
 			assert not worker.get("death"), "Registered dead worker; HOLD"
 			result["workers"][key] = worker
-			if worker.get("current_job"): job_ids.add(worker["current_job"])
+			if worker.get("current_job"):
+				job_ids.add(worker["current_job"])
 		else:
 			# Native register_death unregisters then retains the hash for 60s.
 			# Only the caller's original matched worker may explain this tombstone.
@@ -296,18 +351,51 @@ def raw_rq_snapshot(redis):
 	for job in sorted(job_ids):
 		assert job and ":" not in job, "Malformed RQ job ID"
 		key = "rq:job:" + job
+		if main_only and not typed(key, "hash"):
+			historical = {name: [row for row in rows if row[0] == job] for name, rows in result["registries"].items() if name.startswith("finished:")}
+			historical = {name: rows for name, rows in historical.items() if rows}
+			live = any(job in rows for rows in (*result["queues"].values(), *result["intermediate"].values())) or any(worker.get("current_job") == job for worker in result["workers"].values()) or any(member.split(":", 1)[0] == job for name, rows in result["registries"].items() if not name.startswith("finished:") for member, _ in rows)
+			assert historical and not live, "Referenced live/unknown job missing native data; HOLD"
+			for name, rows in historical.items():
+				result["historical_orphans"].setdefault(name, []).extend(rows)
+			continue
 		assert typed(key, "hash") and redis.hexists(key, "data"), "Referenced job missing native data; HOLD"
 		assert all(redis.hstrlen(key, field) <= 4096 for field in JOB_FIELDS), "Job metadata exceeds bound"
-		value = {field: decode(value) for field, value in zip(JOB_FIELDS, redis.hmget(key, JOB_FIELDS))}
+		value = {field: decode(value) for field, value in zip(JOB_FIELDS, redis.hmget(key, JOB_FIELDS), strict=False)}
 		assert value["origin"] in result["queues"] and value["status"] in {"queued", "started", "finished", "failed", "deferred", "scheduled", "canceled", "stopped"}, "Unknown job origin/status; HOLD"
 		result["jobs"][job] = value
 		for execution, _ in registry("rq:executions:" + job):
 			execution_keys.add("rq:execution:" + job + ":" + execution)
 	assert {key for key in keys if key.startswith("rq:execution:")} == execution_keys, "Orphan execution; HOLD"
-	for key in sorted(execution_keys): result["executions"][key] = raw_hash(key)
+	for key in sorted(execution_keys):
+		result["executions"][key] = raw_hash(key)
 	assert all(key in worker_keys for rows in result["worker_sets"].values() for key in rows), "Orphan queue worker registration"
 	assert len(serialized(result)) <= 16 * 1024**2, "RQ complete inventory exceeds byte bound"
 	return result
+
+
+def assert_main_rq_empty(snapshot):
+	"""Natural main-only drain; retain and report shared historical anomalies."""
+	def live(job):
+		assert any(job.startswith(site + "||") for site in SHARED_SITES), "Unknown live native job identity; HOLD"
+		assert not job.startswith("deeplinkerp.com||"), "Live main native job/callback remains; HOLD"
+	for rows in (*snapshot["queues"].values(), *snapshot.get("intermediate", {}).values()):
+		for job in rows:
+			live(job)
+	for name, rows in snapshot["registries"].items():
+		if name.startswith(("wip:", "deferred:", "scheduled:")):
+			for member, _ in rows:
+				live(member.split(":", 1)[0])
+	for worker in snapshot["workers"].values():
+		if worker.get("current_job"):
+			live(worker["current_job"])
+	for key in snapshot["executions"]:
+		live(key.removeprefix("rq:execution:").split(":", 1)[0])
+	for job, fact in snapshot["jobs"].items():
+		if fact["status"] in {"queued", "started", "deferred", "scheduled"}:
+			live(job)
+	orphans = snapshot.get("historical_orphans", {})
+	return {"main_empty": True, "historical_orphans": orphans, "shared_strict_hold": bool(orphans)}
 
 
 def verify_rq_drain(before, after, completed):
@@ -325,7 +413,8 @@ def verify_rq_drain(before, after, completed):
 	for queue, jobs in before["queues"].items():
 		assert [job for job in jobs if job not in completed] == [job for job in after["queues"][queue] if job in jobs and job not in completed], "Unmatched queued job vanished or reordered; HOLD"
 	for kind, rows in before["registries"].items():
-		if kind.startswith("wip:"): continue
+		if kind.startswith("wip:"):
+			continue
 		assert all(row in after["registries"].get(kind, []) for row in rows), "Historical RQ registry changed; HOLD"
 	for job, fact in before["jobs"].items():
 		if job not in completed:
@@ -336,12 +425,20 @@ def native_processes():
 	"""Read PID/start-time/argv identities inside one known container namespace."""
 	result = {}
 	for path in Path("/proc").iterdir():
-		if not path.name.isdigit(): continue
+		if not path.name.isdigit():
+			continue
 		try:
 			stat = (path / "stat").read_text().rsplit(")", 1)[1].split()
 			argv = [value.decode() for value in (path / "cmdline").read_bytes().split(b"\0") if value]
-			if argv: result[path.name] = {"pid": int(path.name), "parent": int(stat[1]), "start": stat[19], "argv": argv}
-		except FileNotFoundError: continue  # A concurrent natural exit is re-read by the caller.
+			if argv:
+				result[path.name] = {
+					"pid": int(path.name),
+					"parent": int(stat[1]),
+					"start": stat[19],
+					"argv": argv,
+				}
+		except FileNotFoundError:
+			continue  # A concurrent natural exit is re-read by the caller.
 	assert "1" in result and len(result) <= 100, "Unbounded/unknown container process inventory"
 	return result
 
@@ -380,7 +477,8 @@ def drain_release(path, tool, candidate_sha, *, timeout=360):
 		before["containers"][service] = {"id": value["Id"], "image": value["Image"], "pid": value["State"]["Pid"], "started": value["State"]["StartedAt"], "hostname": value["Config"]["Hostname"]}
 		# nginx frontend lacks the Python runtime; its exact Docker PID/start still
 		# belongs to the same old direct-entrypoint container.
-		if service != "frontend": before["processes"][service] = _container_read(service, tool, "--processes")
+		if service != "frontend":
+			before["processes"][service] = _container_read(service, tool, "--processes")
 	worker_names = {}
 	for key, worker in before["rq"]["workers"].items():
 		matches = [service for service in ("queue-long", "queue-short") if worker["hostname"] == before["containers"][service]["hostname"] and worker["pid"] == "1"]
@@ -439,9 +537,11 @@ def drain_release(path, tool, candidate_sha, *, timeout=360):
 		observe(last_rq)
 		states = {service: _container_inspect(service) for service in RELEASE_SERVICES}
 		assert all(value["Id"] == before["containers"][service]["id"] for service, value in states.items()), "Container identity changed during drain"
-		if all(not value["State"]["Running"] for value in states.values()): break
+		if all(not value["State"]["Running"] for value in states.values()):
+			break
 		time.sleep(1)
-	else: raise AssertionError("Bounded warm drain timed out; maintenance HOLD; no second signal")
+	else:
+		raise AssertionError("Bounded warm drain timed out; maintenance HOLD; no second signal")
 	logs = {}
 	for service, value in states.items():
 		assert value["State"]["ExitCode"] in ({0} if service in {"backend", "queue-long", "queue-short", "frontend"} else {0, 143}), "Abnormal process exit; HOLD"
@@ -454,7 +554,8 @@ def drain_release(path, tool, candidate_sha, *, timeout=360):
 	for service in ("queue-long", "queue-short"):
 		assert re.search(r"warm shut|warm stop", logs[service], re.I), "Missing native warm-shutdown proof; HOLD"
 		for job in re.findall(r"Job OK\s*\(([^)]+)\)", logs[service]):
-			if before["rq"]["jobs"].get(job, {}).get("status") != "finished": completed[job] = worker_names[service]
+			if before["rq"]["jobs"].get(job, {}).get("status") != "finished":
+				completed[job] = worker_names[service]
 		for job, worker in completed.items():
 			if worker == worker_names[service]:
 				assert re.search(r"Job OK.*\(" + re.escape(job) + r"\)", logs[service]), "Missing native post-callback success log; HOLD"
@@ -467,18 +568,24 @@ def drain_release(path, tool, candidate_sha, *, timeout=360):
 	return {"quiescent": True, "receipt": str(path), "one_term_per_identity": True}
 
 
-def tenant_preflight(expected_erpnext):
+def tenant_preflight(expected_erpnext, *, main_only=False):
 	"""Read all tenants; plan only main full / secondary native-only metadata."""
-	import frappe
 	import erpnext
-	import rq
+	import frappe
 	import gunicorn
-	from procurement_release_metadata import load_joint_contract, _capture_joint_state, _joint_plan, _read_only_native_planning, verify_current_joint_contract
+	import rq
+	from procurement_release_metadata import (
+		_capture_joint_state,
+		_joint_plan,
+		_read_only_native_planning,
+		load_joint_contract,
+		verify_current_joint_contract,
+	)
 	assert expected_erpnext and erpnext.__version__ == expected_erpnext, "Unknown/unapproved precise ERPNext version (actual " + erpnext.__version__ + "); HOLD"
 	assert frappe.__version__ == "16.23.0" and rq.__version__ == "2.6.1" and gunicorn.__version__ == "23.0.0", "Unapproved native runtime; HOLD"
 	bench = Path("/home/frappe/frappe-bench")
 	result = {"versions": {"frappe": frappe.__version__, "erpnext": erpnext.__version__, "rq": rq.__version__, "gunicorn": gunicorn.__version__}, "sites": {}}
-	for site in SHARED_SITES:
+	for site in SHARED_SITES[:1] if main_only else SHARED_SITES:
 		frappe.init(site=site, sites_path=str(bench / "sites"))
 		frappe.connect()
 		try:
@@ -489,6 +596,10 @@ def tenant_preflight(expected_erpnext):
 			installed = frappe.get_installed_apps()
 			entry = {"installed_apps": installed, "configuration": config, "configuration_raw_base64": base64.b64encode(raw).decode(), "configuration_mode": path.stat().st_mode & 0o777, "maintenance_present": "maintenance_mode" in config, "maintenance_value": config.get("maintenance_mode")}
 			assert frappe.db.sql("select version()")[0][0].startswith("11.8.6-"), "Production MariaDB 11.8.6 required; HOLD"
+			if main_only:
+				assert frappe.db.get_single_value("System Settings", "enable_scheduler") in (0, "0", False), (
+					"Main global scheduler must remain disabled; HOLD"
+				)
 			if "deeplinkerp_branding" in installed:
 				with _read_only_native_planning():
 					native_only = site != "deeplinkerp.com"
@@ -504,7 +615,7 @@ def tenant_preflight(expected_erpnext):
 		finally:
 			frappe.db.rollback()
 			frappe.destroy()
-	assert set(result["sites"]) == set(SHARED_SITES)
+	assert set(result["sites"]) == set(SHARED_SITES[:1] if main_only else SHARED_SITES)
 	return result
 
 
@@ -516,9 +627,12 @@ def restore_site_maintenance(path, site, original, *, enable=False):
 	config = json.loads(config_path.read_bytes())
 	baseline = original["sites"][site]["configuration"]
 	assert {key: value for key, value in config.items() if key != "maintenance_mode"} == {key: value for key, value in baseline.items() if key != "maintenance_mode"}, "Tenant configuration drift; HOLD"
-	if enable: config["maintenance_mode"] = 1
-	elif "maintenance_mode" in baseline: config["maintenance_mode"] = baseline["maintenance_mode"]
-	else: config.pop("maintenance_mode", None)
+	if enable:
+		config["maintenance_mode"] = 1
+	elif "maintenance_mode" in baseline:
+		config["maintenance_mode"] = baseline["maintenance_mode"]
+	else:
+		config.pop("maintenance_mode", None)
 	if enable:
 		DDLReceipt(config_path, {})._save(config)
 	else:
@@ -561,7 +675,7 @@ def cleanup_owned_build(evidence, acceptance):
 	items = list(path.rglob("*"))
 	for item in items:
 		mode = item.lstat()
-		assert stat.S_ISDIR(mode.st_mode) or stat.S_ISREG(mode.st_mode) and mode.st_nlink == 1, "Shared/linked/special extraction contents; HOLD"
+		assert stat.S_ISDIR(mode.st_mode) or (stat.S_ISREG(mode.st_mode) and mode.st_nlink == 1), "Shared/linked/special extraction contents; HOLD"
 	assert sorted(str(item.relative_to(path)) for item in items if item.is_dir()) == owned["directories"], "Build directory inventory changed; HOLD"
 	assert (path / "release-source-manifest.json").is_file() and hashlib.sha256((path / "release-source-manifest.json").read_bytes()).hexdigest() == owned["manifest_sha256"]
 	files = {str(item.relative_to(path)): hashlib.sha256(item.read_bytes()).hexdigest() for item in items if item.is_file()}
@@ -579,18 +693,32 @@ def cleanup_owned_build(evidence, acceptance):
 			assert not (source == canonical or source in canonical.parents or canonical in source.parents), "Build tree in-use/shared by a container; HOLD"
 	def health():
 		backend = None
-		for service in RELEASE_SERVICES:
-			value = _container_inspect(service)
-			assert value["Image"] == owned["image_id"] and value["State"]["Running"] and not value["State"].get("OOMKilled"), "Release health/image changed; forward HOLD"
-			if service == "backend": backend = value
-		for site in SHARED_SITES: _host_call(["curl", "-fsS", "--max-time", "10", "https://" + site + "/api/method/ping"])
+		if owned.get("lane") == "main-only":
+			import sys
+			helper = root / "main_site_lane.py"
+			assert hashlib.sha256(helper.read_bytes()).hexdigest() == owned["main_helper_sha256"], "Frozen main health helper differs; forward HOLD"
+			rq = json.loads(_host_call([sys.executable, str(helper), "health", "--evidence", str(root), "--build", str(root)]))
+			assert rq.get("main_running") is True and rq.get("rq_aof") is True, "Main release health changed; forward HOLD"
+			for site in SHARED_SITES[1:]:
+				for url, digest in owned["old_raw_assets"].items():
+					body = subprocess.run(["curl", "-fsS", "--max-time", "10", "https://" + site + url], check=True, capture_output=True, timeout=15).stdout
+					assert hashlib.sha256(body).hexdigest() == digest, "Unrelated site's original raw asset body differs; forward HOLD"
+		else:
+			for service in RELEASE_SERVICES:
+				value = _container_inspect(service)
+				assert value["Image"] == owned["image_id"] and value["State"]["Running"] and not value["State"].get("OOMKilled"), "Release health/image changed; forward HOLD"
+				if service == "backend":
+					backend = value
+		for site in SHARED_SITES:
+			_host_call(["curl", "-fsS", "--max-time", "10", "https://" + site + "/api/method/ping"])
 		for url, digest in owned["raw_assets"].items():
 			body = subprocess.run(["curl", "-fsS", "--max-time", "10", "https://deeplinkerp.com" + url], check=True, capture_output=True, timeout=15).stdout
 			assert hashlib.sha256(body).hexdigest() == digest, "Current raw asset body differs; forward HOLD"
 		for image_id in (owned["image_id"], owned["rollback_image_id"]):
 			assert json.loads(_host_call(["docker", "image", "inspect", image_id]))[0]["Id"] == image_id, "Current/rollback image retention unconfirmed; forward HOLD"
-		rq = _command_rq_snapshot(backend, Path(__file__))
-		assert rq.get("redis_ping") is True and {"queues", "workers", "executions", "jobs", "registries"} <= set(rq), "Redis/RQ health unconfirmed; forward HOLD"
+		if backend is not None:
+			rq = _command_rq_snapshot(backend, Path(__file__))
+			assert rq.get("redis_ping") is True and {"queues", "workers", "executions", "jobs", "registries"} <= set(rq), "Redis/RQ health unconfirmed; forward HOLD"
 		return rq  # Running writers may naturally advance; record, never mutate/empty.
 	before_rq = health()
 	before = os.statvfs(path.parent)
@@ -708,7 +836,7 @@ def main():
 	import argparse
 	parser = argparse.ArgumentParser(description="Bounded guards for the existing procurement release")
 	action = parser.add_mutually_exclusive_group(required=True)
-	for name in ("rq-snapshot", "processes", "runtime-proof", "tenant-preflight", "source-host-proof", "host-drain", "record-resume", "assert-pre-resume", "maintenance-on", "maintenance-restore", "cleanup-owned-build"):
+	for name in ("rq-snapshot", "rq-main-snapshot", "processes", "runtime-proof", "tenant-preflight", "source-host-proof", "host-drain", "record-resume", "assert-pre-resume", "maintenance-on", "maintenance-restore", "cleanup-owned-build"):
 		action.add_argument("--" + name, action="store_true")
 	parser.add_argument("--receipt")
 	parser.add_argument("--candidate-sha")
@@ -718,31 +846,45 @@ def main():
 	parser.add_argument("--tenant-receipt")
 	parser.add_argument("--evidence")
 	parser.add_argument("--acceptance")
+	parser.add_argument("--main-only", action="store_true")
 	args = parser.parse_args()
-	if args.rq_snapshot:
+	if args.rq_snapshot or args.rq_main_snapshot:
 		import redis
 		import rq
 		assert rq.__version__ == "2.6.1", "RQ native source version unknown; HOLD"
 		config = json.loads(Path("/home/frappe/frappe-bench/sites/common_site_config.json").read_bytes())
 		client = redis.Redis.from_url(config["redis_queue"], socket_connect_timeout=5, socket_timeout=5)
 		assert client.ping() is True, "Redis health unconfirmed; HOLD"
-		result = raw_rq_snapshot(client)
+		result = raw_rq_snapshot(client, main_only=args.rq_main_snapshot)
 		result["redis_ping"] = True
-	elif args.processes: result = native_processes()
-	elif args.runtime_proof: result = native_runtime_proof()
-	elif args.tenant_preflight: result = tenant_preflight(args.erpnext_version)
-	elif args.source_host_proof: result = source_host_proof()
-	elif args.host_drain: result = drain_release(args.receipt, str(Path(__file__).resolve()), args.candidate_sha)
-	elif args.record_resume: result = record_resume(args.receipt, {"candidate_sha": args.candidate_sha, "image_id": args.image_id}, args.producer)
+	elif args.processes:
+		result = native_processes()
+	elif args.runtime_proof:
+		result = native_runtime_proof()
+	elif args.tenant_preflight:
+		result = tenant_preflight(args.erpnext_version, main_only=args.main_only)
+	elif args.source_host_proof:
+		result = source_host_proof()
+	elif args.host_drain:
+		result = drain_release(args.receipt, str(Path(__file__).resolve()), args.candidate_sha)
+	elif args.record_resume:
+		result = record_resume(
+			args.receipt, {"candidate_sha": args.candidate_sha, "image_id": args.image_id}, args.producer
+		)
 	elif args.assert_pre_resume:
 		assert_pre_resume(args.receipt)
 		result = {"pre_resume": True}
 	elif args.maintenance_on or args.maintenance_restore:
 		original = json.loads(Path(args.tenant_receipt).read_bytes())
-		for site in SHARED_SITES: restore_site_maintenance("/home/frappe/frappe-bench/sites", site, original, enable=args.maintenance_on)
+		for site in SHARED_SITES:
+			restore_site_maintenance(
+				"/home/frappe/frappe-bench/sites", site, original, enable=args.maintenance_on
+			)
 		result = {"sites": list(SHARED_SITES), "maintenance": "on" if args.maintenance_on else "restored"}
-	elif args.cleanup_owned_build: result = cleanup_owned_build(args.evidence, args.acceptance)
-	else: raise AssertionError("Unrecognized release action")
+	elif args.cleanup_owned_build:
+		result = cleanup_owned_build(args.evidence, args.acceptance)
+	else:
+		raise AssertionError("Unrecognized release action")
 	print(json.dumps(result, sort_keys=True, ensure_ascii=False))
 
 

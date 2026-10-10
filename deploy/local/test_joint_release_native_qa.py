@@ -679,7 +679,9 @@ class CrossborderUpgradeNativeRehearsal(unittest.TestCase):
 					self.assertEqual((state["steps"][-1]["status"], state["steps"][-1]["sql"]), ("pending", str(query)))
 					original_ddl(query, **kwargs)
 					counter[0] += 1
-					if marker in str(query): raise RuntimeError("Synthetic crash after native autocommit")
+					if marker in str(query):
+						raise RuntimeError("Synthetic crash after native autocommit")
+
 				with patch.object(frappe.db, "sql_ddl", failure), self.assertRaisesRegex(RuntimeError, "autocommit"):
 					release.apply_joint_metadata(CANDIDATE_SHA, self.receipt, native_only=native_only)
 				self.restore()

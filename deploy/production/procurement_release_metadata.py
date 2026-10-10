@@ -6,8 +6,8 @@ flushed before commit so shell recovery can restore exact original child IDs.
 
 import argparse
 import ast
-import copy
 import contextlib
+import copy
 import hashlib
 import json
 import os
@@ -186,8 +186,10 @@ def _native_reversal_contract():
 	tree = ast.parse((root / "services/purchase_native_intent.py").read_text())
 	values = {}
 	def literal(node):
-		if isinstance(node, ast.Name): return values[node.id]
-		if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add): return literal(node.left) + literal(node.right)
+		if isinstance(node, ast.Name):
+			return values[node.id]
+		if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+			return literal(node.left) + literal(node.right)
 		return ast.literal_eval(node)
 	for node in tree.body:
 		if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
@@ -210,8 +212,8 @@ def _native_sql_row(item):
 	Legacy nullable SQL columns can outlive their native Meta fields. Existing
 	rows do not use this path: their complete raw SQL bytes remain authoritative.
 	"""
-	from frappe.utils import cint
 	from audit_unified_purchase import table_schema
+	from frappe.utils import cint
 
 	item._fix_numeric_types()
 	values = item.get_valid_dict(ignore_virtual=True)
@@ -260,8 +262,9 @@ def _definition_rows(source, defaults=False):
 @contextlib.contextmanager
 def _read_only_native_planning():
 	"""No DB commit/rollback, SQL mutation or Redis mutation during schema capture."""
-	import frappe
 	from unittest.mock import patch
+
+	import frappe
 
 	original_sql = frappe.db.sql
 	original_get_meta = frappe.get_meta
@@ -390,8 +393,8 @@ def _assert_no_joint_customizations(*, native_only=False):
 
 def load_joint_contract(*, require_quiescent=True, native_only=False):
 	import frappe
+	from audit_unified_purchase import source_digest, source_files, table_schema
 	from frappe.model.meta import Meta
-	from audit_unified_purchase import table_schema, source_files, source_digest
 	from joint_release_guards import serialized
 
 	assert frappe.__version__ == "16.23.0" and frappe.db.db_type == "mariadb", "Frozen native Frappe 16.23/MariaDB contract required"
@@ -507,8 +510,9 @@ def _definition_matches(scope, name, definition):
 
 def _desired_navigation(scope, *, when, seed):
 	import frappe
-	from deeplinkerp_branding.procurement_navigation import reconcile_links, reconcile_workspace
+
 	from deeplinkerp_branding.operating_navigation import ENTRIES, TARGETS, _anchor
+	from deeplinkerp_branding.procurement_navigation import reconcile_links, reconcile_workspace
 
 	expected = copy.deepcopy(scope)
 	for dt, name in JOINT_NAVIGATION:
@@ -570,8 +574,8 @@ def _assert_frozen_fields(meta, contract, present, doctype):
 
 def _joint_plan(before, contract, *, when, seed, require_quiescent=True):
 	import frappe
-	from frappe.model.meta import Meta
 	from audit_unified_purchase import table_schema
+	from frappe.model.meta import Meta
 	from joint_release_guards import validate_event_index
 
 	_assert_no_joint_customizations(native_only=contract.get("native_only", False))
@@ -746,21 +750,26 @@ def _native_schema_additions(table, contract, dt):
 	columns, indexes = {}, {}
 	if dt == "Integration Request":
 		key, index = contract["activity_column"], contract["activity_index"]
-		if key not in schema["columns"]: columns[key] = _activity_column(contract, len(schema["columns"]))
+		if key not in schema["columns"]:
+			columns[key] = _activity_column(contract, len(schema["columns"]))
 		wanted = copy.deepcopy(schema)
 		wanted["columns"].update(columns)
-		if index not in schema["indexes"]: indexes[index] = _native_index(contract["activity_index_columns"], wanted)
+		if index not in schema["indexes"]:
+			indexes[index] = _native_index(contract["activity_index_columns"], wanted)
 	else:
 		key, index = contract["fieldname"], contract["pointer_index"]
-		if key not in schema["columns"]: columns[key] = _je_column(len(schema["columns"]))
+		if key not in schema["columns"]:
+			columns[key] = _je_column(len(schema["columns"]))
 		wanted = copy.deepcopy(schema)
 		wanted["columns"].update(columns)
-		if index not in schema["indexes"]: indexes[index] = _native_index([key], wanted)
+		if index not in schema["indexes"]:
+			indexes[index] = _native_index([key], wanted)
 	return {"columns": columns, "indexes": indexes}
 
 
 def _native_reversal_plan(before, contract):
 	import frappe
+
 	from deeplinkerp_branding import purchase_reversal_install as install
 	native = contract["native_reversal"]
 	assert set(before["native_tables"]) == set(native["tables"])
@@ -788,7 +797,9 @@ def _native_reversal_plan(before, contract):
 
 def _verify_native_tables(before, current, contract, *, audit_before=None, audit_after=None):
 	from joint_release_guards import assert_schema_delta
-	if not contract.get("native_reversal"): return  # Older test/receipt format only.
+
+	if not contract.get("native_reversal"):
+		return  # Older test/receipt format only.
 	native = contract["native_reversal"]
 	assert set(before["native_tables"]) == set(current["native_tables"]) == set(native["tables"])
 	for dt, original in before["native_tables"].items():
@@ -895,7 +906,8 @@ def _assert_joint_invariants(receipt, current, *, scope=None, source_phase="afte
 	additions = {"columns": {}, "indexes": {}}
 	new_column_names = [key for key in CUSTOM_FIELD_ORDER if key in contract["custom_fields"] and key not in before["je"]["schema"]["columns"]]
 	for key in CUSTOM_FIELD_ORDER:
-		if key not in contract["custom_fields"]: continue
+		if key not in contract["custom_fields"]:
+			continue
 		if key not in before["je"]["schema"]["columns"]:
 			additions["columns"][key] = _je_column(len(before["je"]["schema"]["columns"]) + new_column_names.index(key))
 	if "custom_operating_event_key" in contract["custom_fields"] and "custom_operating_event_key" not in before["je"]["schema"]["indexes"]:
@@ -940,11 +952,12 @@ def _assert_joint_invariants(receipt, current, *, scope=None, source_phase="afte
 
 def apply_joint_metadata(candidate_sha, receipt_path, *, before_audit=None, native_only=False):
 	"""Only this joint path adds native operating DDL; no migrate or business hooks."""
+	from unittest.mock import patch
+
 	import frappe
+	from audit_unified_purchase import table_schema
 	from frappe.model.meta import Meta
 	from frappe.utils import now_datetime
-	from unittest.mock import patch
-	from audit_unified_purchase import table_schema
 	from joint_release_guards import DDLReceipt, serialized
 
 	assert frappe.conf.maintenance_mode == 1, "Verified maintenance required"
@@ -1227,7 +1240,8 @@ def restore_joint_metadata(receipt_path, *, candidate_sha=None, source_phase="af
 				additions = _native_schema_additions(original, native, dt)
 				for key in additions[kind]:
 					actual = table_schema(dt)
-					if key not in actual[kind]: continue
+					if key not in actual[kind]:
+						continue
 					expected = copy.deepcopy(actual)
 					expected[kind].pop(key)
 					query = "ALTER TABLE " + _quote("tab" + dt) + " DROP " + ("INDEX " if kind == "indexes" else "COLUMN ") + _quote(key)

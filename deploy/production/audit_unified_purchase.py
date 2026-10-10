@@ -265,7 +265,7 @@ def _native_activity_mismatch(contract):
 
 def capture_joint_state(*, original_columns=None, original_oa_columns=None, original_native_columns=None, native_only=False):
 	"""Private receipt snapshot. Raw JE projection and all scoped metadata stay private."""
-	from procurement_release_metadata import JOINT_MODELS, capture_joint_metadata, _native_reversal_contract
+	from procurement_release_metadata import JOINT_MODELS, _native_reversal_contract, capture_joint_metadata
 	assert OPERATING_MODELS == JOINT_MODELS, "Operating audit scope drift"
 
 	schema = table_schema("Journal Entry")

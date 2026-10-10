@@ -2,6 +2,9 @@
 # Serialized bounded joint release; exact Finance/OA overlays retain every other app.
 set -euo pipefail
 umask 077
+main_only=0
+main_prepared=0
+if [[ ${1:-} == --main-only ]]; then main_only=1; shift; fi
 if [[ ${1:-} == --cleanup-owned-build ]]; then
   evidence=${2:?This release evidence directory required}
   acceptance=${3:?Actual online browser acceptance receipt required}
@@ -15,6 +18,7 @@ root=Path(sys.argv[1]).resolve(strict=True)
 assert root.parent==Path.cwd()/'private/release-evidence' and root.name.startswith('unified-purchase-') and root.stat().st_uid==os.getuid()
 owned=json.loads((root/'build-ownership.json').read_bytes())
 assert hashlib.sha256((root/'joint_release_guards.py').read_bytes()).hexdigest()==owned['guard_sha256'], 'Cleanup guard differs from this frozen release; forward HOLD'
+if owned.get('lane')=='main-only': assert hashlib.sha256((root/'main_site_lane.py').read_bytes()).hexdigest()==owned['main_helper_sha256'], 'Cleanup main helper differs from this frozen release; forward HOLD'
 PY
   python3 "$evidence/joint_release_guards.py" --cleanup-owned-build --evidence "$evidence" --acceptance "$acceptance"
   exit
@@ -31,12 +35,16 @@ oa_archive=${9:-}
 oa_sha=${10:-}
 approved_maintenance_sites=${11:-}
 approved_native_schema_sites=${12:-}
+if (( main_only )); then
+  [[ -z "$approved_maintenance_sites" && -z "$approved_native_schema_sites" ]] || { echo '--main-only cannot authorize shared-site maintenance/schema' >&2; exit 1; }
+else
 [[ "$approved_maintenance_sites" == 'deeplinkerp.com,akivision.deeplinkerp.com,latingo.deeplinkerp.com,yuewei.deeplinkerp.com' ]] || {
   echo 'Four sites share serving containers. Main-only/unanswered maintenance approval is a scope blocker; no maintenance changed.' >&2; exit 1;
 }
 [[ "$approved_native_schema_sites" == 'akivision.deeplinkerp.com,latingo.deeplinkerp.com,yuewei.deeplinkerp.com' ]] || {
   echo 'Separate approval for exactly the three shared sites native fields/indexes/recover is required. No app installation or maintenance changed.' >&2; exit 1;
 }
+fi
 # The final joint candidate overlays exactly Finance + OA and retains CRM.
 [[ -z "$crm_archive" && -z "$crm_sha" ]] || { echo 'CRM must remain the independently verified base package' >&2; exit 1; }
 [[ "$finance_sha" == b73f17138fdf8235e91a687b8a113cbb33e7031c && "$oa_sha" == cecb3b2c9e3c48217dbe127327ea8f2d5ee40ea7 ]]
@@ -78,6 +86,7 @@ verify_running_release() {
   done
 }
 release_is_current() {
+  (( ! ${main_only:-0} )) || return 1
   local image_id
   image_id=$(docker inspect frappe_docker-backend-1 --format '{{.Image}}') || return 1
   verify_running_release "$image_id" "$branding_sha" "$crm_sha" "$finance_sha" "$oa_sha"
@@ -90,8 +99,10 @@ retarget_existing_source_sync() {
     runner_sha=$(sha256sum "$build_dir/deeplinkerp_branding/services/dedicated_source_sync.py")
     runner_sha=${runner_sha%% *}
   fi
-  python3 "$build_dir/deploy/production/dedicated_source_sync.py" retarget \
-    --revision "$target_revision" --image-id "$image_id" --runner-sha256 "$runner_sha" --start-timer
+  local launcher_args=(retarget --revision "$target_revision" --image-id "$image_id" --runner-sha256 "$runner_sha")
+  if (( ${main_only:-0} )); then launcher_args+=(--container "${4:-deeplinkerp_main-backend-1}"); fi
+  launcher_args+=(--start-timer)
+  python3 "$build_dir/deploy/production/dedicated_source_sync.py" "${launcher_args[@]}"
   systemctl --user is-active --quiet deeplinkerp-source-sync.timer
 }
 capture_pinned_sources() {
@@ -111,6 +122,10 @@ print(json.dumps(result))
 command_runner() {
   local image=$1 entrypoint=$2
   shift 2
+  if (( ${main_prepared:-0} )); then
+    main_lane run --image-id "$image" --entrypoint "$entrypoint" --candidate-sha "$branding_sha" -- "$@"
+    return
+  fi
   local drain_env=()
   if [[ -f "$release_dir/drain.json" ]]; then drain_env=(-e "DEEPLINKERP_RELEASE_DRAIN_RECEIPT=/release-evidence/drain.json"); fi
   docker run --rm --read-only --network "$release_network" --workdir /home/frappe/frappe-bench/sites \
@@ -174,6 +189,7 @@ deploy_files = {'deploy/production/deploy_unified_purchase.sh', 'deploy/producti
 		        'deploy/production/procurement_release_metadata.py',
                 'deploy/production/joint_release_guards.py',
                 'deploy/production/dedicated_source_sync.py',
+                'deploy/production/main_site_lane.py',
                 'deploy/production/systemd/deeplinkerp-source-sync.service',
                 'deploy/production/systemd/deeplinkerp-source-sync.timer',
                 'deploy/local/Dockerfile.unified-purchase'}
@@ -260,6 +276,133 @@ if manifest is not None:
     (root / 'release-source-manifest.json').write_text(json.dumps(manifest, sort_keys=True))
 PY
 }
+approve_release_sources() {
+  # Same full maps for the isolated main or the retained compatibility caller.
+  python3 - "$release_dir" "$build_dir" <<'PY'
+import copy,hashlib,json,sys
+from pathlib import Path
+evidence,build=map(Path,sys.argv[1:]);sys.path.insert(0,str(build/'deploy/production'))
+from joint_release_guards import merge_frozen_branding_sources
+manifest=json.loads((build/'release-source-manifest.json').read_bytes());pinned=json.loads((evidence/'pinned-base-sources.json').read_bytes())
+root=build/'deeplinkerp_branding'
+files={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in root.rglob('*') if p.is_file() and '__pycache__' not in p.parts and p.suffix not in {'.pyc','.pyo'}}
+for baseline in (evidence/'before.json',*evidence.glob('*.before.json')):
+ before=json.loads(baseline.read_bytes())
+ assert before['release_sources_all']=={app:pinned[app] for app in before['release_sources_all']}, 'Dirty server app source differs from immutable base; HOLD'
+ after=copy.deepcopy(before['release_sources_all']);after['deeplinkerp_branding']=merge_frozen_branding_sources(after['deeplinkerp_branding'],files)
+ for app in ('china_finance','oa_purchase_request'):
+  assert app in after, 'Required shared overlay package absent; no auto-install'
+  for path,versions in manifest['apps'][app].items():
+   assert before['release_sources_all'][app].get(path)==versions['before'], 'Unapproved app baseline'
+   after[app][path]=versions['after']
+ before['approved_sources_after']=after
+ baseline.write_text(json.dumps(before,sort_keys=True,ensure_ascii=False))
+PY
+}
+verify_audit_ownership() {
+  python3 - "$release_dir" "$build_dir" "$branding_sha" "$new_image_id" "$old_image_id" "$main_only" <<'PY'
+import hashlib,json,os,sys
+from pathlib import Path
+root,build=map(Path,sys.argv[1:3]);sys.path.insert(0,str(build/'deploy/production'))
+from procurement_release_metadata import verify_joint_audit_delta
+verify_joint_audit_delta(json.loads((root/'before.json').read_bytes()),json.loads((root/'after.json').read_bytes()),json.loads((root/'joint-receipt.json').read_bytes()))
+sites=() if sys.argv[6]=='1' else ('akivision.deeplinkerp.com','latingo.deeplinkerp.com','yuewei.deeplinkerp.com')
+for site in sites:
+ verify_joint_audit_delta(json.loads((root/(site+'.before.json')).read_bytes()),json.loads((root/(site+'.after.json')).read_bytes()),json.loads((root/(site+'.joint-receipt.json')).read_bytes()))
+stats=build.stat();files={str(p.relative_to(build)):hashlib.sha256(p.read_bytes()).hexdigest() for p in build.rglob('*') if p.is_file()}
+owned={'path':str(build),'identity':[stats.st_dev,stats.st_ino,stats.st_uid],'candidate_sha':sys.argv[3],'image_id':sys.argv[4],'files':files,'max_bytes':sum(p.stat().st_size for p in build.rglob('*') if p.is_file()),'manifest_sha256':files['release-source-manifest.json'],'guard_sha256':files['deploy/production/joint_release_guards.py'],'raw_assets':{ '/assets/deeplinkerp_branding/js/inventory_detail.bundle.js?v=0.0.4':files['deeplinkerp_branding/public/js/inventory_detail.bundle.js'],'/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.26':files['deeplinkerp_branding/public/js/purchase_payments.js']}}
+owned['rollback_image_id']=sys.argv[5]
+owned['directories']=sorted(str(p.relative_to(build)) for p in build.rglob('*') if p.is_dir())
+if sys.argv[6]=='1':
+ owned['lane']='main-only'
+ owned['main_helper_sha256']=files['deploy/production/main_site_lane.py']
+ state=json.loads((root/'main-seal.json').read_bytes())
+ owned['old_containers']=state['before']['containers']
+ owned['old_raw_assets']={url:json.loads((root/'before.json').read_bytes())['release_sources_all']['deeplinkerp_branding']['public/'+url.split('/assets/deeplinkerp_branding/',1)[1].split('?')[0]] for url in owned['raw_assets']}
+(root/'build-ownership.json').write_text(json.dumps(owned,sort_keys=True))
+print('Complete bounded metadata/business/source audit passed before first resume')
+PY
+}
+main_lane() {
+  local action=$1
+  shift
+  python3 "$build_dir/deploy/production/main_site_lane.py" "$action" \
+    --evidence "$(pwd)/$release_dir" --build "$build_dir" "$@"
+}
+recover_main_only() {
+  local code=$?
+  (( code != 0 )) || return 0
+  trap - EXIT
+  if [[ ! -f "$release_dir/main-seal.json" ]]; then
+    echo 'Main preflight failed before boundary changes; inspect the private evidence.' >&2
+    exit "$code"
+  fi
+  if ! main_lane boundary-pre-resume > /dev/null; then
+    if main_lane hold > "$release_dir/main-hold.json"; then
+      echo 'Main first producer resume recorded/unknown: main maintenance HOLD; forward-only.' >&2
+    else
+      echo 'Main first producer resume recorded/unknown: HOLD UNCONFIRMED; forward-only. Inspect the private hold attempt.' >&2
+    fi
+    exit "$code"
+  fi
+  local recovery_ok=1
+  if (( ${metadata_started:-0} )); then
+    command_runner "$old_image_id" "$python" "$metadata" --joint-rollback --receipt "$native_receipt" --candidate-sha "$branding_sha" --source-phase before > "$release_dir/metadata-rollback.json" || recovery_ok=0
+    if (( recovery_ok )); then
+      capture_release_audit before "$release_dir/rollback.json" "$old_image_id" || recovery_ok=0
+      python3 - "$release_dir" <<'PY' || recovery_ok=0
+import json,sys
+from pathlib import Path
+root=Path(sys.argv[1]);before=json.loads((root/'before.json').read_bytes());before.pop('approved_sources_after',None)
+assert before==json.loads((root/'rollback.json').read_bytes()), 'Restored full main audit differs; maintenance HOLD'
+PY
+    fi
+  fi
+  if (( recovery_ok )); then main_lane restore > "$release_dir/main-boundary-restore.json" || recovery_ok=0; fi
+  if (( recovery_ok && source_sync_timer_active )); then
+    original_runner=$(python3 -c 'import json;print(json.load(open("/home/yuewei/.local/state/deeplinkerp-source-sync/config.json"))["runner_sha256"])') || recovery_ok=0
+    if (( recovery_ok )); then
+      flock -u 8; flock -u 9
+      retarget_existing_source_sync "$old_image_id" "$current_revision" "$original_runner" frappe_docker-backend-1 || recovery_ok=0
+    fi
+  fi
+  if (( ! recovery_ok )); then
+    if main_lane hold > "$release_dir/main-hold.json"; then
+      echo 'Main restore is unconfirmed; maintenance HOLD. Inspect durable intents.' >&2
+    else
+      echo 'Main restore and HOLD UNCONFIRMED. Inspect durable intents and the private hold attempt.' >&2
+    fi
+  fi
+  exit "$code"
+}
+run_main_only_release() {
+  command_runner "$new_image_id" "$python" "$guard" --tenant-preflight --main-only --erpnext-version "$expected_erpnext" > "$release_dir/tenants.json"
+  metadata_started=0
+  trap recover_main_only EXIT
+  main_lane prepare --base-image "$old_image_id" --image-id "$new_image_id" --candidate-sha "$branding_sha" > "$release_dir/main-prepare.json"
+  main_prepared=1
+  capture_release_audit before "$release_dir/before.json" "$old_image_id"
+  apps=$(python3 -c 'import json,sys;print(json.dumps(sorted(json.load(open(sys.argv[1]))["release_sources_all"])))' "$release_dir/before.json")
+  capture_pinned_sources "$old_image_id" "$release_dir/pinned-base-sources.json" "$apps"
+  approve_release_sources
+  main_lane space > "$release_dir/main-space-before.json"
+  command_runner "$new_image_id" "$python" -c 'import sys;from pathlib import Path;Path(sys.argv[1]).parent.mkdir(parents=True,exist_ok=True)' "$native_receipt"
+  metadata_started=1
+  command_runner "$new_image_id" "$python" "$metadata" --joint-apply --receipt "$native_receipt" --candidate-sha "$branding_sha" --before-audit /release-evidence/before.json > "$release_dir/metadata.json"
+  command_runner "$new_image_id" "$python" -c 'import sys;from pathlib import Path;sys.stdout.buffer.write(Path(sys.argv[1]).read_bytes())' "$native_receipt" > "$release_dir/joint-receipt.json"
+  command_runner "$new_image_id" bench --site deeplinkerp.com clear-cache
+  capture_release_audit after "$release_dir/after.json" "$new_image_id"
+  verify_audit_ownership
+  main_lane space > "$release_dir/main-space-after.json"
+  # Bounded metadata is reversible; web/RQ/source producers are forward-only.
+  command_runner "$new_image_id" "$python" "$guard" --record-resume --receipt "$resume_receipt" --candidate-sha "$branding_sha" --image-id "$new_image_id" --producer main-candidate-serving > "$release_dir/resume.json"
+  main_lane resume > "$release_dir/main-resume.json"
+  flock -u 8; flock -u 9
+  retarget_existing_source_sync "$new_image_id"
+  main_lane health > "$release_dir/main-health.json"
+  trap - EXIT
+  printf '\nMain cutover health verified; actual logged-in browser URL/body-SHA acceptance and owned-build cleanup remain required.\n'
+}
 cd /home/yuewei/ERPNext-Docker/frappe_docker
 exec 9>/tmp/deeplinkerp-erp-release.lock
 flock -n 9 || { echo 'Another ERP release or source job owns the lock'; exit 1; }
@@ -278,7 +421,7 @@ mkdir -p private/release-evidence
 mkdir "$release_dir" # Existing/unknown receipt means HOLD; never infer interrupted absence.
 budget_file="$(pwd)/$release_dir/space-budget.json"
 # Read the reviewed guard in memory. No extraction/build/backup precedes this budget.
-python3 - "$archive" "$finance_archive" "$oa_archive" "$old_image_id" "$branding_sha" "$finance_sha" "$oa_sha" "$0" > "$budget_file" <<'PY'
+python3 - "$archive" "$finance_archive" "$oa_archive" "$old_image_id" "$branding_sha" "$finance_sha" "$oa_sha" "$0" "$main_only" > "$budget_file" <<'PY'
 import hashlib,json,sys,tarfile
 from pathlib import Path
 with tarfile.open(sys.argv[1], 'r:gz') as tar:
@@ -291,13 +434,14 @@ assert manifest['revisions']==dict(deeplinkerp_branding=sys.argv[5],china_financ
 assert manifest['native_versions']['frappe']=='16.23.0' and manifest['native_versions'].get('erpnext'), 'Precise approved native versions required; not latest version-16'
 scope={'__name__':'release_budget'}
 exec(compile(code,'frozen-joint-release-guards','exec'),scope)
-print(json.dumps(scope['release_space_budget'](sys.argv[1:4],sys.argv[4]),sort_keys=True))
+print(json.dumps(scope['release_space_budget'](sys.argv[1:4],sys.argv[4],main_only=sys.argv[9]=='1'),sort_keys=True))
 PY
 build_dir=$(mktemp -d /tmp/unified-purchase-build.XXXXXX)
 prepare_sources
 test "$(docker exec frappe_docker-backend-1 id -u)" = "$(id -u)" # Private mounted evidence stays readable only by its actual owner.
 chmod -R a+rX "$build_dir" # Source only; private audit/backup files are separate.
 cp "$build_dir/deploy/production/joint_release_guards.py" "$release_dir/joint_release_guards.py"
+if (( main_only )); then cp "$build_dir/deploy/production/main_site_lane.py" "$release_dir/main_site_lane.py"; fi
 python3 - "$release_dir" <<'PY'
 import json,subprocess,sys
 from pathlib import Path
@@ -370,6 +514,7 @@ for app in branding crm finance oa; do
   test "$(revision_label "$new_image_id" "$app")" = "$expected"
 done
 test "$(docker image inspect "$new_image_id" --format '{{index .Config.Labels "org.deeplinkerp.base.image"}}')" = "$old_image_id"
+if (( main_only )); then run_main_only_release; exit; fi
 # Candidate preflight is read-only and command-only. No app is installed/global-migrated.
 command_runner "$new_image_id" "$python" "$guard" --tenant-preflight --erpnext-version "$expected_erpnext" > "$release_dir/tenants.json"
 python3 - "$old_image" "$new_image" "$release_dir" "$frozen_base" <<'PY'
@@ -471,27 +616,7 @@ done
 baseline_captured=1
 apps=$(python3 -c 'import json,sys;from pathlib import Path;root=Path(sys.argv[1]);paths=[root/"before.json",*root.glob("*.before.json")];print(json.dumps(sorted(set().union(*(json.loads(p.read_bytes())["release_sources_all"] for p in paths)))))' "$release_dir")
 capture_pinned_sources "$old_image_id" "$release_dir/pinned-base-sources.json" "$apps"
-# Same full maps: Branding COPY plus exact 2+2 overlay, everything else unchanged.
-python3 - "$release_dir" "$build_dir" <<'PY'
-import copy,hashlib,json,sys
-from pathlib import Path
-evidence,build=map(Path,sys.argv[1:]);sys.path.insert(0,str(build/'deploy/production'))
-from joint_release_guards import merge_frozen_branding_sources
-manifest=json.loads((build/'release-source-manifest.json').read_bytes());pinned=json.loads((evidence/'pinned-base-sources.json').read_bytes())
-root=build/'deeplinkerp_branding'
-files={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in root.rglob('*') if p.is_file() and '__pycache__' not in p.parts and p.suffix not in {'.pyc','.pyo'}}
-for baseline in (evidence/'before.json',*evidence.glob('*.before.json')):
- before=json.loads(baseline.read_bytes())
- assert before['release_sources_all']=={app:pinned[app] for app in before['release_sources_all']}, 'Dirty server app source differs from immutable base; HOLD'
- after=copy.deepcopy(before['release_sources_all']);after['deeplinkerp_branding']=merge_frozen_branding_sources(after['deeplinkerp_branding'],files)
- for app in ('china_finance','oa_purchase_request'):
-  assert app in after, 'Required shared overlay package absent; no auto-install'
-  for path,versions in manifest['apps'][app].items():
-   assert before['release_sources_all'][app].get(path)==versions['before'], 'Unapproved app baseline'
-   after[app][path]=versions['after']
- before['approved_sources_after']=after
- baseline.write_text(json.dumps(before,sort_keys=True,ensure_ascii=False))
-PY
+approve_release_sources
 # All six containers are staged stopped. Metadata and the complete audit precede ANY serving startup.
 cp "$release_dir/compose.after.yaml" compose.custom.yaml
 "${dc[@]}" config --quiet
@@ -515,22 +640,7 @@ capture_release_audit after "$release_dir/after.json" "$new_image_id"
 for site in "${sites[@]:1}"; do
   capture_release_audit after "$release_dir/$site.after.json" "$new_image_id" "$site"
 done
-python3 - "$release_dir" "$build_dir" "$branding_sha" "$new_image_id" "$old_image_id" <<'PY'
-import hashlib,json,os,sys
-from pathlib import Path
-root,build=map(Path,sys.argv[1:3]);sys.path.insert(0,str(build/'deploy/production'))
-from procurement_release_metadata import verify_joint_audit_delta
-verify_joint_audit_delta(json.loads((root/'before.json').read_bytes()),json.loads((root/'after.json').read_bytes()),json.loads((root/'joint-receipt.json').read_bytes()))
-sites=('akivision.deeplinkerp.com','latingo.deeplinkerp.com','yuewei.deeplinkerp.com')
-for site in sites:
- verify_joint_audit_delta(json.loads((root/(site+'.before.json')).read_bytes()),json.loads((root/(site+'.after.json')).read_bytes()),json.loads((root/(site+'.joint-receipt.json')).read_bytes()))
-stats=build.stat();files={str(p.relative_to(build)):hashlib.sha256(p.read_bytes()).hexdigest() for p in build.rglob('*') if p.is_file()}
-owned={'path':str(build),'identity':[stats.st_dev,stats.st_ino,stats.st_uid],'candidate_sha':sys.argv[3],'image_id':sys.argv[4],'files':files,'max_bytes':sum(p.stat().st_size for p in build.rglob('*') if p.is_file()),'manifest_sha256':files['release-source-manifest.json'],'guard_sha256':files['deploy/production/joint_release_guards.py'],'raw_assets':{ '/assets/deeplinkerp_branding/js/inventory_detail.bundle.js?v=0.0.4':files['deeplinkerp_branding/public/js/inventory_detail.bundle.js'],'/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.26':files['deeplinkerp_branding/public/js/purchase_payments.js']}}
-owned['rollback_image_id']=sys.argv[5]
-owned['directories']=sorted(str(p.relative_to(build)) for p in build.rglob('*') if p.is_dir())
-(root/'build-ownership.json').write_text(json.dumps(owned,sort_keys=True))
-print('Complete bounded metadata/business/source audit passed before first resume')
-PY
+verify_audit_ownership
 command_runner "$new_image_id" "$python" "$guard" --record-resume --receipt "$resume_receipt" --candidate-sha "$branding_sha" --image-id "$new_image_id" --producer candidate-serving > "$release_dir/resume.json"
 "${dc[@]}" up -d --no-deps "${services[@]}"
 verify_running_release "$new_image_id" "$branding_sha" "$crm_sha" "$finance_sha" "$oa_sha"

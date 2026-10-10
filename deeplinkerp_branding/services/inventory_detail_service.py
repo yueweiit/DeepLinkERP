@@ -1009,6 +1009,7 @@ def _actual_qty(item_code: str, warehouse: str) -> float:
 	)
 	return float(value or 0)
 
+
 def _attach_reversal_progress(payload, selections=None):
 	if selections:
 		selected = _parse_list(selections, "已选物料")
@@ -1021,22 +1022,37 @@ def _attach_reversal_progress(payload, selections=None):
 			_validate_warehouse(payload["company"], warehouse)
 			payload["selected_reversals"].append({"item_code": code, "warehouse": warehouse})
 	for row in payload.get("groups", []) + payload.get("selected_reversals", []):
-		operation_id = frappe.db.get_value("Bin", {"item_code": row["item_code"], "warehouse": row["warehouse"]}, "custom_purchase_reversal_operation") if row.get("warehouse") else None
+		operation_id = (
+			frappe.db.get_value(
+				"Bin",
+				{"item_code": row["item_code"], "warehouse": row["warehouse"]},
+				"custom_purchase_reversal_operation",
+			)
+			if row.get("warehouse")
+			else None
+		)
 		row["reversal"] = None
 		if operation_id:
 			from . import purchase_reversal_progress as progress
+
 			_, context, output = progress._load(operation_id, lock=False)
 			try:
 				row["reversal"] = progress.public(context, output)
 			except frappe.PermissionError:
-				row["reversal"] = {"stage": "waiting_inventory", "safe_reason": "progress_unavailable", "can_retry": False}
+				row["reversal"] = {
+					"stage": "waiting_inventory",
+					"safe_reason": "progress_unavailable",
+					"can_retry": False,
+				}
 	return payload
 
 
 def _require_pair_available(item_code, warehouse):
 	# This endpoint only prepares an unsaved native document. The real writer
 	# still acquires/rechecks the existing durable leases on save/submit.
-	if frappe.db.get_value("Bin", {"item_code": item_code, "warehouse": warehouse}, "custom_purchase_reversal_operation"):
+	if frappe.db.get_value(
+		"Bin", {"item_code": item_code, "warehouse": warehouse}, "custom_purchase_reversal_operation"
+	):
 		frappe.throw("采购冲销未完成，相关库存移动暂缓办理。", frappe.ValidationError)
 
 
