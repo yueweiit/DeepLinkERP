@@ -57,6 +57,45 @@ class MainSiteLaneTests(unittest.TestCase):
 			"NetworkSettings": {"Networks": {"original": {"IPAddress": "fixture-address"}}},
 		}
 
+	def test_rq_history_failure_persists_exact_pair_and_all_callers_share_guard(self):
+		lane = self.module()
+		self.assertTrue(hasattr(lane, "observe_rq_history"), "Durable shared history observation required")
+		base = {"queues": {}, "intermediate": {}, "registries": {}, "workers": {}, "jobs": {}, "executions": {}, "historical_orphans": {}}
+		unknown = copy.deepcopy(base)
+		unknown["registries"] = {"finished:bench:short": [["unknown-history", 1.0]]}
+		unknown["historical_orphans"] = copy.deepcopy(unknown["registries"])
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			with patch.object(lane, "main_rq_snapshot", side_effect=[base, unknown]), self.assertRaisesRegex(AssertionError, "HOLD"):
+				lane.wait_main_drain("image", "build", evidence_root=root, phase="drain-before-auth", timeout=0)
+			path = root / "rq-history-drain-before-auth.json"
+			audit = json.loads(path.read_bytes())
+			self.assertEqual((audit["before"], audit["after"]), (base, unknown))
+			self.assertEqual(audit["status"], "failed")
+			self.assertNotIn("unknown-history", audit["error"])
+			self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+			lane.observe_rq_history(root, "drain-before-auth", base, base)
+			self.assertEqual(json.loads(path.read_bytes())["status"], "history-accepted")
+			self.assertEqual(len(list(root.iterdir())), 1)
+		for function in (lane.wait_main_drain, lane.prepare, lane.seal_proof):
+			self.assertIn("observe_rq_history(", inspect.getsource(function))
+			self.assertNotIn('["historical_orphans"] ==', inspect.getsource(function))
+
+	def test_main_rq_drain_still_waits_for_main_and_rejects_unknown_live(self):
+		lane = self.module()
+		base = {"queues": {"bench:short": []}, "intermediate": {}, "registries": {}, "workers": {}, "jobs": {}, "executions": {}, "historical_orphans": {}}
+		for job in ("deeplinkerp.com||pending", "unknown-live"):
+			live = copy.deepcopy(base)
+			live["queues"]["bench:short"] = [job]
+			with self.subTest(job=job), patch.object(lane, "main_rq_snapshot", side_effect=[base, live, base]), patch.object(lane.time, "sleep") as sleep:
+				if job.startswith("unknown"):
+					with self.assertRaisesRegex(AssertionError, "Unknown"):
+						lane.wait_main_drain("image", "build")
+					sleep.assert_not_called()
+				else:
+					self.assertTrue(lane.wait_main_drain("image", "build")["scope"]["main_empty"])
+					sleep.assert_called_once_with(1)
+
 	def test_future_frontend_bind_preserves_every_unrelated_dirty_compose_byte(self):
 		lane = self.module()
 		original = b"# local dirty note\nservices:\n  backend:\n    image: old\n  frontend:\n    image: old # keep\n    volumes:\n      - sites:/home/frappe/frappe-bench/sites\n    ports:\n      - '8888:8080'\nvolumes:\n  sites:\n    external: true\n"

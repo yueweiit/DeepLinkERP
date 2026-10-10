@@ -1240,6 +1240,30 @@ class CombinedReleaseContractTests(unittest.TestCase):
 			worker = None
 			historical = False
 			orphan_queue = False
+			clock_reads = 0
+			pipeline_calls = None
+			def time(self):
+				self.clock_reads += 1
+				return 1601, self.clock_reads
+			def pttl(self, key): return 600000 if self.type(key) == b"hash" else -2
+			def pipeline(self, *, transaction):
+				assert transaction is True
+				redis = self
+				class Pipeline:
+					def __init__(self): self.commands = []
+					def __enter__(self): return self
+					def __exit__(self, *args): pass
+					def __getattr__(self, name):
+						assert name in {"hstrlen", "type", "pttl", "hexists", "hmget"}, "Unexpected Redis write or native cleanup"
+						def queue(*args): self.commands.append((name, args)); return self
+						return queue
+					def execute(self):
+						if redis.pipeline_calls is None: redis.pipeline_calls = []
+						redis.pipeline_calls.append(list(self.commands))
+						result = [getattr(redis, name)(*args) for name, args in self.commands]
+						self.commands = []
+						return result
+				return Pipeline()
 			def scan(self, cursor, **kwargs): return 0, [b"rq:queues", b"rq:workers", b"rq:queue:bench:short", b"rq:job:queued"] + ([b"rq:worker:old"] if self.worker is not None else []) + ([b"rq:queue:unknown"] if self.orphan_queue else [])
 			def type(self, key): return b"set" if key in {"rq:queues", "rq:workers"} else b"list" if key == "rq:queue:bench:short" or (key == "rq:queue:unknown" and self.orphan_queue) else b"zset" if self.historical and key == "rq:finished:bench:short" else b"hash" if key == "rq:job:queued" or (key == "rq:worker:old" and self.worker is not None) else b"none"
 			def scard(self, key): return len(self.smembers(key))
@@ -1251,7 +1275,7 @@ class CombinedReleaseContractTests(unittest.TestCase):
 			def hlen(self, key): return 4
 			def hstrlen(self, key, field): return 4
 			def hmget(self, key, fields): return [{"status": b"queued", "origin": b"bench:short"}.get(field) for field in fields]
-			def hexists(self, key, field): return True
+			def hexists(self, key, field): return self.type(key) == b"hash"
 			def hkeys(self, key): return list(self.worker)
 			def hgetall(self, key): return self.worker
 		snapshot = guard.raw_rq_snapshot(Redis())
@@ -1262,7 +1286,14 @@ class CombinedReleaseContractTests(unittest.TestCase):
 		historical.historical = True
 		with self.assertRaisesRegex(AssertionError, "missing"):
 			guard.raw_rq_snapshot(historical)
-		self.assertEqual(guard.raw_rq_snapshot(historical, main_only=True)["historical_orphans"], {"finished:bench:short": [["old-finished", 1]]})
+		observed = guard.raw_rq_snapshot(historical, main_only=True)
+		self.assertEqual(observed["historical_orphans"], {"finished:bench:short": [["old-finished", 1]]})
+		self.assertEqual(observed["job_presence"]["old-finished"], {"hash_exists": False, "data_exists": False, "pttl": -2})
+		self.assertEqual(observed["job_presence"]["queued"]["pttl"], 600000)
+		self.assertEqual(historical.clock_reads, 2)
+		self.assertLess(observed["observation"]["started_at"], observed["observation"]["finished_at"])
+		self.assertEqual(len(historical.pipeline_calls), 2)
+		self.assertTrue(all("data" not in args[1] for batch in historical.pipeline_calls for name, args in batch if name == "hmget"))
 		self.assertTrue(historical.historical)
 		historical.orphan_queue = True
 		with self.assertRaisesRegex(AssertionError, "Unknown|Orphan"):
@@ -1397,6 +1428,13 @@ class CombinedReleaseContractTests(unittest.TestCase):
 		self.assertEqual(base, before)
 		self.assertEqual(result["historical_orphans"], base["historical_orphans"])
 		self.assertTrue(result["shared_strict_hold"])
+		for status in ("finished", "failed", "canceled"):
+			terminal = copy.deepcopy(base)
+			job = "deeplinkerp.com||terminal"
+			terminal["registries"][status + ":bench:short"] = [[job, 1]]
+			terminal["jobs"][job] = {"status": status}
+			with self.subTest(terminal_status=status):
+				self.assertTrue(guard.assert_main_rq_empty(terminal)["main_empty"])
 		for kind in ("queued", "intermediate", "wip", "deferred", "scheduled", "callback", "unknown"):
 			with self.subTest(kind=kind):
 				value = copy.deepcopy(base)
@@ -1415,6 +1453,70 @@ class CombinedReleaseContractTests(unittest.TestCase):
 					value["jobs"][job] = {"status": "started"}
 				with self.assertRaisesRegex(AssertionError, "main|Unknown"):
 					guard.assert_main_rq_empty(value)
+
+	def test_terminal_history_allows_only_observed_natural_expiry_or_cleanup(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "terminal_history_transition"), "Bounded terminal-history guard required")
+		registry = "finished:bench:short"
+		for site in guard.SHARED_SITES:
+			job = site + "||scheduled_job||fixture"
+			before = {"queues": {"bench:short": []}, "intermediate": {}, "registries": {registry: [[job, 1600.0]]}, "workers": {}, "executions": {}, "jobs": {job: {"origin": "bench:short", "status": "finished", "ended_at": "1970-01-01T00:16:40Z", "result_ttl": "600"}}, "historical_orphans": {}, "observation": {"started_at": 1590.0, "finished_at": 1590.01}, "job_presence": {job: {"hash_exists": True, "data_exists": True, "pttl": 9990}}}
+			after = copy.deepcopy(before)
+			after.update(jobs={}, historical_orphans={registry: [[job, 1600.0]]}, observation={"started_at": 1601.0, "finished_at": 1601.01}, job_presence={job: {"hash_exists": False, "data_exists": False, "pttl": -2}})
+			original = copy.deepcopy(before), copy.deepcopy(after)
+			with self.subTest(site=site, case="expiry"):
+				self.assertEqual(guard.terminal_history_transition(before, after), {"expired_jobs": [job], "cleaned_orphans": []})
+				self.assertEqual((before, after), original)
+			cleaned = copy.deepcopy(after)
+			cleaned.update(registries={registry: []}, historical_orphans={}, job_presence={})
+			cleaned["observation"] = {"started_at": 1602.0, "finished_at": 1602.01}
+			with self.subTest(site=site, case="cleanup"):
+				self.assertEqual(guard.terminal_history_transition(after, cleaned), {"expired_jobs": [], "cleaned_orphans": [job]})
+				self.assertEqual(guard.terminal_history_transition(before, cleaned), {"expired_jobs": [job], "cleaned_orphans": []})
+			for identity in (job, "unknown-finished-history"):
+				old = json.loads(json.dumps(before).replace(job, identity))
+				for case in ("score", "requeued", "metadata"):
+					new = copy.deepcopy(old)
+					if case == "score": new["registries"][registry][0][1] = 1700.0
+					elif case == "requeued":
+						new["jobs"][identity]["status"] = "queued"
+						new["queues"]["bench:short"] = [identity]
+					else: new["jobs"][identity]["ended_at"] = "1970-01-01T00:16:41Z"
+					with self.subTest(site=site, retained_identity=identity, case=case):
+						if identity == job and site != guard.SHARED_SITES[0]:
+							self.assertEqual(guard.terminal_history_transition(old, new), {"expired_jobs": [], "cleaned_orphans": []})
+							self.assertTrue(guard.assert_main_rq_empty(new)["main_empty"])
+						else:
+							with self.assertRaisesRegex(AssertionError, "terminal history changed"):
+								guard.terminal_history_transition(old, new)
+			for case in ("unknown", "unobserved", "unfinished", "no-ended", "no-ttl", "no-expiry", "premature", "score-drift", "orphan-score-drift", "orphan-extra-ref", "bad-score", "duplicate", "before-live", "after-live", "data-reappears", "revived"):
+				old, new = copy.deepcopy(before), copy.deepcopy(after)
+				if case == "unknown":
+					old = json.loads(json.dumps(old).replace(job, "unknown-history"))
+					new = json.loads(json.dumps(new).replace(job, "unknown-history"))
+				elif case == "unobserved": old["jobs"] = {}
+				elif case == "unfinished": old["jobs"][job]["status"] = "started"
+				elif case == "no-ended": old["jobs"][job]["ended_at"] = None
+				elif case == "no-ttl": old["jobs"][job]["result_ttl"] = "0"
+				elif case == "no-expiry": old["job_presence"][job]["pttl"] = -1
+				elif case == "premature": new["observation"]["started_at"] = 1599.0
+				elif case == "score-drift": new["registries"][registry][0][1] = 1602.0
+				elif case == "orphan-score-drift": new["historical_orphans"][registry][0][1] = 1602.0
+				elif case == "orphan-extra-ref": new["registries"]["finished:bench:long"] = [[job, 1600.0]]
+				elif case == "bad-score": old["registries"][registry][0][1] = float("nan")
+				elif case == "duplicate": new["registries"][registry].append([job, 1600.0])
+				elif case == "before-live": old["workers"] = {"worker": {"current_job": job}}
+				elif case == "after-live": new["queues"]["bench:short"] = [job]
+				elif case == "data-reappears": new["job_presence"][job]["hash_exists"] = True
+				else:
+					old = copy.deepcopy(after)
+					new = copy.deepcopy(cleaned)
+					new["jobs"] = {job: before["jobs"][job]}
+				with self.subTest(site=site, case=case), self.assertRaisesRegex(AssertionError, "history|History|terminal|Terminal|HOLD"):
+					guard.terminal_history_transition(old, new)
+		static = copy.deepcopy(after)
+		static = json.loads(json.dumps(static).replace(job, "unknown-static-history"))
+		self.assertEqual(guard.terminal_history_transition(static, copy.deepcopy(static)), {"expired_jobs": [], "cleaned_orphans": []})
 
 	def test_main_seal_requires_fresh_all_host_auth_namespace_and_stopped_producer_proof(self):
 		guard = self.module()

@@ -4,12 +4,14 @@ import base64
 import copy
 import hashlib
 import json
+import math
 import os
 import re
 import stat
 import subprocess
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 PINNED_INVENTORY_BUNDLES = (
@@ -258,10 +260,153 @@ def validate_main_seal(state, proof, candidate_sha):
 	assert proof["new_user"] == state["contract"]["new_user"] and proof["database"] == state["contract"]["database"], "Main private DB seal differs; HOLD"
 
 
+def rq_reference_index(snapshot, *, all_references=True):
+	"""Index native terminal scores and blocking references once, without cleanup."""
+	finished, live, count = {}, set(), 0
+	for rows in (*snapshot["queues"].values(), *snapshot.get("intermediate", {}).values()):
+		count += len(rows)
+		live.update(rows)
+	for name, rows in snapshot["registries"].items():
+		count += len(rows)
+		for member, score in rows:
+			assert isinstance(member, str) and member, "Malformed terminal history member; HOLD"
+			if name.startswith("finished:"):
+				assert (
+					":" not in member
+					and isinstance(score, (int, float))
+					and not isinstance(score, bool)
+					and math.isfinite(score)
+				), "Invalid terminal history score; HOLD"
+				refs = finished.setdefault(member, {})
+				assert name not in refs, "Duplicate terminal history member; HOLD"
+				refs[name] = score
+			elif all_references or name.startswith(("wip:", "deferred:", "scheduled:")):
+				live.add(member.split(":", 1)[0])
+	assert count <= 50000, "RQ reference inventory exceeds bound; HOLD"
+	live.update(worker["current_job"] for worker in snapshot["workers"].values() if worker.get("current_job"))
+	live.update(key.removeprefix("rq:execution:").split(":", 1)[0] for key in snapshot["executions"])
+	live.update(
+		job
+		for job, fact in snapshot["jobs"].items()
+		if fact["status"] in {"queued", "started", "deferred", "scheduled"}
+	)
+	return finished, live
+
+
+def terminal_history_transition(before, after):
+	"""Allow proved native TTL expiry/registry cleanup, not global immutability."""
+	old_finished, old_live = rq_reference_index(before)
+	new_finished, new_live = rq_reference_index(after)
+	blocking = old_live | new_live
+
+	def orphan_index(snapshot, finished):
+		result = {}
+		for name, rows in snapshot.get("historical_orphans", {}).items():
+			for job, score in rows:
+				refs = result.setdefault(job, {})
+				assert (
+					name.startswith("finished:")
+					and name not in refs
+					and finished.get(job, {}).get(name) == score
+					and job not in snapshot["jobs"]
+				), "Inconsistent terminal history orphan; HOLD"
+				presence = snapshot.get("job_presence", {}).get(job, {})
+				assert not presence.get("hash_exists") and not presence.get("data_exists"), (
+					"Terminal history hash reappeared; HOLD"
+				)
+				refs[name] = score
+		assert all(refs == finished[job] for job, refs in result.items()), (
+			"Incomplete terminal history orphan references; HOLD"
+		)
+		return result
+
+	old_orphans = orphan_index(before, old_finished)
+	new_orphans = orphan_index(after, new_finished)
+	for job, refs in old_finished.items():
+		fact = before["jobs"].get(job, {})
+		# Other tenants may run their native recurring jobs; main/unknown
+		# terminal identities cannot silently change across this release seal.
+		if fact.get("status") == "finished" and job in after["jobs"] and not any(
+			job.startswith(site + "||") for site in SHARED_SITES[1:]
+		):
+			assert after["jobs"][job] == fact and new_finished.get(job) == refs, (
+				"Main/unknown terminal history changed; HOLD"
+			)
+	candidates = dict.fromkeys(old_orphans)
+	candidates.update(dict.fromkeys(new_orphans))
+	candidates.update(dict.fromkeys(job for job in old_finished if job in before["jobs"] and job not in after["jobs"]))
+	delta = {"expired_jobs": [], "cleaned_orphans": []}
+	clocks = None
+	for job in candidates:
+		assert job not in blocking, "Terminal history has blocking references; HOLD"
+		if job in old_orphans and old_orphans[job] == new_orphans.get(job):
+			continue
+		assert any(job.startswith(site + "||") for site in SHARED_SITES), (
+			"Unknown terminal history change; HOLD"
+		)
+		assert job not in after["jobs"], "Terminal history revived; HOLD"
+		if clocks is None:
+			old_clock, new_clock = before.get("observation", {}), after.get("observation", {})
+			clocks = [
+				old_clock.get("started_at"),
+				old_clock.get("finished_at"),
+				new_clock.get("started_at"),
+				new_clock.get("finished_at"),
+			]
+			assert all(
+				isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+				for value in clocks
+			) and clocks == sorted(clocks), "Unproved terminal history observation clock; HOLD"
+		if job in old_orphans:
+			assert (
+				not new_finished.get(job)
+				and not new_orphans.get(job)
+				and all(score <= clocks[0] for score in old_orphans[job].values())
+			), "Unproved terminal history cleanup; HOLD"
+			delta["cleaned_orphans"].append(job)
+			continue
+		fact = before["jobs"].get(job, {})
+		presence = before.get("job_presence", {}).get(job, {})
+		pttl = presence.get("pttl")
+		assert (
+			fact.get("status") == "finished"
+			and fact.get("result_ttl") == "600"
+			and presence.get("hash_exists") is True
+			and presence.get("data_exists") is True
+			and isinstance(pttl, int)
+			and not isinstance(pttl, bool)
+			and 0 < pttl <= 600000
+		), "Unproved terminal history expiry; HOLD"
+		try:
+			ended = datetime.fromisoformat(fact["ended_at"].replace("Z", "+00:00"))
+		except (KeyError, AttributeError, ValueError):
+			raise AssertionError("Unproved terminal history ended time; HOLD") from None
+		assert ended.tzinfo is not None, "Unproved terminal history ended timezone; HOLD"
+		refs = old_finished.get(job, {})
+		assert set(refs) == {"finished:" + fact.get("origin", "")}, "Unproved terminal history origin; HOLD"
+		score = next(iter(refs.values()))
+		expires_at = ended.timestamp() + 600
+		assert score <= expires_at < score + 1 and clocks[2] >= clocks[1] + pttl / 1000, (
+			"Terminal history expiry not yet proved; HOLD"
+		)
+		assert new_finished.get(job, {}) in ({}, refs) and new_orphans.get(job, {}) == new_finished.get(
+			job, {}
+		), "Terminal history score changed; HOLD"
+		assert not after.get("job_presence", {}).get(job, {}).get("hash_exists") and not after.get(
+			"job_presence", {}
+		).get(job, {}).get("data_exists"), "Terminal history hash reappeared; HOLD"
+		delta["expired_jobs"].append(job)
+	return delta
+
+
 def raw_rq_snapshot(redis, *, main_only=False):
 	"""RQ 2.6.1 inventory using raw Redis reads, never native cleanup helpers."""
 	def decode(value):
 		return value.decode("utf-8", "strict") if isinstance(value, bytes) else value
+	def redis_time():
+		seconds, micros = redis.time()
+		return seconds + micros / 1000000
+	started_at = redis_time() if main_only else None
 	keys, cursor = set(), 0
 	for _ in range(1000):
 		cursor, found = redis.scan(cursor, match="rq:*", count=1000)
@@ -303,6 +448,7 @@ def raw_rq_snapshot(redis, *, main_only=False):
 	result = {"queues": {}, "intermediate": {}, "registries": {}, "workers": {}, "tombstones": {}, "jobs": {}, "executions": {}, "worker_sets": {}}
 	if main_only:
 		result["historical_orphans"] = {}
+		result["job_presence"] = {}
 	job_ids, execution_keys = set(), set()
 	for key in queues:
 		queue = key.removeprefix("rq:queue:")
@@ -348,20 +494,48 @@ def raw_rq_snapshot(redis, *, main_only=False):
 			assert worker.get("death"), "Orphan/stale worker hash; HOLD"
 			result["tombstones"][key] = worker
 	job_ids.update(key.removeprefix("rq:job:") for key in keys if key.startswith("rq:job:"))
-	for job in sorted(job_ids):
-		assert job and ":" not in job, "Malformed RQ job ID"
-		key = "rq:job:" + job
-		if main_only and not typed(key, "hash"):
-			historical = {name: [row for row in rows if row[0] == job] for name, rows in result["registries"].items() if name.startswith("finished:")}
-			historical = {name: rows for name, rows in historical.items() if rows}
-			live = any(job in rows for rows in (*result["queues"].values(), *result["intermediate"].values())) or any(worker.get("current_job") == job for worker in result["workers"].values()) or any(member.split(":", 1)[0] == job for name, rows in result["registries"].items() if not name.startswith("finished:") for member, _ in rows)
-			assert historical and not live, "Referenced live/unknown job missing native data; HOLD"
-			for name, rows in historical.items():
-				result["historical_orphans"].setdefault(name, []).extend(rows)
+	assert len(job_ids) <= 50000 and all(job and ":" not in job for job in job_ids), "Malformed/oversized RQ job inventory; HOLD"
+	finished, live = rq_reference_index(result)
+
+	def job_metadata():
+		ordered = sorted(job_ids)
+		for start in range(0, len(ordered), 256):
+			batch = ordered[start:start + 256]
+			if main_only:
+				with redis.pipeline(transaction=True) as pipeline:
+					for job in batch:
+						for field in JOB_FIELDS:
+							pipeline.hstrlen("rq:job:" + job, field)
+					assert all(size <= 4096 for size in pipeline.execute()), "Job metadata exceeds bound"
+					for job in batch:
+						key = "rq:job:" + job
+						pipeline.type(key)
+						pipeline.pttl(key)
+						pipeline.hexists(key, "data")
+						pipeline.hmget(key, JOB_FIELDS)
+					values = pipeline.execute()
+				for index, job in enumerate(batch):
+					kind, pttl, data, fields = values[index * 4:index * 4 + 4]
+					kind = decode(kind)
+					assert kind in {"hash", "none"}, "Unexpected RQ job key type; HOLD"
+					result["job_presence"][job] = {"hash_exists": kind == "hash", "data_exists": bool(data), "pttl": pttl}
+					yield job, kind == "hash", data, fields
+			else:
+				for job in batch:
+					key = "rq:job:" + job
+					assert typed(key, "hash") and redis.hexists(key, "data"), "Referenced job missing native data; HOLD"
+					assert all(redis.hstrlen(key, field) <= 4096 for field in JOB_FIELDS), "Job metadata exceeds bound"
+					yield job, True, True, redis.hmget(key, JOB_FIELDS)
+
+	for job, hash_exists, data_exists, fields in job_metadata():
+		if main_only and not hash_exists:
+			historical = finished.get(job, {})
+			assert historical and job not in live, "Referenced live/unknown job missing native data; HOLD"
+			for name, score in historical.items():
+				result["historical_orphans"].setdefault(name, []).append([job, score])
 			continue
-		assert typed(key, "hash") and redis.hexists(key, "data"), "Referenced job missing native data; HOLD"
-		assert all(redis.hstrlen(key, field) <= 4096 for field in JOB_FIELDS), "Job metadata exceeds bound"
-		value = {field: decode(value) for field, value in zip(JOB_FIELDS, redis.hmget(key, JOB_FIELDS), strict=False)}
+		assert hash_exists and data_exists, "Referenced job missing native data; HOLD"
+		value = {field: decode(value) for field, value in zip(JOB_FIELDS, fields, strict=False)}
 		assert value["origin"] in result["queues"] and value["status"] in {"queued", "started", "finished", "failed", "deferred", "scheduled", "canceled", "stopped"}, "Unknown job origin/status; HOLD"
 		result["jobs"][job] = value
 		for execution, _ in registry("rq:executions:" + job):
@@ -370,30 +544,18 @@ def raw_rq_snapshot(redis, *, main_only=False):
 	for key in sorted(execution_keys):
 		result["executions"][key] = raw_hash(key)
 	assert all(key in worker_keys for rows in result["worker_sets"].values() for key in rows), "Orphan queue worker registration"
+	if main_only:
+		result["observation"] = {"started_at": started_at, "finished_at": redis_time()}
 	assert len(serialized(result)) <= 16 * 1024**2, "RQ complete inventory exceeds byte bound"
 	return result
 
 
 def assert_main_rq_empty(snapshot):
 	"""Natural main-only drain; retain and report shared historical anomalies."""
-	def live(job):
+	_, live = rq_reference_index(snapshot, all_references=False)
+	for job in live:
 		assert any(job.startswith(site + "||") for site in SHARED_SITES), "Unknown live native job identity; HOLD"
 		assert not job.startswith("deeplinkerp.com||"), "Live main native job/callback remains; HOLD"
-	for rows in (*snapshot["queues"].values(), *snapshot.get("intermediate", {}).values()):
-		for job in rows:
-			live(job)
-	for name, rows in snapshot["registries"].items():
-		if name.startswith(("wip:", "deferred:", "scheduled:")):
-			for member, _ in rows:
-				live(member.split(":", 1)[0])
-	for worker in snapshot["workers"].values():
-		if worker.get("current_job"):
-			live(worker["current_job"])
-	for key in snapshot["executions"]:
-		live(key.removeprefix("rq:execution:").split(":", 1)[0])
-	for job, fact in snapshot["jobs"].items():
-		if fact["status"] in {"queued", "started", "deferred", "scheduled"}:
-			live(job)
 	orphans = snapshot.get("historical_orphans", {})
 	return {"main_empty": True, "historical_orphans": orphans, "shared_strict_hold": bool(orphans)}
 

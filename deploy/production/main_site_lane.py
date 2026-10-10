@@ -21,6 +21,7 @@ from joint_release_guards import (
 	assert_main_rq_empty,
 	serialized,
 	source_host_proof,
+	terminal_history_transition,
 	validate_main_seal,
 )
 
@@ -760,14 +761,37 @@ def main_rq_snapshot(base_image, build):
 	return json.loads(host_call(command))
 
 
-def wait_main_drain(base_image, build, *, timeout=360):
+def observe_rq_history(root, phase, before, after):
+	"""Persist exact history proof; main live scope is checked by the caller."""
+	assert phase in {"drain-before-auth", "drain-after-auth", "authentication-seal", "seal-proof"}
+	audit = {"phase": phase, "before": before, "after": after, "status": "observing"}
+
+	def persist():
+		content = serialized(audit)
+		assert len(content) <= 32 * 1024**2, "RQ history diagnostic exceeds bound; HOLD"
+		if root is not None:
+			DDLReceipt(Path(root) / ("rq-history-" + phase + ".json"), {})._write(content)
+
+	persist()
+	try:
+		delta = terminal_history_transition(before, after)
+	except Exception as error:
+		audit.update(
+			status="failed", error=str(error) if isinstance(error, AssertionError) else type(error).__name__
+		)
+		persist()
+		raise
+	audit.update(status="history-accepted", delta=delta)
+	persist()
+	return delta
+
+
+def wait_main_drain(base_image, build, *, timeout=360, evidence_root=None, phase="drain-before-auth"):
 	original = main_rq_snapshot(base_image, build)
 	start = time.monotonic()
 	while True:
 		current = main_rq_snapshot(base_image, build)
-		assert current["historical_orphans"] == original["historical_orphans"], (
-			"Historical finished orphan changed; HOLD"
-		)
+		observe_rq_history(evidence_root, phase, original, current)
 		try:
 			return {"rq": current, "scope": assert_main_rq_empty(current)}
 		except AssertionError as error:
@@ -1032,7 +1056,7 @@ def prepare(root, build, base_image, image, candidate_sha):
 	receipt.plan("physical-maintenance", {"maintenance": False}, {"maintenance": True}, kind="namespace")
 	volume_call(receipt, build, "maintenance")
 	receipt.complete("physical-maintenance", {"maintenance": True})
-	drained = wait_main_drain(base_image, build)
+	drained = wait_main_drain(base_image, build, evidence_root=root, phase="drain-before-auth")
 	receipt.plan(
 		"new-main-principal",
 		{"exists": False},
@@ -1055,10 +1079,8 @@ def prepare(root, build, base_image, image, candidate_sha):
 	receipt.complete("new-main-principal", {"exists": True, "database": contract["database"]})
 	lock_accounts(receipt, before["accounts"])
 	wait_sessions(contract["old_user"])
-	drained_after = wait_main_drain(base_image, build)
-	assert drained["rq"]["historical_orphans"] == drained_after["rq"]["historical_orphans"], (
-		"Historical orphan changed during authentication seal; HOLD"
-	)
+	drained_after = wait_main_drain(base_image, build, evidence_root=root, phase="drain-after-auth")
+	observe_rq_history(root, "authentication-seal", drained["rq"], drained_after["rq"])
 	receipt.plan(
 		"same-volume-main-rename",
 		{"location": SITE},
@@ -1119,10 +1141,8 @@ def seal_proof(root, build):
 	)
 	source_host_proof()
 	rq = main_rq_snapshot(contract["base_image"], build)
+	observe_rq_history(root, "seal-proof", receipt.state["after"]["rq"]["rq"], rq)
 	assert_main_rq_empty(rq)
-	assert rq["historical_orphans"] == receipt.state["after"]["rq"]["rq"]["historical_orphans"], (
-		"Historical orphan changed; HOLD"
-	)
 	proof = {
 		"candidate_sha": contract["candidate_sha"],
 		"observed_at": time.time(),
