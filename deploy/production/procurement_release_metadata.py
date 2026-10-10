@@ -930,7 +930,7 @@ def _assert_joint_invariants(receipt, current, *, scope=None, source_phase="afte
 	for item, native in ((old_audit, before), (audit, current)):
 		_verify_operating_snapshot(item, native)
 	assert audit.pop("release_sources_all") == contract["sources_" + source_phase], "Pinned app source drift"
-	old_audit.pop("release_sources_all")
+	baseline_sources = old_audit.pop("release_sources_all")
 	_verify_operating_audit(old_audit, audit, contract, recorded_schemas={name: model["schema"] for name, model in current["models"].items()})
 	_verify_new_oa_columns(old_audit, audit, before.get("oa"), contract.get("source_custom_fields", {}))
 	# Has Role is fully protected by the raw scope and outside permission audit above.
@@ -941,8 +941,12 @@ def _assert_joint_invariants(receipt, current, *, scope=None, source_phase="afte
 	# Complete source maps already authorize exact overlays. Independently verify
 	# the actual package digests at both phases, including all preserved apps.
 	if "preserved_after" in contract:
-		assert old_audit.pop("preserved_apps") == contract["preserved_before"]
-		assert audit.pop("preserved_apps") == contract["preserved_" + source_phase]
+		# The pre-mutation receipt is captured inside the candidate image; the
+		# external pre-cutover audit uses the old image. Match an exact source and
+		# package pair, without changing either recorded baseline or app coverage.
+		baseline_packages = old_audit.pop("preserved_apps")
+		assert any(baseline_sources == contract["sources_" + phase] and baseline_packages == contract["preserved_" + phase] for phase in ("after", "before")), "Pinned receipt app source/package drift"
+		assert audit.pop("preserved_apps") == contract["preserved_" + source_phase], "Pinned app package drift"
 	elif source_phase == "before":
 		for app in ("china_finance", "crm_integration"):
 			assert audit["preserved_apps"][app] == contract["preserved_before"][app]

@@ -697,7 +697,7 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 		with self.assertRaises(AssertionError):
 			self.page_title_plan(module, before, contract)
 
-	def invariant_fixture(self, module):
+	def invariant_fixture(self, module, *, baseline_phase=None):
 		je = self.schema()
 		for field in module.CUSTOM_FIELD_ORDER:
 			je["columns"][field] = module._je_column(len(je["columns"]))
@@ -706,12 +706,54 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 		rows = [{"name": f"source-{i}", "original_evidence": '{"manual": 1 }'} for i in range(372)]
 		before = {"metadata": metadata, "je": {"schema": je, "rows": [{"name": "old-je"}], "original_columns": list(je["columns"])}, "models": {"Operating Expense Source": {"schema": self.schema(), "rows": rows}}, "operating_singles": [{"doctype": "Operating Expense Sync Settings", "field": "sync_enabled", "value": "0"}], "audit": {"release_sources_all": {"branding": "candidate"}, "tables": {"Has Role": module.digest([]), "OA Purchase Request": module.digest([{"name": "OA-old", "manual": "keep"}])}, "schemas": {"Journal Entry": je}, "singles": "same", "configuration_sha256": "same"}}
 		contract = {"sources_after": before["audit"]["release_sources_all"], "model_schemas": {"Operating Expense Source": self.schema()}, "custom_fields": dict.fromkeys(module.CUSTOM_FIELD_ORDER)}
+		if baseline_phase is not None:
+			apps = ("deeplinkerp_branding", "china_finance", "oa_purchase_request", "crm_integration", "frappe", "erpnext", "other_app")
+			sources = {app: {"source.py": app + "-before"} for app in apps}
+			preserved = {app: app + "-package-before" for app in apps if app != "deeplinkerp_branding"}
+			contract.update(sources_before=sources, preserved_before=preserved, sources_after=copy.deepcopy(sources), preserved_after=copy.deepcopy(preserved))
+			for app in ("deeplinkerp_branding", "china_finance", "oa_purchase_request"):
+				contract["sources_after"][app]["source.py"] = app + "-after"
+				if app in preserved: contract["preserved_after"][app] = app + "-package-after"
+			before["audit"].update(release_sources_all=copy.deepcopy(contract["sources_" + baseline_phase]), preserved_apps=copy.deepcopy(contract["preserved_" + baseline_phase]))
 		return types.SimpleNamespace(state={"before": before, "contract": contract}), copy.deepcopy(before)
 
-	def assert_invariants(self, module, receipt, current):
+	def assert_invariants(self, module, receipt, current, *, source_phase="after"):
 		fake = types.SimpleNamespace(db=types.SimpleNamespace(sql=lambda *a, **kw: [[0]]))
 		with patch.dict(sys.modules, {"frappe": fake}):
-			module._assert_joint_invariants(receipt, current)
+			module._assert_joint_invariants(receipt, current, source_phase=source_phase)
+
+	def test_receipt_source_baseline_matches_its_image_phase_without_mutation(self):
+		module = self.metadata_module()
+		for baseline_phase in ("before", "after"):
+			for source_phase in ("before", "after"):
+				with self.subTest(baseline_phase=baseline_phase, source_phase=source_phase):
+					receipt, current = self.invariant_fixture(module, baseline_phase=baseline_phase)
+					contract = receipt.state["contract"]
+					current["audit"].update(release_sources_all=copy.deepcopy(contract["sources_" + source_phase]), preserved_apps=copy.deepcopy(contract["preserved_" + source_phase]))
+					original, snapshot = copy.deepcopy(receipt.state), copy.deepcopy(current)
+					self.assert_invariants(module, receipt, current, source_phase=source_phase)
+					self.assertEqual(receipt.state, original)
+					self.assertEqual(current, snapshot)
+
+	def test_image_phase_matching_keeps_every_app_source_and_package_protected(self):
+		module = self.metadata_module()
+		for location in ("baseline", "current"):
+			for drift in ("native-source", "oa-source", "missing-source", "extra-source", "package", "mixed-package-phase", "missing-package", "extra-package"):
+				with self.subTest(location=location, drift=drift):
+					receipt, current = self.invariant_fixture(module, baseline_phase="after")
+					contract = receipt.state["contract"]
+					current["audit"].update(release_sources_all=copy.deepcopy(contract["sources_before"]), preserved_apps=copy.deepcopy(contract["preserved_before"]))
+					audit = receipt.state["before"]["audit"] if location == "baseline" else current["audit"]
+					if drift in ("native-source", "oa-source"):
+						audit["release_sources_all"]["frappe" if drift == "native-source" else "oa_purchase_request"]["source.py"] = "unapproved"
+					elif drift == "missing-source": audit["release_sources_all"].pop("other_app")
+					elif drift == "extra-source": audit["release_sources_all"]["unexpected_app"] = {}
+					elif drift == "package": audit["preserved_apps"]["crm_integration"] = "unapproved"
+					elif drift == "mixed-package-phase": audit["preserved_apps"] = copy.deepcopy(contract["preserved_before" if location == "baseline" else "preserved_after"])
+					elif drift == "missing-package": audit["preserved_apps"].pop("other_app")
+					else: audit["preserved_apps"]["unexpected_app"] = "unapproved"
+					with self.assertRaises(AssertionError):
+						self.assert_invariants(module, receipt, current, source_phase="before")
 
 	def test_joint_invariants_accept_exact_active_business_rows_and_single(self):
 		module = self.metadata_module()
