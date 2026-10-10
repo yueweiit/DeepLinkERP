@@ -89,6 +89,7 @@ NUMERIC_FIELD_TYPES = frozenset({"Currency", "Float", "Int", "Long Int", "Percen
 CASHIER_READ_FIELDS = frozenset({"company", "party", "paid_amount", "paid_from", "paid_to",
 	"paid_from_account_currency", "paid_to_account_currency", "reference_no", "reference_date", "remarks"})
 EXPORT_LABELS.update({
+	"payment_progress": "付款进度", "receipt_progress": "收货进度",
 	"oa_source_details": "OA 来源核对明细",
 	"purchasing_company": "采购付款公司", "buyer_company_proposal": "建议采购公司（待确认）",
 	"beneficiary_companies": "最终归属公司（已核对）", "source_beneficiary_hint": "原始归属（来源待核对）",
@@ -694,6 +695,19 @@ def _columns(columns: Any) -> list[str]:
 
 def _export_value(field: str, row: dict) -> Any:
 	"""Display-only cells; canonical identity, permissions and evidence stay intact."""
+	if field == "payment_progress":
+		external = (row.get("order_progress") or {}).get("external") or {}
+		if external.get("state") == "restricted":
+			return "付款进度不可见"
+		if external.get("state") == "not_applicable":
+			return "外部付款不适用"
+		settled, unpaid = _number(external.get("settled")), _number(external.get("order_unpaid"))
+		if external.get("state") != "exact" or settled is None or unpaid is None:
+			return "付款口径待核对"
+		return "已付清" if unpaid <= 0 else "部分付款" if settled > 0 else "未付款"
+	if field == "receipt_progress":
+		received = _number(row.get("per_received"))
+		return "收货进度不可见" if received is None else "已收齐" if received >= 100 else "部分收货" if received > 0 else "未收货"
 	if field in ITEM_EXPORT_FIELDS:
 		progress = row.get("order_progress") or {}
 		permitted = set(progress.get("item_fields") or [])
@@ -933,8 +947,11 @@ def get_unified_purchase_list(filters=None, start=0, page_length=DEFAULT_PAGE_LE
 	POINTER = "custom_purchase_reversal_operation"
 	names = [row["name"] for row in payload["rows"] if row["row_type"] == "purchase_order"]
 	pending = {name for name, in frappe.db.get_values(PURCHASE_ORDER, {"name": ["in", names], POINTER: ["is", "set"]}, "name")} if names else set()
+	from .purchase_payment_service import receipt_eligibility
+	can_receive = bool(frappe.has_permission("Purchase Receipt", "create"))
 	for row in payload["rows"]:
 		if row["row_type"] == "purchase_order":
+			row["receipt_eligibility"] = receipt_eligibility(row, can_create=can_receive, reversal_pending=row["name"] in pending)
 			if row["name"] in pending or row.get("docstatus") == 2:
 				from .purchase_reversal_progress import projection
 			row["reversal"] = projection(frappe.get_doc(PURCHASE_ORDER, row["name"], for_update=True)) if row["name"] in pending or row.get("docstatus") == 2 else None

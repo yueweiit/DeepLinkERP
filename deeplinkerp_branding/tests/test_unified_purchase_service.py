@@ -892,6 +892,27 @@ def progress_row(*, unpaid=0, internal=(), pending=(), review=False):
 		"receipt_logistics": [], "review_required": review, "progress_phases": phases}
 
 
+@pytest.mark.parametrize("external, label", [
+	({"state": "restricted"}, "付款进度不可见"),
+	({"state": "not_applicable"}, "外部付款不适用"),
+	({"state": "review", "settled": 2, "order_unpaid": 3}, "付款口径待核对"),
+	({"state": "exact", "settled": None, "order_unpaid": 3}, "付款口径待核对"),
+	({"state": "exact", "settled": 2, "order_unpaid": 0}, "已付清"),
+	({"state": "exact", "settled": 2, "order_unpaid": 3}, "部分付款"),
+	({"state": "exact", "settled": 0, "order_unpaid": 3}, "未付款"),
+])
+def test_compact_payment_progress_export_preserves_visible_labels_without_inference(external, label):
+	row = {"name": "PO", "order_progress": {"external": external}}
+	assert backend()._export_data([row], ["payment_progress"])[1] == [label]
+	assert row["order_progress"]["external"] == external
+
+
+@pytest.mark.parametrize("received, label", [(None, "收货进度不可见"), (0, "未收货"), (50, "部分收货"), (100, "已收齐")])
+def test_compact_receipt_progress_export_uses_native_percentage_not_domestic_evidence_state(received, label):
+	row = {"name": "PO", "per_received": received, "order_progress": {"domestic_receipt": {"state": "native_received"}}}
+	assert backend()._export_data([row], ["receipt_progress"])[1] == [label]
+
+
 @pytest.mark.parametrize("phase", ["supplier_unpaid", "internal_unsettled", "factory_pending"])
 def test_computed_phase_and_beneficiary_filter_before_page100_count_and_totals(phase):
 	orders = []

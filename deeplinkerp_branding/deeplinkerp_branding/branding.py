@@ -1,3 +1,7 @@
+import hashlib
+from functools import lru_cache
+from pathlib import Path
+
 import frappe
 
 from deeplinkerp_branding.deeplinkerp_branding.interface_mode import apply_interface_mode_bootinfo
@@ -35,6 +39,40 @@ PRODUCT_MODULE_APP_KEYS = {
 DESKTOP_ICON_MODULE_BY_NAME = {
 	"Accounting": "Accounts",
 }
+PURCHASE_PAGE_CODE_SOURCES = {
+	"purchase-payables": ("deeplinkerp_branding/page/purchase_payables/purchase_payables.js",),
+	"purchase-payment-records": (
+		"deeplinkerp_branding/page/purchase_payment_records/purchase_payment_records.js",
+		"public/js/purchase_payments.js",
+	),
+}
+
+
+@lru_cache(maxsize=2)
+def _purchase_page_code_version(name):
+	"""Read fixed release sources once per worker; no database/cache writes."""
+	base = Path(__file__).resolve().parents[1]
+	digest = hashlib.sha256()
+	try:
+		for relative in PURCHASE_PAGE_CODE_SOURCES[name]:
+			digest.update((base / relative).read_bytes())
+	except OSError:
+		return None  # Optional package files must not prevent Desk boot.
+	return digest.hexdigest()
+
+
+def _apply_purchase_page_code_versions(bootinfo):
+	# Preserve native permission-filtered membership and metadata stamps. Desk's
+	# existing sync_pages then evicts only these Page code caches, not preferences.
+	page_info = bootinfo.get("page_info") or {}
+	for name in PURCHASE_PAGE_CODE_SOURCES:
+		if name not in page_info:
+			continue
+		version = _purchase_page_code_version(name)
+		if version:
+			page = page_info[name]
+			modified = str(page.get("modified") or "").split("|dlp-purchase-code:", 1)[0]
+			page["modified"] = f"{modified}|dlp-purchase-code:{version}"
 
 SIDEBAR_ITEM_FIELDS = (
 	"child",
@@ -336,6 +374,7 @@ def is_workspace_sidebar_icon_visible(icon, workspace_sidebar_item, blocked_modu
 
 def apply_boot_branding(bootinfo):
 	"""Brand app labels in bootinfo before the desk sidebar is rendered."""
+	_apply_purchase_page_code_versions(bootinfo)
 	app_data = bootinfo.get("app_data", [])
 	workspace_sidebar_item = bootinfo.get("workspace_sidebar_item", {})
 	module_app = bootinfo.get("module_app", {})

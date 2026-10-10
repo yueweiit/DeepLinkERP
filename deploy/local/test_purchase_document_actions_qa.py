@@ -1353,12 +1353,12 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
 		self.assertEqual(invoice["docstatus"], 1)
 		self.assertFalse(frappe.db.get_value("Purchase Invoice", invoice["name"], "update_stock"))
 		self.commit_fixture()
-		sources = [{"name": po.name} for po in orders]
-		payables = service.preview_payment_batch("Purchase Order", sources)
+		sources = [{"name": receipt["name"]}]
+		payables = service.preview_payment_batch("Purchase Receipt", sources)
 		self.assertEqual([row["name"] for row in payables["invoices"]], [invoice["name"]])
 		payment = actions.record_payment(
-			"Purchase Order",
-			orders[0].name,
+			"Purchase Receipt",
+			receipt["name"],
 			sources=payables["sources"],
 			allocations=[{"name": invoice["name"], "amount": 25}],
 			bank_account="Cash - QAB",
@@ -1405,9 +1405,9 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
 			)
 			for row in invoices
 		}
-		selected = service.preview_payment_batch("Purchase Order", [{"name": po.name} for po in orders])[
-			"sources"
-		]
+		selected = service.preview_payment_batch(
+			"Purchase Receipt", [{"name": row["document"]["name"]} for row in receipts]
+		)["sources"]
 		native_submit = actions._confirm_payment
 
 		def fail_after_gl(*args, **kwargs):
@@ -1419,8 +1419,8 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
 			self.assertRaisesRegex(RuntimeError, "native GL"),
 		):
 			actions.record_payment(
-				"Purchase Order",
-				orders[0].name,
+				"Purchase Receipt",
+				receipts[0]["document"]["name"],
 				sources=selected,
 				allocations=[{"name": name, "amount": 10} for name in outstanding],
 				bank_account="Cash - QAB",

@@ -6,11 +6,12 @@
   ["schedule_date", "需求日期", 96], ["company", "公司", 90], ["currency", "币种", 56], ["grand_total", "订单金额", 140],
   ["advance_paid", "已预付", 140], ["advance_payment_status", "预付款状态", 94], ["order_settled", "已付 / 核销", 140], ["order_unpaid", "订单未付", 140],
   ["per_received", "已收货%", 70], ["per_billed", "已开票%", 70], ["project", "项目", 96], ["owner", "创建人", 86], ["receipt_action", "操作", 176],
+  ['payment_progress','付款进度',128],['receipt_progress','收货进度',112],
  ].map(([fieldname, label, width]) => ({ fieldname, label, width }));
  const provider = unified.configure(COLUMNS);
  const esc = value => String(value ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
  const t = value => (root.__ || (x=>x))(value);
- const numeric = value => value==null || value==='' || typeof value==='boolean' || !Number.isFinite(Number(value)) ? '—' : Number(value).toLocaleString(undefined,{maximumFractionDigits:2});
+ const numeric = value => value==null || value==='' || typeof value==='boolean' || !Number.isFinite(Number(value)) ? '—' : Number(value).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
  const itemFields = new Set(['warehouse','item_code','item_name','qty','uom','rate','amount','received_qty']);
  const payments = c => c?.root?.DeepLinkERPPurchasePayments || root.DeepLinkERPPurchasePayments;
  const isOA = c => c.providerScope==='oa';
@@ -20,11 +21,11 @@
   if(active!==undefined)c._setPurchaseSelectionActive?.(active);
   active ??= true;
   if(!active)cancelPending(c);
-  return engine.fitViewport(c,{active,root:c.root,scrollElement:c.list.$result?.parent?.('.result-container')?.[0],layoutTailElement:c.list.$frappe_list?.[0],property:'--dlp-purchase-result-max-height',headerSelector:'.dlp-po-grid-header',rowSelector:'.dlp-po-grid-row',observeTargets:[c.$filters?.[0]?.parentElement,c.$toolbar?.[0],c.$summary?.[0],c.$paging?.[0]]});
+  return engine.fitViewport(c,{active,root:c.root,scrollElement:c.list.$result?.parent?.('.result-container')?.[0],layoutTailElement:c.list.$frappe_list?.[0],property:'--dlp-purchase-result-max-height',headerSelector:'.dlp-po-grid-header',rowSelector:'.dlp-po-grid-row',minimumRows:2,observeTargets:[c.$filters?.[0]?.parentElement,c.$toolbar?.[0],c.$summary?.[0],c.$paging?.[0]]});
  }
  function columns(c) {
   const selected=c.preferences.columns.map(field=>provider.columns.find(col=>col.fieldname===field)).filter(Boolean);
-  const visible=isOA(c)?selected.filter(col=>!itemFields.has(col.fieldname)):selected;
+  const visible=selected.filter(col=>!itemFields.has(col.fieldname));
   const frozenThrough=visible.findIndex(col=>col.fieldname==='supplier_name');let left=76;
   return visible.map((col,index)=>{const value={...col,left,frozen:index<=frozenThrough};left+=col.width;return value;});
  }
@@ -40,40 +41,47 @@
  function orderValue(c,doc,field) {
   if(field==='name') {
    if(doc.row_type==='oa_request')return `<button type="button" class="btn btn-link btn-xs" data-purchase-source="${esc(doc.oa_name || doc.name)}">${esc(`待完善 · ${doc.oa_number || doc.name}`)}</button>`;
-   const refs=(doc.oa_references || []).map(ref=>`<a class="dlp-po-provenance" href="/desk/oa-purchase-request/${encodeURIComponent(ref.name)}">${esc(`钉钉 · ${ref.number || ref.name}`)}</a>`).join('');
-   return `<a href="${esc(unified.formLink(doc))}" data-name="${esc(doc.name)}">${esc(doc.name)}</a>${refs || (doc.source==='OA'?'<span class="dlp-po-provenance">钉钉</span>':'')}`;
+   const refs=(doc.oa_references || []).map(ref=>`<a class="dlp-po-provenance" title="${esc(ref.number || ref.name)}" href="/desk/oa-purchase-request/${encodeURIComponent(ref.name)}">${esc(ref.number || ref.name)}</a>`).join('');
+   return `<a title="${esc(doc.name)}" href="${esc(unified.formLink(doc))}" data-name="${esc(doc.name)}">${esc(doc.name)}</a>${refs || (doc.source==='OA'?'<span class="dlp-po-provenance">钉钉</span>':'')}`;
   }
-  if(field==='supplier_name')return doc.supplier?`<a href="/desk/supplier/${encodeURIComponent(doc.supplier)}">${esc(doc.supplier_name || '—')}</a>`:esc(doc.supplier_name || '供应商待核对');
+  if(field==='supplier_name') {
+   const warning=[!doc.supplier?'供应商待确认':'',doc.oa_warning,...(doc.role_context?.role_warnings || []),...(doc.order_progress?.progress_warnings || [])].filter(Boolean);
+   const label=doc.supplier?`<a title="${esc(doc.supplier_name)}" href="/desk/supplier/${encodeURIComponent(doc.supplier)}">${esc(doc.supplier_name || '—')}</a>`:esc(doc.supplier_name || '供应商待核对');
+   const summary=warning[0]?.includes('内部关联')?'内部关联未确认':warning[0]?.length>18?`${warning[0].slice(0,18)}…`:warning[0];
+   return label+(warning.length?`<span class="dlp-po-row-warning text-warning" title="${esc(warning.join('；'))}">${esc(summary)}</span>`:'');
+  }
   if(field==='status')return doc.row_type==='purchase_order'?`${c.list.get_indicator_html?.(doc,Boolean(c.list.workflow_state_fieldname)) || esc(c.translate(doc.status || '—'))} ${payments(c)?.reversalHTML(doc.reversal) || ''}`:esc(doc.status || '来源待完善');
   if(field==='receipt_action') {
    if(doc.row_type==='oa_request')return provider.renderValue(field,doc,{},esc);
    if(payments(c)?.reversalBlocked(doc.reversal))return payments(c).reversalHTML(doc.reversal);
    const related=doc.order_progress?.state==='restricted'?'<span class="text-warning">关联进度受限，请核对权限</span>':['internal','logistics'].map((tab,i)=>`<button type="button" class="btn btn-xs btn-default dlp-crossborder-open" data-crossborder-order="${esc(doc.name)}" data-crossborder-tab="${tab}">${t(i?'物流证据':'内部关联')}</button>`).join('');
-   return `<span class="dlp-po-row-actions">${payments(c)?.orderReceiptAction(doc) || ''}${related}</span>`;
+   return `<span class="dlp-po-row-actions">${payments(c)?.orderReceiptAction(doc) || ''}<details class="dlp-po-row-more"><summary class="btn btn-xs btn-default">${t('更多')}</summary><span class="dlp-po-row-more-menu">${related}</span></details></span>`;
   }
   return provider.renderValue(field,doc,{},esc) ?? grid.renderValue(field,doc,{allowed:c.allowed,translate:c.translate,number:(value,field)=>grid.formatNumber(c.root,value,field),date:value=>c.root.frappe.datetime?.str_to_user?.(value) || value});
  }
  function row(c,doc) {
-  const detail=doc.order_progress || {}, permitted=new Set(detail.item_fields || []);
-  const items=doc.row_type==='purchase_order' && detail.state!=='restricted' && permitted.has('name') ? (detail.items || []).filter(item=>item.name) : [];
-  const physical=items.length?items:[null],span=physical.length,cols=columns(c);
+  const cols=columns(c),expanded=c.expandedDetails?.has(doc.name),detail=doc.order_progress || {};
   const selectable=doc.row_type==='purchase_order' && !isOA(c);
   const check=selectable?`<input type="checkbox" class="list-row-checkbox" data-doctype="Purchase Order" data-name="${esc(doc.name)}">`:'';
-  return `<tbody class="list-row-container dlp-purchase-order-body" data-order-name="${esc(doc.name)}" tabindex="0">${physical.map((item,index)=>`<tr class="${index===0 && selectable?'level list-row ':''}dlp-po-grid-row" data-order-name="${esc(doc.name)}"${item?` data-item-name="${esc(item.name)}"`:''}>${index===0?cell('td','_select',check,span,36)+cell('td','_sequence',c.page*c.pageSize+(doc._idx || 0)+1,span,40):''}${cols.map(col=> {
-   if(!itemFields.has(col.fieldname))return index===0?cell('td',col.fieldname,orderValue(c,doc,col.fieldname),span,col):'';
-   const value=item && permitted.has(col.fieldname)?item[col.fieldname]:null;
-   const shown=['qty','received_qty'].includes(col.fieldname)?numeric(value):['rate','amount'].includes(col.fieldname)?grid.renderValue('grand_total',{grand_total:value,currency:detail.currency || doc.currency}):esc(value ?? '—');
-   return cell('td',col.fieldname,shown,1,col);
-  }).join('')}</tr>`).join('')}</tbody>`;
+  const arrow=doc.row_type==='purchase_order'?`<button type="button" class="dlp-purchase-expand" data-name="${esc(doc.name)}" aria-expanded="${Boolean(expanded)}" aria-label="${esc(c.translate(expanded?'收起物料明细':'展开物料明细'))}">${expanded?'⌄':'›'}</button>`:'';
+  let extra='';
+  if(expanded){
+   const permitted=new Set(detail.item_fields || []),items=detail.state!=='restricted' && permitted.has('name')?(detail.items || []).filter(item=>item.name):[];
+   const definitions=[['item_code','物料编码'],['item_name','物料名称'],['warehouse','仓库'],['qty','数量'],['uom','单位'],['rate','单价'],['amount','金额'],['received_qty','已收数量']].filter(([field])=>permitted.has(field));
+   const contents=detail.state==='restricted'?'<span class="text-warning">物料明细不可见，请核对权限</span>':engine.detailTable({columns:definitions,items,escape:esc,translate:c.translate,wrapperClass:'dlp-purchase-detail-scroll',tableClass:'dlp-purchase-detail-table',columnClass:field=>['qty','rate','amount','received_qty'].includes(field)?'dlp-po-number':'',format:(field,item)=>['qty','rate','amount','received_qty'].includes(field)?numeric(item[field]):esc(item[field] ?? '—')});
+   extra=`<tr class="dlp-purchase-expanded"><td colspan="${cols.length+2}">${contents || '暂无可读物料明细'}</td></tr>`;
+  }
+  return `<tbody class="list-row-container dlp-purchase-order-body" data-order-name="${esc(doc.name)}" tabindex="0"><tr class="${selectable?'level list-row ':''}dlp-po-grid-row" data-order-name="${esc(doc.name)}">${cell('td','_select',check,1,36)}${cell('td','_sequence',arrow,1,40)}${cols.map(col=>cell('td',col.fieldname,orderValue(c,doc,col.fieldname),1,col,` title="${esc(typeof doc[col.fieldname]==='object'?'':doc[col.fieldname] ?? '')}"`)).join('')}</tr>${extra}</tbody>`;
  }
  function table(c,rows) { return `<div class="list-row-container dlp-purchase-table-wrap"><table class="dlp-purchase-table">${header(c)}${rows.map(doc=>row(c,doc)).join('')}</table><div class="checkbox-actions" style="display:none"></div></div>`; }
  function selectionChanged(c) {
   if(!c.getSelectedPurchaseOrders)return;
   const selected=c.getSelectedPurchaseOrders(),names=new Set(selected.map(row=>row.name));
-  const allowed=c.providerRows.filter(row=>names.has(row.name)).map(doc=>payments(c)?.orderReceiptAction(doc) || '');
+  const blocked=c.providerRows.filter(row=>names.has(row.name) && !row.receipt_eligibility?.allowed);
   c.$purchaseActions?.find('.dlp-purchase-selected-count').text(c.translate(`已选 ${selected.length} 张订单`));
-  for(const [action,marker] of [['receipt','dlp-order-receipt'],['payment','dlp-order-pay']])c.$purchaseActions?.find(`[data-purchase-action="${action}"]`).prop('disabled',!selected.length || !allowed.every(value=>value.includes(marker)));
-  c.$purchaseActions?.find('.dlp-purchase-action-notice').text(selected.length>1?c.translate('入库可逐单或合并；合并付款按实际应付核销。'):'');
+  c.$purchaseActions?.find('[data-purchase-action="receipt"]').prop('disabled',!selected.length || blocked.length>0);
+  const reasons=blocked.map(doc=>`${doc.name}：${doc.receipt_eligibility?.reason || '收货资格未知，请刷新'}`);
+  c.$purchaseActions?.find('.dlp-purchase-action-notice').text(blocked.length?`${reasons.slice(0,3).join('；')}${blocked.length>3?`；另有 ${blocked.length-3} 张不可入库`:''}`:selected.length>1?c.translate('默认逐单入库，可选择合并。'):'').attr('title',reasons.join('；'));
  }
  function clearSelection(c) {
   c.list.clear_checked_items?.();
@@ -104,45 +112,47 @@
    return c.providerRows.filter(doc=>doc.row_type==='purchase_order' && names.has(doc.name)).map(doc=>({name:doc.name,modified:doc.modified}));
   };
   c.runPurchaseAction=async action=> {
+   if(action!=='receipt')return;
    const selected=c.getSelectedPurchaseOrders();
    if(!selected.length)return;
-   if(selected.some(value=>payments(c)?.reversalBlocked(c.providerRows.find(row=>row.name===value.name)?.reversal)))return;
+   const blocked=selected.map(value=>c.providerRows.find(row=>row.name===value.name)).filter(doc=>!doc?.receipt_eligibility?.allowed || payments(c)?.reversalBlocked(doc.reversal));
+   if(blocked.length){c.root.frappe.msgprint?.({title:c.translate('无法入库'),message:blocked.map(doc=>`${esc(doc?.name)}：${esc(doc?.receipt_eligibility?.reason || '收货资格已变化，请刷新')}`).join('<br>')});return;}
    if(selected.length>1){
     if(action==='receipt')return payments(c).batchDocumentDrawer('Purchase Order',selected,'Purchase Receipt');
-    if(action==='payment')return payments(c).batchPay('Purchase Order',selected);
     return;
    }
-   const doc=c.providerRows.find(row=>row.name===selected[0].name),native=payments(c)?.orderReceiptAction(doc) || '';
-   if(action==='receipt' && native.includes('dlp-order-receipt'))return payments(c).documentDrawer('Purchase Order',doc.name,'Purchase Receipt');
-   if(action==='payment' && native.includes('dlp-order-pay'))return payments(c).pay('Purchase Order',doc.name);
+   return payments(c).documentDrawer('Purchase Order',selected[0].name,'Purchase Receipt');
   };
   // Crossborder drawer saves call this public hook before the shared page refresh.
   c.invalidatePurchaseDetails=names=> {
    c.requestId++;c.list.last_args=null;
+   c.invalidateRowDetails(names);
    const targets=names==null?null:new Set(Array.isArray(names)?names:[names]);
    for(const doc of c.providerRows)if(doc.row_type==='purchase_order' && (!targets || targets.has(doc.name)) && doc.order_progress){delete doc.order_progress.items;delete doc.order_progress.item_fields;}
    c.list.render_list();c.list.set_rows_as_checked?.();
   };
-  c.$purchaseTabs=c.root.$('<nav class="dlp-procurement-tabs dlp-purchase-scope-tabs" role="tablist" aria-label="采购单据"><button type="button" role="tab" data-purchase-scope="orders">采购订单</button><button type="button" role="tab" data-purchase-scope="oa">钉钉待完善</button></nav>').insertAfter(c.$filters);
+  c.$purchaseTabs=c.root.$('<nav class="dlp-purchase-scope-tabs" role="tablist" aria-label="采购来源视图"><button type="button" class="btn btn-default btn-sm" role="tab" data-purchase-scope="orders">采购订单</button><button type="button" class="btn btn-default btn-sm" role="tab" data-purchase-scope="oa">钉钉待完善</button></nav>').appendTo(c.$advancedFilters);
   c.$purchaseTabs.on('click.dlpPurchaseScope','[data-purchase-scope]',event=>c.setProviderScope(event.currentTarget.dataset.purchaseScope));
-  c.$purchaseActions=c.root.$('<div class="dlp-purchase-selection-actions"><span class="dlp-purchase-selected-count" aria-live="polite"></span><button type="button" class="btn btn-primary btn-sm" data-purchase-action="receipt" disabled>入库</button><button type="button" class="btn btn-default btn-sm" data-purchase-action="payment" disabled>付款</button><span class="text-muted dlp-purchase-action-notice" aria-live="polite"></span></div>').insertAfter(c.$toolbar);
+  c.$purchaseActions=c.root.$('<div class="dlp-purchase-selection-actions"><span class="dlp-purchase-selected-count" aria-live="polite"></span><button type="button" class="btn btn-primary btn-sm" data-purchase-action="receipt" disabled>入库</button><span class="text-muted dlp-purchase-action-notice" aria-live="polite"></span></div>').prependTo(c.$toolbar);
   c.$purchaseActions.on('click.dlpPurchaseAction','[data-purchase-action]',event=>c.runPurchaseAction(event.currentTarget.dataset.purchaseAction));
   scopeChanged(c);selectionChanged(c);
  }
  const onPayload=provider.onPayload;
  provider.onPayload=c=>{onPayload?.(c);selectionChanged(c);};
- const grid = engine.create({doctype:'Purchase Order',dismissInitialOnboarding:true,keepColumnHeader:true,columns:COLUMNS,defaultColumns:provider.defaultColumns,provider,providerSelectable:doc=>doc.row_type==='purchase_order',computedFields:['receipt_action','order_settled','order_unpaid'],moneyPrecision:2,
-  onRequestStart:cancelPending,onPageChange:clearSelection,onScopeChange:scopeChanged,onSelectionChange:selectionChanged,mountControls:mount,renderHeader:c=>`<table class="dlp-purchase-table">${header(c)}</table>`,renderRow:row,renderTable:table,
+ const grid = engine.create({doctype:'Purchase Order',purchaseChrome:true,backupMigratedPreferences:true,mainFilterFields:['search','company','status','from_date','to_date'],onMount:c=>engine.mountRowDetails(c,{rows:()=>c.providerRows,load:doc=>doc.order_progress,active:()=>engineRoute(c)}),dismissInitialOnboarding:true,keepColumnHeader:true,columns:COLUMNS,defaultColumns:provider.defaultColumns,provider,providerSelectable:doc=>doc.row_type==='purchase_order',computedFields:['receipt_action','order_settled','order_unpaid'],moneyPrecision:2,
+  onRequestStart:c=>{cancelPending(c);clearSelection(c);},onPageChange:clearSelection,onScopeChange:scopeChanged,onSelectionChange:selectionChanged,mountControls:mount,renderHeader:c=>`<table class="dlp-purchase-table">${header(c)}</table>`,renderRow:row,renderTable:table,
   afterRender:c=>{selectionChanged(c);fit(c);},onRouteChange:fit,controllerKey:'dlpPurchaseOrderGrid',routeClass:'dlp-purchase-order-grid-active',freezeUntil:'supplier_name',moneySummary:true,
   numbers:['grand_total','advance_paid','per_received','per_billed'],dates:['transaction_date','schedule_date'],quickFields:['company','status','advance_payment_status'],searchFields:['name','supplier_name','project'],extraFields:['supplier','party_account_currency','docstatus'],optionLabels:{progress_phase:{supplier_unpaid:'供应商未付',internal_unsettled:'内部待结算',factory_pending:'工厂待入库'}},controls:[
    {fieldname:'search',fieldtype:'Data',label:'订单/审批/项目/供应商'},
    {fieldname:'from_date',fieldtype:'Date',label:'订单开始日期',permission_field:'transaction_date'},
    {fieldname:'to_date',fieldtype:'Date',label:'订单结束日期',permission_field:'transaction_date'},
    {fieldname:'company',fieldtype:'Link',options:'Company',label:'采购付款公司'},
+   {fieldname:'status',fieldtype:'Select',label:'订单状态'},
    {fieldname:'beneficiary_company',fieldtype:'Link',options:'Company',label:'最终归属公司',permission_field:'company'},
    {fieldname:'progress_phase',fieldtype:'Select',label:'进度阶段',permission_field:'name',options:'\nsupplier_unpaid\ninternal_unsettled\nfactory_pending',emptyLabel:'全部进度'},
    {fieldname:'review_only',fieldtype:'Check',label:'待核对',permission_field:'name'},
   ]});
+ function engineRoute(c){const route=c.root.frappe.get_route?.() || [];return String(route[0]).toLowerCase()==='list' && route[1]==='Purchase Order';}
  if(typeof module==='object' && module.exports)module.exports=grid;
  root.DeepLinkERPPurchaseOrderGrid=grid;
  grid.install(root);

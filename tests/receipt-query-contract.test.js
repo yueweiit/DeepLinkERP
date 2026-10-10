@@ -7,7 +7,7 @@ const vm = require("node:vm");
 // Isolate only the browser host. Exercise the real adapter's query function.
 function receiptConfiguration() {
   let configuration;
-  const host = { DeepLinkERPCompactList: { create(value) {
+  const host = { DeepLinkERPCompactList: { ...require('../deeplinkerp_branding/public/js/compact_list.js'), create(value) {
     configuration = value;
     return { install() {} };
   } } };
@@ -112,4 +112,20 @@ test('complete native receipt rows and child-filter fallback retain two money de
  const c=grid.mount(list,env);const doc={name:'PR',grand_total:12.3456,currency:'USD'};
  assert.match(list.get_list_row_html(doc),/12\.35 USD/);assert.doesNotMatch(list.get_list_row_html(doc),/12\.346/);
  c.setProviderScope('all',false);list.get_call_args();assert.equal(c.providerScope,'orders');assert.match(list.get_list_row_html(doc),/12\.35 USD/);
+});
+
+test('receipt lines read only on expansion, retain one version and omit field-level denied native values',async()=>{
+ const config=receiptConfiguration(),calls=[];
+ assert.equal(typeof config.onMount,'function');assert.equal(typeof config.rowExtra,'function');
+ const doc={name:'PR',modified:'v1'},c={providerScope:'all',providerRows:[doc],allowed:new Set(['name','items']),requestId:1,list:{render_list(){},set_rows_as_checked(){}},root:{frappe:{get_route:()=>['List','Purchase Receipt'],model:{with_doctype:async()=>{}},get_meta:()=>({fields:[{fieldname:'item_code'},{fieldname:'qty'},{fieldname:'rate',permlevel:1}]}),perm:{has_perm:(_dt,level)=>level===0},call:async request=>{calls.push(request);return {message:{name:'PR',modified:'v1',currency:'CNY',items:[{name:'PRI',item_code:'MAT',qty:2,rate:300}]}};}}}};
+ config.onMount(c);assert.equal(calls.length,0);assert.equal(config.rowExtra(c,doc),'');
+ await c.toggleRowDetails('PR');assert.equal(calls.length,1);assert.equal(calls[0].method,'frappe.client.get');assert.equal(calls[0].args.doctype,'Purchase Receipt');
+ assert.match(config.rowExtra(c,doc),/MAT|2\.00/);assert.doesNotMatch(config.rowExtra(c,doc),/300|单价/);
+ await c.toggleRowDetails('PR');await c.toggleRowDetails('PR');assert.equal(calls.length,1);
+});
+test('receipt preferences migrate once with backup and preserve density and v4 choices',()=>{
+ const config=receiptConfiguration(),grid=require('../deeplinkerp_branding/public/js/compact_list.js').create(config),allowed=new Set(config.provider.columns.map(col=>col.fieldname));
+ const next=grid.normalizePreferences({columns:['name','currency'],density:'standard',version:3},allowed,config.provider.columns);
+ assert.equal(config.backupMigratedPreferences,true);assert.equal(next.version,4);assert.equal(next.density,'standard');assert.deepEqual(next.columns,Array.from(config.provider.defaultColumns));
+ assert.deepEqual(grid.normalizePreferences({...next,columns:['name','currency']},allowed,config.provider.columns).columns,['name','currency']);
 });

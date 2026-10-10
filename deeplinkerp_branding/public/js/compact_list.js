@@ -1,18 +1,52 @@
 (function (root, factory) {
- const engine = { create: factory, fitViewport, detailTable, invalidateExpandedDetails };
+ const engine = { create: factory, fitViewport, detailTable, invalidateExpandedDetails, mountRowDetails };
+ // One page index and a bounded version cache shared by procurement list adapters.
+ function mountRowDetails(owner, {rows, load, active=()=>true}) {
+  owner.expandedDetails=new Set(); owner.detailCache=new Map(); owner.detailPending=new Map(); owner.detailRows=new Map(); owner.detailVersions=new Map();
+  const version=doc=>String(doc?.modified || doc?.order_progress?.modified || '');
+  const render=()=>{owner.list.render_list();owner.list.set_rows_as_checked?.();};
+  owner.reconcileRowDetails=()=>{
+   const next=new Map(rows().map(doc=>[doc.name,doc]));
+   for(const [name,previous] of owner.detailVersions)if(!next.has(name) || version(next.get(name))!==previous){owner.expandedDetails.delete(name);owner.detailCache.delete(name);owner.detailPending.delete(name);}
+   owner.detailRows=next;owner.detailVersions=new Map([...next].map(([name,doc])=>[name,version(doc)]));
+  };
+  owner.invalidateRowDetails=names=>{
+   const targets=names==null?new Set(owner.detailRows.keys()):new Set(Array.isArray(names)?names:[names]);
+   for(const name of targets){owner.expandedDetails.delete(name);owner.detailCache.delete(name);owner.detailPending.delete(name);}
+  };
+  owner.cancelPendingRowDetails=()=>{
+   for(const name of owner.detailPending.keys())owner.expandedDetails.delete(name);
+   owner.detailPending.clear();
+  };
+  owner.toggleRowDetails=async name=>{
+   owner.reconcileRowDetails();const doc=owner.detailRows.get(name);if(!doc || !active())return;
+   if(owner.expandedDetails.has(name)){owner.expandedDetails.delete(name);owner.detailPending.delete(name);render();return;}
+   owner.expandedDetails.add(name);
+   if(owner.detailCache.get(name)?.error)owner.detailCache.delete(name);
+   if(owner.detailCache.has(name)){render();return;}
+   const scope=()=>JSON.stringify([owner.page,owner.pageSize,owner.providerScope,owner.quick,owner.querySignature]);
+   const token={doc,version:version(doc),requestId:owner.requestId,scope:scope()};owner.detailPending.set(name,token);render();
+   const current=()=>active() && owner.expandedDetails.has(name) && owner.detailPending.get(name)===token && owner.requestId===token.requestId && scope()===token.scope && owner.detailRows.has(name) && version(owner.detailRows.get(name))===token.version;
+   try {const detail=await load(doc);if(current())owner.detailCache.set(name,detail?.header?.modified && token.version && String(detail.header.modified)!==token.version?{error:'明细已更新，请刷新列表后查看。'}:detail);}
+   catch(error){if(current())owner.detailCache.set(name,{error:error.message || '明细读取失败，请重试。'});}
+   finally {if(owner.detailPending.get(name)===token){owner.detailPending.delete(name);if(active())render();}}
+  };
+  owner.list.$result?.on?.('click.dlpRowDetails','.dlp-purchase-expand',event=>{event.preventDefault();event.stopPropagation();return owner.toggleRowDetails(owner.root.$(event.currentTarget).attr('data-name'));});
+  owner.reconcileRowDetails();
+ }
  function invalidateExpandedDetails(expanded,rows,modified=detail=>detail.header?.modified) {
   const byName=new Map(rows.map(row=>[row.name,row]));
   for(const [name,detail] of expanded || []) {const row=byName.get(name);if(!row || (row.modified && row.modified!==modified(detail)))expanded.delete(name);}
  }
  function detailTable({columns, items=[], escape, translate=x=>x, format, wrapperClass='', tableClass='', columnClass=()=>''}) {
-  return `<div class="${escape(wrapperClass)}"><table class="table ${escape(tableClass)}"><thead><tr>${columns.map(([field,label],i)=>`<th class="${escape(columnClass(field,i))}">${escape(translate(label))}</th>`).join('')}</tr></thead><tbody>${items.map(item=>`<tr>${columns.map(([field],i)=>`<td class="${escape(columnClass(field,i))}">${format?.(field,item) ?? escape(item[field] ?? '—')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+  return `<div class="${escape(wrapperClass)}"><table class="table ${escape(tableClass)}"><thead><tr>${columns.map(([field,label],i)=>`<th data-fieldname="${escape(field)}" class="${escape(columnClass(field,i))}">${escape(translate(label))}</th>`).join('')}</tr></thead><tbody>${items.map(item=>`<tr>${columns.map(([field],i)=>`<td data-fieldname="${escape(field)}" title="${escape(item[field] ?? '—')}" class="${escape(columnClass(field,i))}">${format?.(field,item) ?? escape(item[field] ?? '—')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
  }
  // Opt-in sizing shared by Sales and inventory; other list heights stay native.
  function fitViewport(owner, options) {
   if (!owner) return;
   if (!options.active) return owner.stopTableViewport?.();
   if (owner.updateTableViewport) return owner.updateTableViewport();
-  const {root:host,scrollElement:result,layoutTailElement:list,property,headerSelector,rowSelector,observeTargets=[]}=options;
+  const {root:host,scrollElement:result,layoutTailElement:list,property,headerSelector,rowSelector,observeTargets=[],minimumRows=1}=options;
   if (!result?.getBoundingClientRect || !list?.getBoundingClientRect || !host.requestAnimationFrame || !host.getComputedStyle) return;
   let frame, stopped=false, observedHeader, observedRow;
   const schedule=()=>{if(!stopped && frame===undefined)frame=host.requestAnimationFrame(measure);};
@@ -41,7 +75,7 @@
    }
    observedHeader=header;observedRow=row;
    const rowHeight=row ? number(host.getComputedStyle(row).minHeight)||row.getBoundingClientRect?.().height||0 : 0;
-   const minimum=(header?.getBoundingClientRect().height||0)+rowHeight+Math.max(0,result.offsetHeight-result.clientHeight);
+   const minimum=(header?.getBoundingClientRect().height||0)+rowHeight*Math.max(1,minimumRows)+Math.max(0,result.offsetHeight-result.clientHeight);
    const tail=Math.max(0,list.getBoundingClientRect().bottom-result.getBoundingClientRect().bottom);
    const height=`${Math.floor(Math.max(minimum,bottom-top-tail-spacing))}px`;
    if(result.style.getPropertyValue(property)!==height)result.style.setProperty(property,height);
@@ -224,6 +258,19 @@
 	function displayColumns(controller) { return providerActive(controller) ? config.provider.columns : COLUMNS; }
 	function displayPermissions(controller) { return providerActive(controller) ? controller.providerAllowed : controller.displayAllowed; }
 	function currentRows(controller) { return providerActive(controller) ? controller.providerRows : controller.list.data; }
+	function mountDisclosureRowGuard(controller) {
+		const result=controller.list.$result?.[0];
+		if (!config.purchaseChrome || !result?.addEventListener) return;
+		let attached=false;
+		const capture=event=>{
+			const summary=event.target.closest?.('summary');
+			if(summary?.closest('details') && summary.closest('.dlp-po-grid-row'))event.stopPropagation();
+		};
+		controller.syncDisclosureRowGuard=active=>{
+			if(attached===active)return;
+			result[active?'addEventListener':'removeEventListener']('click',capture,true);attached=active;
+		};
+	}
 
 	function mount(list, root) {
 		if (!isNativeList(list)) return null;
@@ -244,12 +291,18 @@
 		let saved;
 		try { saved = JSON.parse(root.localStorage?.getItem(key) || "null"); } catch (_) { /* Browsers may disable storage. */ }
 		const originals = {};
-		for (const name of ["get_args", "get_call_args", "no_change", "prepare_data", "reset_defaults", "get_header_html", "get_list_row_html", "render_list", "render_count", "toggle_result_area", "on_filter_change", "process_document_refreshes", "debounced_refresh", "get_checked_items", "set_rows_as_checked", "on_row_checked", "before_render", "after_render"]) originals[name] = list[name];
+		for (const name of ["get_args", "get_call_args", "no_change", "prepare_data", "reset_defaults", "get_header_html", "get_list_row_html", "render_header", "render_list", "render_count", "toggle_result_area", "on_filter_change", "process_document_refreshes", "debounced_refresh", "get_checked_items", "set_rows_as_checked", "on_row_checked", "before_render", "after_render"]) originals[name] = list[name];
 		const providerAllowed = new Set(displayAllowed);
 		for (const field of config.provider?.virtualFields || []) providerAllowed.add(field);
 		let providerSaved;
 		try { providerSaved = JSON.parse(root.localStorage?.getItem(`${key}:unified`) || "null"); } catch (_) { /* Local preferences are optional. */ }
 		if (!providerSaved && saved && config.provider) providerSaved = config.provider.inheritPreferences ? saved : { ...saved, columns: [...(saved.columns || []), ...(config.provider.newColumns || [])] };
+		if(config.backupMigratedPreferences) {
+			for(const [storageKey,value,definitions,permissions] of [[key,saved,COLUMNS,displayAllowed],[`${key}:unified`,providerSaved,config.provider?.columns,providerAllowed]]) {
+				if(!value || !definitions || normalizePreferences(value,permissions,definitions).version===value.version)continue;
+				try {const backupKey=`${storageKey}:backup:${value.version ?? 'legacy'}`;if(root.localStorage?.getItem(backupKey)==null)root.localStorage?.setItem(backupKey,JSON.stringify(value));}catch(_){/* Browser storage is optional. */}
+			}
+		}
 		const controller = {
 			list, root, allowed, displayAllowed, originals, quick: {}, controls: {}, resetting: false, preferences: config.provider?.alwaysActive ? normalizePreferences(providerSaved, providerAllowed, config.provider.columns) : normalizePreferences(saved, displayAllowed),
 			providerAllowed, providerScope: "orders", providerRows: [], providerPayload: null, providerOrderBy: "transaction_date desc",
@@ -264,6 +317,7 @@
 				list.last_args = null;
 			},
 			activate() {
+				this.syncDisclosureRowGuard?.(isListRoute(frappe));
 				root.document?.body?.classList.toggle(config.routeClass, isListRoute(frappe));
 				root.document?.body?.classList.toggle(`${config.routeClass}-readonly`, isListRoute(frappe) && providerReadonly(this));
 				if (isListRoute(frappe) && providerActive(this)) config.provider.onActivate?.(this);
@@ -324,6 +378,8 @@
 			},
 		};
 		list[config.controllerKey] = controller;
+		mountDisclosureRowGuard(controller);
+		config.onMount?.(controller);
 		controller.setPage(0);
 		list.selected_page_count = 100;
 		for (const field of new Set([...COLUMNS.map((col) => col.fieldname), ...(config.extraFields || []), list.workflow_state_fieldname])) {
@@ -403,6 +459,7 @@
 				this.total_count = controller.total;
 				// Only explicitly eligible provider documents enter native selection/actions.
 				this.data = controller.providerRows.filter(doc => rowSelectable(controller, doc));
+				controller.reconcileRowDetails?.();
 				config.provider.onPayload?.(controller);
 				return;
 			}
@@ -410,6 +467,7 @@
 			this.start = 0;
 			originals.prepare_data.call(this, response);
 			this.start = start;
+			controller.reconcileRowDetails?.();
 			config.onRows?.(controller);
 		};
 		list.reset_defaults = function () {
@@ -451,13 +509,24 @@
 		}
 		list.get_header_html = () => headerHTML(controller);
 		list.get_list_row_html = (doc) => rowHTML(controller, doc);
+		if (config.renderTable) list.render_header = function (...args) {
+			// ListView.refresh calls this again after render_list. The physical table
+			// already owns its header; native refresh_header must not append a second table.
+			if (this.$result?.find(".dlp-custom-table-surface").length) {
+				this.$list_head_subject = this.$result.find(".list-header-subject");
+				this.$checkbox_actions = this.$result.find(".checkbox-actions");
+				return;
+			}
+			this.$result?.find(".dlp-custom-list-header").remove();
+			return originals.render_header?.apply(this, args);
+		};
 		list.render_list = function () {
 			this.$result?.find(".list-row-container").remove();
 			this.$list_head_subject = null;
 			this.$checkbox_actions = null;
 			if (config.renderTable) {
 				currentRows(controller).forEach((doc, index) => { doc._idx = index; });
-				this.$result?.append(config.renderTable(controller, currentRows(controller)));
+				this.$result?.append(`<div class="list-row-container dlp-custom-table-surface">${config.renderTable(controller, currentRows(controller))}</div>`);
 				this.$list_head_subject = this.$result?.find(".list-header-subject");
 				this.$checkbox_actions = this.$result?.find(".checkbox-actions");
 			} else {
@@ -467,6 +536,7 @@
 					this.$result?.append(this.get_list_row_html(doc));
 				});
 			}
+			movePurchaseNativeFilterSection(controller);
 			config.afterRender?.(controller);
 			if (providerActive(controller) && !currentRows(controller).length) this.$result?.append('<div class="list-row-container dlp-provider-empty text-muted text-center" role="status">没有符合条件的采购记录</div>');
 		};
@@ -568,7 +638,7 @@
 	}
 
 	function headerHTML(controller) {
-		if (config.renderHeader) return config.renderHeader(controller);
+		if (config.renderHeader) return `<div class="list-row-container dlp-custom-list-header">${config.renderHeader(controller)}</div>`;
 		const { translate: t, list } = controller;
 		const provider = providerActive(controller), readonly = providerReadonly(controller);
 		const checkbox = readonly ? readonlyCheckbox(t) : `<input class="list-header-checkbox list-check-all" type="checkbox" title="${escapeHTML(t("Select All"))}">`;
@@ -602,6 +672,13 @@
 		return `<div class="list-row-container" tabindex="0"><div class="level ${readonly ? "dlp-po-readonly-row" : "list-row"} dlp-po-grid-row" style="--dlp-po-columns:${template(controller)}">${selectionCell(checkbox, config.renderSequence?.(controller, doc, sequence) ?? sequence)}${cells}</div>${config.rowExtra?.(controller, doc) || ""}</div>`;
 	}
 
+	function movePurchaseNativeFilterSection(controller) {
+		if (!config.purchaseChrome || !controller.$advancedFilters) return;
+		// Native restrictions live under page-form, not the table surface. Move
+		// the original section so its permission indicator and bindings survive.
+		controller.list.page.wrapper.find('.page-form > .filter-section').appendTo(controller.$advancedFilters);
+		controller.list.$frappe_list.find('> .filter-section').appendTo(controller.$advancedFilters);
+	}
 	function mountControls(controller) {
 		const { list, root, translate: t } = controller;
 		if (!root.$ || !list.$frappe_list || !root.document) return;
@@ -630,12 +707,20 @@
 			filterHost.removeClass('hide').show();
 		}
 		controller.$filters = $('<div class="dlp-po-filters"></div>').prependTo(filterHost);
+		if(config.purchaseChrome) {
+			controller.$moreFilters=$(`<details class="dlp-purchase-more-filters"><summary class="btn btn-default btn-sm">${escapeHTML(t('更多筛选'))}</summary><div class="dlp-purchase-advanced-filters"></div></details>`).appendTo(controller.$filters);
+			controller.$advancedFilters=controller.$moreFilters.find('.dlp-purchase-advanced-filters');
+			list.page.wrapper.find('.page-form .filter-selector, .page-form .sort-selector, .page-form .sort-selector-group, .page-form .filter-button').appendTo(controller.$advancedFilters);
+			movePurchaseNativeFilterSection(controller);
+			list.page.inner_toolbar?.find('.inner-group-button').appendTo(controller.$advancedFilters);
+		}
 		const controls = (config.controls || []).map((control) => ({ ...control }));
+		if(config.purchaseChrome) {const rank=new Map(config.mainFilterFields.map((field,index)=>[field,index]));controls.sort((a,b)=>(rank.get(a.fieldname) ?? 100)-(rank.get(b.fieldname) ?? 100));}
 		for (const control of controls) {
 			if (control.fieldname !== "search" && !controller.allowed.has(control.permission_field || control.fieldname)) continue;
 			const field = list.meta.fields.find((df) => df.fieldname === control.fieldname);
 			if (control.fieldtype === "Select") control.options = selectOptions(control, field, t);
-			const holder = $(`<div class="dlp-po-filter" data-fieldname="${control.fieldname}"></div>`).appendTo(controller.$filters);
+			const holder = $(`<div class="dlp-po-filter" data-fieldname="${control.fieldname}"></div>`).appendTo(config.purchaseChrome && !(config.mainFilterFields || []).includes(control.fieldname) ? controller.$advancedFilters : controller.$filters);
 			const input = root.frappe.ui.form.make_control({ parent: holder, df: { ...control, label: t(control.label), placeholder: t(control.label), change: () => {
 				if (controller.resetting) return;
 				controller.quick[control.fieldname] = input.get_value();
@@ -665,7 +750,11 @@
 		controller.savePreferences();
 		config.provider?.mountControls?.(controller);
 		config.mountControls?.(controller);
-		if (["Purchase Order", "Purchase Receipt"].includes(DOCTYPE) || ["purchase-payables", "purchase-payment-records"].includes(config.pageRoute)) controller.root.DeepLinkERPPurchasePayments?.mountProcurementTabs?.(controller);
+		if(config.purchaseChrome) {
+			controller.$moreFilters.appendTo(controller.$filters);
+			controller.$filters.find('.dlp-po-clear-filters').appendTo(controller.$filters);
+			if(controller.pageSurface)$(`<button class="btn btn-default btn-sm dlp-po-clear-filters" type="button">${escapeHTML(t('清空'))}</button>`).appendTo(controller.$filters).on('click.dlpPO',()=>controller.clearQuickFilters());
+		}
 		if (config.dismissInitialOnboarding) dismissAutomaticOnboarding(controller, root);
 		paintSummary(controller);
 	}
@@ -791,8 +880,9 @@
 			const current = frappe.views?.list_view?.[DOCTYPE] || root.cur_list;
 			root.document?.body?.classList.toggle(`${config.routeClass}-readonly`, isListRoute(frappe) && Boolean(current?.[config.controllerKey] && providerReadonly(current[config.controllerKey])));
 			const list = frappe.views?.list_view?.[DOCTYPE] || root.cur_list;
+			list?.[config.controllerKey]?.syncDisclosureRowGuard?.(isListRoute(frappe));
 			config.onRouteChange?.(list?.[config.controllerKey], isListRoute(frappe));
-			if (!isListRoute(frappe)) list?.[config.controllerKey]?.stopInitialOnboarding?.();
+			if (!isListRoute(frappe)) { list?.[config.controllerKey]?.stopInitialOnboarding?.(); list?.[config.controllerKey]?.cancelPendingRowDetails?.(); }
 			if (isListRoute(frappe) && isNativeList(list)) mount(list, root);
 		});
 	}
@@ -847,11 +937,12 @@
 			},
 		};
 		function active() { return (frappe.get_route?.() || [])[0] === config.pageRoute; }
-		function render() { surface.$result.html(headerHTML(c) + c.providerRows.map((row, index) => { row._idx = index; return rowHTML(c, row); }).join('')); if (!c.providerRows.length) surface.$result.append(`<div class="dlp-provider-empty text-muted" role="status">${escapeHTML(c.translate(config.emptyLabel || '没有符合条件的采购付款记录'))}</div>`); config.afterRender?.(c); paintSummary(c); }
+		function render() { surface.$result.html(headerHTML(c) + c.providerRows.map((row, index) => { row._idx = index; return rowHTML(c, row); }).join('')); if (!c.providerRows.length) surface.$result.append(`<div class="dlp-provider-empty text-muted" role="status">${escapeHTML(c.translate(config.emptyLabel || '没有符合条件的采购付款记录'))}</div>`); movePurchaseNativeFilterSection(c); config.afterRender?.(c); paintSummary(c); }
 		surface.render_list = render; surface.refresh = () => c.refresh();
+		config.onMount?.(c);
 		mountControls(c); render(); c.activate();
 		if (config.dismissInitialOnboarding) dismissAutomaticOnboarding(c, root);
-		frappe.router?.on('change', () => { c.activate(); if (!active()) { c.requestId++; c.stopInitialOnboarding?.(); } });
+		frappe.router?.on('change', () => { c.activate(); if (!active()) { c.requestId++; c.stopInitialOnboarding?.(); c.cancelPendingRowDetails?.(); } });
 		return c;
 	}
 	return { COLUMNS, escapeHTML, allowedFields, preferenceKey, normalizePreferences, selectOptions, buildQuery, buildRequests, currencyTotals, formatNumber, renderValue, mount, mountPage, install, dismissAutomaticOnboarding };

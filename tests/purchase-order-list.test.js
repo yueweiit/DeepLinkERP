@@ -34,13 +34,42 @@ test("existing OR filters remain consistent and conflicting quick search is refu
 	assert.throws(() => production("buildQuery")(native, { search: "different buyer" }, permitted), /OR filters/);
 });
 
-test("purchase header uses a physical material table with compact independent columns", () => {
+test("purchase header defaults to compact order columns with collapsed material details", () => {
 	const { list, env } = bareList();
 	production("mount")(list, env);
 	const header = list.get_header_html();
-	for (const label of ["采购订单号", "订单状态", "供应商名称", "仓库", "物料编码", "物料名称", "数量", "单位", "单价", "金额", "已入库数量"]) assert.ok(header.includes(label), label);
+	for (const label of ["采购订单号", "订单状态", "供应商名称", "订单日期", "公司", "订单金额", "付款进度", "收货进度"]) assert.ok(header.includes(label), label);
+	assert.doesNotMatch(header, /物料编码|物料名称|已入库数量/);
 	assert.match(header, /<thead>/);
 	assert.equal((header.match(/list-check-all/g) || []).length, 1);
+});
+test("purchase main column chooser omits material fields that belong only to expanded details", () => {
+ const {list,env}=bareList(),c=production('mount')(list,env);
+ const chooser=c.$columnsMenu?.value || c.$toolbar?.value || '';
+ assert.ok(c.providerColumns || c.providerAllowed,'provider mounted');
+ const provider=require('../deeplinkerp_branding/public/js/unified_purchase_list.js').configure(grid.COLUMNS);
+ assert.equal(provider.columns.some(col=>['item_code','item_name','warehouse','qty','uom','rate','amount','received_qty'].includes(col.fieldname)),false);
+ assert.doesNotMatch(chooser,/data-column="(?:item_code|qty)"/);
+});
+
+test("native header rendering and custom rows share one removable header lifecycle", () => {
+	const { list, env } = bareList();
+	let fragments = [];
+	list.$result = { append(html) { fragments.push(html); }, find(selector) {
+		if (selector === '.list-row-container') return { remove() { fragments = fragments.filter(html => !html.includes('list-row-container')); } };
+		if (selector === '.dlp-custom-list-header') return {remove() {fragments=fragments.filter(html=>!html.includes('dlp-custom-list-header'));}};
+		if (selector === '.dlp-custom-table-surface') return {length:fragments.filter(html=>html.includes('dlp-custom-table-surface')).length};
+		return { show() {}, hide() {}, find() { return { prop() { return this; } }; } };
+	} };
+	list.render_header = function () { this.$result.append(this.get_header_html()); };
+	production('mount')(list, env);
+	list.render_header(); list.render_header(true);
+	assert.equal((fragments.join('').match(/<thead>/g) || []).length,1,'before first rows');
+	for (const step of ['initial', 'refresh', 'page', 'back']) {
+		list.render_header(true); list.render_list();
+		list.render_header(); list.render_header(true);
+		assert.equal((fragments.join('').match(/<thead>/g) || []).length, 1, step);
+	}
 });
 
 test("export includes visible columns in order and account currency, without any page limit", () => {
@@ -361,7 +390,8 @@ test("a payment refresh replaces progress and page materials when the order time
  await list.process_document_refreshes();
  assert.equal(list.data[0].order_progress.settled, 3000);
  assert.equal(list.data[0].order_progress.items, progress.items);
- assert.match(list.get_list_row_html(list.data[0]), /POI-1/);
+ await list.dlpPurchaseOrderGrid.toggleRowDetails('PO-1');
+ assert.match(list.get_list_row_html(list.data[0]), /material/);
  assert.doesNotMatch(list.get_list_row_html(list.data[0]), /OLD-ITEM/);
 });
 
@@ -558,6 +588,7 @@ list.data = [{ name: "PO-1", row_type: "purchase_order" }, { name: "PO-2", row_t
 	list.$result = {
 		find(selector) {
 			if (selector === ".list-row-container") return { remove() { rows.clear(); } };
+			if (selector === ".dlp-custom-list-header") return {remove() {}};
 			if (selector === ".list-header-subject") return { show() {}, find() { return { prop() { return this; } }; } };
 			if (selector === ".checkbox-actions") return { hide() {} };
 			if (selector === ".list-row-checkbox:checked") return [...rows.values()].filter((row) => row.checked);
@@ -761,14 +792,16 @@ test("all real Purchase Order scopes use one unified provider while virtual grou
 	}
 });
 
-test("purchase provider inherits saved custom columns without appending new defaults or losing density", () => {
+test("purchase provider upgrades old layout once, backs it up and preserves density and later choices", () => {
 	const { list, env } = bareList();
 	const saved = { density: "standard", columns: ["supplier_name", "name", "advance_paid", "status"] }, writes = new Map();
-	env.localStorage = { getItem: key => key.endsWith(":unified") ? null : JSON.stringify(saved), setItem: (key, value) => writes.set(key, value) };
+	env.localStorage = { getItem: key => writes.get(key) ?? (key===grid.preferenceKey('site-a','buyer-a')?JSON.stringify(saved):null), setItem: (key, value) => writes.set(key, value) };
 	const controller = production("mount")(list, env);
 	controller.setProviderScope("orders", false);
-	assert.deepEqual(controller.preferences.columns, saved.columns); assert.equal(controller.preferences.density, "standard");
-	assert.match([...writes.keys()][0], /site-a:buyer-a:Purchase%20Order:unified$/);
+	assert.ok(controller.preferences.columns.includes('payment_progress')); assert.equal(controller.preferences.density, "standard");
+	assert.deepEqual(JSON.parse(writes.get(`${grid.preferenceKey('site-a','buyer-a')}:unified:backup:legacy`)), saved);
+	controller.setColumns(['name','status']);
+	assert.deepEqual(controller.preferences.columns, ['name','status']);
 });
 
 test("a unified page payload supplies material progress directly without an expansion read", async () => {
@@ -780,7 +813,7 @@ test("a unified page payload supplies material progress directly without an expa
 	await new Promise(resolve => setImmediate(resolve)); assert.equal(calls.length, 0);
 	assert.equal(controller.providerRows[0].order_progress.external.settled, 1);
 	const html = list.get_list_row_html(doc);
-assert.doesNotMatch(html, /dlp-purchase-expand/); assert.match(html, /data-fieldname="_sequence"[^>]*>3<\/td>/);
+assert.match(html, /dlp-purchase-expand/); assert.match(html, /aria-expanded="false"/);
 });
 
 test("restricted related progress retains independently authorized native order actions and gates only crossborder entries", () => {
@@ -790,7 +823,7 @@ test("restricted related progress retains independently authorized native order 
 	try {
 		const { list, env } = bareList(); production("mount")(list, env);
 		for (const docstatus of [0, 1]) {
-			const doc = { name: "PO-1", row_type: "purchase_order", docstatus, status: docstatus ? "To Receive and Bill" : "Draft", per_received: 0, order_progress: { state: "restricted" } };
+			const doc = { name: "PO-1", row_type: "purchase_order", docstatus, status: docstatus ? "To Receive and Bill" : "Draft", per_received: 0, receipt_eligibility: {allowed:docstatus===1,reason:''}, order_progress: { state: "restricted" } };
 			const native = context.DeepLinkERPPurchasePayments.orderReceiptAction(doc), html = list.get_list_row_html(doc);
 			assert.ok(native); assert.ok(html.includes(native), "related-read denial cannot replace existing native action authority"); assert.doesNotMatch(html, /dlp-crossborder-open/);
 		}
@@ -799,24 +832,36 @@ test("restricted related progress retains independently authorized native order 
 	} finally { if (previous === undefined) delete globalThis.DeepLinkERPPurchasePayments; else globalThis.DeepLinkERPPurchasePayments = previous; }
 });
 
-test("purchase physical table CSS preserves table layout, rowspans and sticky scrolling without changing shared consumers", () => {
+test("purchase table CSS preserves table layout and sticky scrolling with accessible expansion", () => {
  const css = fs.readFileSync(path.join(__dirname, "../deeplinkerp_branding/public/css/purchase_order_list.css"), "utf8");
  assert.match(css, /body\.dlp-purchase-order-grid-active \.dlp-purchase-table[^{}]*\.dlp-po-grid-row[^{}]*\{[^}]*display:\s*table-row/);
  assert.match(css, /body\.dlp-purchase-order-grid-active \.dlp-purchase-table\s*\{[^}]*border-collapse:\s*separate/);
  assert.match(css, /body\.dlp-purchase-order-grid-active \.dlp-purchase-table th\s*\{[^}]*position:\s*sticky/);
  assert.match(css, /\.dlp-purchase-table \.dlp-purchase-frozen\s*\{[^}]*left:\s*var\(--dlp-purchase-left\)/);
- assert.doesNotMatch(css, /\.dlp-purchase-expand\s*\{/);
+ assert.match(css, /\.dlp-purchase-expand\s*\{/);
+ assert.match(css, /body\.dlp-purchase-order-grid-active \.result-container\s*\{[^}]*scroll-padding-top:/);
+ const details=css.match(/\.dlp-purchase-detail-table\s*\{([^}]*)\}/)?.[1];
+ assert.match(details,/width:\s*(?:900px|auto)/,'nested tables must not use cyclic percentage widths inside max-content native rows');
+ assert.doesNotMatch(details,/(?:^|;)\s*width:\s*100%/);
 });
 
 function mountedPurchase(beforeMount) {
 	const fixture = bareList(), { list, env } = fixture, handlers = new Map(), controls = [], calls = [], changes = [];
-	const captures = new Set(), resultNode = {
-		addEventListener(type, handler, capture) { assert.equal(type, "change"); assert.equal(capture, true); captures.add(handler); },
-		removeEventListener(type, handler, capture) { assert.equal(type, "change"); assert.equal(capture, true); captures.delete(handler); },
+	const captures = new Set(), clickCaptures=new Set(), clicks=[], resultNode = {
+		addEventListener(type, handler, capture) { assert.equal(capture, true); (type==='click'?clickCaptures:captures).add(handler); },
+		removeEventListener(type, handler, capture) { assert.equal(capture, true); (type==='click'?clickCaptures:captures).delete(handler); },
 		dispatchChange(target) {
 			const event = { target, currentTarget: target };
 			for (const handler of captures) handler(event);
 			for (const { selector, handler } of changes) if (target.matches(selector)) handler(event);
+		},
+		dispatchClick(target,documentCapture=()=>{}) {
+			const event={target,currentTarget:target,stopped:false,defaultPrevented:false,stopPropagation(){this.stopped=true;},preventDefault(){this.defaultPrevented=true;}};
+			documentCapture(event);
+			if(!event.stopped)for(const handler of clickCaptures)handler(event);
+			if(!event.stopped)for(const {selector,handler} of clicks)if(target.closest(selector))handler(event);
+			const summary=target.closest('summary');if(summary && !event.defaultPrevented)summary.details.open=!summary.details.open;
+			return event;
 		},
 	};
 	class Surface {
@@ -826,7 +871,7 @@ function mountedPurchase(beforeMount) {
 		addClass() { return this; } removeClass() { return this; } toggleClass() { return this; } toggle() { return this; } show() { return this; } hide() { return this; } remove() { return this; }
 		append(value) { this.value += value; return this; } html(value) { this.value = value; return this; } text(value) { if (value === undefined) return this.value; this.value = value; return this; }
 		val() { return this; } prop() { return this; } each() { return this; } attr(name, value) { if (value !== undefined) return this; return this.attributes?.[name]; } off() { return this; }
-		on(events, selector, handler) { if (typeof selector === "string") { handlers.set(selector, handler); if (this === list.$result && events.startsWith("change")) changes.push({ selector, handler }); } return this; }
+		on(events, selector, handler) { if (typeof selector === "string") { handlers.set(selector, handler); if (this === list.$result && events.startsWith("change")) changes.push({ selector, handler }); if(this===list.$result && events.startsWith('click'))clicks.push({selector,handler}); } return this; }
 	}
 	env.$ = target => target instanceof Surface ? target : new Surface(); env.document = { body: { classList: { toggle() {} } } }; env.cur_list = list;
 	env.frappe.model.can_export = () => false;
@@ -837,8 +882,28 @@ function mountedPurchase(beforeMount) {
 	const controller = production("mount")(list, env);
 	function payload(doc) { const call = dispatch(list), response = { message: { rows: [doc], total_count: 1 } }; call.callback(response); list.prepare_data(response); }
 	function click(name) { const target = new Surface(); target.attributes = { "data-name": name }; return handlers.get(".dlp-purchase-expand")({ currentTarget: target, preventDefault() {}, stopPropagation() {} }); }
-	return { ...fixture, controller, calls, controls, handlers, payload, click, resultNode, captures };
+	return { ...fixture, controller, calls, controls, handlers, payload, click, resultNode, captures,clickCaptures };
 }
+
+test('summary bubbling opens its disclosure without native row navigation and keeps ordinary clicks and captured buttons intact',()=>{
+ let navigation=0,buttons=0;
+ const {list,env,resultNode,clickCaptures}=mountedPurchase(({list})=>{
+  // Native setup_list_click is registered before the compact adapter: summary
+  // has no checkbox/anchor exceptions and would navigate without capture guard.
+  list.$result.on('click','.list-row',event=>{navigation++;event.preventDefault();});
+ });
+ const details={open:false},row={},summary={details,closest:selector=>selector==='details'?details:selector==='.dlp-po-grid-row'?row:null};
+ const summaryLabel={closest:selector=>selector==='summary'?summary:selector==='.list-row'?row:null};
+ const clicked=resultNode.dispatchClick(summaryLabel);
+ assert.equal(navigation,0);assert.equal(details.open,true);assert.equal(clicked.defaultPrevented,false);
+ resultNode.dispatchClick(summaryLabel);assert.equal(details.open,false);
+ const ordinary={closest:selector=>selector==='.list-row'?row:null};resultNode.dispatchClick(ordinary);assert.equal(navigation,1);
+ resultNode.dispatchClick(ordinary,event=>{buttons++;event.stopPropagation();});assert.equal(buttons,1);assert.equal(navigation,1,'existing document-capture action runs before and independently of row guards');
+ assert.equal(clickCaptures.size,1);production('mount')(list,env);assert.equal(clickCaptures.size,1,'cached mount installs one guard');
+ const routes=[];env.cur_list=list;env.frappe.router.on=(_,callback)=>routes.push(callback);production('install')(env);
+ env.frappe.get_route=()=>['Form','Purchase Order','PO'];routes.forEach(callback=>callback());assert.equal(clickCaptures.size,0);
+ env.frappe.get_route=()=>['List','Purchase Order','List'];routes.forEach(callback=>callback());assert.equal(clickCaptures.size,1);
+});
 
 test("one header checkbox selects current-page orders before the native forwarding and header rewrite", () => {
 	const header = { checked: false, indeterminate: false, matches: selector => selector.includes(".list-check-all") || selector === "input[type=checkbox]" };
@@ -881,18 +946,23 @@ test("one header checkbox selects current-page orders before the native forwardi
 	assert.equal(captures.size, 1, "cached-list reentry attaches once");
 });
 
-test("physical detail rows use actual item IDs and one whole-order checkbox with real rowspans", () => {
-	const { list, env } = bareList(); production("mount")(list, env);
+test("order rows collapse by default and expand permission-filtered materials without extra requests or rowspans", async () => {
+	const { list, env } = bareList(); const c=production("mount")(list, env);
 	const doc = { name: "PO-1", row_type: "purchase_order", docstatus: 1, supplier_name: "S", grand_total: 100, currency: "CNY", oa_references: [{ name: "OA-1", number: "审批-1" }], order_progress: { settled: null, item_fields: ["name", "item_code", "item_name", "warehouse", "qty", "uom", "rate", "amount", "received_qty"], items: [{ name: "POI-A", item_code: "SAME", item_name: "材料", warehouse: "W1", qty: 2, uom: "kg", rate: 3, amount: 6, received_qty: 0 }, { name: "POI-B", item_code: "SAME", warehouse: "W2", qty: 4, received_qty: null }] } };
+	c.providerRows=[doc];
+	const collapsed = list.get_list_row_html(doc);
+	assert.doesNotMatch(collapsed, /SAME|POI-A|rowspan/);
+	assert.match(collapsed,/aria-expanded="false"/);
+	await c.toggleRowDetails(doc.name);
 	const html = list.get_list_row_html(doc);
 	assert.equal((html.match(/list-row-checkbox/g) || []).length, 1);
-	assert.equal((html.match(/<tr /g) || []).length, 2);
-	for (const id of ["POI-A", "POI-B"]) assert.match(html, new RegExp(`data-item-name="${id}"`));
-	for (const field of ["name", "status", "supplier_name", "grand_total"]) assert.match(html, new RegExp(`data-fieldname="${field}"[^>]*rowspan="2"`));
-	assert.match(html, /W1/); assert.match(html, /W2/); assert.match(html, /钉钉/); assert.match(html, /审批-1/);
-	assert.match(html, /data-fieldname="received_qty"[^>]*>0<\/td>/);
-	assert.match(html, /data-fieldname="received_qty"[^>]*>—<\/td>/);
-	assert.doesNotMatch(html, /dlp-purchase-expand|dlp-purchase-expanded/);
+	assert.doesNotMatch(html, /rowspan/);
+	assert.match(html, /W1/); assert.match(html, /W2/); assert.match(html, /审批-1/);
+	assert.match(html, /0\.00/);
+	assert.match(html, /dlp-purchase-expanded/);
+	await c.toggleRowDetails(doc.name); assert.doesNotMatch(list.get_list_row_html(doc), /SAME/);
+	doc.order_progress.item_fields=['name','item_code']; await c.toggleRowDetails(doc.name);
+	assert.doesNotMatch(list.get_list_row_html(doc), /W1|材料/);
 	assert.equal(doc.order_progress.items[0].rate, 3);
 });
 
@@ -913,14 +983,14 @@ test("whole-order selection clears with page and tabs and opens the native batch
 	list.clear_checked_items = () => { checked.clear(); list.$checks = []; };
 	env.DeepLinkERPPurchasePayments = { reversalBlocked: value => Boolean(value && value.stage !== 'completed'), orderReceiptAction: () => 'dlp-order-pay dlp-order-receipt', pay: (...args) => calls.push(["pay", ...args]), documentDrawer: (...args) => calls.push(["receipt", ...args]), batchDocumentDrawer: (...args) => calls.push(["batch-receipt", ...args]), batchPay: (...args) => calls.push(["batch-pay", ...args]) };
 	assert.equal(c.providerScope, "orders");
-	payload({ name: "PO-1", row_type: "purchase_order", modified: "v1", order_progress: { items: [{ name: "I1" }, { name: "I2" }] } });
+	payload({ name: "PO-1", row_type: "purchase_order", modified: "v1", receipt_eligibility: {allowed:true,reason:""}, order_progress: { items: [{ name: "I1" }, { name: "I2" }] } });
 	checked.add("PO-1"); checked.add("OA-UNRELATED"); list.on_row_checked();
 	assert.deepEqual(c.getSelectedPurchaseOrders(), [{ name: "PO-1", modified: "v1" }]);
 	await c.runPurchaseAction("receipt"); await c.runPurchaseAction("payment");
-	assert.deepEqual(calls, [["receipt", "Purchase Order", "PO-1", "Purchase Receipt"], ["pay", "Purchase Order", "PO-1"]]);
+	assert.deepEqual(calls, [["receipt", "Purchase Order", "PO-1", "Purchase Receipt"]]);
 	c.providerRows[0].reversal = { stage: 'failed' };
 	await c.runPurchaseAction('receipt'); await c.runPurchaseAction('payment');
-	assert.equal(calls.length, 2, 'pending selection cannot start dependent batch or single actions');
+	assert.equal(calls.length, 1, 'pending selection cannot start dependent batch or single actions');
 	c.setPage(1); assert.equal(checked.size, 0);
 	checked.add("PO-1"); c.quick.company = "OTHER"; list.get_args(); assert.equal(checked.size, 0);
 	checked.add("PO-1"); const old = dispatch(list);
@@ -932,11 +1002,15 @@ test("whole-order selection clears with page and tabs and opens the native batch
 	payload({ name: "OA-1", row_type: "oa_request" });
 	assert.equal(c.getSelectedPurchaseOrders().length, 0); assert.doesNotMatch(list.get_header_html(), /list-check-all/);
 	c.setProviderScope("orders", false);
-	c.providerRows = list.data = [{ name: "PO-1", row_type: "purchase_order" }, { name: "PO-2", row_type: "purchase_order" }];
+	c.providerRows = list.data = [{ name: "PO-1", row_type: "purchase_order", receipt_eligibility: {allowed:true,reason:""} }, { name: "PO-2", row_type: "purchase_order", receipt_eligibility: {allowed:true,reason:""} }];
 	checked.add("PO-1"); checked.add("PO-2");
 	env.frappe.msgprint = options => calls.push(["notice", options.message]);
 	await c.runPurchaseAction("receipt"); await c.runPurchaseAction("payment");
-	assert.deepEqual(calls.slice(2), [["batch-receipt", "Purchase Order", [{name:"PO-1",modified:undefined},{name:"PO-2",modified:undefined}], "Purchase Receipt"], ["batch-pay", "Purchase Order", [{name:"PO-1",modified:undefined},{name:"PO-2",modified:undefined}]]]);
+	assert.deepEqual(calls.slice(1), [["batch-receipt", "Purchase Order", [{name:"PO-1",modified:undefined},{name:"PO-2",modified:undefined}], "Purchase Receipt"]]);
+	c.providerRows[1].receipt_eligibility={allowed:false,reason:'订单已关闭'};
+	await c.runPurchaseAction('receipt');
+	assert.equal(calls.length,3); assert.match(calls[2][1],/PO-2.*订单已关闭/);
+	checked.add('PO-1'); dispatch(list); assert.equal(checked.size,0,'refresh clears selection');
 });
 
 
@@ -961,4 +1035,18 @@ test("native refresh filter sort and route cancellation notify only the optional
  for(const change of [()=>{},()=>{c.quick.company='OTHER';},()=>{c.providerOrderBy='name asc';}]){change();list.last_args=null;dispatch(list);assert.equal(cancelled.at(-1),c);}
  const before=cancelled.length;env.frappe.get_route=()=>['Form','Purchase Order','PO'];routes[0]();assert.ok(cancelled.length>before,'route exit cancels the owner');assert.ok(cancelled.every(owner=>owner===c));
  delete env.DeepLinkERPPurchasePayments;env.frappe.get_route=()=>['List','Purchase Order','List'];list.last_args=null;assert.doesNotThrow(()=>dispatch(list),'cached list remains usable before optional resource loads');
+});
+
+test('native list departure cancels a late detail read even after cached-list reentry',async()=>{
+ const {controller:c,list,env}=mountedPurchase(),routes=[];
+ let resolve;
+ const shared=require('../deeplinkerp_branding/public/js/compact_list.js');
+ c.providerRows=[{name:'PO',row_type:'purchase_order',modified:'v1'}];
+ shared.mountRowDetails(c,{rows:()=>c.providerRows,load:()=>new Promise(done=>resolve=done),active:()=>env.frappe.get_route()[0]==='List'});
+ env.cur_list=list;env.frappe.router.on=(_,callback)=>routes.push(callback);production('install')(env);
+ const pending=c.toggleRowDetails('PO');
+ env.frappe.get_route=()=>['Form','Purchase Order','PO'];routes.forEach(callback=>callback());
+ env.frappe.get_route=()=>['List','Purchase Order','List'];routes.forEach(callback=>callback());
+ resolve({header:{modified:'v1'},items:[{item_code:'OLD'}]});await pending;
+ assert.equal(c.detailCache.has('PO'),false);assert.equal(c.expandedDetails.has('PO'),false);
 });
