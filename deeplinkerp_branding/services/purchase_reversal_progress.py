@@ -365,12 +365,36 @@ def retry(doctype, name):
 
 
 def recover():
-    """Observe only service-accepted generations; native scheduler executes them."""
-    from .purchase_native_repost import reconcile
+    """Drive accepted generations only, including sites with scheduler disabled.
+
+    Reuse audited native valuation and its timeslot/dependency rules. Do not
+    invoke the global native selector or deduplication: they also touch legacy,
+    unaccepted RIVs. The existing fixed timer runs this method on the main site.
+    """
+    from .dedicated_source_sync import check_deadline
+    from .purchase_native_repost import install, reconcile
     rows = frappe.db.get_values("Integration Request", {"integration_request_service": operation.SERVICE,
         "status": ["in", ["Queued", "Failed"]]}, ["name", "output"], as_dict=True, limit=5001)
     if len(rows) > 5000:
         _reject("purchase_reversal_scope_oversize")
     for row in rows:
-        if json.loads(row.output or "{}").get("generation"):
-            reconcile(row.name)
+        check_deadline()
+        if not json.loads(row.output or "{}").get("generation"):
+            continue
+        _, _, current = _load(row.name, lock=False)
+        if current["stage"] in ("failed", "completed"):
+            continue
+        riv = install()
+        if riv.in_configured_timeslot():
+            tasks = frappe.db.get_values("Repost Item Valuation", {
+                boundary.POINTER: row.name, "docstatus": 1,
+                "status": ["in", ["Queued", "In Progress"]]}, ["name"],
+                as_dict=True, order_by="posting_date asc, posting_time asc, creation asc", limit=5001)
+            if len(tasks) > 5000:
+                _reject("purchase_reversal_scope_oversize")
+            for task in tasks:
+                check_deadline()
+                doc = frappe.get_doc("Repost Item Valuation", task.name)
+                riv.repost(doc)  # The locked adapter owns current task/dependency eligibility.
+                check_deadline()
+        reconcile(row.name)

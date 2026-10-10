@@ -3,11 +3,68 @@ import importlib
 import json
 import sys
 import unittest
-from unittest.mock import patch
+from contextlib import ExitStack, nullcontext
+from unittest.mock import Mock, patch
 from types import SimpleNamespace
 
 import frappe
 from frappe.utils import CallbackManager
+
+
+class AcceptedReversalRecoveryTests(unittest.TestCase):
+    """Scheduler-off recovery executes only accepted cancellation generations."""
+
+    def setUp(self):
+        self.progress = importlib.import_module("deeplinkerp_branding.services.purchase_reversal_progress")
+        self.native = importlib.import_module("deeplinkerp_branding.services.purchase_native_repost")
+        self.db = Mock()
+        self.riv = SimpleNamespace(repost=Mock(), in_configured_timeslot=lambda: True)
+        self.output = {"generation": "G", "stage": "waiting_inventory"}
+        self.rows = [frappe._dict(name="ACCEPTED", output=json.dumps(self.output)),
+                     frappe._dict(name="LEGACY", output="{}")]
+        self.tasks = [frappe._dict(name="ROOT", repost_only_accounting_ledgers=0, reposting_reference=None),
+                      frappe._dict(name="CHILD", repost_only_accounting_ledgers=1, reposting_reference="ROOT")]
+        self.db.get_values.side_effect = lambda doctype, *args, **kwargs: self.rows if doctype == "Integration Request" else self.tasks
+        self.db.get_value.return_value = "Queued"
+        self.docs = {task.name: task for task in self.tasks}
+        self.reconcile = Mock()
+        for target in (patch.object(frappe, "db", self.db),
+                       patch.object(frappe, "get_doc", side_effect=lambda doctype, name: self.docs[name]),
+                       patch.object(self.progress, "_load", return_value=(None, {}, self.output)),
+                       patch.object(self.native, "install", return_value=self.riv),
+                       patch.object(self.native, "reconcile", self.reconcile)):
+            target.start()
+            self.addCleanup(target.stop)
+
+    def test_accepted_roots_execute_without_native_global_selection_or_deduplication(self):
+        self.progress.recover()
+        self.assertEqual([call.args[0].name for call in self.riv.repost.call_args_list], ["ROOT", "CHILD"])
+        self.reconcile.assert_called_once_with("ACCEPTED")
+        self.db.get_value.assert_not_called()  # Parent eligibility belongs to the locked native adapter.
+        riv_call = next(call for call in self.db.get_values.call_args_list if call.args[0] == "Repost Item Valuation")
+        self.assertEqual(riv_call.args[1], {
+            "custom_purchase_reversal_operation": "ACCEPTED", "docstatus": 1,
+            "status": ["in", ["Queued", "In Progress"]]})
+        self.assertIn("posting_date", riv_call.kwargs["order_by"])
+
+    def test_failed_generation_waits_for_manual_retry_and_legacy_is_untouched(self):
+        self.output["stage"] = "failed"
+        self.progress.recover()
+        self.riv.repost.assert_not_called()
+        self.reconcile.assert_not_called()
+
+    def test_native_timeslot_remains_authoritative(self):
+        self.riv.in_configured_timeslot = lambda: False
+        self.progress.recover()
+        self.riv.repost.assert_not_called()
+
+    def test_expired_native_deadline_stops_before_next_owned_task(self):
+        runner = importlib.import_module("deeplinkerp_branding.services.dedicated_source_sync")
+        with patch.object(runner, "check_deadline", side_effect=[None, None, TimeoutError("expired")], create=True):
+            with self.assertRaises(TimeoutError):
+                self.progress.recover()
+        self.riv.repost.assert_called_once_with(self.docs["ROOT"])
+        self.reconcile.assert_not_called()
 
 
 class Connection:
@@ -114,6 +171,45 @@ class RepostBoundarySessionTests(unittest.TestCase):
 
     def assert_locked(self, key="a", owner=101):
         self.assertEqual(Database.owners.get(key), owner)
+
+    def test_owned_repost_rechecks_current_task_and_parent_after_waiting(self):
+        from deeplinkerp_branding.services import purchase_native_repost as native, purchase_reversal_progress as progress
+        from erpnext.stock.doctype.repost_item_valuation import repost_item_valuation as riv
+
+        selected = frappe._dict(name="CHILD", doctype="Repost Item Valuation", docstatus=1,
+            status="Queued", repost_only_accounting_ledgers=1, reposting_reference="ROOT",
+            custom_purchase_reversal_operation="OP")
+        for docstatus, status, parent_status in (
+            (1, "Queued", "Queued"), (1, "Completed", "Completed"),
+            (2, "Queued", "Completed"), (1, "Failed", "Completed"),
+        ):
+            with self.subTest(docstatus=docstatus, status=status, parent_status=parent_status), ExitStack() as stack:
+                current = frappe._dict(selected, docstatus=docstatus, status=status, reload=Mock())
+                output = {"stage": "waiting_inventory", "tasks": {"CHILD": {
+                    "identity": native._task_fields(selected), "coverage": {}, "expected": []}}}
+                context = {"reversal": {"roots": []}}
+                database, original = Mock(), Mock()
+                database.get_value.side_effect = lambda doctype, name, field, **kwargs: "OP" if field == self.boundary.POINTER else parent_status
+                patches = (
+                    patch.object(frappe, "db", database),
+                    patch.object(frappe, "get_doc", return_value=current),
+                    patch.object(riv, "_dlp_reversal_original_repost", original, create=True),
+                    patch.object(self.boundary, "execution", side_effect=nullcontext),
+                    patch.object(self.boundary, "acquire", side_effect=lambda *args: nullcontext()),
+                    patch.object(self.boundary, "fence_key", return_value="FENCE"),
+                    patch.object(self.boundary, "initialize", return_value=SimpleNamespace(poisoned=False)),
+                    patch.object(progress, "_load", return_value=(None, context, output)),
+                    patch.object(progress, "keys", return_value=()),
+                    patch.object(progress, "_write"),
+                    patch.object(progress, "finalize"),
+                )
+                for target in patches:
+                    stack.enter_context(target)
+                native.repost(selected)
+                original.assert_not_called()
+                database.commit.assert_not_called()
+                if docstatus == 1 and status == "Queued":
+                    database.get_value.assert_any_call("Repost Item Valuation", "ROOT", "status", for_update=True)
 
     def receipts(self, state):
         """A transaction participant, not a business-ownership switch."""

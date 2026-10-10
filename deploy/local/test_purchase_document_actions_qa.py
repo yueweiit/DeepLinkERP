@@ -5567,7 +5567,7 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
 
     def test_trusted_future_receipt_cancel_accepts_then_native_repost_verifies_complete(self):
         from deeplinkerp_branding.services import purchase_consistency as guard, purchase_operation as kernel
-        from erpnext.stock.doctype.repost_item_valuation import repost_item_valuation as native
+        from deeplinkerp_branding.services import purchase_reversal_progress as progress
         po, prior, future = self.future_receipts()
         request_id = str(uuid.uuid4())
         payload = json.dumps(prior.as_dict(), default=str)
@@ -5582,8 +5582,15 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
             self.assertTrue(roots)
             frappe.db.commit()
             self.remember_new_names()
-            for name in roots:
-                native.execute_reposting_entry(name)
+            self.assertFalse(frappe.db.get_single_value("System Settings", "enable_scheduler", cache=False))
+            legacy = frappe.db.get_values("Repost Item Valuation", {
+                "custom_purchase_reversal_operation": ["is", "not set"]},
+                ["name", "status", "modified", "current_index"], as_dict=True, order_by="name")
+            progress.recover()  # The fixed timer drives native valuation without global scheduler.
+            if legacy:
+                self.assertEqual(legacy, frappe.db.get_values("Repost Item Valuation", {
+                    "name": ["in", [row.name for row in legacy]]},
+                    ["name", "status", "modified", "current_index"], as_dict=True, order_by="name"))
             audit.reload()
             self.assertEqual(audit.status, "Completed", audit.output)
             self.assertEqual(json.loads(audit.output)["stage"], "completed")

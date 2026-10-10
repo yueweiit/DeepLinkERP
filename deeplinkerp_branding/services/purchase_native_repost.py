@@ -365,12 +365,18 @@ def repost(doc):
             task = frappe.get_doc("Repost Item Valuation", doc.name, for_update=True)
             # The preloaded native doc cannot authorize a write after waiting.
             _, context, output = progress._load(operation_id, lock=True)
-            if output["stage"] == "completed":
+            if output["stage"] in ("completed", "failed"):
                 return
             identities = {root["name"]: root for root in manifest["roots"]}
             identities.update({name: value["identity"] for name, value in output["tasks"].items()})
             if task.get(boundary.POINTER) != operation_id or _task_fields(task) != identities.get(task.name):
                 progress._reject("purchase_reversal_task_identity_changed")
+            if task.docstatus != 1 or task.status not in ("Queued", "In Progress"):
+                return
+            if (task.repost_only_accounting_ledgers and task.reposting_reference and
+                    frappe.db.get_value("Repost Item Valuation", task.reposting_reference, "status", for_update=True)
+                    not in ("Completed", "Skipped")):
+                return
             task_progress = output["tasks"].setdefault(task.name, {"identity": _task_fields(task), "coverage": {}, "expected": []})
             owner = {"operation_id": operation_id, "context": context, "progress": output, "task": task, "expected": task_progress["expected"]}
             token = progress._executing.set(owner)
