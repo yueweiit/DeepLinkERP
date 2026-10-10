@@ -256,6 +256,10 @@ PAYMENT_COLUMNS = {"name": "付款单", "posting_date": "付款日期", "supplie
                    "payment_type": "付款类型", "amount": "金额", "currency": "付款币种", "bank_account": "记账账户",
                    "state": "付款状态", "remarks": "摘要", "references": "核销引用", "allocation_currency": "核销币种",
                    "vouchers": "会计凭证", "sync_issues": "凭证同步状态"}
+PAYABLE_COLUMNS = {"name": "应付单号", "posting_date": "应付日期", "supplier": "供应商", "company": "公司",
+                   "grand_total": "应付原币金额", "invoice_currency": "应付原币币种",
+                   "total": "应付金额", "settled": "已付 / 核销", "outstanding": "未付余额", "currency": "应付账户币种",
+                   "status": "应付状态", "orders": "采购订单", "receipts": "采购入库"}
 BANK_WARNING = "银行或现金账户不可用或无权读取，请在原生单据核对"
 
 
@@ -355,8 +359,11 @@ def _export(doctype, rows, columns, allowed):
     if not isinstance(columns, list) or not columns or len(set(columns)) != len(columns) or any(column not in allowed for column in columns):
         frappe.throw("导出列无效")
     columns = list(columns)
-    if {"grand_total", "amount"}.intersection(columns) and "currency" not in columns:
-        columns.append("currency")
+    currencies = ([("invoice_currency", {"grand_total"}), ("currency", {"total", "settled", "outstanding"})]
+                  if doctype == "Purchase Invoice" else [("currency", {"grand_total", "amount"})])
+    for currency, amounts in currencies:
+        if amounts.intersection(columns) and currency not in columns:
+            columns.append(currency)
     if doctype == "Payment Entry" and "allocation_currency" not in columns:
         columns.append("allocation_currency")
     for row in rows:
@@ -368,7 +375,7 @@ def _export(doctype, rows, columns, allowed):
             cell = getdate(cell) if cell else None
         elif column == "allocation_currency":
             cell = ", ".join(sorted({ref["currency"] for ref in row["references"] if ref.get("currency")}))
-        elif column in ("settled", "outstanding"):
+        elif doctype == "Purchase Receipt" and column in ("settled", "outstanding"):
             cell = [{"currency": balance["currency"], column: balance[column],
                      "scope_label": "共享应付整单余额" if row.get("shared_payable") else "关联应付余额"}
                     for balance in row.get("balances", [])]
@@ -382,7 +389,7 @@ def _export(doctype, rows, columns, allowed):
         return cell
     from frappe.utils.xlsxutils import make_xlsx
     column_styles = {index: (1,) if column == "posting_date" else (0,)
-                     for index, column in enumerate(columns) if column in {"posting_date", "grand_total", "amount"}}
+                     for index, column in enumerate(columns) if column in {"posting_date", "grand_total", "amount", "total", "settled", "outstanding"}}
     styles = {"styles": [{"num_format": "#,##0.00"}, {"num_format": "yyyy-mm-dd"}],
               "column_styles": column_styles} if column_styles else {}
     workbook = make_xlsx([[allowed[column] for column in columns]] + [[value(row, column) for column in columns] for row in rows], "采购记录", styles=styles)
@@ -492,17 +499,17 @@ def summarize(invoices):
 
 @frappe.whitelist()
 def get_purchase_payables(company=None, supplier=None, search=None, from_date=None, to_date=None,
-                          start=0, page_length=100):
+                          start=0, page_length=100, export_format=None, columns=None):
     if not frappe.has_permission("Payment Entry", "read"):
         frappe.throw("采购人员请在采购订单查看订单进度；应付与付款办理由财务处理", frappe.PermissionError)
     token = _record_reader.set(_RecordReader())
     try:
-        return _get_purchase_payables(company, supplier, search, from_date, to_date, start, page_length)
+        return _get_purchase_payables(company, supplier, search, from_date, to_date, start, page_length, export_format, columns)
     finally:
         _record_reader.reset(token)
 
 
-def _get_purchase_payables(company, supplier, search, from_date, to_date, start, page_length):
+def _get_purchase_payables(company, supplier, search, from_date, to_date, start, page_length, export_format=None, columns=None):
     """Native PI documents with readable procurement sources, once per invoice.
 
     Totals/balances are whole native invoices, including mixed expense lines.
@@ -551,7 +558,11 @@ def _get_purchase_payables(company, supplier, search, from_date, to_date, start,
                      "can_pay": bool(invoice["can_pay"] and not warnings
                                      and frappe.has_permission("Payment Entry", "read")
                                      and frappe.has_permission("Payment Entry", "create"))})
-    return {"rows": rows[start:start + page_length], "total_count": len(rows),
+    if export_format:
+        if export_format != "xlsx":
+            frappe.throw("导出格式无效")
+        return _export("Purchase Invoice", rows, columns, PAYABLE_COLUMNS)
+    return {"rows": rows[start:start + page_length], "total_count": len(rows), "totals": summarize(rows),
             "notice": "仅显示关联可读采购订单或采购入库的原生应付单。金额与余额均为整张应付单，可能包含其他费用；不是采购成本或某张入库的分摊金额。草稿、退货、取消分别显示，草稿和取消不计应付余额。"}
 
 
@@ -897,7 +908,7 @@ def _receipt_list(filters, start, page_length, native_filters, or_filters, order
             query[field] = filters[field]
     if filters.get("from_date") or filters.get("to_date"):
         query["posting_date"] = ["between", [filters.get("from_date") or "1900-01-01", filters.get("to_date") or "2999-12-31"]]
-    fields = RECEIPT_FIELDS
+    fields = [*RECEIPT_FIELDS, "modified"]  # Version metadata is not an export column.
     _require_fields("Purchase Receipt", fields)
     start, page_length = _pagination(start, page_length)
     allowed = _query_fields("Purchase Receipt")

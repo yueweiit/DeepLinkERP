@@ -6,17 +6,17 @@ const engine=require('../deeplinkerp_branding/public/js/compact_list.js');
 class Surface {
   constructor(){this.value='';this.length=1;}
   find(){return new Surface();} first(){return this;} html(value){if(value===undefined)return this.value;this.value=value;return this;}
-  text(value){this.value=value;return this;} append(value){this.value+=value;return this;} appendTo(){return this;} prependTo(){return this;} insertBefore(){return this;} insertAfter(){return this;}
+  text(value){this.value=value;return this;} append(value){this.value+=value;return this;} appendTo(parent){this.parent=parent;return this;} prependTo(){return this;} insertBefore(){return this;} insertAfter(){return this;}
   addClass(){return this;} removeClass(){return this;} toggleClass(){return this;} hide(){return this;} show(){return this;} remove(){return this;} off(){return this;} on(){return this;} attr(){return this;} prop(){return this;} val(){return this;} each(){return this;}
 }
 function setup(options={}){
-  let route=['purchase-payment-records'];const calls=[],classes=new Map(),storage=new Map();
-  const root={$:()=>new Surface(),document:{body:{classList:{toggle:(key,value)=>classes.set(key,value)}}},localStorage:{getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value)},frappe:{get_route:()=>route,router:{on(){}},session:{user:'buyer'},boot:{sitename:'qa'},get_meta:()=>options.meta,perm:{has_perm:(doctype,level)=>level!==1},model:{can_export:()=>false},ui:{form:{make_control:()=>({set_value:async()=>{},get_value:()=>''})}},call(request){return new Promise(resolve=>calls.push({request,resolve}));}}};
+  let route=['purchase-payment-records'];const calls=[],classes=new Map(),storage=new Map(),routes=[];
+  const root={$:()=>new Surface(),document:{body:{classList:{toggle:(key,value)=>classes.set(key,value)}}},localStorage:{getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value)},frappe:{get_route:()=>route,router:{on:(_,callback)=>routes.push(callback)},session:{user:'buyer'},boot:{sitename:'qa'},get_meta:()=>options.meta,perm:{has_perm:(doctype,level)=>level!==1},model:{can_export:()=>false},ui:{form:{make_control:()=>({set_value:async()=>{},get_value:()=>''})}},call(request){return new Promise(resolve=>calls.push({request,resolve}));}}};
   const columns=[{fieldname:'name',label:'付款单',width:150},{fieldname:'amount',label:'金额',width:130},{fieldname:'references',label:'引用',width:100}];
-  const grid=engine.create({doctype:'Payment Entry',pageRoute:'purchase-payment-records',routeClass:'only-payment-page',columns,numbers:['amount'],pageFieldMap:options.fieldMap,controls:options.controls,provider:{columns,formLink:doc=>`/desk/payment-entry/${encodeURIComponent(doc.name)}`,request:c=>({method:'records',args:{search:c.quick.search,native_filters:JSON.stringify(c.nativeFilters || []),or_filters:JSON.stringify(c.orFilters || []),order_by:c.providerOrderBy,start:c.page*c.pageSize,page_length:c.pageSize}}),renderValue:field=>field==='references'?'引用':undefined,summary:()=>''}});
+  const grid=engine.create({doctype:'Payment Entry',purchaseChrome:options.purchaseChrome,mainFilterFields:[],pageRoute:'purchase-payment-records',routeClass:'only-payment-page',columns,numbers:['amount'],pageFieldMap:options.fieldMap,controls:options.controls,provider:{columns,formLink:doc=>`/desk/payment-entry/${encodeURIComponent(doc.name)}`,request:c=>({method:'records',args:{search:c.quick.search,native_filters:JSON.stringify(c.nativeFilters || []),or_filters:JSON.stringify(c.orFilters || []),order_by:c.providerOrderBy,start:c.page*c.pageSize,page_length:c.pageSize}}),renderValue:field=>field==='references'?'引用':undefined,summary:()=>''}});
   let showForm=0;const form=new Surface();
   const controller=grid.mountPage({main:new Surface(),wrapper:new Surface(),...(options.pageForm?{page_form:form,show_form:()=>showForm++}:{})},root);
-  return {controller,calls,classes,storage,shown:()=>showForm,leave:()=>route=['List','Item']};
+  return {controller,calls,classes,storage,shown:()=>showForm,leave:()=>route=['List','Item'],navigate:value=>{route=value;routes.forEach(callback=>callback());}};
 }
 test('real page renderer shares column/density preferences and fixed pagination without native ListView data',async()=>{
   const {controller:c,calls,storage}=setup();c.setPage(2);c.pageSize=500;
@@ -75,4 +75,46 @@ test('expanded details invalidate using one row index rather than rescanning eve
  const expanded=new Map([['PO-2',{header:{modified:'new'}}],['PO-900',{header:{modified:'old'}}],['removed',{header:{modified:'new'}}]]);
  engine.invalidateExpandedDetails(expanded,rows);
  assert.deepEqual([...expanded.keys()],['PO-2']);
+});
+
+test('shared row details cache one version and discard late page, collapsed or changed-version reads',async()=>{
+ const reads=[];let renders=0;const owner={providerRows:[{name:'PR',modified:'v1'}],requestId:1,list:{render_list:()=>renders++,set_rows_as_checked(){}},root:{frappe:{get_route:()=>['List','Purchase Receipt']}},detailActive:()=>true};
+ assert.equal(typeof engine.mountRowDetails,'function');
+ engine.mountRowDetails(owner,{rows:()=>owner.providerRows,load:doc=>new Promise(resolve=>reads.push({doc,resolve}))});
+ const first=owner.toggleRowDetails('PR');assert.equal(reads.length,1);
+ await owner.toggleRowDetails('PR');reads[0].resolve({header:{modified:'v1'},items:[{item_code:'old'}]});await first;
+ assert.equal(owner.expandedDetails.has('PR'),false);assert.equal(owner.detailCache.has('PR'),false);
+ const next=owner.toggleRowDetails('PR');reads[1].resolve({header:{modified:'v1'},items:[{item_code:'visible'}]});await next;
+ await owner.toggleRowDetails('PR');await owner.toggleRowDetails('PR');assert.equal(reads.length,2);assert.equal(owner.detailCache.get('PR').items[0].item_code,'visible');
+ owner.providerRows=[{name:'PR',modified:'v2'}];owner.reconcileRowDetails();assert.equal(owner.detailCache.size,0);assert.equal(owner.expandedDetails.size,0);
+ const newer=owner.toggleRowDetails('PR');owner.requestId++;reads[2].resolve({header:{modified:'v2'},items:[{item_code:'late'}]});await newer;assert.equal(owner.detailCache.size,0);
+ assert.ok(renders>0);
+});
+test('failed details can retry and newer server versions show an explicit refresh notice',async()=>{
+ let attempts=0;const owner={providerRows:[{name:'PR',modified:'v1'}],requestId:1,list:{render_list(){}},root:{}};
+ engine.mountRowDetails(owner,{rows:()=>owner.providerRows,load:async()=>{if(++attempts===1)throw new Error('读取失败');return {header:{modified:'v2'},items:[{item_code:'stale'}]};}});
+ await owner.toggleRowDetails('PR');assert.match(owner.detailCache.get('PR').error,/读取失败/);
+ await owner.toggleRowDetails('PR');await owner.toggleRowDetails('PR');assert.equal(attempts,2);
+ assert.match(owner.detailCache.get('PR').error,/已更新|刷新/);assert.equal(owner.detailCache.get('PR').items,undefined);
+});
+test('detail caches survive a replacement row with the same version and invalidate an in-place version change',async()=>{
+ const owner={providerRows:[{name:'PR',modified:'v1'}],requestId:1,list:{render_list(){}},root:{}};let reads=0;
+ engine.mountRowDetails(owner,{rows:()=>owner.providerRows,load:async()=>{reads++;return {header:{modified:'v1'},items:[]};}});
+ await owner.toggleRowDetails('PR');owner.providerRows=[{name:'PR',modified:'v1'}];owner.reconcileRowDetails();
+ assert.equal(owner.detailCache.size,1);assert.equal(owner.expandedDetails.size,1);
+ owner.providerRows[0].modified='v2';owner.reconcileRowDetails();assert.equal(owner.detailCache.size,0);assert.equal(owner.expandedDetails.size,0);assert.equal(reads,1);
+});
+test('standalone route departure invalidates a pending detail even when returning before it resolves',async()=>{
+ const {controller:c,navigate}=setup();let resolve;
+ c.providerRows=[{name:'PR',modified:'v1'}];
+ engine.mountRowDetails(c,{rows:()=>c.providerRows,load:()=>new Promise(done=>resolve=done)});
+ const pending=c.toggleRowDetails('PR');navigate(['List','Item']);navigate(['purchase-payment-records']);
+ resolve({header:{modified:'v1'},items:[{item_code:'OLD'}]});await pending;
+ assert.equal(c.detailCache.has('PR'),false);assert.equal(c.expandedDetails.has('PR'),false);
+});
+test('native page-form restriction section moves into the active advanced disclosure on existing render lifecycle',()=>{
+ const {controller:c}=setup({purchaseChrome:true}),section=new Surface();
+ c.list.page.wrapper.find=selector=>selector==='.page-form > .filter-section'?section:new Surface();
+ c.list.render_list();assert.equal(section.parent,c.$advancedFilters);
+ section.parent=c.list.page.wrapper;c.list.render_list();assert.equal(section.parent,c.$advancedFilters,'native reattachment stays accessible in the same advanced container');
 });

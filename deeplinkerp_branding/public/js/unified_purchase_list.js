@@ -11,7 +11,7 @@
 		["project_context", "项目/最终归属", 200], ["external_payment", "供应商付款", 190],
 		["internal_settlement", "集团内部结算", 200], ["receipt_logistics", "收货物流", 200], ["receipt_action", "操作", 155],
 	].map(([fieldname, label, width]) => ({ fieldname, label, width }));
-	const virtualFields = ["row_type", "source", "oa_number", "approval_status", "oa_amount", "requested_amount", "cashier_paid_amount", ...groups.slice(2).map(c => c.fieldname), "order_settled", "order_unpaid"];
+	const virtualFields = ["row_type", "source", "oa_number", "approval_status", "oa_amount", "requested_amount", "cashier_paid_amount", ...groups.slice(2).map(c => c.fieldname), "order_settled", "order_unpaid", "payment_progress", "receipt_progress"];
 	const groupFields = new Set(groups.slice(2).map(c => c.fieldname));
 	const additions = [
 		["row_type", "单据类型", 104], ["source", "来源", 108], ["oa_number", "OA 来源单", 180],
@@ -133,6 +133,13 @@
 		}
 	}
 	function renderValue(field, doc, formatters = {}, escape = String) {
+		if(field==='payment_progress') {
+			const value=doc.order_progress?.external || {}, labels={restricted:'付款进度不可见',not_applicable:'外部付款不适用'};
+			if(labels[value.state])return escape(labels[value.state]);
+			if(value.state!=='exact' || value.settled==null || value.order_unpaid==null)return escape('付款口径待核对');
+			return escape(Number(value.order_unpaid)<=0?'已付清':Number(value.settled)>0?'部分付款':'未付款');
+		}
+		if(field==='receipt_progress')return escape(doc.per_received==null?'收货进度不可见':Number(doc.per_received)>=100?'已收齐':Number(doc.per_received)>0?'部分收货':'未收货');
 		const grouped = renderGroup(field, doc, escape);
 		if (grouped !== undefined) return grouped;
 		if (["order_settled", "order_unpaid"].includes(field)) return escape(monetary(doc.order_progress?.[field === "order_settled" ? "settled" : "order_unpaid"], doc.order_progress?.currency || doc.currency));
@@ -194,7 +201,8 @@
 				return change?.apply(this, args);
 			};
 		}
-		controller.$providerControls = $("<div class='dlp-po-provider-controls'><label>来源 <select class='form-control input-xs' data-filter='source' aria-label='来源'><option value=''>全部来源</option><option value='oa'>钉钉</option><option value='non_oa'>其他来源</option></select></label><details class='dlp-po-source-advanced'><summary>来源筛选</summary><label>审批状态 <input class='form-control input-xs' data-filter='approval_status' aria-label='审批状态' placeholder='审批状态'></label><label><input type='checkbox' data-filter='pending_company'> 公司待确认</label></details></div>").insertAfter(controller.$filters);
+		controller.$providerControls = $("<div class='dlp-po-provider-controls'><label>来源 <select class='form-control input-xs' data-filter='source' aria-label='来源'><option value=''>全部来源</option><option value='oa'>钉钉</option><option value='non_oa'>其他来源</option></select></label><details class='dlp-po-source-advanced'><summary>来源筛选</summary><label>审批状态 <input class='form-control input-xs' data-filter='approval_status' aria-label='审批状态' placeholder='审批状态'></label><label><input type='checkbox' data-filter='pending_company'> 公司待确认</label></details></div>");
+		if(controller.$advancedFilters)controller.$providerControls.appendTo(controller.$advancedFilters);else controller.$providerControls.insertAfter(controller.$filters);
 		if (root.frappe.session?.user === "Administrator" || root.frappe.user_roles?.includes("System Manager")) $("<button type='button' class='btn btn-default btn-sm dlp-source-sync'>同步钉钉</button>").appendTo(controller.$providerControls).on("click.dlpUnified", async event => {
 			const button = $(event.currentTarget).prop("disabled", true);
 			try {
@@ -272,12 +280,13 @@
 	}
 	function configure(nativeColumns) {
 		const columns = nativeColumns.map(col => ({ ...col }));
+		const approved=nativeColumns.some(col=>col.fieldname==='transaction_date');
 		const seen = new Set(columns.map(c => c.fieldname));
-		for (const col of [...groups, ...additions, ...itemColumns]) if (!seen.has(col.fieldname)) { columns.push(col); seen.add(col.fieldname); }
-		const oldDefault = groups.map(c => c.fieldname);
-		const defaultColumns = ["name", "status", "supplier_name", ...itemColumns.map(c => c.fieldname), "grand_total", "order_settled", "order_unpaid", "receipt_action"];
-		const migratePreferences = value => value?.version === 2 && Array.isArray(value.columns) && value.columns.length === oldDefault.length && oldDefault.every((field, i) => value.columns[i] === field) ? { ...value, columns: defaultColumns } : value;
-		return { columns, defaultColumns, migratePreferences, preferenceVersion: 3, inheritPreferences: true, alwaysActive: true, freezeUntil: "supplier_name", virtualFields: [...virtualFields, ...itemColumns.map(c => c.fieldname)], useNativeIndicator: doc => doc.row_type === "purchase_order", getArgs, request, formLink, renderLink, renderValue, summary, exportCurrent, mountControls, onActivate, onPayload, sortFields: ["transaction_date", "name", "supplier_name", "company", "status", "grand_total", "oa_amount", "approval_status"] };
+		// Material columns stay in expansion/export, never a no-op main-table choice.
+		for (const col of [...groups, ...additions, ...(approved?[]:itemColumns)]) if (!seen.has(col.fieldname)) { columns.push(col); seen.add(col.fieldname); }
+		const defaultColumns = approved ? ["name", "supplier_name", "transaction_date", "status", "company", "grand_total", "payment_progress", "receipt_progress", "receipt_action"] : nativeColumns.map(col=>col.fieldname);
+		const migratePreferences = value => approved && value?.version!==4 ? {...value,columns:defaultColumns}:value;
+		return { columns, defaultColumns, migratePreferences, preferenceVersion: 4, inheritPreferences: true, alwaysActive: true, freezeUntil: "supplier_name", virtualFields: [...virtualFields, ...itemColumns.map(c => c.fieldname)], useNativeIndicator: doc => doc.row_type === "purchase_order", getArgs, request, formLink, renderLink, renderValue, summary, exportCurrent, mountControls, onActivate, onPayload, sortFields: ["transaction_date", "name", "supplier_name", "company", "status", "grand_total", "oa_amount", "approval_status"] };
 	}
 	return { configure, getArgs, request, formLink, renderValue, summary, exportColumns, exportCurrent, shouldHideOANavigation, installNavigation };
 });

@@ -279,6 +279,9 @@ test("unified exports always retain selected amount currencies and provenance", 
 	assert.deepEqual(adapter.exportColumns(["name", "grand_total"]),
 		["order_context", "grand_total", "currency", "oa_warning", "oa_references"]);
 });
+test('purchase compact progress exports use the same business labels instead of unrelated raw evidence states',()=>{
+ assert.deepEqual(adapter.exportColumns(['payment_progress','receipt_progress']),['payment_progress','receipt_progress','oa_warning','oa_references']);
+});
 
 test("Excel transport reuses same-origin CSRF download for the unified endpoint", async () => {
 	const exporter = require("../deeplinkerp_branding/public/js/purchase_order_export.js");
@@ -379,9 +382,9 @@ test("export captures clicked native filters and columns before lazy library loa
 const groupedDefaults = ["name", "supplier_name", "project_context", "external_payment", "internal_settlement", "receipt_logistics", "receipt_action"];
 const nativePOColumns = require("../deeplinkerp_branding/public/js/purchase_order_list.js").COLUMNS;
 
-test("only the exact version 2 seven-column purchase default migrates to physical detail columns", () => {
+test("every previous purchase layout upgrades once to the approved order defaults and retains density", () => {
 	const provider = adapter.configure(nativePOColumns);
-	assert.ok(provider.defaultColumns.includes("item_code"));
+	assert.ok(provider.defaultColumns.includes("payment_progress")); assert.ok(!provider.defaultColumns.includes('item_code'));
 	const old8 = ["name", "supplier_name", "grand_total", "order_settled", "order_unpaid", "per_received", "status", "receipt_action"];
 	const old10 = [...old8.slice(0, 3), "requested_amount", "cashier_paid_amount", ...old8.slice(3)];
 	const old16 = nativePOColumns.map(c => c.fieldname).filter(field => field !== "receipt_action");
@@ -390,15 +393,15 @@ test("only the exact version 2 seven-column purchase default migrates to physica
 	for (const density of ["standard", "tight"]) {
 		const input = { density, version: 2, columns: groupedDefaults }, before = JSON.stringify(input);
 		const prefs = grid.normalizePreferences(input, allowed, provider.columns);
-		assert.deepEqual(prefs.columns, provider.defaultColumns); assert.equal(prefs.density, density); assert.equal(prefs.version, 3);
+		assert.deepEqual(prefs.columns, provider.defaultColumns); assert.equal(prefs.density, density); assert.equal(prefs.version, 4);
 		assert.equal(JSON.stringify(input), before);
 	}
 	for (const columns of [old8, old10, old16, nativePOColumns.map(c => c.fieldname), ["supplier_name", "name", "grand_total"], [...groupedDefaults].reverse(), ["name", "status"]]) {
-		assert.deepEqual(grid.normalizePreferences({ density: "standard", columns }, allowed, provider.columns).columns, columns);
+		assert.deepEqual(grid.normalizePreferences({ density: "standard", version:4, columns }, allowed, provider.columns).columns, columns);
 	}
 	assert.ok(provider.columns.some(c => c.fieldname === "advance_paid"));
 	assert.ok(provider.columns.some(c => c.fieldname === "requested_amount"));
-	assert.deepEqual(grid.normalizePreferences({ density: "standard", version: 2, columns: old8 }, allowed, provider.columns).columns, old8, "a current-version user choice is not an old default");
+	assert.deepEqual(grid.normalizePreferences({ density: "standard", version: 3, columns: old8 }, allowed, provider.columns).columns, provider.defaultColumns);
 });
 
 test("provider migration never infers old defaults from a custom column definition or an empty selection", () => {

@@ -200,6 +200,35 @@ class PurchasePayableScopeTests(unittest.TestCase):
             with self.assertRaises(frappe.PermissionError):
                 service.get_purchase_payables()
 
+    def test_payable_totals_use_all_readable_filtered_invoices_before_pagination_and_account_currency(self):
+        docs = {'PI-1': self.invoice('PI-1'),
+                'PI-2': self.invoice('PI-2', currency='USD', party_account_currency='CNY', base_grand_total=2400, outstanding_amount=400),
+                'DRAFT': self.invoice('DRAFT', docstatus=0),
+                'RETURN': self.invoice('RETURN', is_return=1),
+                'PRIVATE': self.invoice('PRIVATE')}
+        sources = {(name, 'Purchase Receipt'): ['PR'] for name in docs if name != 'PRIVATE'}
+        with patch.object(frappe, 'get_cached_value', return_value='CNY'):
+            result = self.scope(docs, sources, page_length=1)
+        self.assertEqual(len(result['rows']), 1)
+        self.assertEqual(result['totals'], [{'currency': 'CNY', 'total': 3600, 'settled': 2900, 'outstanding': 700}])
+        self.assertEqual(result['total_count'], 4)
+        self.assertNotIn('PRIVATE', str(result))
+
+    def test_payable_export_uses_all_authorized_search_matches_beyond_page_and_skips_missing_sources(self):
+        docs = {f'PI-{index}': self.invoice(f'PI-{index}') for index in range(120)}
+        docs.update(OTHER=self.invoice('OTHER'), PRIVATE=self.invoice('PRIVATE'))
+        sources = {(name, 'Purchase Receipt'): ['PR'] for name in docs if name != 'PRIVATE'}
+        with patch.object(service, '_export', return_value=None) as export:
+            result = self.scope(docs, sources, search='PI-', start=50, page_length=20,
+                                export_format='xlsx', columns=['name', 'total', 'settled', 'outstanding'])
+        self.assertIsNone(result)
+        self.assertEqual(export.call_args.args[0], 'Purchase Invoice')
+        rows = export.call_args.args[1]
+        self.assertEqual(len(rows), 120)
+        self.assertEqual(len({row['name'] for row in rows}), 120)
+        self.assertNotIn('OTHER', str(rows))
+        self.assertNotIn('PRIVATE', str(rows))
+
 
 class CrossborderInvoiceChainTests(unittest.TestCase):
     def setUp(self):
@@ -367,7 +396,7 @@ class ProcurementExportTests(unittest.TestCase):
         response = {}
         doc = SimpleNamespace(check_permission=check_read or (lambda permission: None),
                               get=lambda field: owner if field == 'owner' else None)
-        allowed = service.RECEIPT_COLUMNS if doctype == 'Purchase Receipt' else service.PAYMENT_COLUMNS
+        allowed = service.RECEIPT_COLUMNS if doctype == 'Purchase Receipt' else service.PAYABLE_COLUMNS if doctype == 'Purchase Invoice' else service.PAYMENT_COLUMNS
         from frappe.utils.xlsxutils import XLSXStyleBuilder
         capability = lambda doctype, is_owner=False: owner_export if is_owner else can_export
         def throw_without_site(message, exception):
@@ -416,6 +445,23 @@ class ProcurementExportTests(unittest.TestCase):
                 self.assertEqual(workbook.active.cell(2, 2).value, 4000.123456)
                 self.assertEqual(workbook.active.cell(2, 2).number_format, '#,##0.00')
 
+    def test_payable_export_keeps_invoice_and_account_currencies_distinct_without_duplicating_columns(self):
+        row = {'name': 'PI', 'grand_total': 100.125, 'invoice_currency': 'USD',
+               'total': 600.75, 'settled': 450.25, 'outstanding': 150.5, 'currency': 'CNY'}
+        for selected in (['name', 'grand_total', 'total', 'settled', 'outstanding'],
+                         ['name', 'grand_total', 'invoice_currency', 'total', 'settled', 'outstanding', 'currency']):
+            workbook = self.export('Purchase Invoice', [row], selected)
+            labels = [cell.value for cell in workbook.active[1]]
+            self.assertEqual(labels.count(service.PAYABLE_COLUMNS['currency']), 1)
+            self.assertEqual(labels.count(service.PAYABLE_COLUMNS['invoice_currency']), 1)
+            values = dict(zip(labels, [cell.value for cell in workbook.active[2]]))
+            self.assertEqual(values[service.PAYABLE_COLUMNS['invoice_currency']], 'USD')
+            self.assertEqual(values[service.PAYABLE_COLUMNS['currency']], 'CNY')
+            for field in ('grand_total', 'total', 'settled', 'outstanding'):
+                index = labels.index(service.PAYABLE_COLUMNS[field]) + 1
+                self.assertEqual(workbook.active.cell(2, index).value, row[field])
+                self.assertEqual(workbook.active.cell(2, index).number_format, '#,##0.00')
+
     def test_dates_are_typed_and_formatted_without_filling_missing_dates(self):
         for doctype in ('Purchase Receipt', 'Payment Entry'):
             for source_date in (date(2026, 10, 4), datetime(2026, 10, 4, 12, 30), '2026-10-04', None):
@@ -437,6 +483,8 @@ class ProcurementExportTests(unittest.TestCase):
             'posting_date': '入库日期', 'status': '入库状态', 'company': '公司',
             'currency': '入库币种', 'grand_total': '入库金额', 'docstatus': '单据状态', 'is_return': '是否退货',
         }
+        self.assertNotIn('modified', service.RECEIPT_COLUMNS)
+        self.assertNotIn('modified', service.RECEIPT_FIELDS)
         for doctype, amount_field in (('Purchase Receipt', 'grand_total'), ('Payment Entry', 'amount')):
             allowed = service.RECEIPT_COLUMNS if doctype == 'Purchase Receipt' else service.PAYMENT_COLUMNS
             row = {'name': 'DOC-1', amount_field: 0, 'currency': 'CNY', 'references': []}

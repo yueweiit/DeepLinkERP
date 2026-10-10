@@ -43,8 +43,8 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 
 	def test_unified_adapter_loads_after_cache_busted_shared_engine(self):
 		scripts = hooks.app_include_js
-		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.24"
-		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.11"
+		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.25"
+		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.12"
 		self.assertIn(engine, scripts)
 		self.assertIn(adapter, scripts)
 		self.assertLess(scripts.index(engine), scripts.index(adapter))
@@ -56,13 +56,13 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 
 	def test_crossborder_drawer_reuses_the_loaded_payment_shell_once(self):
 		scripts = hooks.app_include_js
-		payments = "/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.27"
+		payments = "/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.28"
 		crossborder = "/assets/deeplinkerp_branding/js/crossborder_procurement.js?v=0.0.5"
 		self.assertIn(payments, scripts)
 		self.assertIn(crossborder, scripts)
 		self.assertEqual(sum("/crossborder_procurement.js" in path for path in scripts), 1)
 		self.assertLess(scripts.index(payments), scripts.index(crossborder))
-		self.assertLess(scripts.index(crossborder), scripts.index("/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.11"))
+		self.assertLess(scripts.index(crossborder), scripts.index("/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.12"))
 		self.assertIn("/assets/deeplinkerp_branding/css/purchase_payments.css?v=0.0.9", hooks.app_include_css)
 		self.assertNotIn("crossborder_procurement", str(getattr(hooks, "web_include_js", None)))
 
@@ -76,14 +76,10 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		)
 		self.assertNotIn("purchase_order_list", str(hooks.web_include_css))
 
-	def test_classic_purchase_order_narrow_sidebar_keeps_mode_menu_in_viewport(self):
+	def test_procurement_keeps_readable_sidebar_and_refreshes_styles(self):
 		css = (Path(__file__).resolve().parents[1] / "deeplinkerp_branding/public/css/purchase_order_list.css").read_text()
-		selector = r"body\.dlp-purchase-order-grid-active:not\(\.dlp-mes-navigation-enabled\) \.dlp-interface-mode-menu"
-		rule = re.search(selector + r"\s*\{([^}]+)\}", css)
-		self.assertIsNotNone(rule, "Only the classic PO menu should override the global right anchor")
-		self.assertRegex(rule.group(1), r"left:\s*0\s*;")
-		self.assertRegex(rule.group(1), r"right:\s*auto\s*;")
-		self.assertIn("/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.22", hooks.app_include_css)
+		self.assertNotRegex(css, r"body\.dlp-purchase-order-grid-active:not\(\.dlp-mes-navigation-enabled\) \.body-sidebar")
+		self.assertIn("/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.23", hooks.app_include_css)
 
 	def test_purchase_source_identity_stays_one_line_in_the_physical_table(self):
 		css = (Path(__file__).resolve().parents[1] / "deeplinkerp_branding/public/css/purchase_order_list.css").read_text()
