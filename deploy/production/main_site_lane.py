@@ -11,6 +11,7 @@ import secrets
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 
 from joint_release_guards import (
@@ -88,13 +89,6 @@ def lane_compose(image, redis_image, evidence, subpath, *, private_gid=None):
 			"source": "sites",
 			"target": BENCH + "/sites/" + SITE,
 			"volume": {"subpath": subpath},
-		},
-		{
-			"type": "volume",
-			"source": "sites",
-			"target": BENCH + "/sites/assets",
-			"read_only": True,
-			"volume": {"subpath": "assets"},
 		},
 		{
 			"type": "bind",
@@ -258,6 +252,10 @@ def site_boundary(root, action, subpath, original=None):
 	"""Run only in a command container on the existing volume, same inode/files."""
 	root = Path(root)
 	assert re.fullmatch(r"\.deeplinkerp-main-lane/[a-zA-Z0-9_-]+/deeplinkerp\.com", subpath)
+	assets = root / "assets"
+	assert assets.is_symlink() and os.readlink(assets) == BENCH + "/assets", (
+		"Shared asset root alias differs from the fixed image path; HOLD"
+	)
 	src, dst = root / SITE, root / subpath
 	discovered = sorted(
 		path.name
@@ -275,6 +273,7 @@ def site_boundary(root, action, subpath, original=None):
 		stats = src.stat()
 		return {
 			"configs": configs,
+			"assets_link": os.readlink(assets),
 			"config_mode": (src / "site_config.json").stat().st_mode & 0o777,
 			"directory_identity": [stats.st_dev, stats.st_ino],
 			"common": base64.b64encode((root / "common_site_config.json").read_bytes()).decode(),
@@ -337,9 +336,10 @@ def site_boundary(root, action, subpath, original=None):
 
 
 def asset_view(bench):
-	"""Resolve the existing volume's symlinks in this image's app namespace."""
+	"""Read immutable compiled assets in the image, not a host-resolved volume alias."""
 	bench = Path(bench)
-	assets = bench / "sites/assets"
+	assets = bench / "assets"
+	assert assets.is_dir() and not assets.is_symlink(), "Unknown physical image asset root; HOLD"
 	links = {}
 	for path in assets.iterdir():
 		if not path.is_symlink():
@@ -348,7 +348,7 @@ def asset_view(bench):
 		assert re.fullmatch(r"[a-zA-Z0-9_]+", app)
 		expected = bench / "apps" / app / app / "public"
 		target = os.readlink(path)
-		assert target in {str(expected), "../../apps/" + app + "/" + app + "/public"}, (
+		assert target in {str(expected), "../apps/" + app + "/" + app + "/public"}, (
 			"Unknown asset symlink target; HOLD"
 		)
 		assert path.resolve(strict=True) == expected.resolve(strict=True) and expected.is_dir(), (
@@ -385,6 +385,10 @@ def asset_view(bench):
 
 
 def frozen_model(root, receipt):
+	assets = root / "main-sites/assets"
+	assert (
+		not assets.parent.is_symlink() and assets.is_symlink() and os.readlink(assets) == BENCH + "/assets"
+	), "Private asset root alias differs from the frozen image path; HOLD"
 	model = json.loads((root / "main.compose.json").read_bytes())
 	contract = receipt.state["contract"]
 	assert model == lane_compose(
@@ -517,14 +521,18 @@ def image_call(image, build, action, *, payload=None, writable=False, assets_onl
 	assert (tools / "main_site_lane.py").is_file() and (tools / "joint_release_guards.py").is_file(), (
 		"Frozen main inspection tools missing; HOLD"
 	)
-	mount = (
-		"type=volume,source="
-		+ SITES_VOLUME
-		+ ",target="
-		+ BENCH
-		+ "/sites"
-		+ ("/assets,volume-subpath=assets" if assets_only else "")
-		+ ("" if writable else ",readonly")
+	mounts = (
+		[]
+		if assets_only
+		else [
+			"--mount",
+			"type=volume,source="
+			+ SITES_VOLUME
+			+ ",target="
+			+ BENCH
+			+ "/sites"
+			+ ("" if writable else ",readonly"),
+		]
 	)
 	return json.loads(
 		host_call(
@@ -542,8 +550,7 @@ def image_call(image, build, action, *, payload=None, writable=False, assets_onl
 				"/tmp",
 				"--mount",
 				"type=bind,source=" + str(tools) + ",target=/release-tools,readonly",
-				"--mount",
-				mount,
+				*mounts,
 				"--entrypoint",
 				BENCH + "/env/bin/python",
 				image,
@@ -709,10 +716,12 @@ def runtime_access(root):
 
 
 def private_roots(root, volume, config):
+	assert volume["assets_link"] == BENCH + "/assets", "Unknown private asset root alias; HOLD"
 	sites = root / "main-sites"
-	for path in (sites, sites / SITE, sites / "assets", sites / "logs"):
+	for path in (sites, sites / SITE, sites / "logs"):
 		path.mkdir(parents=True, exist_ok=True, mode=0o700)
 		os.chmod(path, 0o2770 if path == sites / "logs" else 0o750)
+	(sites / "assets").symlink_to(volume["assets_link"])
 	common = json.loads(base64.b64decode(volume["common"]))
 	for key in ("redis_queue", "redis_socketio"):
 		common[key] = "redis://" + PROJECT + "-redis-queue-1:6379"
@@ -1083,8 +1092,12 @@ def receipt_budget(root, build):
 	receipt = DDLReceipt.load(root / "main-seal.json")
 	budget = json.loads((root / "space-budget.json").read_bytes())
 	paths = list(root.rglob("*"))
-	assert all(not path.is_symlink() for path in paths), "Unknown private receipt storage; HOLD"
-	host_bytes = sum(path.stat().st_size for path in paths if path.is_file())
+	assert all(
+		not path.is_symlink()
+		or (path == root / "main-sites/assets" and os.readlink(path) == BENCH + "/assets")
+		for path in paths
+	), "Unknown private receipt storage/alias; HOLD"
+	host_bytes = sum(path.stat().st_size for path in paths if not path.is_symlink() and path.is_file())
 	native = image_call(
 		receipt.state["contract"]["base_image"],
 		build,
@@ -1529,24 +1542,42 @@ def main():
 			return completed.returncode
 		print(json.dumps(result, sort_keys=True))
 		return 0
-	except Exception:
+	except Exception as error:
+		failure = {
+			"outcome": "HOLD",
+			"reason": "Main isolation action unconfirmed; inspect the private durable receipt",
+			"phase": args.action,
+			"exception_type": type(error).__name__,
+			"locations": [
+				{"file": Path(frame.filename).name, "function": frame.name, "line": frame.lineno}
+				for frame in traceback.extract_tb(error.__traceback__)
+				if Path(frame.filename).name in {"main_site_lane.py", "joint_release_guards.py"}
+			],
+		}
 		if args.action == "runtime-access":
-			failure = {
-				"outcome": "PRIVATE_ACCESS_FAILED",
-				"phase": "runtime-access",
-				"host_uid": os.getuid(),
-				"private_gid": os.getgid(),
-				"reason": "Private group, ownership or access is unconfirmed",
-			}
-			root = args.evidence
-			if root and root.is_dir() and not root.is_symlink() and root.stat().st_uid == os.getuid():
-				DDLReceipt(root / "private-access-failure.json", {})._write(serialized(failure))
-			print(json.dumps(failure, sort_keys=True), file=sys.stderr)
-			return 1
-		print(
-			'{"outcome":"HOLD","reason":"Main isolation action unconfirmed; inspect the private durable receipt"}',
-			file=sys.stderr,
-		)
+			failure.update(
+				{
+					"outcome": "PRIVATE_ACCESS_FAILED",
+					"host_uid": os.getuid(),
+					"private_gid": os.getgid(),
+					"reason": "Private group, ownership or access is unconfirmed",
+				}
+			)
+		root = args.evidence
+		if root:
+			name = (
+				"private-access-failure.json"
+				if args.action == "runtime-access"
+				else "main-action-failure.json"
+			)
+			try:
+				if root.is_dir() and not root.is_symlink() and root.stat().st_uid == os.getuid():
+					DDLReceipt(root / name, {})._write(serialized(failure))
+				else:
+					failure["durable_log"] = "unconfirmed"
+			except OSError:
+				failure["durable_log"] = "unconfirmed"
+		print(json.dumps(failure, sort_keys=True), file=sys.stderr)
 		return 1
 
 

@@ -94,9 +94,8 @@ class MainSiteLaneTests(unittest.TestCase):
 			config = next(value for value in mounts if value["target"].endswith("/site_config.json"))
 			self.assertEqual(config["source"], "/private/release/main-site-config.json")
 			self.assertTrue(config["read_only"])
-			assets = next(value for value in mounts if value["target"].endswith("/sites/assets"))
-			self.assertTrue(assets["read_only"])
-			self.assertEqual(assets["volume"]["subpath"], "assets")
+			self.assertFalse(any(value["target"].endswith("/sites/assets") for value in mounts))
+			self.assertEqual(len([value for value in mounts if value["type"] == "volume"]), 1)
 		self.assertEqual(model["volumes"]["sites"], {"external": True, "name": "frappe_docker_sites"})
 		self.assertEqual(model["networks"]["default"]["name"], "frappe_docker_default")
 
@@ -241,6 +240,50 @@ class MainSiteLaneTests(unittest.TestCase):
 			self.assertEqual((root / "before.json").read_text(), '{"unchanged":true}')
 			self.assertFalse((root / "main-seal.json").exists())
 
+	def test_cli_failure_reports_safe_locations_without_payload_or_error_text(self):
+		lane = self.module()
+		for unavailable in (None, "stat", "write"):
+			with self.subTest(unavailable=unavailable), tempfile.TemporaryDirectory() as tmp:
+				root = Path(tmp)
+				stderr = io.StringIO()
+				secret = "SECRET_FIXTURE_PASSWORD_AND_PAYLOAD"
+				with (
+					patch.object(lane, "prepare", side_effect=RuntimeError(secret)),
+					patch.object(sys, "argv", ["main_site_lane", "prepare", "--evidence", str(root)]),
+					patch.object(Path, "is_dir", return_value=True)
+					if unavailable == "stat"
+					else contextlib.nullcontext(),
+					patch.object(Path, "stat", side_effect=PermissionError(secret))
+					if unavailable == "stat"
+					else contextlib.nullcontext(),
+					patch.object(lane.DDLReceipt, "_write", side_effect=PermissionError(secret))
+					if unavailable == "write"
+					else contextlib.nullcontext(),
+					contextlib.redirect_stderr(stderr),
+				):
+					try:
+						self.assertEqual(lane.main(), 1)
+					except PermissionError:
+						self.fail("Log ownership/stat failure must retain a redacted structured HOLD")
+				report = json.loads(stderr.getvalue())
+				self.assertEqual(report.get("phase"), "prepare")
+				self.assertEqual(report.get("exception_type"), "RuntimeError")
+				self.assertTrue(report.get("locations"))
+				for location in report["locations"]:
+					self.assertEqual(set(location), {"file", "function", "line"})
+					self.assertIn(location["file"], {"main_site_lane.py", "joint_release_guards.py"})
+					self.assertGreater(location["line"], 0)
+				log = root / "main-action-failure.json"
+				if unavailable:
+					self.assertEqual(report.get("durable_log"), "unconfirmed")
+					self.assertFalse(log.exists())
+				else:
+					self.assertEqual(json.loads(log.read_bytes()), report)
+					self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+					self.assertNotIn(secret, log.read_text())
+				self.assertNotIn(secret, stderr.getvalue())
+				self.assertFalse((root / "main-seal.json").exists())
+
 	def test_private_scaffold_keeps_config_read_only_and_logs_group_writable(self):
 		lane = self.module()
 		with tempfile.TemporaryDirectory() as tmp:
@@ -248,10 +291,13 @@ class MainSiteLaneTests(unittest.TestCase):
 			volume = {
 				"common": base64.b64encode(b"{}").decode(),
 				"apps": base64.b64encode(b"frappe\nerpnext\n").decode(),
+				"assets_link": lane.BENCH + "/assets",
 			}
 			lane.private_roots(root, volume, {"db_password": "fixture", "maintenance_mode": 1})
-			for name in ("main-sites", "main-sites/deeplinkerp.com", "main-sites/assets"):
+			for name in ("main-sites", "main-sites/deeplinkerp.com"):
 				self.assertEqual((root / name).stat().st_mode & 0o7777, 0o750)
+			self.assertTrue((root / "main-sites/assets").is_symlink())
+			self.assertEqual(os.readlink(root / "main-sites/assets"), lane.BENCH + "/assets")
 			self.assertEqual((root / "main-sites/logs").stat().st_mode & 0o7777, 0o2770)
 			for name in (
 				"main-sites/apps.txt",
@@ -260,6 +306,9 @@ class MainSiteLaneTests(unittest.TestCase):
 			):
 				self.assertEqual((root / name).stat().st_mode & 0o777, 0o640)
 				self.assertEqual((root / name).stat().st_uid, os.getuid())
+			for alias in ("/unreviewed/assets", "../assets"):
+				with self.subTest(alias=alias), self.assertRaisesRegex(AssertionError, "asset|alias"):
+					lane.private_roots(root / "unexpected", {**volume, "assets_link": alias}, {})
 
 	def test_owned_cleanup_image_tools_keep_private_access_when_build_is_evidence(self):
 		lane = self.module()
@@ -284,6 +333,18 @@ class MainSiteLaneTests(unittest.TestCase):
 			)
 			for name in ("main_site_lane.py", "joint_release_guards.py"):
 				self.assertEqual((root / name).stat().st_mode & 0o777, 0o640)
+
+	def test_image_asset_and_startup_probes_mount_no_sites_volume(self):
+		lane = self.module()
+		for action in ("assets", "startup"):
+			with self.subTest(action=action), patch.object(lane, "host_call", return_value="{}") as call:
+				lane.image_call("frozen-image", ROOT, action, assets_only=True)
+			command = call.call_args.args[0]
+			mounts = [command[i + 1] for i, arg in enumerate(command[:-1]) if arg == "--mount"]
+			self.assertEqual(len(mounts), 1, "Image-only proof must expose only frozen tools, not sites")
+			self.assertIn("target=/release-tools,readonly", mounts[0])
+			self.assertIn("--read-only", command)
+			self.assertEqual(command[command.index("--network") + 1], "none")
 
 	def test_original_auth_intent_survives_a_partial_host_lock_failure(self):
 		lane = self.module()
@@ -331,7 +392,16 @@ class MainSiteLaneTests(unittest.TestCase):
 				)
 			(root / "common_site_config.json").write_text('{"redis_queue":"redis://old:6379"}')
 			(root / "apps.txt").write_text("frappe\nerpnext\n")
+			(root / "assets").symlink_to(lane.BENCH + "/assets")
 			before = lane.site_boundary(root, "snapshot", ".deeplinkerp-main-lane/release/deeplinkerp.com")
+			self.assertEqual(before.get("assets_link"), lane.BENCH + "/assets")
+			for alias in ("/unreviewed/assets", "../assets"):
+				(root / "assets").unlink()
+				(root / "assets").symlink_to(alias)
+				with self.subTest(alias=alias), self.assertRaisesRegex(AssertionError, "asset|alias"):
+					lane.site_boundary(root, "snapshot", ".deeplinkerp-main-lane/release/deeplinkerp.com")
+			(root / "assets").unlink()
+			(root / "assets").symlink_to(lane.BENCH + "/assets")
 			inode = (root / lane.SITE).stat().st_ino
 			lane.site_boundary(root, "maintenance", ".deeplinkerp-main-lane/release/deeplinkerp.com", before)
 			after = lane.site_boundary(
@@ -355,17 +425,18 @@ class MainSiteLaneTests(unittest.TestCase):
 		self.assertTrue(hasattr(lane, "asset_view"), "Image-resolved readonly asset proof is missing")
 		with tempfile.TemporaryDirectory() as tmp:
 			bench = Path(tmp)
-			assets = bench / "sites/assets"
-			assets.mkdir(parents=True)
+			assets = bench / "assets"
+			assets.mkdir()
 			public = bench / "apps/deeplinkerp_branding/deeplinkerp_branding/public"
 			(public / "dist").mkdir(parents=True)
 			(public / "dist/frozen.js").write_bytes(b"compiled")
-			(assets / "deeplinkerp_branding").symlink_to(
-				"../../apps/deeplinkerp_branding/deeplinkerp_branding/public"
-			)
+			(assets / "deeplinkerp_branding").symlink_to(public)
 			(assets / "assets.json").write_text('{"bundle.js":"/assets/deeplinkerp_branding/dist/frozen.js"}')
 			before = (assets / "assets.json").read_bytes()
-			proof = lane.asset_view(bench)
+			try:
+				proof = lane.asset_view(bench)
+			except FileNotFoundError:
+				self.fail("Image asset proof must use the physical root even without a sites/assets alias")
 			self.assertEqual(
 				proof["manifest_bodies"]["/assets/deeplinkerp_branding/dist/frozen.js"],
 				hashlib.sha256(b"compiled").hexdigest(),
@@ -405,6 +476,8 @@ class MainSiteLaneTests(unittest.TestCase):
 					)
 				)
 			)
+			(root / "main-sites").mkdir()
+			(root / "main-sites/assets").symlink_to(lane.BENCH + "/assets")
 			binding = patch.object(
 				lane, "runtime_access", return_value={"private_gid": 1001, "host_uid": os.getuid()}
 			)
@@ -426,7 +499,7 @@ class MainSiteLaneTests(unittest.TestCase):
 					for mount in mounts
 				)
 			)
-			self.assertTrue(any("volume-subpath=assets" in mount and "readonly" in mount for mount in mounts))
+			self.assertFalse(any("volume-subpath=assets" in mount for mount in mounts))
 			self.assertIn("DEEPLINKERP_MAIN_SEAL_RECEIPT=/release-evidence/main-seal.json", command)
 			self.assertNotIn("DEEPLINKERP_RELEASE_QUIESCENT=1", command)
 			with self.assertRaisesRegex(AssertionError, "image|identity"):
@@ -650,7 +723,7 @@ class MainSiteLaneTests(unittest.TestCase):
 
 	def test_health_rejects_private_route_model_or_original_auth_drift(self):
 		lane = self.module()
-		for drift in (None, "route", "private-config", "compose-model", "old-auth"):
+		for drift in (None, "route", "private-config", "compose-model", "old-auth", "asset-alias"):
 			with self.subTest(drift=drift), tempfile.TemporaryDirectory() as tmp:
 				root = Path(tmp)
 				image = "sha256:" + "a" * 64
@@ -702,6 +775,10 @@ class MainSiteLaneTests(unittest.TestCase):
 				if drift == "compose-model":
 					model["services"]["main-backend"]["image"] = "unapproved"
 				(root / "main.compose.json").write_text(json.dumps(model))
+				(root / "main-sites").mkdir()
+				(root / "main-sites/assets").symlink_to(
+					"/unreviewed/assets" if drift == "asset-alias" else lane.BENCH + "/assets"
+				)
 				route.write_text("drift" if drift == "route" else lane.main_route(maintenance=False))
 				compose.write_bytes(lane.frontend_bind(source, str(route) + ":" + lane.ROUTE_TARGET + ":ro"))
 				(root / "main-site-config.json").write_text(
@@ -874,10 +951,125 @@ class MainSiteLaneTests(unittest.TestCase):
 				{"base_image": "frozen", "subpath": ".deeplinkerp-main-lane/release/deeplinkerp.com"},
 			)
 			with patch.object(lane, "image_call", return_value={"native_receipt_bytes": 100}):
+				(root / "main-sites").mkdir()
+				alias = root / "main-sites/assets"
+				alias.symlink_to(lane.BENCH + "/assets")
 				self.assertLess(lane.receipt_budget(root, root)["observed_receipt_bytes"], 1000)
+				for path, target in (
+					(root / "unexpected-link", lane.BENCH + "/assets"),
+					(alias, "/unreviewed/assets"),
+				):
+					if path.is_symlink():
+						path.unlink()
+					path.symlink_to(target)
+					with (
+						self.subTest(path=path, target=target),
+						self.assertRaisesRegex(AssertionError, "storage|alias"),
+					):
+						lane.receipt_budget(root, root)
+					path.unlink()
+				alias.symlink_to(lane.BENCH + "/assets")
 				(root / "oversized-audit.json").write_bytes(b"a" * 1000)
 				with self.assertRaisesRegex(AssertionError, "receipt|budget"):
 					lane.receipt_budget(root, root)
+
+	@unittest.skipUnless(
+		os.environ.get("DEEPLINKERP_MAIN_LANE_DOCKER_QA") == "1", "Explicit owned local Docker QA only"
+	)
+	def test_owned_docker_asset_root_alias_avoids_host_subpath_resolution(self):
+		lane = self.module()
+
+		def docker(*argv):
+			return subprocess.run(["docker", *argv], capture_output=True, text=True, timeout=30)
+
+		self.assertEqual(docker("context", "show").stdout.strip(), "desktop-linux")
+		endpoint = docker("context", "inspect", "--format", "{{json .Endpoints.docker.Host}}")
+		self.assertEqual(json.loads(endpoint.stdout), "unix:///Users/smk/.docker/run/docker.sock")
+		image = os.environ.get(
+			"DEEPLINKERP_MAIN_LANE_QA_IMAGE",
+			"sha256:07b192aca907fe5880a8817077896c1b32307679c08ba858f62de49c4b23aebe",
+		)
+		volume = "deeplinkerp-owned-assets-qa-" + uuid.uuid4().hex
+		container = volume + "-failed-probe"
+		created = docker("volume", "create", "--label", "org.deeplinkerp.qa=asset-root-alias", volume)
+		self.assertEqual(created.returncode, 0, created.stderr)
+		try:
+			initialized = docker(
+				"run",
+				"--rm",
+				"--read-only",
+				"--network",
+				"none",
+				"--user",
+				"0",
+				"--mount",
+				"type=volume,source=" + volume + ",target=/fixture-sites",
+				"--entrypoint",
+				lane.BENCH + "/env/bin/python",
+				image,
+				"-c",
+				"from pathlib import Path;Path('/fixture-sites/assets').symlink_to('/home/frappe/frappe-bench/assets')",
+			)
+			self.assertEqual(initialized.returncode, 0, initialized.stderr)
+			broken = docker(
+				"run",
+				"--rm",
+				"--name",
+				container,
+				"--read-only",
+				"--network",
+				"none",
+				"--mount",
+				"type=volume,source=" + volume + ",volume-subpath=assets,target=/proof,readonly",
+				"--entrypoint",
+				lane.BENCH + "/env/bin/python",
+				image,
+				"-c",
+				"pass",
+			)
+			self.assertNotEqual(broken.returncode, 0, "Docker must reproduce the host-resolved alias failure")
+			self.assertIn("no such file or directory", broken.stderr)
+			with patch.object(lane, "SITES_VOLUME", volume):
+				try:
+					proof = lane.image_call(image, ROOT, "assets", assets_only=True)
+				except RuntimeError:
+					self.fail("Image-only asset proof still tries the invalid shared volume alias subpath")
+			self.assertTrue(proof["manifest_bodies"])
+			with tempfile.TemporaryDirectory() as tmp:
+				root = Path(tmp)
+				volume_state = {
+					"common": base64.b64encode(b"{}").decode(),
+					"apps": base64.b64encode(b"frappe\n").decode(),
+					"assets_link": lane.BENCH + "/assets",
+				}
+				lane.private_roots(root, volume_state, {})
+				resolved = docker(
+					"run",
+					"--rm",
+					"--read-only",
+					"--network",
+					"none",
+					"--group-add",
+					str(os.getgid()),
+					"--mount",
+					"type=bind,source="
+					+ str((root / "main-sites").resolve())
+					+ ",target="
+					+ lane.BENCH
+					+ "/sites,readonly",
+					"--entrypoint",
+					lane.BENCH + "/env/bin/python",
+					image,
+					"-c",
+					"import hashlib;from pathlib import Path;b=Path('/home/frappe/frappe-bench');assert (b/'sites/assets').resolve()==b/'assets';print(hashlib.sha256((b/'sites/assets/assets.json').read_bytes()).hexdigest())",
+				)
+				self.assertEqual(resolved.returncode, 0, resolved.stderr)
+				self.assertEqual(resolved.stdout.strip(), proof["manifest_sha256"])
+		finally:
+			docker("rm", "--force", container)
+			removed = docker("volume", "rm", volume)
+			self.assertEqual(removed.returncode, 0, removed.stderr)
+		self.assertNotEqual(docker("volume", "inspect", volume).returncode, 0)
 
 	@unittest.skipUnless(
 		os.environ.get("DEEPLINKERP_MAIN_LANE_DOCKER_QA") == "1", "Explicit owned local Docker QA only"
@@ -916,7 +1108,7 @@ def child(uid,gid,groups,source,expected=0):
  return result
 read="assert json.loads((root/'before.json').read_bytes())['private']=='fixture'"
 child(1000,1000,[1001],read,1)
-child(1001,1001,[],"[(root/name).write_bytes((Path('/release-tools')/name).read_bytes()) for name in ('main_site_lane.py','joint_release_guards.py')];lane.runtime_access(root);lane.private_roots(root,{'common':base64.b64encode(b'{}').decode(),'apps':base64.b64encode(b'frappe\\nerpnext\\n').decode()},{'db_password':'fixture','maintenance_mode':1})")
+child(1001,1001,[],"[(root/name).write_bytes((Path('/release-tools')/name).read_bytes()) for name in ('main_site_lane.py','joint_release_guards.py')];lane.runtime_access(root);lane.private_roots(root,{'common':base64.b64encode(b'{}').decode(),'apps':base64.b64encode(b'frappe\\nerpnext\\n').decode(),'assets_link':lane.BENCH+'/assets'},{'db_password':'fixture','maintenance_mode':1})")
 assert private.stat().st_uid==1001 and private.stat().st_gid==1001 and private.stat().st_mode&0o777==0o640
 assert root.stat().st_mode&0o777==0o750
 child(1000,1000,[1001],read+";assert (root/'main-sites/apps.txt').read_bytes()==b'frappe\\nerpnext\\n';assert (root/'main_site_lane.py').read_bytes();assert (root/'joint_release_guards.py').read_bytes();assert json.loads((root/'main-sites/common_site_config.json').read_bytes());assert json.loads((root/'main-site-config.json').read_bytes())['maintenance_mode']==1;os.umask(0o007);(root/'main-sites/logs/runtime.log').write_text('fixture')")
