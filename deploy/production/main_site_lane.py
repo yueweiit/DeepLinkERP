@@ -31,6 +31,7 @@ NETWORK = "frappe_docker_default"
 SITES_VOLUME = "frappe_docker_sites"
 DB_CONTAINER = "frappe_docker-db-1"
 ROUTE_TARGET = "/etc/nginx/conf.d/deeplinkerp-main.conf"
+CONTAINER_IDENTITY_FIELDS = ("id", "image", "pid", "started", "running", "config_sha256", "networks")
 
 
 def frontend_bind(source, binding):
@@ -499,6 +500,70 @@ def container_identity(value):
 	}
 
 
+def assert_original_processes(expected, reason):
+	current = {
+		service: container_identity(inspect("frappe_docker-" + service + "-1"))
+		for service in RELEASE_SERVICES
+	}
+	if current == expected:
+		return
+	error = AssertionError(reason)
+	error.original_process_changes = {
+		service: [
+			field
+			for field in CONTAINER_IDENTITY_FIELDS
+			if current[service].get(field) != expected.get(service, {}).get(field)
+		]
+		for service in RELEASE_SERVICES
+		if current[service] != expected.get(service)
+	}
+	raise error
+
+
+def wait_main_maintenance(*, timeout=30):
+	"""Nginx reload is asynchronous: require all paths in one fresh, bounded round."""
+	deadline = time.monotonic() + timeout
+	urls = (
+		"/api/method/ping",
+		"/assets/frappe/js/frappe-web.bundle.js",
+		"/files/main-seal",
+		"/protected/main-seal",
+		"/socket.io/",
+	)
+	while True:
+		statuses = []
+		for url in urls:
+			remaining = deadline - time.monotonic()
+			assert remaining > 0, "Main all-URL maintenance route unconfirmed; HOLD"
+			bound = min(2, remaining)
+			try:
+				statuses.append(
+					host_call(
+						[
+							"curl",
+							"-sS",
+							"--max-time",
+							str(bound),
+							"-o",
+							"/dev/null",
+							"-w",
+							"%{http_code}",
+							"-H",
+							"Host: " + SITE,
+							"http://127.0.0.1:8888" + url,
+						],
+						timeout=bound,
+					)
+				)
+			except (RuntimeError, subprocess.TimeoutExpired):
+				statuses.append(None)
+		remaining = deadline - time.monotonic()
+		assert remaining > 0, "Main all-URL maintenance route unconfirmed; HOLD"
+		if all(status == "503" for status in statuses):
+			return
+		time.sleep(min(0.25, remaining))
+
+
 def assert_private_host_boundary(root, containers):
 	root = Path(root).resolve(strict=True)
 	for container in containers:
@@ -924,31 +989,7 @@ def prepare(root, build, base_image, image, candidate_sha):
 	DDLReceipt(root / "main.compose.json", {})._write(serialized(model))
 	compose(root, "config", "--quiet")
 	install_route(receipt, maintenance=True, first=True)
-	for url in (
-		"/api/method/ping",
-		"/assets/frappe/js/frappe-web.bundle.js",
-		"/files/main-seal",
-		"/protected/main-seal",
-		"/socket.io/",
-	):
-		assert (
-			host_call(
-				[
-					"curl",
-					"-sS",
-					"--max-time",
-					"10",
-					"-o",
-					"/dev/null",
-					"-w",
-					"%{http_code}",
-					"-H",
-					"Host: " + SITE,
-					"http://127.0.0.1:8888" + url,
-				]
-			)
-			== "503"
-		), "Main all-URL maintenance route unconfirmed; HOLD"
+	wait_main_maintenance()
 	receipt.plan("physical-maintenance", {"maintenance": False}, {"maintenance": True}, kind="namespace")
 	volume_call(receipt, build, "maintenance")
 	receipt.complete("physical-maintenance", {"maintenance": True})
@@ -1034,11 +1075,9 @@ def seal_proof(root, build):
 		config == receipt.state["before"]["private_config"]
 		and str(root / "main-site-config.json") not in contract["subpath"]
 	), "Private credential bind changed; HOLD"
-	unchanged = {
-		service: container_identity(inspect("frappe_docker-" + service + "-1"))
-		for service in RELEASE_SERVICES
-	}
-	assert unchanged == receipt.state["before"]["containers"], "Original three-site processes changed; HOLD"
+	assert_original_processes(
+		receipt.state["before"]["containers"], "Original three-site processes changed; HOLD"
+	)
 	source_host_proof()
 	rq = main_rq_snapshot(contract["base_image"], build)
 	assert_main_rq_empty(rq)
@@ -1163,10 +1202,9 @@ def resume(root, build):
 			break
 		assert time.monotonic() - start < 90, "Main routed health timeout; forward HOLD"
 		time.sleep(1)
-	assert {
-		service: container_identity(inspect("frappe_docker-" + service + "-1"))
-		for service in RELEASE_SERVICES
-	} == receipt.state["before"]["containers"], "Original three-site processes changed; forward HOLD"
+	assert_original_processes(
+		receipt.state["before"]["containers"], "Original three-site processes changed; forward HOLD"
+	)
 	for site in SHARED_SITES[1:]:
 		host_call(["curl", "-fsS", "--max-time", "10", "https://" + site + "/api/method/ping"])
 	return {"main_candidate_running": True, "online_browser_acceptance": "pending"}
@@ -1230,10 +1268,9 @@ def health(root, build):
 			and current["State"]["Running"]
 			and not current["State"].get("OOMKilled")
 		), "Main running identity/health changed; forward HOLD"
-	assert {
-		service: container_identity(inspect("frappe_docker-" + service + "-1"))
-		for service in RELEASE_SERVICES
-	} == receipt.state["before"]["containers"], "Original three-site processes changed; forward HOLD"
+	assert_original_processes(
+		receipt.state["before"]["containers"], "Original three-site processes changed; forward HOLD"
+	)
 	namespace = volume_call(receipt, build, "proof")
 	assert namespace["discovered_sites"] == sorted(SHARED_SITES[1:]) and namespace["maintenance_mode"] == 1
 	accounts = account_snapshot(receipt.state["contract"]["old_user"])
@@ -1312,10 +1349,7 @@ def restore(root, build):
 		container = PROJECT + "-" + name + "-1"
 		if container in names:
 			assert not inspect(container)["State"]["Running"], "Candidate producer resumed; forward HOLD"
-	assert {
-		service: container_identity(inspect("frappe_docker-" + service + "-1"))
-		for service in RELEASE_SERVICES
-	} == before["containers"], "Original processes drifted; HOLD"
+	assert_original_processes(before["containers"], "Original processes drifted; HOLD")
 	new_accounts = account_snapshot(contract["new_user"])
 	if new_accounts:
 		assert len(new_accounts) == 1 and new_accounts[0]["host"] == "%", "Unknown new principal scope; HOLD"
@@ -1554,6 +1588,17 @@ def main():
 				if Path(frame.filename).name in {"main_site_lane.py", "joint_release_guards.py"}
 			],
 		}
+		changes = getattr(error, "original_process_changes", {})
+		if isinstance(changes, dict):
+			fields = {
+				service: [field for field in CONTAINER_IDENTITY_FIELDS if field in names]
+				for service, names in changes.items()
+				if service in RELEASE_SERVICES
+				and isinstance(names, list)
+				and all(isinstance(name, str) for name in names)
+			}
+			if fields:
+				failure["original_process_changes"] = fields
 		if args.action == "runtime-access":
 			failure.update(
 				{

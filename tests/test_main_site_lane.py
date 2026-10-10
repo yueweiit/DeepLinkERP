@@ -5,6 +5,7 @@ import contextlib
 import copy
 import hashlib
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -247,8 +248,10 @@ class MainSiteLaneTests(unittest.TestCase):
 				root = Path(tmp)
 				stderr = io.StringIO()
 				secret = "SECRET_FIXTURE_PASSWORD_AND_PAYLOAD"
+				error = RuntimeError(secret)
+				error.original_process_changes = {secret: ["id"], "backend": [secret]}
 				with (
-					patch.object(lane, "prepare", side_effect=RuntimeError(secret)),
+					patch.object(lane, "prepare", side_effect=error),
 					patch.object(sys, "argv", ["main_site_lane", "prepare", "--evidence", str(root)]),
 					patch.object(Path, "is_dir", return_value=True)
 					if unavailable == "stat"
@@ -552,6 +555,121 @@ class MainSiteLaneTests(unittest.TestCase):
 				any("restart" in argv or ("compose" in argv and "config" not in argv) for argv in calls)
 			)
 			self.assertFalse(any("reload" in argv for argv in calls))
+
+	def test_maintenance_wait_requires_one_complete_round_and_times_out_without_writes(self):
+		lane = self.module()
+		self.assertTrue(hasattr(lane, "wait_main_maintenance"), "Nginx reload must wait for all URLs")
+		for scenario in (
+			"delayed",
+			"mixed-rounds",
+			"runtime-error",
+			"curl-timeout",
+			"never-ready",
+			"late-ready",
+		):
+			with self.subTest(scenario=scenario):
+				calls, sleeps, now = [], [], [0.0]
+
+				def command(argv, **kwargs):
+					self.assertEqual(argv[0], "curl")
+					self.assertIn("Host: deeplinkerp.com", argv)
+					self.assertLessEqual(kwargs["timeout"], 2 - now[0])
+					index = len(calls)
+					calls.append(argv[-1])
+					if index == 4 and scenario == "late-ready":
+						now[0] += 3
+					if index == 0 and scenario == "runtime-error":
+						raise RuntimeError("SECRET_RUNTIME_OUTPUT")
+					if index == 0 and scenario == "curl-timeout":
+						raise subprocess.TimeoutExpired(argv, 1)
+					if scenario == "never-ready" and index % 5 == 4:
+						return "200"
+					if index == 0 and scenario in {"delayed", "mixed-rounds"}:
+						return "200"
+					if index == 9 and scenario == "mixed-rounds":
+						return "200"
+					return "503"
+
+				def sleep(seconds):
+					sleeps.append(seconds)
+					now[0] += seconds
+
+				with (
+					patch.object(lane, "host_call", side_effect=command),
+					patch.object(lane.time, "monotonic", side_effect=lambda: now[0]),
+					patch.object(lane.time, "sleep", side_effect=sleep),
+				):
+					if scenario in {"never-ready", "late-ready"}:
+						with self.assertRaisesRegex(AssertionError, "maintenance.*HOLD"):
+							lane.wait_main_maintenance(timeout=2)
+						if scenario == "never-ready":
+							self.assertLessEqual(now[0], 2)
+					else:
+						lane.wait_main_maintenance(timeout=2)
+						self.assertEqual(len(calls), 15 if scenario == "mixed-rounds" else 10)
+					if scenario != "late-ready":
+						self.assertTrue(sleeps)
+					self.assertEqual(len(set(calls[:5])), 5)
+					self.assertEqual(calls[-5:], calls[:5])
+		prepare = inspect.getsource(lane.prepare)
+		self.assertLess(
+			prepare.index("wait_main_maintenance()"), prepare.index('receipt.plan("physical-maintenance"')
+		)
+
+	def test_original_process_guard_retains_strict_equality_and_only_logs_changed_field_names(self):
+		lane = self.module()
+		self.assertTrue(hasattr(lane, "assert_original_processes"), "Shared strict process guard missing")
+		original = {
+			"Id": "old-container",
+			"Image": "immutable-image",
+			"State": {"Pid": 42, "StartedAt": "original-start", "Running": True},
+			"Config": {"Env": ["DB_PASSWORD=SECRET_CONFIGURATION"]},
+			"HostConfig": {},
+			"Mounts": [],
+			"NetworkSettings": {"Networks": {"original": {"IPAddress": "fixture-address"}}},
+		}
+		baseline = {service: lane.container_identity(original) for service in lane.RELEASE_SERVICES}
+		with patch.object(lane, "inspect", return_value=original):
+			lane.assert_original_processes(baseline, "Original processes drifted; HOLD")
+		for field in ("id", "image", "pid", "started", "running", "config_sha256", "networks"):
+			with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+				root, stderr = Path(tmp), io.StringIO()
+				changed = copy.deepcopy(original)
+				if field in {"id", "image"}:
+					changed[{"id": "Id", "image": "Image"}[field]] = "changed"
+				elif field in {"pid", "started", "running"}:
+					changed["State"][{"pid": "Pid", "started": "StartedAt", "running": "Running"}[field]] = (
+						None
+					)
+				elif field == "config_sha256":
+					changed["Config"]["Env"] = ["DB_PASSWORD=SECRET_CHANGED_CONFIGURATION"]
+				else:
+					changed["NetworkSettings"]["Networks"] = {
+						"changed": {"IPAddress": "SECRET_NETWORK_VALUE"}
+					}
+				with (
+					patch.object(
+						lane,
+						"inspect",
+						side_effect=lambda name: changed if name == "frappe_docker-backend-1" else original,
+					),
+					patch.object(
+						lane,
+						"prepare",
+						side_effect=lambda *args: lane.assert_original_processes(
+							baseline, "Original processes drifted; HOLD"
+						),
+					),
+					patch.object(sys, "argv", ["main_site_lane", "prepare", "--evidence", str(root)]),
+					contextlib.redirect_stderr(stderr),
+				):
+					self.assertEqual(lane.main(), 1)
+				report = json.loads(stderr.getvalue())
+				self.assertEqual(report.get("original_process_changes"), {"backend": [field]})
+				self.assertEqual(report["exception_type"], "AssertionError")
+				self.assertEqual(json.loads((root / "main-action-failure.json").read_bytes()), report)
+				self.assertNotIn("SECRET", stderr.getvalue())
+				self.assertFalse((root / "main-seal.json").exists())
 
 	def test_main_queue_persists_accepted_jobs_and_cache_remains_separate(self):
 		lane = self.module()
