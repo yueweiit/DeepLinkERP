@@ -1405,9 +1405,9 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
 			)
 			for row in invoices
 		}
-		selected = service.preview_payment_batch("Purchase Receipt", [{"name": row["document"]["name"]} for row in receipts])[
-			"sources"
-		]
+		selected = service.preview_payment_batch(
+			"Purchase Receipt", [{"name": row["document"]["name"]} for row in receipts]
+		)["sources"]
 		native_submit = actions._confirm_payment
 
 		def fail_after_gl(*args, **kwargs):
