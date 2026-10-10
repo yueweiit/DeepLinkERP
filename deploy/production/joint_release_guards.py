@@ -182,6 +182,7 @@ print(json.dumps({"database_bytes":int(size),"attachment_bytes":attachments,"bac
 
 JOB_FIELDS = ("origin", "status", "worker_name", "started_at", "ended_at", "last_heartbeat", "timeout", "success_callback_name", "failure_callback_name", "stopped_callback_name", "success_callback_timeout", "failure_callback_timeout", "stopped_callback_timeout", "result_ttl", "failure_ttl", "retries_left", "repeats_left")
 SHARED_SITES = ("deeplinkerp.com", "akivision.deeplinkerp.com", "latingo.deeplinkerp.com", "yuewei.deeplinkerp.com")
+BENCH_SITES = Path("/home/frappe/frappe-bench/sites")
 RELEASE_SERVICES = ("backend", "frontend", "queue-long", "queue-short", "scheduler", "websocket")
 NATIVE_RELAY_SOURCES = {
 	"frappe/socketio.js": "72bd46b5ae81f718e6dde73d516597e1b7038b70c7339645cc2958a352c71b56",
@@ -192,6 +193,90 @@ NATIVE_RELAY_SOURCES = {
 	"frappe/node_utils.js": "c08d86349370fa51b030c93e31b1395caed3813c3a6c68c2e3aff38986b110e2",
 	"frappe/frappe/utils/scheduler.py": "f109d9030c3a990a688d2af4b6c510352b2675745f4d1e20b97c041790f124a3",
 }
+
+
+def retirement_site_proof(path, digest, *, original_config=False):
+	"""A pinned completion receipt AND native/filesystem evidence, never a site override."""
+	from frappe.utils import get_sites
+	root = BENCH_SITES.resolve(strict=True)
+	assert isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest), "Retirement digest approval required; HOLD"
+	path = Path(path)
+	assert path.is_file() and not path.is_symlink(), "Retirement receipt missing/linked; HOLD"
+	for parent in path.parents:
+		assert not parent.is_symlink(), "Linked retirement receipt directory; HOLD"
+		if parent == BENCH_SITES: break
+	path = path.resolve(strict=True)
+	assert path.name == "retirement-receipt.json" and path.parent.parent == root / ".deeplinkerp-retired-sites", "Unapproved retirement receipt location; HOLD"
+	assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", path.parent.name), "Unapproved retirement directory; HOLD"
+	raw = path.read_bytes()
+	assert hashlib.sha256(raw).hexdigest() == digest, "Retirement receipt differs from approval; HOLD"
+	receipt = json.loads(raw)
+	assert receipt["version"] == 1 and receipt["status"] == "complete" and receipt["databases_retained"] is True, "Retirement incomplete or databases not retained; HOLD"
+	assert receipt["original_sites"] == list(SHARED_SITES) and receipt["active_sites"] == list(SHARED_SITES[:1]), "Unapproved retirement scope; HOLD"
+	assert set(receipt["retired_sites"]) == set(SHARED_SITES[1:]), "Incomplete retired site set; HOLD"
+	def checked_file(base, relative):
+		name = PurePosixPath(relative)
+		assert relative and str(name) == relative and not name.is_absolute() and ".." not in name.parts and "\\" not in relative, "Unapproved archive path; HOLD"
+		current = base
+		assert not current.is_symlink(), "Linked retirement directory; HOLD"
+		for part in name.parts:
+			current = current / part
+			assert not current.is_symlink(), "Linked retirement content; HOLD"
+		assert current.is_file(), "Missing retired archive/configuration; HOLD"
+		return current
+	checked_file(root, str(path.relative_to(root)))
+	for child in root.iterdir():
+		assert not (child.is_symlink() and (child / "site_config.json").exists()), "Linked active site bypasses native discovery; HOLD"
+	assert get_sites(str(root)) == list(SHARED_SITES[:1]), "Actual active sites are not exclusively main; HOLD"
+	for site, entry in receipt["retired_sites"].items():
+		relative = str(path.parent.relative_to(root) / site)
+		assert entry["directory"] == relative and not os.path.lexists(root / site), "Retired site directory not moved; HOLD"
+		config = checked_file(root, relative + "/site_config.json")
+		assert hashlib.sha256(config.read_bytes()).hexdigest() == entry["config_sha256"], "Retired configuration changed; HOLD"
+		assert entry["archives"], "Missing verified retirement backups; HOLD"
+		for name, checksum in entry["archives"].items():
+			archive = checked_file(root, relative + "/" + name)
+			assert hashlib.sha256(archive.read_bytes()).hexdigest() == checksum["sha256"] == checksum["local_sha256"], "Archive/offline checksum mismatch; HOLD"
+	main = checked_file(root, "deeplinkerp.com/site_config.json").read_bytes()
+	config = json.loads(main)
+	config.pop("maintenance_mode", None)
+	assert hashlib.sha256(serialized(config)).hexdigest() == receipt["main_config_without_maintenance_sha256"], "Main configuration drift; HOLD"
+	if original_config:
+		assert hashlib.sha256(main).hexdigest() == receipt["main_config_sha256"], "Main original configuration differs; HOLD"
+	return {"active_sites": receipt["active_sites"], "receipt_path": str(path), "sha256": digest, "receipt": receipt}
+
+
+def release_sites(*, main_only=False, original_config=False):
+	path, digest = os.environ.get("DEEPLINKERP_RETIREMENT_RECEIPT"), os.environ.get("DEEPLINKERP_RETIREMENT_SHA256")
+	assert bool(path) == bool(digest), "Both retirement path and digest approval required; HOLD"
+	assert not (main_only and path), "Retirement is not the isolated main-only lane; HOLD"
+	return tuple(retirement_site_proof(path, digest, original_config=original_config)["active_sites"]) if path else (SHARED_SITES[:1] if main_only else SHARED_SITES)
+
+
+def verify_retirement_routing(proof, *, serving=True):
+	"""Verify the existing frontend's durable exact-host 410 bind before/after cutover."""
+	nginx = proof["receipt"]["nginx"]
+	destination = nginx["container_path"]
+	assert Path(destination).parent == Path("/etc/nginx/conf.d") and Path(destination).suffix == ".conf", "Unapproved retired route location; HOLD"
+	frontend = _container_inspect("frontend")
+	mounts = [item for item in frontend["Mounts"] if item["Destination"] == destination]
+	assert len(mounts) == 1 and mounts[0]["Type"] == "bind" and mounts[0]["RW"] is False, "Persistent readonly retired route bind required; HOLD"
+	path = Path(mounts[0]["Source"])
+	assert not path.is_symlink() and path.is_file(), "Retired route source missing/linked; HOLD"
+	content = path.read_text()
+	assert hashlib.sha256(path.read_bytes()).hexdigest() == nginx["sha256"], "Retired route hash changed; HOLD"
+	clean = re.sub(r"#.*", "", content)
+	names = re.findall(r"\bserver_name\s+([^;]+);", clean)
+	assert len(names) == 1 and sorted(names[0].split()) == sorted(SHARED_SITES[1:]), "Retired route must name exactly the three retired hosts; HOLD"
+	assert clean.count("{") == clean.count("}") == 1 and re.match(r"\s*server\s*\{", clean) and re.findall(r"\blisten\s+([^;]+);", clean) == ["8080"] and re.findall(r"\breturn\s+(\d+)\b", clean) == ["410"] and not re.search(r"\b(proxy_pass|include|rewrite|location)\b", clean), "Retired route must be a single terminal HTTP 410 server; HOLD"
+	if serving:
+		assert frontend["State"]["Running"], "Frontend not serving retirement route; HOLD"
+		loaded = _host_call(["docker", "exec", "frappe_docker-frontend-1", "nginx", "-T"])
+		marker = "# configuration file " + destination + ":\n"
+		assert marker in loaded and loaded.split(marker, 1)[1].split("# configuration file ", 1)[0].strip() == content.strip(), "Retired route not actually loaded; HOLD"
+		for site in SHARED_SITES[1:]:
+			assert _host_call(["curl", "-sS", "--max-time", "10", "-o", "/dev/null", "-w", "%{http_code}", "https://" + site + "/api/method/ping"]).strip() == "410", "Retired host not returning HTTP 410; HOLD"
+	return {"retired_hosts": list(SHARED_SITES[1:]), "persistent_bind": True, "serving_verified": serving}
 
 
 def native_runtime_proof():
@@ -205,7 +290,7 @@ def native_runtime_proof():
 		assert hashlib.sha256((bench / "apps" / name).read_bytes()).hexdigest() == expected, "Unknown native relay/scheduler source; HOLD: " + name
 	assert not any("dedicated_source_sync" in " ".join(value["argv"]) for value in native_processes().values()), "Source child still running; HOLD"
 	configs, handlers = {}, {}
-	for site in SHARED_SITES:
+	for site in release_sites():
 		frappe.init(site=site, sites_path=str(bench / "sites"))
 		frappe.connect()
 		try:
@@ -628,15 +713,20 @@ def _container_inspect(service):
 
 
 def _container_read(service, tool, action):
-	return json.loads(_host_call(["docker", "exec", "frappe_docker-" + service + "-1", "/home/frappe/frappe-bench/env/bin/python", "/tmp/joint_release_guards.py", action]))
+	environment = []
+	if action == "--runtime-proof" and os.environ.get("DEEPLINKERP_RETIREMENT_RECEIPT"):
+		for key in ("DEEPLINKERP_RETIREMENT_RECEIPT", "DEEPLINKERP_RETIREMENT_SHA256"):
+			environment += ["-e", key + "=" + os.environ[key]]
+	return json.loads(_host_call(["docker", "exec", *environment, "frappe_docker-" + service + "-1", "/home/frappe/frappe-bench/env/bin/python", "/tmp/joint_release_guards.py", action]))
 
 
-def _command_rq_snapshot(backend, tool):
+def _command_rq_snapshot(backend, tool, *, action="--rq-snapshot", arguments=()):
 	"""Reuse the read-only probe with the inspected image/network/sites identity."""
 	sites_mounts = [item for item in backend["Mounts"] if item["Destination"] == "/home/frappe/frappe-bench/sites"]
 	assert len(sites_mounts) == 1 and sites_mounts[0]["Type"] in {"bind", "volume"}, "Unknown shared sites mount"
 	site_source = sites_mounts[0].get("Name") if sites_mounts[0]["Type"] == "volume" else sites_mounts[0]["Source"]
-	return json.loads(_host_call(["docker", "run", "--rm", "--network", backend["HostConfig"]["NetworkMode"], "--mount", "type=bind,source=" + str(Path(tool).resolve()) + ",target=/tmp/joint_release_guards.py,readonly", "-v", site_source + ":/home/frappe/frappe-bench/sites:ro", "--entrypoint", "/home/frappe/frappe-bench/env/bin/python", backend["Image"], "/tmp/joint_release_guards.py", "--rq-snapshot"]))
+	assert action in {"--rq-snapshot", "--retirement-proof"}, "Only readonly shared probes permitted"
+	return json.loads(_host_call(["docker", "run", "--rm", "--network", backend["HostConfig"]["NetworkMode"], "--mount", "type=bind,source=" + str(Path(tool).resolve()) + ",target=/tmp/joint_release_guards.py,readonly", "-v", site_source + ":/home/frappe/frappe-bench/sites:ro", "--entrypoint", "/home/frappe/frappe-bench/env/bin/python", backend["Image"], "/tmp/joint_release_guards.py", action, *arguments]))
 
 
 def drain_release(path, tool, candidate_sha, *, timeout=360):
@@ -759,7 +849,8 @@ def tenant_preflight(expected_erpnext, *, main_only=False):
 	assert frappe.__version__ == "16.23.0" and rq.__version__ == "2.6.1" and gunicorn.__version__ == "23.0.0", "Unapproved native runtime; HOLD"
 	bench = Path("/home/frappe/frappe-bench")
 	result = {"versions": {"frappe": frappe.__version__, "erpnext": erpnext.__version__, "rq": rq.__version__, "gunicorn": gunicorn.__version__}, "sites": {}}
-	for site in SHARED_SITES[:1] if main_only else SHARED_SITES:
+	active_sites = release_sites(main_only=main_only, original_config=True)
+	for site in active_sites:
 		frappe.init(site=site, sites_path=str(bench / "sites"))
 		frappe.connect()
 		try:
@@ -789,7 +880,7 @@ def tenant_preflight(expected_erpnext, *, main_only=False):
 		finally:
 			frappe.db.rollback()
 			frappe.destroy()
-	assert set(result["sites"]) == set(SHARED_SITES[:1] if main_only else SHARED_SITES)
+	assert set(result["sites"]) == set(active_sites)
 	return result
 
 
@@ -883,7 +974,17 @@ def cleanup_owned_build(evidence, acceptance):
 				assert value["Image"] == owned["image_id"] and value["State"]["Running"] and not value["State"].get("OOMKilled"), "Release health/image changed; forward HOLD"
 				if service == "backend":
 					backend = value
-		for site in SHARED_SITES:
+		active_sites = SHARED_SITES
+		if owned.get("retirement"):
+			assert owned.get("lane") != "main-only" and owned["active_sites"] == list(SHARED_SITES[:1]), "Invalid retired release ownership; HOLD"
+			proof = owned["retirement"]
+			current = _command_rq_snapshot(backend, Path(__file__), action="--retirement-proof", arguments=("--retirement-receipt", proof["receipt_path"], "--retirement-sha256", proof["sha256"]))
+			assert current == proof, "Retirement proof changed; forward HOLD"
+			verify_retirement_routing(current)
+			active_sites = tuple(current["active_sites"])
+		else:
+			assert owned.get("lane") == "main-only" or owned.get("active_sites", list(SHARED_SITES)) == list(SHARED_SITES), "Single-site cleanup without retirement proof; HOLD"
+		for site in active_sites:
 			_host_call(["curl", "-fsS", "--max-time", "10", "https://" + site + "/api/method/ping"])
 		for url, digest in owned["raw_assets"].items():
 			body = subprocess.run(["curl", "-fsS", "--max-time", "10", "https://deeplinkerp.com" + url], check=True, capture_output=True, timeout=15).stdout
@@ -1010,7 +1111,7 @@ def main():
 	import argparse
 	parser = argparse.ArgumentParser(description="Bounded guards for the existing procurement release")
 	action = parser.add_mutually_exclusive_group(required=True)
-	for name in ("rq-snapshot", "rq-main-snapshot", "processes", "runtime-proof", "tenant-preflight", "source-host-proof", "host-drain", "record-resume", "assert-pre-resume", "maintenance-on", "maintenance-restore", "cleanup-owned-build"):
+	for name in ("rq-snapshot", "rq-main-snapshot", "processes", "runtime-proof", "tenant-preflight", "source-host-proof", "host-drain", "record-resume", "assert-pre-resume", "maintenance-on", "maintenance-restore", "cleanup-owned-build", "retirement-proof", "verify-retirement-routing"):
 		action.add_argument("--" + name, action="store_true")
 	parser.add_argument("--receipt")
 	parser.add_argument("--candidate-sha")
@@ -1021,7 +1122,13 @@ def main():
 	parser.add_argument("--evidence")
 	parser.add_argument("--acceptance")
 	parser.add_argument("--main-only", action="store_true")
+	parser.add_argument("--retirement-receipt")
+	parser.add_argument("--retirement-sha256")
+	parser.add_argument("--staged", action="store_true")
 	args = parser.parse_args()
+	if args.retirement_receipt or args.retirement_sha256:
+		assert args.retirement_receipt and args.retirement_sha256, "Both retirement approvals required; HOLD"
+		os.environ.update(DEEPLINKERP_RETIREMENT_RECEIPT=args.retirement_receipt, DEEPLINKERP_RETIREMENT_SHA256=args.retirement_sha256)
 	if args.rq_snapshot or args.rq_main_snapshot:
 		import redis
 		import rq
@@ -1050,13 +1157,19 @@ def main():
 		result = {"pre_resume": True}
 	elif args.maintenance_on or args.maintenance_restore:
 		original = json.loads(Path(args.tenant_receipt).read_bytes())
-		for site in SHARED_SITES:
+		active_sites = release_sites()
+		assert set(original["sites"]) == set(active_sites), "Maintenance tenant receipt scope differs; HOLD"
+		for site in active_sites:
 			restore_site_maintenance(
 				"/home/frappe/frappe-bench/sites", site, original, enable=args.maintenance_on
 			)
-		result = {"sites": list(SHARED_SITES), "maintenance": "on" if args.maintenance_on else "restored"}
+		result = {"sites": list(active_sites), "maintenance": "on" if args.maintenance_on else "restored"}
 	elif args.cleanup_owned_build:
 		result = cleanup_owned_build(args.evidence, args.acceptance)
+	elif args.retirement_proof:
+		result = retirement_site_proof(os.environ["DEEPLINKERP_RETIREMENT_RECEIPT"], os.environ["DEEPLINKERP_RETIREMENT_SHA256"], original_config=True)
+	elif args.verify_retirement_routing:
+		result = verify_retirement_routing(json.loads(Path(args.tenant_receipt).read_bytes()), serving=not args.staged)
 	else:
 		raise AssertionError("Unrecognized release action")
 	print(json.dumps(result, sort_keys=True, ensure_ascii=False))

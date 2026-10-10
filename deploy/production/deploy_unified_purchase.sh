@@ -4,7 +4,22 @@ set -euo pipefail
 umask 077
 main_only=0
 main_prepared=0
-if [[ ${1:-} == --main-only ]]; then main_only=1; shift; fi
+retirement_receipt=
+retirement_sha256=
+retirement_args=()
+while [[ ${1:-} == --main-only || ${1:-} == --retirement-receipt ]]; do
+  case "$1" in
+    --main-only) main_only=1; shift ;;
+    --retirement-receipt)
+      [[ -z "$retirement_receipt" ]] || exit 1
+      retirement_receipt=${2:?Completed retirement receipt required}
+      retirement_sha256=${3:?Approved retirement receipt SHA256 required}
+      [[ "$retirement_receipt" =~ ^/home/frappe/frappe-bench/sites/\.deeplinkerp-retired-sites/[0-9]{4}-[0-9]{2}-[0-9]{2}/retirement-receipt\.json$ && "$retirement_sha256" =~ ^[0-9a-f]{64}$ ]] || exit 1
+      retirement_args=(--retirement-receipt "$retirement_receipt" --retirement-sha256 "$retirement_sha256")
+      shift 3 ;;
+  esac
+done
+[[ -z "$retirement_receipt" || "$main_only" == 0 ]] || { echo 'Retirement uses existing shared services, not --main-only' >&2; exit 1; }
 if [[ ${1:-} == --cleanup-owned-build ]]; then
   evidence=${2:?This release evidence directory required}
   acceptance=${3:?Actual online browser acceptance receipt required}
@@ -35,7 +50,9 @@ oa_archive=${9:-}
 oa_sha=${10:-}
 approved_maintenance_sites=${11:-}
 approved_native_schema_sites=${12:-}
-if (( main_only )); then
+if [[ -n "$retirement_receipt" ]]; then
+  [[ "$approved_maintenance_sites" == deeplinkerp.com && -z "$approved_native_schema_sites" ]] || { echo 'Retired-site release requires only main maintenance, no retired schema approval' >&2; exit 1; }
+elif (( main_only )); then
   [[ -z "$approved_maintenance_sites" && -z "$approved_native_schema_sites" ]] || { echo '--main-only cannot authorize shared-site maintenance/schema' >&2; exit 1; }
 else
 [[ "$approved_maintenance_sites" == 'deeplinkerp.com,akivision.deeplinkerp.com,latingo.deeplinkerp.com,yuewei.deeplinkerp.com' ]] || {
@@ -127,14 +144,15 @@ command_runner() {
     return
   fi
   main_lane runtime-access > /dev/null
-  local drain_env=()
+  local drain_env=() retirement_env=()
   if [[ -f "$release_dir/drain.json" ]]; then drain_env=(-e "DEEPLINKERP_RELEASE_DRAIN_RECEIPT=/release-evidence/drain.json"); fi
+  if [[ -n ${retirement_receipt:-} ]]; then retirement_env=(-e "DEEPLINKERP_RETIREMENT_RECEIPT=$retirement_receipt" -e "DEEPLINKERP_RETIREMENT_SHA256=$retirement_sha256"); fi
   docker run --rm --read-only --group-add "$private_runtime_gid" --network "$release_network" --workdir /home/frappe/frappe-bench/sites \
     --tmpfs /tmp --mount "type=bind,source=$build_dir,target=/release,readonly" \
     --mount "type=bind,source=$(pwd)/$release_dir,target=/release-evidence,readonly" \
     -v "$sites_spec:/home/frappe/frappe-bench/sites" \
     -e FRAPPE_STREAM_LOGGING=1 -e "DEEPLINKERP_RELEASE_CANDIDATE_SHA=$branding_sha" \
-    "${drain_env[@]}" \
+    ${drain_env[@]+"${drain_env[@]}"} ${retirement_env[@]+"${retirement_env[@]}"} \
     -e "DEEPLINKERP_RELEASE_RESUME_RECEIPT=$resume_receipt" \
     --entrypoint "$entrypoint" "$image" "$@"
 }
@@ -154,7 +172,12 @@ quiesce_release_workers() {
   # The host guard records exact processes and a single native TERM intent.
   # Timeout/unknown outcome retains maintenance; never signal this identity again.
   python3 "$build_dir/deploy/production/joint_release_guards.py" --host-drain \
-    --receipt "$release_dir/drain.json" --candidate-sha "$branding_sha"
+    --receipt "$release_dir/drain.json" --candidate-sha "$branding_sha" ${retirement_args[@]+"${retirement_args[@]}"}
+}
+verify_retired_routes() {
+  [[ -n ${retirement_receipt:-} ]] || return 0
+  python3 "$build_dir/deploy/production/joint_release_guards.py" --verify-retirement-routing \
+    --tenant-receipt "$release_dir/retirement-proof.json" "$@"
 }
 verify_staged_release() {
   local image_id=$1 branding=$2 crm=$3 finance=$4 oa=${5:-} service running label
@@ -307,12 +330,14 @@ from pathlib import Path
 root,build=map(Path,sys.argv[1:3]);sys.path.insert(0,str(build/'deploy/production'))
 from procurement_release_metadata import verify_joint_audit_delta
 verify_joint_audit_delta(json.loads((root/'before.json').read_bytes()),json.loads((root/'after.json').read_bytes()),json.loads((root/'joint-receipt.json').read_bytes()))
-sites=() if sys.argv[6]=='1' else ('akivision.deeplinkerp.com','latingo.deeplinkerp.com','yuewei.deeplinkerp.com')
+sites=() if sys.argv[6]=='1' else tuple(site for site in json.loads((root/'tenants.json').read_bytes())['sites'] if site!='deeplinkerp.com')
 for site in sites:
  verify_joint_audit_delta(json.loads((root/(site+'.before.json')).read_bytes()),json.loads((root/(site+'.after.json')).read_bytes()),json.loads((root/(site+'.joint-receipt.json')).read_bytes()))
 stats=build.stat();files={str(p.relative_to(build)):hashlib.sha256(p.read_bytes()).hexdigest() for p in build.rglob('*') if p.is_file()}
 owned={'path':str(build),'identity':[stats.st_dev,stats.st_ino,stats.st_uid],'candidate_sha':sys.argv[3],'image_id':sys.argv[4],'files':files,'max_bytes':sum(p.stat().st_size for p in build.rglob('*') if p.is_file()),'manifest_sha256':files['release-source-manifest.json'],'guard_sha256':files['deploy/production/joint_release_guards.py'],'raw_assets':{ '/assets/deeplinkerp_branding/js/inventory_detail.bundle.js?v=0.0.4':files['deeplinkerp_branding/public/js/inventory_detail.bundle.js'],'/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.26':files['deeplinkerp_branding/public/js/purchase_payments.js']}}
 owned['rollback_image_id']=sys.argv[5]
+owned['active_sites']=['deeplinkerp.com'] if sys.argv[6]=='1' else list(json.loads((root/'tenants.json').read_bytes())['sites'])
+if (root/'retirement-proof.json').exists(): owned['retirement']=json.loads((root/'retirement-proof.json').read_bytes())
 owned['directories']=sorted(str(p.relative_to(build)) for p in build.rglob('*') if p.is_dir())
 if sys.argv[6]=='1':
  owned['lane']='main-only'
@@ -456,6 +481,12 @@ sites_spec=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["sit
 release_network=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["network"])' "$release_dir/runner-mount.json")
 python=/home/frappe/frappe-bench/env/bin/python
 guard=/release/deploy/production/joint_release_guards.py
+if [[ -n "$retirement_receipt" ]]; then
+  # Actual native discovery and archive/config hashes, before stopping any timer.
+  command_runner "$old_image_id" "$python" "$guard" --retirement-proof > "$release_dir/retirement-proof.json"
+  verify_retired_routes > "$release_dir/retirement-routing.before.json"
+  read -r -a sites <<< "$(python3 -c 'import json,sys;print(" ".join(json.load(open(sys.argv[1]))["active_sites"]))' "$release_dir/retirement-proof.json")"
+fi
 metadata=/release/deploy/production/procurement_release_metadata.py
 audit_args=(--purchase-payment-page-source /release/deeplinkerp_branding/deeplinkerp_branding/page/purchase_payment_records/purchase_payment_records.json --joint-metadata --release-manifest /release/release-source-manifest.json)
 expected_erpnext=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["native_versions"]["erpnext"])' "$build_dir/release-source-manifest.json")
@@ -565,7 +596,8 @@ import json,sys
 from pathlib import Path
 root=Path(sys.argv[1]);before=json.loads((root/'before.json').read_bytes());before.pop('approved_sources_after',None)
 assert before==json.loads((root/'rollback.json').read_bytes()), 'Restored full audit differs; maintenance retained'
-for site in ('akivision.deeplinkerp.com','latingo.deeplinkerp.com','yuewei.deeplinkerp.com'):
+for site in json.loads((root/'tenants.json').read_bytes())['sites']:
+ if site=='deeplinkerp.com': continue
  old=json.loads((root/(site+'.before.json')).read_bytes());old.pop('approved_sources_after',None)
  restored=root/(site+'.rollback.json')
  assert restored.exists() and old==json.loads(restored.read_bytes()), 'Shared-site original audit not proved: '+site
@@ -577,6 +609,7 @@ PY
     cp "$release_dir/compose.rollback.yaml" compose.custom.yaml || recovery_ok=0
     "${dc[@]}" up --no-start --force-recreate --no-deps backend frontend queue-long queue-short scheduler websocket || recovery_ok=0
     verify_staged_release "$old_image_id" "$current_revision" "$current_crm" "$current_finance" "$current_oa" || recovery_ok=0
+    verify_retired_routes --staged > "$release_dir/retirement-routing.rollback-staged.json" || recovery_ok=0
   fi
   if (( recovery_ok )); then
     command_runner "$old_image_id" "$python" "$guard" --record-resume --receipt "$resume_receipt" --candidate-sha "$branding_sha" --image-id "$old_image_id" --producer old-serving > "$release_dir/resume.json" || recovery_ok=0
@@ -584,6 +617,7 @@ PY
       "${dc[@]}" up -d --no-deps "${services[@]}" || recovery_ok=0
       verify_running_release "$old_image_id" "$current_revision" "$current_crm" "$current_finance" "$current_oa" || recovery_ok=0
       command_runner "$old_image_id" "$python" "$guard" --maintenance-restore --tenant-receipt /release-evidence/tenants.json || recovery_ok=0
+      verify_retired_routes > "$release_dir/retirement-routing.rollback.json" || recovery_ok=0
       for site in "${sites[@]}"; do curl -fsS --max-time 10 "https://$site/api/method/ping" || recovery_ok=0; done
     fi
   fi
@@ -643,10 +677,12 @@ for site in "${sites[@]:1}"; do
   capture_release_audit after "$release_dir/$site.after.json" "$new_image_id" "$site"
 done
 verify_audit_ownership
+verify_retired_routes --staged > "$release_dir/retirement-routing.staged.json"
 command_runner "$new_image_id" "$python" "$guard" --record-resume --receipt "$resume_receipt" --candidate-sha "$branding_sha" --image-id "$new_image_id" --producer candidate-serving > "$release_dir/resume.json"
 "${dc[@]}" up -d --no-deps "${services[@]}"
 verify_running_release "$new_image_id" "$branding_sha" "$crm_sha" "$finance_sha" "$oa_sha"
 command_runner "$new_image_id" "$python" "$guard" --maintenance-restore --tenant-receipt /release-evidence/tenants.json
+verify_retired_routes > "$release_dir/retirement-routing.after.json"
 for site in "${sites[@]}"; do curl -fsS --max-time 10 "https://$site/api/method/ping"; done
 command_runner "$new_image_id" "$python" -c 'import json,sys;from pathlib import Path;actual=json.loads(Path(sys.argv[1]).read_bytes());expected=json.loads(Path("/release-evidence/resume.json").read_bytes());assert actual==expected and actual["contract"]["first_resume"]=="candidate-serving"' "$resume_receipt"
 # Cutover is verified; first web/RQ resume already wrote a durable forward-only intent.

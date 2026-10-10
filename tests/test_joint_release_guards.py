@@ -1418,7 +1418,7 @@ class CombinedReleaseContractTests(unittest.TestCase):
 
 	def test_owned_build_cleanup_rejects_drift_shared_mount_or_asset_without_deleting(self):
 		guard = self.module()
-		for scenario in ("exact", "main-exact", "main-helper-drift", "main-old-asset-drift", "extra-file", "changed-file", "extra-directory", "hardlink", "special", "shared-mount", "asset-url", "asset-origin", "asset-body", "redis-pre", "redis-post", "post-health"):
+		for scenario in ("exact", "retired-exact", "retired-proof-drift", "retired-routing-broken", "retired-unproved", "main-exact", "main-helper-drift", "main-old-asset-drift", "extra-file", "changed-file", "extra-directory", "hardlink", "special", "shared-mount", "asset-url", "asset-origin", "asset-body", "redis-pre", "redis-post", "post-health"):
 			with self.subTest(scenario=scenario), tempfile.TemporaryDirectory(prefix="unified-purchase-build.", dir="/tmp") as build_name, tempfile.TemporaryDirectory() as evidence_name:
 				build, evidence = Path(build_name), Path(evidence_name)
 				(build / "release-source-manifest.json").write_bytes(b"{}")
@@ -1430,6 +1430,11 @@ class CombinedReleaseContractTests(unittest.TestCase):
 				if scenario.startswith("main-"):
 					owned.update(lane="main-only", main_helper_sha256=hashlib.sha256(b"frozen").hexdigest(), old_raw_assets=owned["raw_assets"])
 					(evidence / "main_site_lane.py").write_bytes(b"drift" if scenario == "main-helper-drift" else b"frozen")
+				route = "server { listen 8080; server_name " + " ".join(guard.SHARED_SITES[1:]) + "; return 410; }\n"
+				(evidence / "retired-sites.conf").write_text(route)
+				if scenario.startswith("retired-"):
+					owned["active_sites"] = ["deeplinkerp.com"]
+					if scenario != "retired-unproved": owned["retirement"] = {"active_sites": ["deeplinkerp.com"], "receipt_path": "/home/frappe/frappe-bench/sites/.deeplinkerp-retired-sites/2026-10-10/retirement-receipt.json", "sha256": "d" * 64, "receipt": {"nginx": {"container_path": "/etc/nginx/conf.d/retired-sites.conf", "sha256": hashlib.sha256(route.encode()).hexdigest()}}}
 				(evidence / "build-ownership.json").write_text(json.dumps(owned))
 				accepted = {"browser_accepted": True, "candidate_sha": owned["candidate_sha"], "image_id": image, "loaded_assets": [{"url": "https://deeplinkerp.com/assets/raw.js?v=" + ("0" if scenario == "asset-url" else "1"), "body_sha256": "d" * 64 if scenario == "asset-body" else files["raw.js"]}]}
 				if scenario == "asset-origin":
@@ -1448,6 +1453,12 @@ class CombinedReleaseContractTests(unittest.TestCase):
 				calls = []
 				def host_call(args):
 					calls.append(args)
+					if "--retirement-proof" in args:
+						proof = copy.deepcopy(owned["retirement"])
+						if scenario == "retired-proof-drift": proof["sha256"] = "e" * 64
+						return json.dumps(proof)
+					if "nginx" in args: return "# configuration file /etc/nginx/conf.d/retired-sites.conf:\n" + route
+					if args[0] == "curl" and "%{http_code}" in args: return "200" if scenario == "retired-routing-broken" else "410"
 					if "main_site_lane.py" in args[1]:
 						return json.dumps({"main_running": True, "rq_aof": True})
 					if args == ["docker", "ps", "-aq"]:
@@ -1476,18 +1487,21 @@ class CombinedReleaseContractTests(unittest.TestCase):
 					return "pong"
 				def inspect(service):
 					self.assertFalse(scenario.startswith("main-"), "Main cleanup must not expect old six containers to run the candidate image")
-					return {"Image": image, "State": {"Running": not (scenario == "post-health" and not build.exists())}, "Mounts": [{"Destination": "/home/frappe/frappe-bench/sites", "Type": "volume", "Name": "sites"}], "HostConfig": {"NetworkMode": "release-net"}}
+					mounts = [{"Destination": "/home/frappe/frappe-bench/sites", "Type": "volume", "Name": "sites"}]
+					if scenario.startswith("retired-") and service == "frontend": mounts.append({"Type": "bind", "Destination": "/etc/nginx/conf.d/retired-sites.conf", "Source": str(evidence / "retired-sites.conf"), "RW": False})
+					return {"Image": image, "State": {"Running": not (scenario == "post-health" and not build.exists())}, "Mounts": mounts, "HostConfig": {"NetworkMode": "release-net"}}
 				def body(args, **kwargs):
 					return types.SimpleNamespace(stdout=b"drift" if scenario == "main-old-asset-drift" and "https://akivision" in args[-1] else b"raw")
 				with patch.object(guard, "_host_call", side_effect=host_call), patch.object(guard, "_container_inspect", side_effect=inspect), patch.object(guard.subprocess, "run", side_effect=body):
-					if scenario in {"exact", "main-exact"}:
+					if scenario in {"exact", "main-exact", "retired-exact"}:
 						result = guard.cleanup_owned_build(evidence, evidence / "acceptance.json")
 						self.assertEqual(result["removed_bytes"], 5)
-						if scenario == "exact":
+						if scenario in {"exact", "retired-exact"}:
 							self.assertEqual(result["redis_rq"]["queues"], {"bench:short": ["preserved"]})
 						else:
 							self.assertTrue(result["redis_rq"]["rq_aof"])
 						self.assertFalse(build.exists())
+						if scenario == "retired-exact": self.assertFalse(any(call[0] == "curl" and "-fsS" in call and any(site in call[-1] for site in guard.SHARED_SITES[1:]) for call in calls), "Retired hosts must not be tested as active sites")
 					elif scenario in {"post-health", "redis-post"}:
 						with self.assertRaisesRegex(AssertionError, "forward HOLD"):
 							guard.cleanup_owned_build(evidence, evidence / "acceptance.json")
@@ -1632,6 +1646,129 @@ class CombinedReleaseContractTests(unittest.TestCase):
 		for field, value in (("old_hosts", ["%"]), ("old_accounts_locked", False), ("old_sessions", 1), ("discovered_sites", list(guard.SHARED_SITES)), ("producer_containers_stopped", False), ("private_config", False), ("old_containers_unchanged", False), ("observed_at", 0), ("new_user", "_old")):
 			with self.subTest(field=field), self.assertRaisesRegex(AssertionError, "seal|HOLD"):
 				guard.validate_main_seal(state, dict(proof, **{field: value}), "a" * 40)
+
+
+class RetiredSiteReleaseTests(unittest.TestCase):
+	module = JointReleaseGuardTests.module
+
+	@contextlib.contextmanager
+	def retirement(self, guard):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			main = root / guard.SHARED_SITES[0]
+			main.mkdir()
+			config = {"db_name": "main", "maintenance_mode": 0}
+			(main / "site_config.json").write_text(json.dumps(config))
+			digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+			receipt = {"version": 1, "status": "complete", "original_sites": list(guard.SHARED_SITES), "active_sites": [guard.SHARED_SITES[0]], "databases_retained": True, "main_config_sha256": digest(main / "site_config.json"), "main_config_without_maintenance_sha256": hashlib.sha256(guard.serialized({"db_name": "main"})).hexdigest(), "retired_sites": {}, "nginx": {"container_path": "/etc/nginx/conf.d/retired-sites.conf", "sha256": "f" * 64}}
+			for site in guard.SHARED_SITES[1:]:
+				relative = ".deeplinkerp-retired-sites/2026-10-10/" + site
+				retired = root / relative
+				(retired / ".retirement-archive").mkdir(parents=True)
+				(retired / "site_config.json").write_text(json.dumps({"db_name": site}))
+				archive = retired / ".retirement-archive/database.sql.gz"
+				archive.write_bytes(b"original database archive")
+				receipt["retired_sites"][site] = {"directory": relative, "config_sha256": digest(retired / "site_config.json"), "archives": {".retirement-archive/database.sql.gz": {"sha256": digest(archive), "local_sha256": digest(archive)}}}
+			path = root / ".deeplinkerp-retired-sites/2026-10-10/retirement-receipt.json"
+			path.write_text(json.dumps(receipt))
+			# Same native filesystem discovery algorithm, no DB or business mocks.
+			native = types.SimpleNamespace(get_sites=lambda sites_path: sorted(p.name for p in Path(sites_path).iterdir() if p.is_dir() and not p.is_symlink() and (p / "site_config.json").exists()))
+			with patch.dict(sys.modules, {"frappe.utils": native}), patch.object(guard, "BENCH_SITES", root, create=True):
+				yield root, path, receipt, digest
+
+	def test_completed_pinned_retirement_derives_only_actual_main_without_changing_historical_sites(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "retirement_site_proof"), "Completed retirement proof is missing")
+		with self.retirement(guard) as (root, path, receipt, digest):
+			proof = guard.retirement_site_proof(path, digest(path), original_config=True)
+			self.assertEqual(proof["active_sites"], ["deeplinkerp.com"])
+			self.assertEqual(guard.SHARED_SITES, tuple(receipt["original_sites"]))
+			with patch.dict(os.environ, {"DEEPLINKERP_RETIREMENT_RECEIPT": str(path), "DEEPLINKERP_RETIREMENT_SHA256": digest(path)}):
+				self.assertEqual(guard.release_sites(), ("deeplinkerp.com",))
+				with self.assertRaisesRegex(AssertionError, "isolated|HOLD"):
+					guard.release_sites(main_only=True)
+		with patch.dict(os.environ, {}, clear=True):
+			self.assertEqual(guard.release_sites(), guard.SHARED_SITES)
+			self.assertEqual(guard.release_sites(main_only=True), guard.SHARED_SITES[:1])
+
+	def test_retirement_rejects_incomplete_receipt_live_site_missing_archive_and_configuration_drift(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "retirement_site_proof"), "Completed retirement proof is missing")
+		for scenario in ("status", "digest", "database", "active", "original", "local", "directory", "missing-archive", "archive-drift", "old-live", "unknown-live", "site-symlink", "archive-symlink", "main-drift"):
+			with self.subTest(scenario=scenario), self.retirement(guard) as (root, path, receipt, digest):
+				expected = digest(path)
+				first = receipt["retired_sites"][guard.SHARED_SITES[1]]
+				archive = root / first["directory"] / next(iter(first["archives"]))
+				if scenario == "status": receipt["status"] = "backup_only"
+				elif scenario == "database": receipt["databases_retained"] = False
+				elif scenario == "active": receipt["active_sites"].append(guard.SHARED_SITES[1])
+				elif scenario == "original": receipt["original_sites"].pop()
+				elif scenario == "local": next(iter(first["archives"].values()))["local_sha256"] = "a" * 64
+				elif scenario == "directory": first["directory"] = "../other"
+				elif scenario == "missing-archive": archive.unlink()
+				elif scenario == "archive-drift": archive.write_bytes(b"changed")
+				elif scenario in {"old-live", "unknown-live"}:
+					live = root / (guard.SHARED_SITES[1] if scenario == "old-live" else "unknown.site")
+					live.mkdir(); (live / "site_config.json").write_text("{}")
+				elif scenario == "site-symlink": (root / "hidden.site").symlink_to(root / first["directory"], target_is_directory=True)
+				elif scenario == "archive-symlink":
+					outside = root / "shared.gz"; outside.write_bytes(archive.read_bytes()); archive.unlink(); archive.symlink_to(outside)
+				elif scenario == "main-drift": (root / "deeplinkerp.com/site_config.json").write_text('{"db_name":"other"}')
+				path.write_text(json.dumps(receipt))
+				if scenario != "digest": expected = digest(path)
+				else: path.write_text(json.dumps(receipt) + " ")
+				with self.assertRaises((AssertionError, FileNotFoundError)):
+					guard.retirement_site_proof(path, expected, original_config=True)
+
+	def test_maintenance_consumes_actual_active_sites_and_preserves_main_config_identity(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "release_sites"), "Verified release scope is missing")
+		with self.retirement(guard) as (root, path, receipt, digest):
+			original_digest = digest(path)
+			(root / "deeplinkerp.com/site_config.json").write_text('{"db_name":"main","maintenance_mode":1}')
+			self.assertEqual(guard.retirement_site_proof(path, original_digest)["active_sites"], ["deeplinkerp.com"])
+			with self.assertRaisesRegex(AssertionError, "configuration|HOLD"):
+				guard.retirement_site_proof(path, original_digest, original_config=True)
+			calls = []
+			tenants = root / "tenants.json"
+			tenants.write_text(json.dumps({"sites": {"deeplinkerp.com": {}}}))
+			with patch.dict(os.environ, {"DEEPLINKERP_RETIREMENT_RECEIPT": str(path), "DEEPLINKERP_RETIREMENT_SHA256": original_digest}), patch.object(guard, "restore_site_maintenance", side_effect=lambda base, site, original, **kw: calls.append(site)), patch.object(sys, "argv", ["guard", "--maintenance-restore", "--tenant-receipt", str(tenants)]), patch("builtins.print"):
+				guard.main()
+			self.assertEqual(calls, ["deeplinkerp.com"])
+
+	def test_persistent_retired_route_requires_exact_bind_loaded_fragment_and_real_410(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "verify_retirement_routing"), "Persistent retirement routing proof is missing")
+		for scenario in ("exact", "message", "writable", "wrong-host", "unloaded", "hash", "http"):
+			with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
+				path = Path(directory) / "retired-sites.conf"
+				hosts = " ".join(guard.SHARED_SITES[1:] if scenario != "wrong-host" else guard.SHARED_SITES)
+				content = "server { listen 8080; server_name " + hosts + "; return 410; }\n"
+				if scenario == "message": content = content.replace("return 410;", 'default_type text/plain; return 410 "Archived";')
+				path.write_text(content)
+				proof = {"active_sites": ["deeplinkerp.com"], "receipt": {"nginx": {"container_path": "/etc/nginx/conf.d/retired-sites.conf", "sha256": hashlib.sha256(content.encode()).hexdigest() if scenario != "hash" else "e" * 64}}}
+				container = {"Mounts": [{"Type": "bind", "Source": str(path), "Destination": proof["receipt"]["nginx"]["container_path"], "RW": scenario == "writable"}], "State": {"Running": True}}
+				calls = []
+				def host(args):
+					calls.append(args)
+					if "nginx" in args: return "" if scenario == "unloaded" else "# configuration file /etc/nginx/conf.d/retired-sites.conf:\n" + content
+					return "200" if scenario == "http" else "410"
+				with patch.object(guard, "_container_inspect", return_value=container), patch.object(guard, "_host_call", side_effect=host):
+					if scenario in {"exact", "message"}:
+						guard.verify_retirement_routing(proof)
+						self.assertEqual(sum(call[0] == "curl" for call in calls), 3)
+					else:
+						with self.assertRaises(AssertionError): guard.verify_retirement_routing(proof)
+
+	def test_host_drain_forwards_retirement_pin_to_runtime_but_never_narrows_raw_rq(self):
+		guard = self.module()
+		calls = []
+		with patch.dict(os.environ, {"DEEPLINKERP_RETIREMENT_RECEIPT": "/retirement-receipt.json", "DEEPLINKERP_RETIREMENT_SHA256": "a" * 64}), patch.object(guard, "_host_call", side_effect=lambda args: calls.append(args) or "{}"):
+			guard._container_read("backend", "guard.py", "--runtime-proof")
+			guard._container_read("backend", "guard.py", "--rq-snapshot")
+		self.assertIn("DEEPLINKERP_RETIREMENT_RECEIPT=/retirement-receipt.json", calls[0])
+		self.assertIn("DEEPLINKERP_RETIREMENT_SHA256=" + "a" * 64, calls[0])
+		self.assertFalse(any("RETIREMENT" in value for value in calls[1]))
 
 
 if __name__ == "__main__":

@@ -45,6 +45,40 @@ class ReleaseRecoveryTests(unittest.TestCase):
 			and shlex.split(line.strip())[1] in {"create", "up"}
 		]
 
+	def test_shared_single_site_approval_requires_retirement_pin_and_cannot_mix_isolated_lane(self):
+		prefix = self.release_source().split("# The final joint candidate", 1)[0]
+		for mode in ("legacy", "bare-main", "retired", "mixed-isolated", "missing-pin"):
+			with self.subTest(mode=mode):
+				flags = [] if mode in {"legacy", "bare-main"} else ["--retirement-receipt", "/home/frappe/frappe-bench/sites/.deeplinkerp-retired-sites/2026-10-10/retirement-receipt.json", "d" * 64 if mode != "missing-pin" else ""]
+				if mode == "mixed-isolated": flags.insert(0, "--main-only")
+				approval = ("deeplinkerp.com,akivision.deeplinkerp.com,latingo.deeplinkerp.com,yuewei.deeplinkerp.com", "akivision.deeplinkerp.com,latingo.deeplinkerp.com,yuewei.deeplinkerp.com") if mode == "legacy" else ("deeplinkerp.com", "")
+				args = ["archive", "a" * 40, "old-image", "old-id", "", "", "finance", "b" * 40, "oa", "c" * 40, *approval]
+				result = subprocess.run(["bash", "-c", prefix, "release-test", *flags, *args], capture_output=True, text=True)
+				self.assertEqual(result.returncode == 0, mode in {"legacy", "retired"}, result.stderr)
+
+	def test_command_runner_passes_pinned_retirement_to_existing_shared_container(self):
+		script = self.shell_function("command_runner") + """
+set -eo pipefail
+main_prepared=0
+private_runtime_gid=1000
+release_network=shared-net
+build_dir=/frozen-source
+release_dir=/verified-evidence
+sites_spec=existing-sites
+branding_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+resume_receipt=/existing-resume
+retirement_receipt=/home/frappe/frappe-bench/sites/.deeplinkerp-retired-sites/2026-10-10/retirement-receipt.json
+retirement_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+main_lane() { return 0; }
+docker() { printf '%s\\n' "$@"; }
+command_runner old-image python guard --runtime-proof
+"""
+		result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+		self.assertEqual(result.returncode, 0, result.stderr)
+		self.assertIn("DEEPLINKERP_RETIREMENT_RECEIPT=/home/frappe/frappe-bench/sites/.deeplinkerp-retired-sites/2026-10-10/retirement-receipt.json", result.stdout)
+		self.assertIn("DEEPLINKERP_RETIREMENT_SHA256=" + "d" * 64, result.stdout)
+		self.assertNotIn("deeplinkerp_main", result.stdout)
+
 	def test_worker_staging_never_starts_jobs_and_checks_cli_before_maintenance(self):
 		commands = self.worker_staging_commands()
 		self.assertEqual(len(commands), 2, "Both forward cutover and recovery must stage stopped workers")
@@ -638,7 +672,8 @@ printf '%s|%s|%s|%s' "$crm_sha" "$finance_sha" "$current_finance" "$current_oa"
 					"crm-current|preserved|" + ("" if finance == "<no value>" else finance) + "|",
 				)
 
-	def compare_audits(self, before, after, manifest):
+	def compare_audits(self, before, after, manifest, active_sites=None):
+		active_sites = active_sites or ["deeplinkerp.com", "akivision.deeplinkerp.com", "latingo.deeplinkerp.com", "yuewei.deeplinkerp.com"]
 		_source = self.release_source()
 		code = self.shell_function("verify_audit_ownership").split("<<'PY'\n", 1)[1].split("\nstats=", 1)[0]
 		with tempfile.TemporaryDirectory() as tmp:
@@ -716,7 +751,8 @@ printf '%s|%s|%s|%s' "$crm_sha" "$finance_sha" "$current_finance" "$current_oa"
 			)
 			(root / "before.json").write_text(json.dumps(before))
 			(root / "after.json").write_text(json.dumps(after))
-			for site in ("akivision.deeplinkerp.com", "latingo.deeplinkerp.com", "yuewei.deeplinkerp.com"):
+			(root / "tenants.json").write_text(json.dumps({"sites": {site: {} for site in active_sites}}))
+			for site in active_sites[1:]:
 				for phase, value in (("before", before), ("after", after), ("joint-receipt", receipt)):
 					(root / (site + "." + phase + ".json")).write_text(json.dumps(value))
 			(root / "release-source-manifest.json").write_text(json.dumps(manifest))
@@ -748,6 +784,7 @@ printf '%s|%s|%s|%s' "$crm_sha" "$finance_sha" "$current_finance" "$current_oa"
 		for app in manifest["apps"]:
 			after["release_sources"][app][next(iter(manifest["apps"][app]))] = "new"
 		self.assertEqual(self.compare_audits(before, after, manifest).returncode, 0)
+		self.assertEqual(self.compare_audits(before, after, manifest, active_sites=["deeplinkerp.com"]).returncode, 0)
 		for change in ("unlisted", "listed", "crm", "page-role-identities"):
 			with self.subTest(change=change):
 				bad = json.loads(json.dumps(after))
@@ -1075,6 +1112,7 @@ printf '%s|%s|%s|%s' "$crm_sha" "$finance_sha" "$current_finance" "$current_oa"
 				"quiesce_release_workers",
 				"verify_staged_release",
 				"verify_running_release",
+				"verify_retired_routes",
 			)
 		)
 		baseline = {
@@ -1182,6 +1220,7 @@ recover
 """
 		with tempfile.TemporaryDirectory() as tmp:
 			root = Path(tmp)
+			(root / "tenants.json").write_text(json.dumps({"sites": {site: {} for site in ("deeplinkerp.com", "akivision.deeplinkerp.com", "latingo.deeplinkerp.com", "yuewei.deeplinkerp.com")}}))
 			if baseline_present:
 				(root / "before.json").write_text(json.dumps(baseline))
 				for site in (
