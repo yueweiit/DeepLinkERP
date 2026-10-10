@@ -21,6 +21,65 @@ class ReleaseRecoveryTests(unittest.TestCase):
 	def release_source(self):
 		return (Path(__file__).parents[1] / "deploy/production/deploy_unified_purchase.sh").read_text()
 
+	def test_shared_cutover_preserves_immutable_assets_manifest(self):
+		source = self.release_source()
+		self.assertFalse('/usr/bin/touch /home/frappe/frappe-bench/sites/assets/assets.json' in source)
+
+	def test_retirement_proofs_are_not_tenant_database_audits(self):
+		source = self.release_source()
+		self.assertFalse("glob('*.before.json')" in source)
+		self.assertFalse('glob("*.before.json")' in source)
+		with tempfile.TemporaryDirectory() as tmp:
+			root = Path(tmp)
+			(root / 'tenants.json').write_text(json.dumps({'sites': {'deeplinkerp.com': {}, 'other.test': {}}}))
+			(root / 'retirement-routing.before.json').write_text('{}')
+			for name in ('before.json', 'other.test.before.json'):
+				(root / name).write_text('{}')
+			code = self.shell_function('tenant_audit_paths') + '\ntenant_audit_paths "$1"\n'
+			result = subprocess.run(['bash', '-c', code, 'test', tmp], capture_output=True, text=True)
+			self.assertEqual(result.returncode, 0, result.stderr)
+			self.assertEqual(json.loads(result.stdout), [str(root / 'before.json'), str(root / 'other.test.before.json')])
+
+	def test_release_backup_never_invokes_retention_cleanup(self):
+		source = self.release_source()
+		self.assertFalse('bench --site deeplinkerp.com backup --with-files --compress' in source)
+		backup = self.shell_function('capture_native_backup')
+		self.assertIn('BackupGenerator', backup)
+		self.assertIn('get_backup(force=True', backup)
+		self.assertNotIn('new_backup(', backup)
+		self.assertNotIn('delete_temp_backups', backup)
+		code = backup.split(" -c '\n", 1)[1].split("\n' \"release-$release_key\"", 1)[0]
+		with tempfile.TemporaryDirectory() as tmp:
+			root = Path(tmp)
+			(root / 'private/backups').mkdir(parents=True)
+			retained = root / 'private/backups/retained-directory'
+			retained.mkdir()
+			(retained / 'old-backup').write_bytes(b'keep')
+			calls = []
+			class NativeBackup:
+				def __init__(self, *args, **kwargs):
+					calls.append(('init', kwargs))
+					self.root = Path(kwargs['backup_path'])
+				def get_backup(self, **kwargs):
+					calls.append(('backup', kwargs))
+					for name in ('backup_path_db', 'backup_path_files', 'backup_path_private_files', 'backup_path_conf'):
+						path = self.root / name
+						path.write_bytes(b'nonempty')
+						setattr(self, name, str(path))
+			frappe = types.SimpleNamespace(
+				init=lambda **kwargs: calls.append(('site', kwargs)), connect=lambda: None,
+				destroy=lambda: calls.append(('destroy', {})), get_site_path=lambda *parts: str(root.joinpath(*parts)),
+				conf=types.SimpleNamespace(db_name='db', db_user='user', db_password='test-only', db_socket=None, db_host='db', db_port=3306, db_type='mariadb'),
+			)
+			with patch.dict(sys.modules, {'frappe': frappe, 'frappe.utils': types.ModuleType('frappe.utils'), 'frappe.utils.backups': types.SimpleNamespace(BackupGenerator=NativeBackup)}), patch.object(sys, 'argv', ['-c', 'release-test']), contextlib.redirect_stdout(io.StringIO()) as output:
+				exec(code, {})
+			self.assertTrue(calls[1][1]['ignore_conf'])
+			self.assertTrue(calls[1][1]['compress_files'])
+			self.assertEqual(calls[2], ('backup', {'force': True, 'ignore_files': False}))
+			self.assertEqual(calls[-1][0], 'destroy')
+			self.assertTrue(json.loads(output.getvalue())['full_backup'])
+			self.assertEqual((retained / 'old-backup').read_bytes(), b'keep')
+
 	def test_explicit_main_only_entrypoint_reuses_build_and_never_enters_shared_cutover(self):
 		source = self.release_source()
 		self.assertIn("--main-only", source, "Explicit authorized main-only lane is missing")

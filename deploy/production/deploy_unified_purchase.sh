@@ -136,6 +136,40 @@ for app in json.loads(sys.argv[1]):
 print(json.dumps(result))
 ' "$apps" > "$output"
 }
+tenant_audit_paths() {
+  python3 - "$1" "${main_only:-0}" <<'PY'
+import json,re,sys
+from pathlib import Path
+root=Path(sys.argv[1]);sites=json.loads((root/'tenants.json').read_bytes())['sites']
+assert isinstance(sites,(dict,list)) and 'deeplinkerp.com' in sites
+assert all(isinstance(site,str) and re.fullmatch(r'[A-Za-z0-9.-]+',site) for site in sites)
+paths=[root/'before.json']
+if sys.argv[2]!='1': paths.extend(root/(site+'.before.json') for site in sorted(sites) if site!='deeplinkerp.com')
+assert all(path.is_file() and not path.is_symlink() for path in paths)
+print(json.dumps([str(path) for path in paths]))
+PY
+}
+capture_native_backup() {
+  # Native full backup only; retain earlier backups, including directories.
+  command_runner "$old_image_id" "$python" -c '
+import json,sys
+from pathlib import Path
+import frappe
+from frappe.utils.backups import BackupGenerator
+frappe.init(site="deeplinkerp.com");frappe.connect()
+try:
+ root=Path(frappe.get_site_path("private","backups",sys.argv[1])).resolve()
+ assert root.parent==Path(frappe.get_site_path("private","backups")).resolve()
+ root.mkdir(mode=0o700)
+ conf=frappe.conf
+ backup=BackupGenerator(conf.db_name,conf.db_user,conf.db_password,db_socket=conf.db_socket,db_host=conf.db_host,db_port=conf.db_port,db_type=conf.db_type,backup_path=str(root),ignore_conf=True,compress_files=True)
+ backup.get_backup(force=True,ignore_files=False)
+ files=[Path(getattr(backup,key)).resolve() for key in ("backup_path_db","backup_path_files","backup_path_private_files","backup_path_conf")]
+ assert len(set(files))==4 and all(path.parent==root and path.is_file() and path.stat().st_size>0 for path in files)
+ print(json.dumps({"full_backup":True,"files":[{"name":path.name,"bytes":path.stat().st_size} for path in files]},sort_keys=True))
+finally: frappe.destroy()
+' "release-$release_key" > "$release_dir/backup.log"
+}
 command_runner() {
   local image=$1 entrypoint=$2
   shift 2
@@ -302,15 +336,17 @@ PY
 }
 approve_release_sources() {
   # Same full maps for the isolated main or the retained compatibility caller.
-  python3 - "$release_dir" "$build_dir" <<'PY'
+  local baselines=${audit_paths:-}
+  if [[ -z "$baselines" ]]; then baselines=$(tenant_audit_paths "$release_dir"); fi
+  python3 - "$release_dir" "$build_dir" "$baselines" <<'PY'
 import copy,hashlib,json,sys
 from pathlib import Path
-evidence,build=map(Path,sys.argv[1:]);sys.path.insert(0,str(build/'deploy/production'))
+evidence,build=map(Path,sys.argv[1:3]);sys.path.insert(0,str(build/'deploy/production'))
 from joint_release_guards import merge_frozen_branding_sources
 manifest=json.loads((build/'release-source-manifest.json').read_bytes());pinned=json.loads((evidence/'pinned-base-sources.json').read_bytes())
 root=build/'deeplinkerp_branding'
 files={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in root.rglob('*') if p.is_file() and '__pycache__' not in p.parts and p.suffix not in {'.pyc','.pyo'}}
-for baseline in (evidence/'before.json',*evidence.glob('*.before.json')):
+for baseline in map(Path,json.loads(sys.argv[3])):
  before=json.loads(baseline.read_bytes())
  assert before['release_sources_all']=={app:pinned[app] for app in before['release_sources_all']}, 'Dirty server app source differs from immutable base; HOLD'
  after=copy.deepcopy(before['release_sources_all']);after['deeplinkerp_branding']=merge_frozen_branding_sources(after['deeplinkerp_branding'],files)
@@ -644,13 +680,14 @@ for service in backend queue-long queue-short scheduler websocket; do
   docker cp "$build_dir/deploy/production/joint_release_guards.py" "frappe_docker-$service-1:/tmp/joint_release_guards.py"
 done
 quiesce_release_workers
-command_runner "$old_image_id" bench --site deeplinkerp.com backup --with-files --compress > "$release_dir/backup.log"
+capture_native_backup
 capture_release_audit before "$release_dir/before.json" "$old_image_id"
 for site in "${sites[@]:1}"; do
   capture_release_audit before "$release_dir/$site.before.json" "$old_image_id" "$site"
 done
 baseline_captured=1
-apps=$(python3 -c 'import json,sys;from pathlib import Path;root=Path(sys.argv[1]);paths=[root/"before.json",*root.glob("*.before.json")];print(json.dumps(sorted(set().union(*(json.loads(p.read_bytes())["release_sources_all"] for p in paths)))))' "$release_dir")
+audit_paths=$(tenant_audit_paths "$release_dir")
+apps=$(python3 -c 'import json,sys;from pathlib import Path;paths=map(Path,json.loads(sys.argv[1]));print(json.dumps(sorted(set().union(*(json.loads(p.read_bytes())["release_sources_all"] for p in paths)))))' "$audit_paths")
 capture_pinned_sources "$old_image_id" "$release_dir/pinned-base-sources.json" "$apps"
 approve_release_sources
 # All six containers are staged stopped. Metadata and the complete audit precede ANY serving startup.
@@ -670,7 +707,6 @@ for site in "${sites[@]:1}"; do
   command_runner "$new_image_id" "$python" -c 'import sys;from pathlib import Path;sys.stdout.buffer.write(Path(sys.argv[1]).read_bytes())' "$site_receipt" > "$release_dir/$site.joint-receipt.json"
 done
 # Existing compiled inventory bundles/maps are preserved, NOT claimed rebuilt.
-command_runner "$new_image_id" /usr/bin/touch /home/frappe/frappe-bench/sites/assets/assets.json
 for site in "${sites[@]}"; do command_runner "$new_image_id" bench --site "$site" clear-cache; done
 capture_release_audit after "$release_dir/after.json" "$new_image_id"
 for site in "${sites[@]:1}"; do
