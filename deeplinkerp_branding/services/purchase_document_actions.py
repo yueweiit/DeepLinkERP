@@ -541,7 +541,7 @@ def _payment(doc):
     warnings = []
     references = service._procurement_references(doc, warnings)
     kinds = {row.reference_doctype for row in doc.references}
-    simple_references = kinds == {"Purchase Invoice"} or (kinds == {"Purchase Order"} and len({row.reference_name for row in doc.references}) == 1)
+    simple_references = kinds == {"Purchase Invoice"}
     advanced = bool(warnings or doc.payment_type != "Pay" or doc.party_type != "Supplier" or doc.get("deductions")
                     or doc.paid_from_account_currency != doc.paid_to_account_currency or doc.unallocated_amount
                     or not doc.references or not simple_references)
@@ -582,14 +582,7 @@ def _payment_balance(doc, validate_allocations=True):
     balances = {}
     for row in doc.references:
         if row.reference_doctype == "Purchase Order":
-            _, order, balance = service.payment_target("Purchase Order", row.reference_name)
-            if order.company != doc.company or order.supplier != doc.party:
-                frappe.throw("预付来源公司或供应商已改变")
-            service._advance_account(doc)
-            if balance["currency"] != doc.paid_from_account_currency:
-                frappe.throw("跨币种预付款请在原生付款单核对")
-            balances[order.name] = balance
-            continue
+            frappe.throw("采购订单预付款请在原生财务付款单处理；采购付款记录可继续查看")
         if row.reference_doctype != "Purchase Invoice":
             frappe.throw(ADVANCED)
         invoice = _locked("Purchase Invoice", row.reference_name)

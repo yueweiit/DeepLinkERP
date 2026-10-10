@@ -521,6 +521,8 @@ body.dlp-purchase-order-grid-active-readonly .page-actions .primary-action {
 [data-dlp-oa-compatibility="true"] { display: none !important; }
 
 /* The purchase table uses physical material rows; other compact lists stay grids. */
+body.dlp-purchase-order-grid-active .result-container { scroll-padding-top: calc(var(--dlp-po-row-height) + 8px); }
+body.dlp-purchase-order-grid-active .dlp-purchase-table .list-row-checkbox { scroll-margin-top: calc(var(--dlp-po-row-height) + 8px); }
 body.dlp-purchase-order-grid-active .dlp-purchase-table { border-collapse: separate; border-spacing: 0; table-layout: fixed; width: max-content; min-width: 100%; font-size: inherit; }
 body.dlp-purchase-order-grid-active .dlp-purchase-table .dlp-po-grid-row,
 body.dlp-purchase-order-grid-active .dlp-purchase-table .dlp-po-grid-header { display: table-row; height: auto; background: inherit; }

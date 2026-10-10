@@ -43,6 +43,26 @@ test("purchase header uses a physical material table with compact independent co
 	assert.equal((header.match(/list-check-all/g) || []).length, 1);
 });
 
+test("native header rendering and custom rows share one removable header lifecycle", () => {
+	const { list, env } = bareList();
+	let fragments = [];
+	list.$result = { append(html) { fragments.push(html); }, find(selector) {
+		if (selector === '.list-row-container') return { remove() { fragments = fragments.filter(html => !html.includes('list-row-container')); } };
+		if (selector === '.dlp-custom-list-header') return {remove() {fragments=fragments.filter(html=>!html.includes('dlp-custom-list-header'));}};
+		if (selector === '.dlp-custom-table-surface') return {length:fragments.filter(html=>html.includes('dlp-custom-table-surface')).length};
+		return { show() {}, hide() {}, find() { return { prop() { return this; } }; } };
+	} };
+	list.render_header = function () { this.$result.append(this.get_header_html()); };
+	production('mount')(list, env);
+	list.render_header(); list.render_header(true);
+	assert.equal((fragments.join('').match(/<thead>/g) || []).length,1,'before first rows');
+	for (const step of ['initial', 'refresh', 'page', 'back']) {
+		list.render_header(true); list.render_list();
+		list.render_header(); list.render_header(true);
+		assert.equal((fragments.join('').match(/<thead>/g) || []).length, 1, step);
+	}
+});
+
 test("export includes visible columns in order and account currency, without any page limit", () => {
 	const requests = production("buildRequests")({ doctype: "Purchase Order", filters: [], or_filters: [], start: 500, page_length: 500, order_by: "name asc" }, ["supplier_name", "advance_paid", "name"], permitted);
 	assert.deepEqual(requests.export.fields, ["supplier_name", "advance_paid", "party_account_currency", "name"]);
@@ -558,6 +578,7 @@ list.data = [{ name: "PO-1", row_type: "purchase_order" }, { name: "PO-2", row_t
 	list.$result = {
 		find(selector) {
 			if (selector === ".list-row-container") return { remove() { rows.clear(); } };
+			if (selector === ".dlp-custom-list-header") return {remove() {}};
 			if (selector === ".list-header-subject") return { show() {}, find() { return { prop() { return this; } }; } };
 			if (selector === ".checkbox-actions") return { hide() {} };
 			if (selector === ".list-row-checkbox:checked") return [...rows.values()].filter((row) => row.checked);
@@ -790,7 +811,7 @@ test("restricted related progress retains independently authorized native order 
 	try {
 		const { list, env } = bareList(); production("mount")(list, env);
 		for (const docstatus of [0, 1]) {
-			const doc = { name: "PO-1", row_type: "purchase_order", docstatus, status: docstatus ? "To Receive and Bill" : "Draft", per_received: 0, order_progress: { state: "restricted" } };
+			const doc = { name: "PO-1", row_type: "purchase_order", docstatus, status: docstatus ? "To Receive and Bill" : "Draft", per_received: 0, receipt_eligibility: {allowed:docstatus===1,reason:''}, order_progress: { state: "restricted" } };
 			const native = context.DeepLinkERPPurchasePayments.orderReceiptAction(doc), html = list.get_list_row_html(doc);
 			assert.ok(native); assert.ok(html.includes(native), "related-read denial cannot replace existing native action authority"); assert.doesNotMatch(html, /dlp-crossborder-open/);
 		}
@@ -806,6 +827,7 @@ test("purchase physical table CSS preserves table layout, rowspans and sticky sc
  assert.match(css, /body\.dlp-purchase-order-grid-active \.dlp-purchase-table th\s*\{[^}]*position:\s*sticky/);
  assert.match(css, /\.dlp-purchase-table \.dlp-purchase-frozen\s*\{[^}]*left:\s*var\(--dlp-purchase-left\)/);
  assert.doesNotMatch(css, /\.dlp-purchase-expand\s*\{/);
+ assert.match(css, /body\.dlp-purchase-order-grid-active \.result-container\s*\{[^}]*scroll-padding-top:/);
 });
 
 function mountedPurchase(beforeMount) {
@@ -913,14 +935,14 @@ test("whole-order selection clears with page and tabs and opens the native batch
 	list.clear_checked_items = () => { checked.clear(); list.$checks = []; };
 	env.DeepLinkERPPurchasePayments = { reversalBlocked: value => Boolean(value && value.stage !== 'completed'), orderReceiptAction: () => 'dlp-order-pay dlp-order-receipt', pay: (...args) => calls.push(["pay", ...args]), documentDrawer: (...args) => calls.push(["receipt", ...args]), batchDocumentDrawer: (...args) => calls.push(["batch-receipt", ...args]), batchPay: (...args) => calls.push(["batch-pay", ...args]) };
 	assert.equal(c.providerScope, "orders");
-	payload({ name: "PO-1", row_type: "purchase_order", modified: "v1", order_progress: { items: [{ name: "I1" }, { name: "I2" }] } });
+	payload({ name: "PO-1", row_type: "purchase_order", modified: "v1", receipt_eligibility: {allowed:true,reason:""}, order_progress: { items: [{ name: "I1" }, { name: "I2" }] } });
 	checked.add("PO-1"); checked.add("OA-UNRELATED"); list.on_row_checked();
 	assert.deepEqual(c.getSelectedPurchaseOrders(), [{ name: "PO-1", modified: "v1" }]);
 	await c.runPurchaseAction("receipt"); await c.runPurchaseAction("payment");
-	assert.deepEqual(calls, [["receipt", "Purchase Order", "PO-1", "Purchase Receipt"], ["pay", "Purchase Order", "PO-1"]]);
+	assert.deepEqual(calls, [["receipt", "Purchase Order", "PO-1", "Purchase Receipt"]]);
 	c.providerRows[0].reversal = { stage: 'failed' };
 	await c.runPurchaseAction('receipt'); await c.runPurchaseAction('payment');
-	assert.equal(calls.length, 2, 'pending selection cannot start dependent batch or single actions');
+	assert.equal(calls.length, 1, 'pending selection cannot start dependent batch or single actions');
 	c.setPage(1); assert.equal(checked.size, 0);
 	checked.add("PO-1"); c.quick.company = "OTHER"; list.get_args(); assert.equal(checked.size, 0);
 	checked.add("PO-1"); const old = dispatch(list);
@@ -932,11 +954,15 @@ test("whole-order selection clears with page and tabs and opens the native batch
 	payload({ name: "OA-1", row_type: "oa_request" });
 	assert.equal(c.getSelectedPurchaseOrders().length, 0); assert.doesNotMatch(list.get_header_html(), /list-check-all/);
 	c.setProviderScope("orders", false);
-	c.providerRows = list.data = [{ name: "PO-1", row_type: "purchase_order" }, { name: "PO-2", row_type: "purchase_order" }];
+	c.providerRows = list.data = [{ name: "PO-1", row_type: "purchase_order", receipt_eligibility: {allowed:true,reason:""} }, { name: "PO-2", row_type: "purchase_order", receipt_eligibility: {allowed:true,reason:""} }];
 	checked.add("PO-1"); checked.add("PO-2");
 	env.frappe.msgprint = options => calls.push(["notice", options.message]);
 	await c.runPurchaseAction("receipt"); await c.runPurchaseAction("payment");
-	assert.deepEqual(calls.slice(2), [["batch-receipt", "Purchase Order", [{name:"PO-1",modified:undefined},{name:"PO-2",modified:undefined}], "Purchase Receipt"], ["batch-pay", "Purchase Order", [{name:"PO-1",modified:undefined},{name:"PO-2",modified:undefined}]]]);
+	assert.deepEqual(calls.slice(1), [["batch-receipt", "Purchase Order", [{name:"PO-1",modified:undefined},{name:"PO-2",modified:undefined}], "Purchase Receipt"]]);
+	c.providerRows[1].receipt_eligibility={allowed:false,reason:'订单已关闭'};
+	await c.runPurchaseAction('receipt');
+	assert.equal(calls.length,3); assert.match(calls[2][1],/PO-2.*订单已关闭/);
+	checked.add('PO-1'); dispatch(list); assert.equal(checked.size,0,'refresh clears selection');
 });
 
 

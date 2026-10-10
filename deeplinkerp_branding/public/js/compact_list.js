@@ -244,7 +244,7 @@
 		let saved;
 		try { saved = JSON.parse(root.localStorage?.getItem(key) || "null"); } catch (_) { /* Browsers may disable storage. */ }
 		const originals = {};
-		for (const name of ["get_args", "get_call_args", "no_change", "prepare_data", "reset_defaults", "get_header_html", "get_list_row_html", "render_list", "render_count", "toggle_result_area", "on_filter_change", "process_document_refreshes", "debounced_refresh", "get_checked_items", "set_rows_as_checked", "on_row_checked", "before_render", "after_render"]) originals[name] = list[name];
+		for (const name of ["get_args", "get_call_args", "no_change", "prepare_data", "reset_defaults", "get_header_html", "get_list_row_html", "render_header", "render_list", "render_count", "toggle_result_area", "on_filter_change", "process_document_refreshes", "debounced_refresh", "get_checked_items", "set_rows_as_checked", "on_row_checked", "before_render", "after_render"]) originals[name] = list[name];
 		const providerAllowed = new Set(displayAllowed);
 		for (const field of config.provider?.virtualFields || []) providerAllowed.add(field);
 		let providerSaved;
@@ -451,13 +451,24 @@
 		}
 		list.get_header_html = () => headerHTML(controller);
 		list.get_list_row_html = (doc) => rowHTML(controller, doc);
+		if (config.renderTable) list.render_header = function (...args) {
+			// ListView.refresh calls this again after render_list. The physical table
+			// already owns its header; native refresh_header must not append a second table.
+			if (this.$result?.find(".dlp-custom-table-surface").length) {
+				this.$list_head_subject = this.$result.find(".list-header-subject");
+				this.$checkbox_actions = this.$result.find(".checkbox-actions");
+				return;
+			}
+			this.$result?.find(".dlp-custom-list-header").remove();
+			return originals.render_header?.apply(this, args);
+		};
 		list.render_list = function () {
 			this.$result?.find(".list-row-container").remove();
 			this.$list_head_subject = null;
 			this.$checkbox_actions = null;
 			if (config.renderTable) {
 				currentRows(controller).forEach((doc, index) => { doc._idx = index; });
-				this.$result?.append(config.renderTable(controller, currentRows(controller)));
+				this.$result?.append(`<div class="list-row-container dlp-custom-table-surface">${config.renderTable(controller, currentRows(controller))}</div>`);
 				this.$list_head_subject = this.$result?.find(".list-header-subject");
 				this.$checkbox_actions = this.$result?.find(".checkbox-actions");
 			} else {
@@ -568,7 +579,7 @@
 	}
 
 	function headerHTML(controller) {
-		if (config.renderHeader) return config.renderHeader(controller);
+		if (config.renderHeader) return `<div class="list-row-container dlp-custom-list-header">${config.renderHeader(controller)}</div>`;
 		const { translate: t, list } = controller;
 		const provider = providerActive(controller), readonly = providerReadonly(controller);
 		const checkbox = readonly ? readonlyCheckbox(t) : `<input class="list-header-checkbox list-check-all" type="checkbox" title="${escapeHTML(t("Select All"))}">`;

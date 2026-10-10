@@ -933,8 +933,11 @@ def get_unified_purchase_list(filters=None, start=0, page_length=DEFAULT_PAGE_LE
 	POINTER = "custom_purchase_reversal_operation"
 	names = [row["name"] for row in payload["rows"] if row["row_type"] == "purchase_order"]
 	pending = {name for name, in frappe.db.get_values(PURCHASE_ORDER, {"name": ["in", names], POINTER: ["is", "set"]}, "name")} if names else set()
+	from .purchase_payment_service import receipt_eligibility
+	can_receive = bool(frappe.has_permission("Purchase Receipt", "create"))
 	for row in payload["rows"]:
 		if row["row_type"] == "purchase_order":
+			row["receipt_eligibility"] = receipt_eligibility(row, can_create=can_receive, reversal_pending=row["name"] in pending)
 			if row["name"] in pending or row.get("docstatus") == 2:
 				from .purchase_reversal_progress import projection
 			row["reversal"] = projection(frappe.get_doc(PURCHASE_ORDER, row["name"], for_update=True)) if row["name"] in pending or row.get("docstatus") == 2 else None

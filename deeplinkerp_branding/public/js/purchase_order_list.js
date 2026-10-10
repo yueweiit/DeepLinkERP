@@ -70,10 +70,11 @@
  function selectionChanged(c) {
   if(!c.getSelectedPurchaseOrders)return;
   const selected=c.getSelectedPurchaseOrders(),names=new Set(selected.map(row=>row.name));
-  const allowed=c.providerRows.filter(row=>names.has(row.name)).map(doc=>payments(c)?.orderReceiptAction(doc) || '');
+  const blocked=c.providerRows.filter(row=>names.has(row.name) && !row.receipt_eligibility?.allowed);
   c.$purchaseActions?.find('.dlp-purchase-selected-count').text(c.translate(`已选 ${selected.length} 张订单`));
-  for(const [action,marker] of [['receipt','dlp-order-receipt'],['payment','dlp-order-pay']])c.$purchaseActions?.find(`[data-purchase-action="${action}"]`).prop('disabled',!selected.length || !allowed.every(value=>value.includes(marker)));
-  c.$purchaseActions?.find('.dlp-purchase-action-notice').text(selected.length>1?c.translate('入库可逐单或合并；合并付款按实际应付核销。'):'');
+  c.$purchaseActions?.find('[data-purchase-action="receipt"]').prop('disabled',!selected.length || blocked.length>0);
+  const reasons=blocked.map(doc=>`${doc.name}：${doc.receipt_eligibility?.reason || '收货资格未知，请刷新'}`);
+  c.$purchaseActions?.find('.dlp-purchase-action-notice').text(blocked.length?`${reasons.slice(0,3).join('；')}${blocked.length>3?`；另有 ${blocked.length-3} 张不可入库`:''}`:selected.length>1?c.translate('默认逐单入库，可选择合并。'):'').attr('title',reasons.join('；'));
  }
  function clearSelection(c) {
   c.list.clear_checked_items?.();
@@ -104,17 +105,16 @@
    return c.providerRows.filter(doc=>doc.row_type==='purchase_order' && names.has(doc.name)).map(doc=>({name:doc.name,modified:doc.modified}));
   };
   c.runPurchaseAction=async action=> {
+   if(action!=='receipt')return;
    const selected=c.getSelectedPurchaseOrders();
    if(!selected.length)return;
-   if(selected.some(value=>payments(c)?.reversalBlocked(c.providerRows.find(row=>row.name===value.name)?.reversal)))return;
+   const blocked=selected.map(value=>c.providerRows.find(row=>row.name===value.name)).filter(doc=>!doc?.receipt_eligibility?.allowed || payments(c)?.reversalBlocked(doc.reversal));
+   if(blocked.length){c.root.frappe.msgprint?.({title:c.translate('无法入库'),message:blocked.map(doc=>`${esc(doc?.name)}：${esc(doc?.receipt_eligibility?.reason || '收货资格已变化，请刷新')}`).join('<br>')});return;}
    if(selected.length>1){
     if(action==='receipt')return payments(c).batchDocumentDrawer('Purchase Order',selected,'Purchase Receipt');
-    if(action==='payment')return payments(c).batchPay('Purchase Order',selected);
     return;
    }
-   const doc=c.providerRows.find(row=>row.name===selected[0].name),native=payments(c)?.orderReceiptAction(doc) || '';
-   if(action==='receipt' && native.includes('dlp-order-receipt'))return payments(c).documentDrawer('Purchase Order',doc.name,'Purchase Receipt');
-   if(action==='payment' && native.includes('dlp-order-pay'))return payments(c).pay('Purchase Order',doc.name);
+   return payments(c).documentDrawer('Purchase Order',selected[0].name,'Purchase Receipt');
   };
   // Crossborder drawer saves call this public hook before the shared page refresh.
   c.invalidatePurchaseDetails=names=> {
@@ -125,14 +125,14 @@
   };
   c.$purchaseTabs=c.root.$('<nav class="dlp-procurement-tabs dlp-purchase-scope-tabs" role="tablist" aria-label="采购单据"><button type="button" role="tab" data-purchase-scope="orders">采购订单</button><button type="button" role="tab" data-purchase-scope="oa">钉钉待完善</button></nav>').insertAfter(c.$filters);
   c.$purchaseTabs.on('click.dlpPurchaseScope','[data-purchase-scope]',event=>c.setProviderScope(event.currentTarget.dataset.purchaseScope));
-  c.$purchaseActions=c.root.$('<div class="dlp-purchase-selection-actions"><span class="dlp-purchase-selected-count" aria-live="polite"></span><button type="button" class="btn btn-primary btn-sm" data-purchase-action="receipt" disabled>入库</button><button type="button" class="btn btn-default btn-sm" data-purchase-action="payment" disabled>付款</button><span class="text-muted dlp-purchase-action-notice" aria-live="polite"></span></div>').insertAfter(c.$toolbar);
+  c.$purchaseActions=c.root.$('<div class="dlp-purchase-selection-actions"><span class="dlp-purchase-selected-count" aria-live="polite"></span><button type="button" class="btn btn-primary btn-sm" data-purchase-action="receipt" disabled>入库</button><span class="text-muted dlp-purchase-action-notice" aria-live="polite"></span></div>').insertAfter(c.$toolbar);
   c.$purchaseActions.on('click.dlpPurchaseAction','[data-purchase-action]',event=>c.runPurchaseAction(event.currentTarget.dataset.purchaseAction));
   scopeChanged(c);selectionChanged(c);
  }
  const onPayload=provider.onPayload;
  provider.onPayload=c=>{onPayload?.(c);selectionChanged(c);};
  const grid = engine.create({doctype:'Purchase Order',dismissInitialOnboarding:true,keepColumnHeader:true,columns:COLUMNS,defaultColumns:provider.defaultColumns,provider,providerSelectable:doc=>doc.row_type==='purchase_order',computedFields:['receipt_action','order_settled','order_unpaid'],moneyPrecision:2,
-  onRequestStart:cancelPending,onPageChange:clearSelection,onScopeChange:scopeChanged,onSelectionChange:selectionChanged,mountControls:mount,renderHeader:c=>`<table class="dlp-purchase-table">${header(c)}</table>`,renderRow:row,renderTable:table,
+  onRequestStart:c=>{cancelPending(c);clearSelection(c);},onPageChange:clearSelection,onScopeChange:scopeChanged,onSelectionChange:selectionChanged,mountControls:mount,renderHeader:c=>`<table class="dlp-purchase-table">${header(c)}</table>`,renderRow:row,renderTable:table,
   afterRender:c=>{selectionChanged(c);fit(c);},onRouteChange:fit,controllerKey:'dlpPurchaseOrderGrid',routeClass:'dlp-purchase-order-grid-active',freezeUntil:'supplier_name',moneySummary:true,
   numbers:['grand_total','advance_paid','per_received','per_billed'],dates:['transaction_date','schedule_date'],quickFields:['company','status','advance_payment_status'],searchFields:['name','supplier_name','project'],extraFields:['supplier','party_account_currency','docstatus'],optionLabels:{progress_phase:{supplier_unpaid:'供应商未付',internal_unsettled:'内部待结算',factory_pending:'工厂待入库'}},controls:[
    {fieldname:'search',fieldtype:'Data',label:'订单/审批/项目/供应商'},

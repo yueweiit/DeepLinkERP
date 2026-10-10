@@ -20,6 +20,28 @@ def native(doctype, name, **changes):
 
 
 class PurchaseLinkTests(unittest.TestCase):
+    def test_procurement_payment_rejects_order_sources_before_reads(self):
+        def reject(message, exception=frappe.ValidationError):
+            raise exception(message)
+        with patch.object(frappe, 'throw', side_effect=reject), patch.object(service, '_source', side_effect=AssertionError('PO source read before rejection')) as read:
+            for invoke in (lambda: service.payment_target('Purchase Order', 'PO'),
+                           lambda: service.create_payment_draft.__wrapped__.__wrapped__('Purchase Order', 'PO'),
+                           lambda: service.preview_payment_batch.__wrapped__.__wrapped__('Purchase Order', [{'name': 'PO'}])):
+                with self.subTest(invoke=invoke), self.assertRaises(frappe.ValidationError):
+                    invoke()
+            read.assert_not_called()
+
+    def test_receipt_eligibility_uses_projected_order_state_without_reads(self):
+        for changes, allowed in (({}, True), ({'docstatus': 0}, False), ({'status': 'Closed'}, False),
+                                 ({'status': 'Completed'}, False), ({'per_received': 100}, False),
+                                 ({'per_received': 'NaN'}, False), ({'per_received': 'invalid'}, False)):
+            with self.subTest(changes=changes):
+                result = service.receipt_eligibility({'docstatus': 1, 'status': 'To Receive and Bill', 'per_received': 0, **changes}, can_create=True)
+                self.assertEqual(result['allowed'], allowed)
+                self.assertEqual(bool(result['reason']), not allowed)
+        self.assertFalse(service.receipt_eligibility({'docstatus': 1, 'per_received': 0}, can_create=False)['allowed'])
+        self.assertFalse(service.receipt_eligibility({'docstatus': 1, 'per_received': 0}, can_create=True, reversal_pending=True)['allowed'])
+
     def setUp(self):
         self.flags_patch = patch.object(frappe, 'flags', frappe._dict())
         self.flags_patch.start()
@@ -213,7 +235,7 @@ class CrossborderInvoiceChainTests(unittest.TestCase):
              patch.object(actions, "_mapping_fields"), patch.object(service, "order_execution_reason", return_value=""), \
              patch.object(actions, "_fields"), patch.object(actions, "_native") as mapper:
             chain = service.get_purchase_chain("Purchase Order", "PO", include_payments=False)
-        self.assertTrue(chain["can_create_invoice"])
+        self.assertFalse(chain["can_create_invoice"])
         self.assertEqual(chain["invoice_reason"], "")
         self.assertEqual(chain["source_modified"], "v1")
         mapper.assert_not_called()
@@ -244,7 +266,7 @@ class CrossborderInvoiceChainTests(unittest.TestCase):
                      patch.object(service, "_order_progress", return_value=[]), \
                      patch.object(actions, "_mapping_fields"), patch.object(frappe, "has_permission", return_value=True):
                     chain = service.get_purchase_chain(source_type, source.name, include_payments=False)
-                    self.assertEqual(chain["can_create"], status == "Completed")
+                    self.assertEqual(chain["can_create"], status == "Completed" and source_type == "Purchase Receipt")
                     self.assertEqual(chain["balances"], [{"currency": "CNY", "total": 70, "settled": 25, "outstanding": 45}])
                     self.assertFalse(chain["can_create_invoice"])
                     self.assertFalse(chain["can_prepay"])
@@ -273,54 +295,6 @@ class CrossborderInvoiceChainTests(unittest.TestCase):
                 result = service.get_payment_records(purchase_receipt="PR")
         self.assertEqual(result["total_count"], 1)
         self.assertEqual(result["rows"][0]["references"][0]["name"], "PI")
-
-
-class AdvanceCapabilityTests(unittest.TestCase):
-    def setUp(self):
-        flags = patch.object(frappe, "flags", frappe._dict())
-        flags.start(); self.addCleanup(flags.stop)
-
-    def check(self, company=None, account=None, denied=None, supplier_accounts=None):
-        company = company or native("Company", "C", book_advance_payments_in_separate_party_account=1,
-            default_advance_paid_account="ADVANCE", default_currency="CNY")
-        supplier = native("Supplier", "S", supplier_group="GROUP", accounts=supplier_accounts or [])
-        group = native("Supplier Group", "GROUP", accounts=[])
-        account = account or native("Account", "ADVANCE", root_type="Asset", account_currency="CNY", is_group=0, disabled=0)
-        docs = {"Company": company, "Supplier": supplier, "Supplier Group": group, "Account": account}
-        def read(dt, name, fields=()):
-            if dt == denied: raise frappe.PermissionError("PRIVATE-ACCOUNT")
-            return docs[dt]
-        with patch.object(service, "_read", side_effect=read), patch.object(service, "_require_fields"), \
-             patch("erpnext.accounts.party.get_party_advance_account", return_value="ADVANCE") as resolver:
-            reason = service._advance_reason(native("Purchase Order", "PO"))
-        return reason, resolver
-
-    def test_unconfigured_advance_is_disabled_before_native_payment_mapping(self):
-        company = native("Company", "C", book_advance_payments_in_separate_party_account=0,
-            default_advance_paid_account=None, default_currency="CNY")
-        reason, resolver = self.check(company=company)
-        self.assertIn("预付", reason); resolver.assert_not_called()
-
-    def test_native_supplier_advance_account_is_supported_when_company_default_missing(self):
-        company = native("Company", "C", book_advance_payments_in_separate_party_account=1,
-            default_advance_paid_account=None, default_currency="CNY")
-        reason, resolver = self.check(company=company, supplier_accounts=[frappe._dict(company="C", advance_account="ADVANCE")])
-        self.assertEqual(reason, "")
-        resolver.assert_called_once_with("Supplier", "S", "C")
-
-    def test_advance_account_denials_are_generic_and_do_not_disclose_names(self):
-        for denied in ("Company", "Supplier", "Supplier Group", "Account"):
-            with self.subTest(denied=denied):
-                reason, _ = self.check(denied=denied)
-                self.assertIn("预付", reason)
-                self.assertNotIn("PRIVATE", reason)
-
-    def test_invalid_or_crosscurrency_advance_account_is_disabled(self):
-        for values in ({"company": "OTHER"}, {"root_type": "Liability"}, {"is_group": 1}, {"disabled": 1}, {"account_currency": "USD"}):
-            with self.subTest(values=values):
-                account = native("Account", "ADVANCE", **{"root_type": "Asset", "account_currency": "CNY", "is_group": 0, "disabled": 0, **values})
-                reason, _ = self.check(account=account)
-                self.assertTrue(reason)
 
 
 class PaymentRecordReaderTests(unittest.TestCase):
