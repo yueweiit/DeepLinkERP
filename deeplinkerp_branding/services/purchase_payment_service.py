@@ -858,7 +858,6 @@ def get_purchase_chain(source_doctype, source_name, include_payments=True):
     can_prepay = False
     if source_doctype == "Purchase Order":
         can_create = can_invoice = False
-        drafts = []
     from .purchase_reversal_progress import projection
     reversal = projection(doc)
     if reversal and reversal["stage"] != "completed":

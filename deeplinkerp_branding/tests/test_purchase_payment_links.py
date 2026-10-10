@@ -226,21 +226,25 @@ class CrossborderInvoiceChainTests(unittest.TestCase):
             self.assertEqual(service._invoice_names("Purchase Receipt", "PR", warnings=warnings), [])
         self.assertEqual(warnings, [service.LINK_WARNING])
 
-    def test_order_invoice_capability_does_not_run_native_mapper_or_guess_billing_percent(self):
+    def test_order_invoice_capability_keeps_historical_drafts_without_enabling_procurement_actions(self):
         order = native("Purchase Order", "PO", per_billed=100, items=[frappe._dict(name="A", qty=10)])
-        with patch.object(service, "_source", return_value=order), patch.object(service, "_invoice_names", return_value=[]), \
-             patch.object(service, "_order_progress", return_value=[]), \
-             patch.object(frappe, "has_permission", side_effect=lambda dt, perm: dt != "Payment Entry"), \
-             patch.object(frappe, "db", SimpleNamespace(get_values=lambda *args, **kwargs: [], get_single_value=lambda *args: "No")), \
-             patch.object(actions, "_mapping_fields"), patch.object(service, "order_execution_reason", return_value=""), \
-             patch.object(actions, "_fields"), patch.object(actions, "_native") as mapper:
-            chain = service.get_purchase_chain("Purchase Order", "PO", include_payments=False)
-        self.assertFalse(chain["can_create_invoice"])
-        self.assertEqual(chain["invoice_reason"], "")
-        self.assertEqual(chain["source_modified"], "v1")
-        mapper.assert_not_called()
-
-    def test_direct_order_invoice_on_receipt_is_shared_whole_balance(self):
+        for names in ([], ["PI-DRAFT"]):
+            with self.subTest(names=names), patch.object(service, "_source", return_value=order), \
+                 patch.object(service, "_invoice_names", return_value=names), \
+                 patch.object(service, "_related", return_value=native("Purchase Invoice", "PI-DRAFT", docstatus=0)), \
+                 patch.object(service, "_invoice_row", return_value={"name": "PI-DRAFT", "docstatus": 0, "can_pay": False, "shared": False}), \
+                 patch.object(service, "_order_progress", return_value=[]), \
+                 patch.object(frappe, "has_permission", side_effect=lambda dt, perm: dt != "Payment Entry"), \
+                 patch.object(frappe, "db", SimpleNamespace(get_values=lambda *args, **kwargs: [], get_single_value=lambda *args: "No")), \
+                 patch.object(actions, "_mapping_fields"), patch.object(service, "order_execution_reason", return_value=""), \
+                 patch.object(actions, "_fields"), patch.object(actions, "_native") as mapper:
+                chain = service.get_purchase_chain("Purchase Order", "PO", include_payments=False)
+            self.assertFalse(chain["can_create_invoice"])
+            self.assertFalse(chain["can_create"])
+            self.assertEqual(chain["draft_invoices"], [{"name": name, "docstatus": 0} for name in names])
+            self.assertEqual(chain["invoice_reason"], "已有应付草稿，请选择继续编辑" if names else "")
+            self.assertEqual(chain["source_modified"], "v1")
+            mapper.assert_not_called()
         invoice = native("Purchase Invoice", "PI", is_return=0, party_account_currency="CNY", disable_rounded_total=1,
             rounded_total=0, outstanding_amount=70, items=[frappe._dict(purchase_order="PO", purchase_receipt=None)])
         invoice.invoice_is_blocked = lambda: False
