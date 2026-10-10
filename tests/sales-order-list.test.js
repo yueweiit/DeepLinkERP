@@ -328,6 +328,15 @@ test('sales table reserves its measured footer and recalculates after wrapping, 
  assert.equal(values.get('--dlp-sales-result-max-height'),'139px','short screens keep a header and row, with outer scrolling available');
 });
 
+test('shared viewport can reserve two usable purchase rows below sticky header and scrollbar on short screens',()=>{
+ const engine=require('../deeplinkerp_branding/public/js/compact_list.js'),fixture=viewportFixture();
+ fixture.state.height=360;fixture.state.top=300;
+ engine.fitViewport(fixture.controller,{active:true,root:fixture.root,scrollElement:fixture.result,layoutTailElement:fixture.list,property:'--dlp-sales-result-max-height',headerSelector:'.dlp-po-grid-header',rowSelector:'.dlp-po-grid-row',minimumRows:2});
+ fixture.flush();assert.equal(fixture.values.get('--dlp-sales-result-max-height'),'133px');
+ fixture.state.scroll=100;fixture.main.scrollTop=100;fixture.observers[0].callback();fixture.flush();
+ assert.equal(fixture.values.get('--dlp-sales-result-max-height'),'133px','outer overflow preserves usable row space');
+});
+
 test('sales viewport fitting cleans up on departure and resumes once on a cached route return',()=>{
  const fixture=viewportFixture(),{controller,values,frames,listeners,observers}=fixture;
  assert.equal(typeof grid.fitViewport,'function');grid.fitViewport(controller,true);grid.fitViewport(controller,true);

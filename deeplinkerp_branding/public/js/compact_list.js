@@ -12,7 +12,7 @@
   if (!owner) return;
   if (!options.active) return owner.stopTableViewport?.();
   if (owner.updateTableViewport) return owner.updateTableViewport();
-  const {root:host,scrollElement:result,layoutTailElement:list,property,headerSelector,rowSelector,observeTargets=[]}=options;
+  const {root:host,scrollElement:result,layoutTailElement:list,property,headerSelector,rowSelector,observeTargets=[],minimumRows=1}=options;
   if (!result?.getBoundingClientRect || !list?.getBoundingClientRect || !host.requestAnimationFrame || !host.getComputedStyle) return;
   let frame, stopped=false, observedHeader, observedRow;
   const schedule=()=>{if(!stopped && frame===undefined)frame=host.requestAnimationFrame(measure);};
@@ -41,7 +41,7 @@
    }
    observedHeader=header;observedRow=row;
    const rowHeight=row ? number(host.getComputedStyle(row).minHeight)||row.getBoundingClientRect?.().height||0 : 0;
-   const minimum=(header?.getBoundingClientRect().height||0)+rowHeight+Math.max(0,result.offsetHeight-result.clientHeight);
+   const minimum=(header?.getBoundingClientRect().height||0)+rowHeight*Math.max(1,minimumRows)+Math.max(0,result.offsetHeight-result.clientHeight);
    const tail=Math.max(0,list.getBoundingClientRect().bottom-result.getBoundingClientRect().bottom);
    const height=`${Math.floor(Math.max(minimum,bottom-top-tail-spacing))}px`;
    if(result.style.getPropertyValue(property)!==height)result.style.setProperty(property,height);
