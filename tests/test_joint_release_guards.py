@@ -8,6 +8,7 @@ import json
 import os
 import stat
 import sys
+import tarfile
 import tempfile
 import types
 import unittest
@@ -1274,6 +1275,68 @@ class CombinedReleaseContractTests(unittest.TestCase):
 			for amount in (None, 0, -1):
 				with self.subTest(amount=amount), self.assertRaises(AssertionError):
 					guard.filesystem_budget({"backup": (path, amount)})
+
+	@contextlib.contextmanager
+	def shared_budget_boundary(self, directory, filesystem):
+		guard = self.module()
+		archive = Path(directory) / "candidate.tar.gz"
+		with tarfile.open(archive, "w:gz") as output:
+			output.add(ROOT / "deploy/production/joint_release_guards.py", arcname="guard.py")
+		source = "/var/lib/docker/volumes/frappe_docker_sites/_data"
+		image_id = "sha256:" + "a" * 64
+		probe_calls = []
+		def host(argv):
+			if argv[:3] == ["docker", "exec", "-e"]:
+				probe_calls.append(argv[-1])
+				return json.dumps({"database_bytes": 10, "attachment_bytes": 20, "backup_filesystem": filesystem})
+			if argv[:3] == ["docker", "image", "inspect"]:
+				return json.dumps([{"Id": image_id, "Size": 30}])
+			if argv[:2] == ["docker", "info"]:
+				return json.dumps(directory)
+			raise AssertionError("Unexpected host operation: " + str(argv))
+		original_resolve = Path.resolve
+		def resolve(path, *args, **kwargs):
+			if str(path).startswith("/var/lib/docker/volumes/"):
+				raise PermissionError("/var/lib/docker/volumes")
+			return original_resolve(path, *args, **kwargs)
+		with patch.object(guard, "_container_inspect", return_value={"Mounts": [{"Type": "volume", "Source": source, "Destination": "/home/frappe/frappe-bench/sites"}]}), patch.object(guard, "_host_call", side_effect=host), patch.object(Path, "resolve", autospec=True, side_effect=resolve):
+			yield guard, archive, image_id, source, probe_calls
+
+	def test_shared_budget_reads_inaccessible_volume_capacity_in_container(self):
+		with tempfile.TemporaryDirectory() as directory:
+			filesystem = {"device": os.stat(directory).st_dev, "available_bytes": 100 * 1024**3}
+			with self.shared_budget_boundary(directory, filesystem) as (guard, archive, image_id, source, probes):
+				result = guard.release_space_budget([archive], image_id)
+			self.assertEqual(len(result["filesystems"]), 1)
+			entry = result["filesystems"][0]
+			self.assertEqual(entry["operations"]["full_with_attachments_backup"], 160)
+			self.assertEqual(entry["required_bytes"], 2 * 1024**3 + 4 * result["expanded_archive_bytes"] + 60 + 160)
+			self.assertIn("os.statvfs(", probes[0])
+			self.assertIn("os.stat(", probes[0])
+
+	def test_shared_budget_keeps_separate_volume_capacity_and_rejects_shortage(self):
+		with tempfile.TemporaryDirectory() as directory:
+			device = os.stat(directory).st_dev + 1
+			for available in (3 * 1024**3, 100):
+				with self.subTest(available=available), self.shared_budget_boundary(directory, {"device": device, "available_bytes": available}) as (guard, archive, image_id, source, _):
+					if available == 100:
+						with self.assertRaisesRegex(AssertionError, "Insufficient filesystem space"):
+							guard.release_space_budget([archive], image_id)
+					else:
+						result = guard.release_space_budget([archive], image_id)
+						entry = next(row for row in result["filesystems"] if row["device"] == device)
+						self.assertEqual(entry["path"], source)
+						self.assertEqual(entry["available_bytes"], available)
+						self.assertEqual(entry["required_bytes"], 2 * 1024**3 + 160)
+						self.assertEqual(len(result["filesystems"]), 2)
+
+	def test_shared_budget_refuses_unknown_volume_capacity(self):
+		with tempfile.TemporaryDirectory() as directory:
+			cases = [{}, {"device": None, "available_bytes": 3 * 1024**3}] + [{"device": 1, "available_bytes": value} for value in (None, 0, -1)]
+			for filesystem in cases:
+				with self.subTest(filesystem=filesystem), self.shared_budget_boundary(directory, filesystem) as (guard, archive, image_id, _, _):
+					with self.assertRaisesRegex(AssertionError, "Unknown measured filesystem"):
+						guard.release_space_budget([archive], image_id)
 
 	def test_raw_rq_snapshot_preserves_queue_order_without_native_cleanup_calls(self):
 		guard = self.module()

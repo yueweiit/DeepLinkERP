@@ -102,16 +102,23 @@ def record_resume(path, identity, producer):
 	return DDLReceipt.create(path, key, {}, contract).state
 
 
-def filesystem_budget(operations, *, reserve_bytes=2 * 1024**3):
+def filesystem_budget(operations, *, reserve_bytes=2 * 1024**3, measured_filesystems=None):
 	"""Actual available bytes, summing concurrent demands on each filesystem."""
 	devices = {}
+	measured_filesystems = measured_filesystems or {}
 	for kind, (path, amount) in operations.items():
 		assert isinstance(amount, int) and amount > 0, "Unknown/invalid space estimate: " + kind
-		path = Path(path).resolve(strict=True)
-		stats, capacity = os.stat(path), os.statvfs(path)
-		available = capacity.f_bavail * capacity.f_frsize
+		if str(path) in measured_filesystems:
+			facts = measured_filesystems[str(path)]
+			assert isinstance(facts, dict) and set(facts) == {"device", "available_bytes"}, "Unknown measured filesystem"
+			device, available = facts["device"], facts["available_bytes"]
+			assert type(device) is int and device >= 0 and type(available) is int and available > 0, "Unknown measured filesystem capacity"
+		else:
+			path = Path(path).resolve(strict=True)
+			stats, capacity = os.stat(path), os.statvfs(path)
+			device, available = stats.st_dev, capacity.f_bavail * capacity.f_frsize
 		assert available > 0, "Unknown available filesystem space"
-		entry = devices.setdefault(stats.st_dev, {"device": stats.st_dev, "path": str(path), "available_bytes": available, "required_bytes": reserve_bytes, "operations": {}})
+		entry = devices.setdefault(device, {"device": device, "path": str(path), "available_bytes": available, "required_bytes": reserve_bytes, "operations": {}})
 		entry["available_bytes"] = min(entry["available_bytes"], available)
 		entry["required_bytes"] += amount
 		entry["operations"][kind] = amount
@@ -154,7 +161,9 @@ for directory in (Path("deeplinkerp.com/public/files"),Path("deeplinkerp.com/pri
  for path in directory.rglob("*"):
   assert not path.is_symlink(),"Unknown shared attachment target"
   if path.is_file():attachments+=path.stat().st_size
-print(json.dumps({"database_bytes":int(size),"attachment_bytes":attachments}));frappe.db.rollback();frappe.destroy()
+stats=os.stat("/home/frappe/frappe-bench/sites")
+capacity=os.statvfs("/home/frappe/frappe-bench/sites")
+print(json.dumps({"database_bytes":int(size),"attachment_bytes":attachments,"backup_filesystem":{"device":stats.st_dev,"available_bytes":capacity.f_bavail*capacity.f_frsize}}));frappe.db.rollback();frappe.destroy()
 '''
 	data = json.loads(_host_call(["docker", "exec", "-e", "FRAPPE_STREAM_LOGGING=1", "frappe_docker-backend-1", "/home/frappe/frappe-bench/env/bin/python", "-c", probe]))
 	assert data["database_bytes"] > 0 and data["attachment_bytes"] >= 0
@@ -164,7 +173,10 @@ print(json.dumps({"database_bytes":int(size),"attachment_bytes":attachments}));f
 	operations = {"extraction": ("/tmp", expanded * 2),
 		"build": (docker_root, image["Size"] * 2 + expanded * 2),
 		"full_with_attachments_backup": (sites[0]["Source"], data["database_bytes"] * 12 + data["attachment_bytes"] * 2)}
-	return {"filesystems": filesystem_budget(operations), "expanded_archive_bytes": expanded, "base_image_bytes": image["Size"], **data,
+	# Measure the inspected mount from inside its running container: Docker's
+	# host volume directory can be inaccessible to the deployment user.
+	filesystems = filesystem_budget(operations, measured_filesystems={sites[0]["Source"]: data.get("backup_filesystem")})
+	return {"filesystems": filesystems, "expanded_archive_bytes": expanded, "base_image_bytes": image["Size"], **data,
 		"archives": {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in archives}}
 
 
