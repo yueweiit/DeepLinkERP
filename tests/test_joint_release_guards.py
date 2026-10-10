@@ -30,6 +30,120 @@ class JointReleaseGuardTests(unittest.TestCase):
 	def schema(self):
 		return {"columns": {"name": {"type": "varchar(140)", "default": "NULL"}}, "indexes": {"PRIMARY": [{"column": "name", "unique": 1, "prefix": None}]}, "table": {"engine": "InnoDB"}}
 
+	def test_service_specific_exit_plan_does_not_signal_frontend_wrapper(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "service_exit_plan"), "Missing service-specific exit contract")
+		self.assertEqual(guard.service_exit_plan("frontend", 8), {"signal": "TERM", "pid": 8, "exit_codes": [0]})
+		self.assertEqual(guard.service_exit_plan("scheduler"), {"signal": "INT", "pid": 1, "exit_codes": [0, 1]})
+		self.assertEqual(guard.service_exit_plan("websocket"), {"signal": "KILL", "pid": 1, "exit_codes": [137], "requires_idle_relay": True})
+		for service, pid in (("frontend", 1), ("frontend", 0), ("database", None)):
+			with self.subTest(service=service, pid=pid), self.assertRaises(AssertionError):
+				guard.service_exit_plan(service, pid)
+
+	def test_native_relay_entrypoint_rejects_preloads_alternate_programs_and_app_mounts(self):
+		guard = self.module()
+		argv = ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]
+		guard.validate_native_relay_process(argv, [], [])
+		for arguments, environment, mounts in ((["node", "/tmp/other.js"], [], []), (argv, ["NODE_OPTIONS=--require=/tmp/other.js"], []), (argv, [], [{"Destination": "/home/frappe/frappe-bench/apps/frappe"}]), (argv, [], [{"Destination": "/home/frappe/frappe-bench"}])):
+			with self.subTest(arguments=arguments, environment=environment, mounts=mounts), self.assertRaises(AssertionError): guard.validate_native_relay_process(arguments, environment, mounts)
+
+	def test_failed_native_command_keeps_private_diagnostics_without_public_error_text(self):
+		guard = self.module()
+		with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"DEEPLINKERP_COMMAND_ERROR_DIR": directory}), patch.object(guard.subprocess, "run", side_effect=guard.subprocess.CalledProcessError(1, ["docker"], output="private stdout", stderr="private stderr")):
+			with self.assertRaises(RuntimeError) as error: guard._host_call(["docker", "probe"])
+			self.assertNotIn("private stderr", str(error.exception))
+			files = list(Path(directory).iterdir())
+			self.assertEqual(len(files), 1)
+			self.assertEqual(files[0].stat().st_mode & 0o777, 0o600)
+			self.assertEqual(json.loads(files[0].read_bytes())["stderr"], "private stderr")
+
+	def test_idle_relay_requires_all_business_services_stopped_and_no_clients_or_db_work(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "assert_idle_relay"), "Missing stateless relay barrier")
+		proof = {"native": True, "containers": {role: {"running": False} for role in guard.RELEASE_SERVICES if role != "websocket"}, "database": {"sessions": [], "transactions": []}, "relay": {"client_connections": [], "unreviewed_connections": []}}
+		guard.assert_idle_relay(proof)
+		for bad in ("native", "container", "session", "transaction", "client", "connection"):
+			with self.subTest(bad=bad):
+				changed = copy.deepcopy(proof)
+				if bad == "native": changed["native"] = False
+				elif bad == "container": changed["containers"]["backend"]["running"] = True
+				elif bad in {"session", "transaction"}: changed["database"][bad + "s"] = ["active"]
+				else: changed["relay"]["client_connections" if bad == "client" else "unreviewed_connections"] = ["active"]
+				with self.assertRaises(AssertionError): guard.assert_idle_relay(changed)
+
+	def test_relay_socket_parser_classifies_owned_sockets_not_other_container_connections(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "classify_relay_sockets"), "Missing owned socket inventory")
+		rows = ["0: 00000000:2328 00000000:0000 0A 0 0 0 0 0 11", "1: 0100007F:ABCD 0100007F:18EB 01 0 0 0 0 0 12", "2: 0100007F:2328 0100007F:AA00 01 0 0 0 0 0 13"]
+		self.assertEqual(guard.classify_relay_sockets(rows, {"11", "12"}), {"client_connections": [], "unreviewed_connections": []})
+		self.assertEqual(len(guard.classify_relay_sockets(rows, {"13"})["client_connections"]), 1)
+		with self.assertRaises(AssertionError): guard.classify_relay_sockets(["malformed"], {"11"})
+
+	def test_service_exit_receipt_rejects_cold_worker_or_unproved_relay(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "validate_service_exit_receipt"), "Missing exit receipt validation")
+		plans = {role: guard.service_exit_plan(role, 8 if role == "frontend" else None) for role in guard.RELEASE_SERVICES}
+		state = {"contract": {"exit_protocol": 2, "exit_plan": plans}, "before": {"native": {"native_source_sha256": guard.NATIVE_RELAY_SOURCES}, "source_host": {"MainPID": "0"}, "containers": {role: {"id": role} for role in plans}}, "after": {"containers": {role: {"id": role, "running": False, "exit_code": plan["exit_codes"][0]} for role, plan in plans.items()}, "relay_idle_proof": {"native": True, "containers": {role: {"running": False} for role in plans if role != "websocket"}, "database": {"sessions": [], "transactions": []}, "relay": {"client_connections": [], "unreviewed_connections": []}}, "database": {"sessions": [], "transactions": []}}}
+		guard.validate_service_exit_receipt(state)
+		for bad in ("worker", "relay", "database", "identity", "native"):
+			with self.subTest(bad=bad):
+				changed = copy.deepcopy(state)
+				if bad == "worker": changed["after"]["containers"]["queue-long"]["exit_code"] = 137
+				elif bad == "relay": changed["after"].pop("relay_idle_proof")
+				elif bad == "database": changed["after"]["database"]["transactions"] = ["active"]
+				elif bad == "identity": changed["after"]["containers"]["websocket"]["id"] = "other"
+				else: changed["before"]["native"]["native_source_sha256"] = {}
+				with self.assertRaises((AssertionError, KeyError)): guard.validate_service_exit_receipt(changed)
+
+	def test_source_failure_is_preserved_but_not_confused_with_active_work(self):
+		guard = self.module()
+		with tempfile.TemporaryDirectory() as directory:
+			Path(directory, "run.json").write_text(json.dumps({"active": None, "last": {"status": "Failed"}}))
+			status = "MainPID=0\nActiveState=failed\nResult=exit-code\nExecMainCode=1\nExecMainStatus=1\n"
+			with patch.object(guard, "_host_call", return_value=status):
+				proof = guard.source_host_proof(root=Path(directory))
+				self.assertEqual(proof["Result"], "exit-code")
+				self.assertEqual(proof["run.json"]["last"]["status"], "Failed")
+				Path(directory, "run.json").write_text(json.dumps({"active": "unfinished"}))
+				with self.assertRaises(AssertionError): guard.source_host_proof(root=Path(directory))
+			with patch.object(guard, "_host_call", return_value=status.replace("MainPID=0", "MainPID=15")):
+				with self.assertRaises(AssertionError): guard.source_host_proof(root=Path(directory))
+
+	def test_drain_reaches_relay_only_after_business_exits_and_stops_on_active_database(self):
+		for active_database in (False, True):
+			with self.subTest(active_database=active_database), tempfile.TemporaryDirectory() as directory:
+				guard = self.module()
+				states = {role: {"Id": role, "Image": "image", "State": {"Running": True, "StartedAt": "start", "Pid": 1, "ExitCode": 0, "OOMKilled": False}, "Config": {"Hostname": role, "Env": []}} for role in guard.RELEASE_SERVICES}
+				argv = {"backend": ["gunicorn", "--workers", "2", "--threads", "4", "--worker-class", "gthread", "--timeout", "120", "--preload", "frappe.app:application"], "queue-long": ["bench", "worker"], "queue-short": ["bench", "worker"], "scheduler": ["bench", "schedule"], "websocket": ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]}
+				processes = {role: {"1": {"pid": 1, "start": "1", "parent": 0, "argv": values}} for role, values in argv.items()}
+				for pid in (8, 9): processes["backend"][str(pid)] = {"pid": pid, "parent": 1, "argv": ["gunicorn"]}
+				rq = {"queues": {"bench:short": [], "bench:long": []}, "intermediate": {}, "registries": {}, "jobs": {}, "executions": {}, "workers": {}, "tombstones": {}, "worker_sets": {}}
+				for role in ("queue-short", "queue-long"): rq["workers"]["rq:worker:" + role] = {"hostname": role, "pid": "1", "birth": "then"}
+				stopped = copy.deepcopy(rq); stopped["workers"] = {}
+				signals = []
+				def host(command, **kwargs):
+					if command[:2] == ["docker", "logs"]: return "warm shutdown\nWorker exiting 8\nWorker exiting 9\n"
+					if command[:2] == ["docker", "inspect"]: return json.dumps([states[role] for role in command[2:]])
+					if "--version" in command: return "v24.12.0\n"
+					role = "frontend" if command[:2] == ["docker", "exec"] else command[-1]
+					if role == "websocket": self.assertTrue(all(not states[item]["State"]["Running"] for item in guard.RELEASE_SERVICES if item != role))
+					signals.append((role, command))
+					states[role]["State"].update(Running=False, ExitCode=137 if role == "websocket" else 0)
+					return role
+				def read(role, tool, action):
+					if action == "--rq-drain-snapshot": return copy.deepcopy(rq)
+					if action == "--runtime-proof": return {"native_source_sha256": guard.NATIVE_RELAY_SOURCES}
+					if action == "--relay-connections": return {"client_connections": [], "unreviewed_connections": []}
+					return processes[role]
+				log = types.SimpleNamespace(stdout="warm shutdown\nWorker exiting 8\nWorker exiting 9\n", stderr="")
+				with patch.object(guard, "_container_inspect", side_effect=lambda role: copy.deepcopy(states[role])), patch.object(guard, "_container_read", side_effect=read), patch.object(guard, "frontend_master", return_value={"pid": 12}), patch.object(guard, "source_host_proof", return_value={"MainPID": "0"}), patch.object(guard, "_command_rq_snapshot", return_value=stopped), patch.object(guard, "database_idle_snapshot", return_value={"sessions": ["active"] if active_database else [], "transactions": []}), patch.object(guard, "_host_call", side_effect=host), patch.object(guard.subprocess, "run", return_value=log):
+					if active_database:
+						with self.assertRaisesRegex(AssertionError, "database activity"): guard.drain_release(Path(directory) / "drain.json", "tool", "a" * 40)
+					else:
+						self.assertTrue(guard.drain_release(Path(directory) / "drain.json", "tool", "a" * 40)["quiescent"])
+				self.assertEqual([role for role, _ in signals], ["frontend", "scheduler", "queue-long", "queue-short", "backend"] + ([] if active_database else ["websocket"]))
+				self.assertNotIn("KILL", str([command for role, command in signals if role != "websocket"]))
+
 	def test_native_delta_keeps_every_original_column_index_and_table_option(self):
 		guard = self.module().assert_schema_delta
 		before = self.schema()
@@ -1345,6 +1459,7 @@ class CombinedReleaseContractTests(unittest.TestCase):
 			worker = None
 			historical = False
 			orphan_queue = False
+			orphan_terminal = False
 			clock_reads = 0
 			pipeline_calls = None
 			def time(self):
@@ -1369,14 +1484,14 @@ class CombinedReleaseContractTests(unittest.TestCase):
 						self.commands = []
 						return result
 				return Pipeline()
-			def scan(self, cursor, **kwargs): return 0, [b"rq:queues", b"rq:workers", b"rq:queue:bench:short", b"rq:job:queued"] + ([b"rq:worker:old"] if self.worker is not None else []) + ([b"rq:queue:unknown"] if self.orphan_queue else [])
-			def type(self, key): return b"set" if key in {"rq:queues", "rq:workers"} else b"list" if key == "rq:queue:bench:short" or (key == "rq:queue:unknown" and self.orphan_queue) else b"zset" if self.historical and key == "rq:finished:bench:short" else b"hash" if key == "rq:job:queued" or (key == "rq:worker:old" and self.worker is not None) else b"none"
+			def scan(self, cursor, **kwargs): return 0, [b"rq:queues", b"rq:workers", b"rq:queue:bench:short", b"rq:job:queued"] + ([b"rq:worker:old"] if self.worker is not None else []) + ([b"rq:queue:unknown"] if self.orphan_queue else []) + ([b"rq:finished:bench:orphan"] if self.orphan_terminal else [])
+			def type(self, key): return b"set" if key in {"rq:queues", "rq:workers"} else b"list" if key == "rq:queue:bench:short" or (key == "rq:queue:unknown" and self.orphan_queue) else b"zset" if (self.historical and key == "rq:finished:bench:short") or (self.orphan_terminal and key == "rq:finished:bench:orphan") else b"hash" if key == "rq:job:queued" or (key == "rq:worker:old" and self.worker is not None) else b"none"
 			def scard(self, key): return len(self.smembers(key))
 			def smembers(self, key): return {b"rq:queue:bench:short"} if key == "rq:queues" else set()
 			def llen(self, key): return 2 if key == "rq:queue:bench:short" else int(self.orphan_queue and key == "rq:queue:unknown")
 			def lrange(self, key, *args): return [b"queued", b"queued"] if key == "rq:queue:bench:short" else [b"deeplinkerp.com||orphan"] if key == "rq:queue:unknown" and self.orphan_queue else []
-			def zcard(self, key): return int(self.historical and key == "rq:finished:bench:short")
-			def zrange(self, key, *args, **kwargs): return [(b"old-finished", 1)] if self.historical and key == "rq:finished:bench:short" else []
+			def zcard(self, key): return int(self.type(key) == b"zset")
+			def zrange(self, key, *args, **kwargs): return [(b"old-finished", 1)] if self.type(key) == b"zset" else []
 			def hlen(self, key): return 4
 			def hstrlen(self, key, field): return 4
 			def hmget(self, key, fields): return [{"status": b"queued", "origin": b"bench:short"}.get(field) for field in fields]
@@ -1400,6 +1515,14 @@ class CombinedReleaseContractTests(unittest.TestCase):
 		self.assertEqual(len(historical.pipeline_calls), 2)
 		self.assertTrue(all("data" not in args[1] for batch in historical.pipeline_calls for name, args in batch if name == "hmget"))
 		self.assertTrue(historical.historical)
+		self.assertIn("historical_evidence", guard.raw_rq_snapshot.__code__.co_varnames, "Shared drain must retain complete terminal evidence")
+		shared = guard.raw_rq_snapshot(historical, historical_evidence=True)
+		self.assertEqual(shared["queues"], observed["queues"])
+		self.assertEqual(shared["historical_orphans"], observed["historical_orphans"])
+		historical.orphan_terminal = True
+		with self.assertRaisesRegex(AssertionError, "Unknown/orphan RQ registry"):
+			guard.raw_rq_snapshot(historical, historical_evidence=True)
+		historical.orphan_terminal = False
 		historical.orphan_queue = True
 		with self.assertRaisesRegex(AssertionError, "Unknown|Orphan"):
 			guard.raw_rq_snapshot(historical, main_only=True)

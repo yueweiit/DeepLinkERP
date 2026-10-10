@@ -169,7 +169,7 @@ capture_release_audit() {
     "${args[@]}" "${scope_args[@]}" "${receipt_args[@]}" --phase "$phase" > "$output"
 }
 quiesce_release_workers() {
-  # The host guard records exact processes and a single native TERM intent.
+  # The host guard records exact processes and service-specific exit intents.
   # Timeout/unknown outcome retains maintenance; never signal this identity again.
   python3 "$build_dir/deploy/production/joint_release_guards.py" --host-drain \
     --receipt "$release_dir/drain.json" --candidate-sha "$branding_sha" ${retirement_args[@]+"${retirement_args[@]}"}

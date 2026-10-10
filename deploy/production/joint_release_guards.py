@@ -343,7 +343,10 @@ def verified_quiescence():
 	assert state["identity"]["candidate_sha"] == os.environ.get("DEEPLINKERP_RELEASE_CANDIDATE_SHA"), "Drain belongs to another candidate; HOLD"
 	assert state["status"] == "applied" and set(state["after"]["containers"]) == set(RELEASE_SERVICES), "Actual bounded drain incomplete; HOLD"
 	assert all(not value["running"] for value in state["after"]["containers"].values()), "Unconfirmed stopped identity; HOLD"
-	assert state["contract"]["one_term_only"] and state["before"].get("native") and state["before"].get("source_host"), "Missing native/source drain proof; HOLD"
+	if state["contract"].get("exit_protocol") == 2:
+		validate_service_exit_receipt(state)
+	else:
+		assert state["contract"]["one_term_only"] and state["before"].get("native") and state["before"].get("source_host"), "Missing native/source drain proof; HOLD"
 	assert_pre_resume(os.environ["DEEPLINKERP_RELEASE_RESUME_RECEIPT"])
 	return True
 
@@ -497,14 +500,15 @@ def terminal_history_transition(before, after):
 	return delta
 
 
-def raw_rq_snapshot(redis, *, main_only=False):
+def raw_rq_snapshot(redis, *, main_only=False, historical_evidence=False):
 	"""RQ 2.6.1 inventory using raw Redis reads, never native cleanup helpers."""
+	detailed = main_only or historical_evidence  # Evidence mode never filters another site's jobs.
 	def decode(value):
 		return value.decode("utf-8", "strict") if isinstance(value, bytes) else value
 	def redis_time():
 		seconds, micros = redis.time()
 		return seconds + micros / 1000000
-	started_at = redis_time() if main_only else None
+	started_at = redis_time() if detailed else None
 	keys, cursor = set(), 0
 	for _ in range(1000):
 		cursor, found = redis.scan(cursor, match="rq:*", count=1000)
@@ -544,7 +548,7 @@ def raw_rq_snapshot(redis, *, main_only=False):
 	queues = members("rq:queues")
 	assert all(key.startswith("rq:queue:") and key.count(":") >= 3 for key in queues), "Unknown RQ queue key"
 	result = {"queues": {}, "intermediate": {}, "registries": {}, "workers": {}, "tombstones": {}, "jobs": {}, "executions": {}, "worker_sets": {}}
-	if main_only:
+	if detailed:
 		result["historical_orphans"] = {}
 		result["job_presence"] = {}
 	job_ids, execution_keys = set(), set()
@@ -569,13 +573,13 @@ def raw_rq_snapshot(redis, *, main_only=False):
 					job_ids.add(job)
 				else:
 					job_ids.add(member)
-	if main_only:
+	if detailed:
 		known_queues = set(queues) | {key + ":intermediate" for key in queues}
 		for key in keys:
 			if key.startswith("rq:queue:") and key not in known_queues:
 				assert not listing(key), "Unknown/orphan live RQ queue; HOLD"
-			if any(key.startswith("rq:" + kind + ":") for kind in ("wip", "deferred", "scheduled")) and key.removeprefix("rq:") not in result["registries"]:
-				assert not registry(key), "Unknown/orphan live RQ registry; HOLD"
+			if any(key.startswith("rq:" + kind + ":") for kind in ("wip", "deferred", "scheduled", "finished", "failed", "canceled")) and key.removeprefix("rq:") not in result["registries"]:
+				assert not registry(key), "Unknown/orphan RQ registry; HOLD"
 	worker_keys = members("rq:workers")
 	assert all(key.startswith("rq:worker:") for key in worker_keys), "Malformed worker identity"
 	for key in sorted({key for key in keys if key.startswith("rq:worker:")} | set(worker_keys)):
@@ -599,7 +603,7 @@ def raw_rq_snapshot(redis, *, main_only=False):
 		ordered = sorted(job_ids)
 		for start in range(0, len(ordered), 256):
 			batch = ordered[start:start + 256]
-			if main_only:
+			if detailed:
 				with redis.pipeline(transaction=True) as pipeline:
 					for job in batch:
 						for field in JOB_FIELDS:
@@ -626,9 +630,9 @@ def raw_rq_snapshot(redis, *, main_only=False):
 					yield job, True, True, redis.hmget(key, JOB_FIELDS)
 
 	for job, hash_exists, data_exists, fields in job_metadata():
-		if main_only and not hash_exists:
+		if detailed and not hash_exists:
 			historical = finished.get(job, {})
-			assert historical and job not in live, "Referenced live/unknown job missing native data; HOLD"
+			assert historical and job not in live and all(score <= started_at for score in historical.values()), "Referenced live/unknown/unexpired job missing native data; HOLD"
 			for name, score in historical.items():
 				result["historical_orphans"].setdefault(name, []).append([job, score])
 			continue
@@ -642,7 +646,7 @@ def raw_rq_snapshot(redis, *, main_only=False):
 	for key in sorted(execution_keys):
 		result["executions"][key] = raw_hash(key)
 	assert all(key in worker_keys for rows in result["worker_sets"].values() for key in rows), "Orphan queue worker registration"
-	if main_only:
+	if detailed:
 		result["observation"] = {"started_at": started_at, "finished_at": redis_time()}
 	assert len(serialized(result)) <= 16 * 1024**2, "RQ complete inventory exceeds byte bound"
 	return result
@@ -670,15 +674,19 @@ def verify_rq_drain(before, after, completed):
 	for job, worker in completed.items():
 		fact = after["jobs"].get(job)
 		assert fact and fact["status"] == "finished" and fact["ended_at"] and fact["started_at"] and fact["worker_name"] == worker, "Natural job/callback completion unconfirmed; HOLD"
+	delta = terminal_history_transition(before, after)
+	expired = set(delta["expired_jobs"]) | set(delta["cleaned_orphans"])
 	for queue, jobs in before["queues"].items():
 		assert [job for job in jobs if job not in completed] == [job for job in after["queues"][queue] if job in jobs and job not in completed], "Unmatched queued job vanished or reordered; HOLD"
 	for kind, rows in before["registries"].items():
 		if kind.startswith("wip:"):
 			continue
-		assert all(row in after["registries"].get(kind, []) for row in rows), "Historical RQ registry changed; HOLD"
+		remaining = {tuple(row) for row in after["registries"].get(kind, [])}
+		assert all(tuple(row) in remaining or (kind.startswith("finished:") and row[0] in expired) for row in rows), "Historical RQ registry changed; HOLD"
 	for job, fact in before["jobs"].items():
-		if job not in completed:
+		if job not in completed and job not in expired:
 			assert after["jobs"].get(job) == fact, "Unmatched job changed/vanished; HOLD"
+	return delta
 
 
 def native_processes():
@@ -703,8 +711,19 @@ def native_processes():
 	return result
 
 
-def _host_call(argv, *, timeout=30):
-	return subprocess.run(argv, check=True, capture_output=True, text=True, timeout=timeout).stdout
+def _host_call(argv, *, timeout=30, include_stderr=False):
+	try:
+		result = subprocess.run(argv, check=True, capture_output=True, text=True, timeout=timeout)
+		return result.stdout + result.stderr if include_stderr else result.stdout
+	except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+		# Keep native errors private; neither credentials nor source payloads go
+		# into the public exception. mkstemp cannot overwrite an earlier attempt.
+		fd, path = tempfile.mkstemp(prefix="deeplinkerp-command-error-", suffix=".json", dir=os.environ.get("DEEPLINKERP_COMMAND_ERROR_DIR"))
+		with os.fdopen(fd, "wb") as output:
+			output.write(serialized({"command": Path(argv[0]).name, "returncode": getattr(error, "returncode", None), "error": type(error).__name__, "stdout": error.stdout, "stderr": error.stderr}))
+			output.flush()
+			os.fsync(output.fileno())
+		raise RuntimeError("Native command failed; private diagnostic: " + path) from None
 
 
 def _container_inspect(service):
@@ -726,15 +745,113 @@ def _command_rq_snapshot(backend, tool, *, action="--rq-snapshot", arguments=())
 	sites_mounts = [item for item in backend["Mounts"] if item["Destination"] == "/home/frappe/frappe-bench/sites"]
 	assert len(sites_mounts) == 1 and sites_mounts[0]["Type"] in {"bind", "volume"}, "Unknown shared sites mount"
 	site_source = sites_mounts[0].get("Name") if sites_mounts[0]["Type"] == "volume" else sites_mounts[0]["Source"]
-	assert action in {"--rq-snapshot", "--retirement-proof"}, "Only readonly shared probes permitted"
+	assert action in {"--rq-snapshot", "--rq-drain-snapshot", "--retirement-proof"}, "Only readonly shared probes permitted"
 	return json.loads(_host_call(["docker", "run", "--rm", "--workdir", str(BENCH_SITES), "--network", backend["HostConfig"]["NetworkMode"], "--mount", "type=bind,source=" + str(Path(tool).resolve()) + ",target=/tmp/joint_release_guards.py,readonly", "-v", site_source + ":/home/frappe/frappe-bench/sites:ro", "--entrypoint", "/home/frappe/frappe-bench/env/bin/python", backend["Image"], "/tmp/joint_release_guards.py", action, *arguments]))
 
 
+def service_exit_plan(service, master_pid=None):
+	"""The native service entrypoints do not share a PID1 signal contract."""
+	assert service in RELEASE_SERVICES, "Unreviewed service exit"
+	if service == "frontend":
+		assert isinstance(master_pid, int) and master_pid > 1, "Signal the nginx master, not its wrapper"
+		return {"signal": "TERM", "pid": master_pid, "exit_codes": [0]}
+	if service == "scheduler":
+		return {"signal": "INT", "pid": 1, "exit_codes": [0, 1]}
+	if service == "websocket":
+		return {"signal": "KILL", "pid": 1, "exit_codes": [137], "requires_idle_relay": True}
+	return {"signal": "TERM", "pid": 1, "exit_codes": [0]}
+
+
+def classify_relay_sockets(rows, owned):
+	"""One scan of socket tables, restricted to native relay-owned descriptors."""
+	result = {"client_connections": [], "unreviewed_connections": []}
+	for line in rows:
+		fields = line.split()
+		assert len(fields) >= 10, "Malformed native socket row"
+		if fields[9] not in owned or fields[3] in {"0A", "06"}:
+			continue
+		local_port, remote_port = int(fields[1].rsplit(":", 1)[1], 16), int(fields[2].rsplit(":", 1)[1], 16)
+		if local_port == 9000:
+			result["client_connections"].append(fields[9])
+		elif remote_port != 6379:
+			result["unreviewed_connections"].append(fields[9])
+	return result
+
+
+def relay_connections():
+	owned = set()
+	for fd in Path("/proc/1/fd").iterdir():
+		try:
+			target = os.readlink(fd)
+			if target.startswith("socket:[") and target.endswith("]"):
+				owned.add(target[8:-1])
+		except FileNotFoundError:
+			continue
+	rows = []
+	for name in ("tcp", "tcp6"):
+		rows.extend((Path("/proc/net") / name).read_text().splitlines()[1:])
+	return classify_relay_sockets(rows, owned)
+
+
+def assert_idle_relay(proof):
+	assert proof["native"], "Unreviewed native relay handlers"
+	assert set(proof["containers"]) == set(RELEASE_SERVICES) - {"websocket"}, "Incomplete business service barrier"
+	assert all(not value["running"] for value in proof["containers"].values()), "Business producer still running"
+	assert not proof["database"]["sessions"] and not proof["database"]["transactions"], "Old database activity remains"
+	assert not proof["relay"]["client_connections"] and not proof["relay"]["unreviewed_connections"], "Relay has outstanding clients/requests"
+
+
+def validate_native_relay_process(argv, environment, mounts):
+	assert argv == ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"], "Unreviewed realtime entrypoint"
+	assert not any(value.startswith(("NODE_OPTIONS=", "NODE_PATH=")) and value.split("=", 1)[1] for value in environment), "Unreviewed realtime preload"
+	apps = PurePosixPath("/home/frappe/frappe-bench/apps")
+	assert not any(PurePosixPath(mount["Destination"]) == apps or PurePosixPath(mount["Destination"]) in apps.parents or apps in PurePosixPath(mount["Destination"]).parents for mount in mounts), "Realtime source must come from immutable inspected image"
+
+
+def validate_service_exit_receipt(state):
+	"""Verify service-specific exits, not a generic success code or an env claim."""
+	assert state["contract"]["exit_protocol"] == 2
+	before, after = state["before"], state["after"]
+	assert before["native"]["native_source_sha256"] == NATIVE_RELAY_SOURCES, "Unreviewed native runtime"
+	assert before["source_host"]["MainPID"] == "0", "Source process remains"
+	plans = state["contract"]["exit_plan"]
+	assert set(plans) == set(before["containers"]) == set(after["containers"]) == set(RELEASE_SERVICES)
+	for service, value in after["containers"].items():
+		plan = plans[service]
+		assert plan == service_exit_plan(service, plan["pid"]), "Unknown native exit contract"
+		assert value["id"] == before["containers"][service]["id"] and value["running"] is False, "Changed/running service identity"
+		assert value["exit_code"] in plan["exit_codes"], "Abnormal business service exit"
+	assert_idle_relay(after["relay_idle_proof"])
+	assert not after["database"]["sessions"] and not after["database"]["transactions"], "Post-exit database activity remains"
+
+
+def database_idle_snapshot():
+	"""Native read-only administrator inventory; password stays inside the DB container."""
+	query = "SELECT 'transaction', trx_id FROM information_schema.INNODB_TRX UNION ALL SELECT 'session', ID FROM information_schema.PROCESSLIST WHERE ID <> CONNECTION_ID() AND USER <> 'system user'"
+	argv = ["docker", "exec", "frappe_docker-db-1", "/bin/sh", "-c", 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mariadb --user=root --batch --skip-column-names -e "$1"', "probe", query]
+	result = {"sessions": [], "transactions": []}
+	for line in _host_call(argv).splitlines():
+		kind, identity = line.split("\t")
+		assert kind in {"session", "transaction"} and identity.isdigit(), "Unknown DB inventory row"
+		result[kind + "s"].append(identity)
+	return result
+
+
+def frontend_master():
+	assert _host_call(["docker", "exec", "frappe_docker-frontend-1", "sha256sum", "/usr/local/bin/nginx-entrypoint.sh"]).split()[0] == "93573cdb6d483223f00b8a2dd67b40f005adb1af378d57c31b0dacdaaef0263c", "Unknown frontend entrypoint"
+	text = _host_call(["docker", "exec", "--user", "0", "frappe_docker-frontend-1", "/bin/sh", "-c", 'pid=$(cat /run/nginx.pid); cat "/proc/$pid/stat"; tr "\\000" " " < "/proc/$pid/cmdline"'])
+	stat, command = text.split("\n", 1)
+	fields = stat.rsplit(")", 1)[1].split()
+	pid = int(stat.split(" ", 1)[0])
+	assert pid > 1 and int(fields[1]) == 1 and command.startswith("nginx: master process nginx -g daemon off;"), "Unknown nginx master identity"
+	return {"pid": pid, "start": fields[19], "argv": command}
+
+
 def drain_release(path, tool, candidate_sha, *, timeout=360):
-	"""One native TERM per fixed identity, bounded natural completion, no cleanup."""
+	"""Service-specific exits; never force a business process or clean Redis."""
 	assert not Path(path).exists(), "Prior/unknown drain receipt exists; HOLD, do not signal twice"
 	start = time.time()
-	before = {"containers": {}, "processes": {}, "rq": _container_read("backend", tool, "--rq-snapshot"), "native": _container_read("backend", tool, "--runtime-proof"), "source_host": source_host_proof()}
+	before = {"containers": {}, "processes": {}, "rq": _container_read("backend", tool, "--rq-drain-snapshot"), "native": _container_read("websocket", tool, "--runtime-proof"), "source_host": source_host_proof(), "frontend_master": frontend_master()}
 	assert not before["rq"].get("tombstones"), "Unmatched prior native worker death; HOLD"
 	for service in RELEASE_SERVICES:
 		value = _container_inspect(service)
@@ -765,11 +882,13 @@ def drain_release(path, tool, candidate_sha, *, timeout=360):
 	assert (option(("--workers", "-w"), "1"), option(("--threads",), "1"), option(("--worker-class", "-k"), "sync"), option(("--timeout", "-t"), "30"), option(("--graceful-timeout",), "30")) == ("2", "4", "gthread", "120", "30") and "--preload" in argv, "Unreviewed actual Gunicorn drain configuration; HOLD"
 	assert not any(value.startswith("GUNICORN_CMD_ARGS=") or value.startswith("GUNICORN_CONFIG=") for value in _container_inspect("backend")["Config"]["Env"]), "Unknown web environment options; HOLD"
 	assert "schedule" in before["processes"]["scheduler"]["1"]["argv"], "Unknown native scheduler entrypoint; HOLD"
-	assert Path(before["processes"]["websocket"]["1"]["argv"][0]).name == "node", "Realtime is not native direct PID1; HOLD"
+	relay_container = _container_inspect("websocket")
+	validate_native_relay_process(before["processes"]["websocket"]["1"]["argv"], relay_container["Config"]["Env"], relay_container.get("Mounts", []))
 	assert _host_call(["docker", "exec", "frappe_docker-websocket-1", "node", "--version"]).strip() == "v24.12.0", "Unknown realtime runtime; HOLD"
 	web_children = [process for process in web.values() if process["parent"] == 1 and any("gunicorn" in arg for arg in process["argv"])]
 	assert len(web_children) == 2, "Expected two known Gunicorn workers; HOLD"
-	contract = {"container_ids": {service: value["id"] for service, value in before["containers"].items()}, "worker_names": worker_names, "one_term_only": True}
+	plans = {service: service_exit_plan(service, before["frontend_master"]["pid"] if service == "frontend" else None) for service in RELEASE_SERVICES}
+	contract = {"container_ids": {service: value["id"] for service, value in before["containers"].items()}, "worker_names": worker_names, "exit_protocol": 2, "exit_plan": plans}
 	identity = {"candidate_sha": candidate_sha, "contract_sha256": hashlib.sha256(serialized(contract)).hexdigest()}
 	receipt = DDLReceipt.create(path, identity, before, contract)
 	completed, last_rq = {}, before["rq"]
@@ -784,38 +903,62 @@ def drain_release(path, tool, candidate_sha, *, timeout=360):
 			assert value["worker_name"] in worker_names.values(), "Unmatched native execution; HOLD"
 			completed[job] = value["worker_name"]
 	observe(last_rq)
-	for service in ("scheduler", "frontend", "websocket", "queue-long", "queue-short", "backend"):
+	def signal(service):
 		value = _container_inspect(service)
-		assert value["Id"] == before["containers"][service]["id"] and value["State"]["StartedAt"] == before["containers"][service]["started"] and value["State"]["Running"], "Process identity raced before TERM; HOLD"
+		assert value["Id"] == before["containers"][service]["id"] and value["State"]["StartedAt"] == before["containers"][service]["started"] and value["State"]["Running"], "Process identity raced before exit; HOLD"
 		if service != "frontend":
-			assert _container_read(service, tool, "--processes")["1"] == before["processes"][service]["1"], "PID/start/argv changed before TERM; HOLD"
-		receipt.plan("term-" + service, {"signal_attempted": False}, {"signal_attempted": True}, kind="signal", identity=before["containers"][service])
-		_host_call(["docker", "kill", "--signal", "TERM", value["Id"]])
-		receipt.complete("term-" + service, {"signal_attempted": True})
+			assert _container_read(service, tool, "--processes")["1"] == before["processes"][service]["1"], "PID/start/argv changed before exit; HOLD"
+		else:
+			assert frontend_master() == before["frontend_master"], "Nginx master identity changed; HOLD"
+		plan = plans[service]
+		receipt.plan("exit-" + service, {"signal_attempted": False}, {"signal_attempted": True}, kind="signal", identity=before["containers"][service], exit_plan=plan)
+		if service == "frontend":
+			_host_call(["docker", "exec", "--user", "0", value["Id"], "/bin/sh", "-c", 'kill -TERM "$1"', "probe", str(plan["pid"])])
+		else:
+			_host_call(["docker", "kill", "--signal", plan["signal"], value["Id"]])
+		receipt.complete("exit-" + service, {"signal_attempted": True})
+	# Close ingress and scheduling first. RQ/Gunicorn then finish actual work.
+	for service in ("frontend", "scheduler", "queue-long", "queue-short", "backend"):
+		signal(service)
 	# Inspect Redis through a command-only old-image process after Gunicorn exits.
 	# The helper is mounted read-only, sites/configs use the already-verified volume.
 	backend = _container_inspect("backend")
 	def stopped_snapshot():
-		return _command_rq_snapshot(backend, tool)
+		return _command_rq_snapshot(backend, tool, action="--rq-drain-snapshot")
+	def container_states():
+		values = json.loads(_host_call(["docker", "inspect", *[before["containers"][service]["id"] for service in RELEASE_SERVICES]]))
+		states = dict(zip(RELEASE_SERVICES, values, strict=True))
+		assert all(value["Id"] == before["containers"][service]["id"] and value["State"]["StartedAt"] == before["containers"][service]["started"] for service, value in states.items()), "Container identity changed during drain"
+		return states
 	while time.time() - start < timeout:
-		last_rq = stopped_snapshot()
-		observe(last_rq)
-		states = {service: _container_inspect(service) for service in RELEASE_SERVICES}
-		assert all(value["Id"] == before["containers"][service]["id"] for service, value in states.items()), "Container identity changed during drain"
-		if all(not value["State"]["Running"] for value in states.values()):
+		states = container_states()
+		if all(not value["State"]["Running"] for service, value in states.items() if service != "websocket"):
 			break
 		time.sleep(1)
 	else:
 		raise AssertionError("Bounded warm drain timed out; maintenance HOLD; no second signal")
+	last_rq = stopped_snapshot()
+	observe(last_rq)
+	idle = {"native": before["native"], "containers": {service: {"id": value["Id"], "running": value["State"]["Running"]} for service, value in states.items() if service != "websocket"}, "database": database_idle_snapshot(), "relay": _container_read("websocket", tool, "--relay-connections")}
+	assert_idle_relay(idle)
+	receipt.plan("idle-relay-proof", {"verified": False}, {"verified": True, "proof": idle}, kind="read-only-barrier")
+	receipt.complete("idle-relay-proof", {"verified": True, "proof": idle})
+	signal("websocket")  # Stateless relay only, after the durable zero-work barrier.
+	for _ in range(100):
+		states = container_states()
+		if not states["websocket"]["State"]["Running"]:
+			break
+		time.sleep(0.1)
+	assert all(not value["State"]["Running"] for value in states.values()), "Idle relay exit unconfirmed; HOLD"
 	logs = {}
 	for service, value in states.items():
-		assert value["State"]["ExitCode"] in ({0} if service in {"backend", "queue-long", "queue-short", "frontend"} else {0, 143}), "Abnormal process exit; HOLD"
+		assert value["State"]["ExitCode"] in plans[service]["exit_codes"], "Abnormal process exit; HOLD"
 		assert not value["State"]["OOMKilled"] and not value["State"].get("Error"), "Killed/unconfirmed process; HOLD"
-		log = subprocess.run(["docker", "logs", "--since", str(int(start)), value["Id"]], check=True, capture_output=True, text=True, timeout=30)
-		logs[service] = log.stdout + log.stderr
+		logs[service] = _host_call(["docker", "logs", "--since", str(int(start)), value["Id"]], include_stderr=True)
 		assert len(logs[service].encode()) <= 16 * 1024**2, "Native exit log proof exceeds bound; HOLD"
 		logs[service] = re.sub(r"\x1b\[[0-9;]*m", "", logs[service])
-		assert not re.search(r"SIGKILL|force.?stop|cold shutdown|killing.*horse|Worker.*timeout", logs[service], re.I), "Forced/unknown process shutdown; HOLD"
+		if service != "websocket":
+			assert not re.search(r"SIGKILL|force.?stop|cold shutdown|killing.*horse|Worker.*timeout", logs[service], re.I), "Forced/unknown business shutdown; HOLD"
 	for service in ("queue-long", "queue-short"):
 		assert re.search(r"warm shut|warm stop", logs[service], re.I), "Missing native warm-shutdown proof; HOLD"
 		for job in re.findall(r"Job OK\s*\(([^)]+)\)", logs[service]):
@@ -826,11 +969,15 @@ def drain_release(path, tool, candidate_sha, *, timeout=360):
 				assert re.search(r"Job OK.*\(" + re.escape(job) + r"\)", logs[service]), "Missing native post-callback success log; HOLD"
 	for process in web_children:
 		assert re.search(r"Worker exiting.*\b" + str(process["pid"]) + r"\b", logs["backend"]), "Missing normal Gunicorn worker exit proof; HOLD"
+	if states["scheduler"]["State"]["ExitCode"] == 1:
+		assert "Aborted!" in logs["scheduler"], "Scheduler error is not native INT exit; HOLD"
 	second = stopped_snapshot()
-	assert second == last_rq, "Post-exit Redis inventory unstable; HOLD"
-	verify_rq_drain(before["rq"], second, completed)
-	receipt.finish({"containers": {service: {"id": value["Id"], "running": False, "exit_code": value["State"]["ExitCode"]} for service, value in states.items()}, "rq": second, "naturally_completed_jobs": completed, "native_logs": logs})
-	return {"quiescent": True, "receipt": str(path), "one_term_per_identity": True}
+	assert last_rq["queues"] == second["queues"] and last_rq["intermediate"] == second["intermediate"], "Post-exit queue contents changed; HOLD"
+	delta = verify_rq_drain(before["rq"], second, completed)
+	after = {"containers": {service: {"id": value["Id"], "running": False, "exit_code": value["State"]["ExitCode"]} for service, value in states.items()}, "rq": second, "naturally_completed_jobs": completed, "native_logs": logs, "historical_transition": delta, "relay_idle_proof": idle, "database": database_idle_snapshot()}
+	validate_service_exit_receipt({"contract": contract, "before": before, "after": after})
+	receipt.finish(after)
+	return {"quiescent": True, "receipt": str(path), "exit_protocol": 2}
 
 
 def tenant_preflight(expected_erpnext, *, main_only=False):
@@ -908,12 +1055,13 @@ def restore_site_maintenance(path, site, original, *, enable=False):
 	assert json.loads(config_path.read_bytes()) == config, "Maintenance read-back failed"
 
 
-def source_host_proof():
+def source_host_proof(*, root=None):
 	"""Inspect the existing runner only; never cancel/finalize/logging-snapshot."""
-	root = Path("/home/yuewei/.local/state/deeplinkerp-source-sync")
+	root = Path(root) if root is not None else Path("/home/yuewei/.local/state/deeplinkerp-source-sync")
 	status = _host_call(["systemctl", "--user", "show", "deeplinkerp-source-sync.service", "--property=MainPID", "--property=Result", "--property=ActiveState", "--property=ExecMainStartTimestampMonotonic", "--property=ExecMainCode", "--property=ExecMainStatus"])
 	values = dict(line.split("=", 1) for line in status.splitlines() if "=" in line)
-	assert values.get("MainPID") == "0" and values.get("ActiveState") in {"inactive", "failed"} and values.get("Result") == "success", "Source host process/result unconfirmed; HOLD"
+	terminal = values.get("Result") == "success" or (values.get("Result") == "exit-code" and values.get("ExecMainCode") == "1" and values.get("ExecMainStatus", "0").isdigit() and int(values["ExecMainStatus"]) > 0)
+	assert values.get("MainPID") == "0" and values.get("ActiveState") in {"inactive", "failed"} and terminal, "Source host process/result unconfirmed; HOLD"
 	for name in ("currentrun.json", "run.json"):
 		path = root / name
 		if path.exists():
@@ -1112,7 +1260,7 @@ def main():
 	import argparse
 	parser = argparse.ArgumentParser(description="Bounded guards for the existing procurement release")
 	action = parser.add_mutually_exclusive_group(required=True)
-	for name in ("rq-snapshot", "rq-main-snapshot", "processes", "runtime-proof", "tenant-preflight", "source-host-proof", "host-drain", "record-resume", "assert-pre-resume", "maintenance-on", "maintenance-restore", "cleanup-owned-build", "retirement-proof", "verify-retirement-routing"):
+	for name in ("rq-snapshot", "rq-main-snapshot", "rq-drain-snapshot", "relay-connections", "processes", "runtime-proof", "tenant-preflight", "source-host-proof", "host-drain", "record-resume", "assert-pre-resume", "maintenance-on", "maintenance-restore", "cleanup-owned-build", "retirement-proof", "verify-retirement-routing"):
 		action.add_argument("--" + name, action="store_true")
 	parser.add_argument("--receipt")
 	parser.add_argument("--candidate-sha")
@@ -1130,15 +1278,17 @@ def main():
 	if args.retirement_receipt or args.retirement_sha256:
 		assert args.retirement_receipt and args.retirement_sha256, "Both retirement approvals required; HOLD"
 		os.environ.update(DEEPLINKERP_RETIREMENT_RECEIPT=args.retirement_receipt, DEEPLINKERP_RETIREMENT_SHA256=args.retirement_sha256)
-	if args.rq_snapshot or args.rq_main_snapshot:
+	if args.rq_snapshot or args.rq_main_snapshot or args.rq_drain_snapshot:
 		import redis
 		import rq
 		assert rq.__version__ == "2.6.1", "RQ native source version unknown; HOLD"
 		config = json.loads(Path("/home/frappe/frappe-bench/sites/common_site_config.json").read_bytes())
 		client = redis.Redis.from_url(config["redis_queue"], socket_connect_timeout=5, socket_timeout=5)
 		assert client.ping() is True, "Redis health unconfirmed; HOLD"
-		result = raw_rq_snapshot(client, main_only=args.rq_main_snapshot)
+		result = raw_rq_snapshot(client, main_only=args.rq_main_snapshot, historical_evidence=args.rq_drain_snapshot)
 		result["redis_ping"] = True
+	elif args.relay_connections:
+		result = relay_connections()
 	elif args.processes:
 		result = native_processes()
 	elif args.runtime_proof:
