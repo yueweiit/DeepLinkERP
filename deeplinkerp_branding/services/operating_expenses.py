@@ -1019,6 +1019,12 @@ def link_existing(source_id, journal_entry, expected_fingerprint):
 
 
 def validate_operating_journal(doc, method=None):
+    # Shared-image sites need not install Operating. Ordinary native journals
+    # stay independent, but unauditable operating associations cannot be accepted.
+    if not frappe.db.exists("DocType", EVENT):
+        if any(doc.get(field) for field in ("custom_operating_event_key", "custom_operating_source", "custom_operating_fingerprint", "custom_operating_recognition")):
+            frappe.throw("当前账套未启用运营费用，不能设置运营费用凭证关联")
+        return
     key = doc.get("custom_operating_event_key")
     if not doc.is_new():
         old_key = frappe.db.get_value("Journal Entry", doc.name, "custom_operating_event_key")
