@@ -110,10 +110,11 @@ class JointReleaseGuardTests(unittest.TestCase):
 				with self.assertRaises(AssertionError): guard.source_host_proof(root=Path(directory))
 
 	def test_drain_reaches_relay_only_after_business_exits_and_stops_on_active_database(self):
-		for active_database in (False, True):
-			with self.subTest(active_database=active_database), tempfile.TemporaryDirectory() as directory:
+		for active_database, restart_policy in ((False, "unless-stopped"), (True, "unless-stopped"), (False, "no"), (True, "no")):
+			with self.subTest(active_database=active_database, restart_policy=restart_policy), tempfile.TemporaryDirectory() as directory:
 				guard = self.module()
-				states = {role: {"Id": role, "Image": "image", "State": {"Running": True, "StartedAt": "start", "Pid": 1, "ExitCode": 0, "OOMKilled": False}, "Config": {"Hostname": role, "Env": []}} for role in guard.RELEASE_SERVICES}
+				states = {role: {"Id": role, "Image": "image", "State": {"Running": True, "StartedAt": "start", "Pid": 1, "ExitCode": 0, "OOMKilled": False}, "Config": {"Hostname": role, "Env": []}, "HostConfig": {"RestartPolicy": {"Name": "unless-stopped", "MaximumRetryCount": 0}}} for role in guard.RELEASE_SERVICES}
+				states["frontend"]["HostConfig"]["RestartPolicy"]["Name"] = restart_policy
 				argv = {"backend": ["gunicorn", "--workers", "2", "--threads", "4", "--worker-class", "gthread", "--timeout", "120", "--preload", "frappe.app:application"], "queue-long": ["bench", "worker"], "queue-short": ["bench", "worker"], "scheduler": ["bench", "schedule"], "websocket": ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]}
 				processes = {role: {"1": {"pid": 1, "start": "1", "parent": 0, "argv": values}} for role, values in argv.items()}
 				for pid in (8, 9): processes["backend"][str(pid)] = {"pid": pid, "parent": 1, "argv": ["gunicorn"]}
@@ -122,10 +123,17 @@ class JointReleaseGuardTests(unittest.TestCase):
 				stopped = copy.deepcopy(rq); stopped["workers"] = {}
 				signals = []
 				def host(command, **kwargs):
+					if command[:2] == ["docker", "update"]:
+						self.assertEqual(command, ["docker", "update", "--restart", "no", "frontend"])
+						states["frontend"]["HostConfig"]["RestartPolicy"] = {"Name": "no", "MaximumRetryCount": 0}
+						return "frontend"
 					if command[:2] == ["docker", "logs"]: return "warm shutdown\nWorker exiting 8\nWorker exiting 9\n"
 					if command[:2] == ["docker", "inspect"]: return json.dumps([states[role] for role in command[2:]])
 					if "--version" in command: return "v24.12.0\n"
 					role = "frontend" if command[:2] == ["docker", "exec"] else command[-1]
+					if role == "frontend" and states[role]["HostConfig"]["RestartPolicy"]["Name"] != "no":
+						states[role]["State"]["StartedAt"] = "restarted"
+						return role
 					if role == "websocket": self.assertTrue(all(not states[item]["State"]["Running"] for item in guard.RELEASE_SERVICES if item != role))
 					signals.append((role, command))
 					states[role]["State"].update(Running=False, ExitCode=137 if role == "websocket" else 0)
@@ -143,6 +151,9 @@ class JointReleaseGuardTests(unittest.TestCase):
 						self.assertTrue(guard.drain_release(Path(directory) / "drain.json", "tool", "a" * 40)["quiescent"])
 				self.assertEqual([role for role, _ in signals], ["frontend", "scheduler", "queue-long", "queue-short", "backend"] + ([] if active_database else ["websocket"]))
 				self.assertNotIn("KILL", str([command for role, command in signals if role != "websocket"]))
+				receipt = json.loads(Path(directory, "drain.json").read_bytes())
+				self.assertEqual(receipt["before"]["frontend_restart_policy"]["Name"], restart_policy)
+				self.assertEqual(receipt["steps"][0]["status"], "complete")
 
 	def test_native_delta_keeps_every_original_column_index_and_table_option(self):
 		guard = self.module().assert_schema_delta

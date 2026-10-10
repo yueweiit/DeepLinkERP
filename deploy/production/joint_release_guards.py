@@ -890,7 +890,18 @@ def drain_release(path, tool, candidate_sha, *, timeout=360):
 	plans = {service: service_exit_plan(service, before["frontend_master"]["pid"] if service == "frontend" else None) for service in RELEASE_SERVICES}
 	contract = {"container_ids": {service: value["id"] for service, value in before["containers"].items()}, "worker_names": worker_names, "exit_protocol": 2, "exit_plan": plans}
 	identity = {"candidate_sha": candidate_sha, "contract_sha256": hashlib.sha256(serialized(contract)).hexdigest()}
+	frontend = _container_inspect("frontend")
+	before["frontend_restart_policy"] = copy.deepcopy(frontend["HostConfig"]["RestartPolicy"])
+	assert before["frontend_restart_policy"]["Name"] in {"no", "always", "unless-stopped", "on-failure"}, "Unknown frontend restart policy; HOLD"
 	receipt = DDLReceipt.create(path, identity, before, contract)
+	# An exec-delivered nginx signal is not a manual Docker stop. Suppress only
+	# this exact container's restart until Compose recreates it with its policy.
+	assert frontend["Id"] == before["containers"]["frontend"]["id"] and frontend["State"]["StartedAt"] == before["containers"]["frontend"]["started"], "Frontend identity raced before restart suppression; HOLD"
+	if before["frontend_restart_policy"] != {"Name": "no", "MaximumRetryCount": 0}:
+		receipt.plan("disable-frontend-restart", before["frontend_restart_policy"], {"Name": "no", "MaximumRetryCount": 0}, kind="restart-policy", identity=before["containers"]["frontend"])
+		_host_call(["docker", "update", "--restart", "no", frontend["Id"]])
+		assert _container_inspect("frontend")["HostConfig"]["RestartPolicy"] == {"Name": "no", "MaximumRetryCount": 0}, "Frontend restart suppression unconfirmed; HOLD"
+		receipt.complete("disable-frontend-restart", {"Name": "no", "MaximumRetryCount": 0})
 	completed, last_rq = {}, before["rq"]
 	def observe(snapshot):
 		for job, value in snapshot["jobs"].items():
