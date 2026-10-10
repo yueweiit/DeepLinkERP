@@ -398,6 +398,18 @@
 					return result;
 				});
 			},
+			async saveCompany(company) {
+				return run(async (current) => {
+					const result = await call("save_source_company", {
+						source_id: sourceId,
+						company,
+						expected_source_version: detail.source.version,
+					});
+					if (!current()) return;
+					this.invalidate();
+					return result;
+				});
+			},
 			async preview(payment) {
 				if (!detail?.mapping || !this.session || this.session.dirty())
 					throw new Error(t("请先保存当前财务映射，再预览"));
@@ -963,15 +975,8 @@
 					drawer.panel.find(".dlp-operating-company-actions"),
 					"保存法律公司",
 					async () => {
-						await uiTask(drawer, async (current) => {
-							await call("save_source_company", {
-								source_id: sourceId,
-								company,
-								expected_source_version: detail.source.version,
-							});
-							if (current()) w.invalidate();
-						});
-						if (drawer.alive()) {
+						const result = await w.saveCompany(company);
+						if (result && drawer.alive()) {
 							await w.load();
 							await refresh();
 						}

@@ -139,7 +139,11 @@ def _source(name, write=False):
     return doc
 
 
-def _settings():
+def _settings(for_update=False):
+    if for_update:
+        # Native locking reads cover both Single values and company-map children.
+        # Every settings writer must take this lock before any source row lock.
+        return frappe.get_doc(SETTINGS, SETTINGS, for_update=True)
     return frappe.get_single(SETTINGS)
 
 
@@ -170,14 +174,17 @@ def _assert_financial_fields(record, expected, notice):
             frappe.throw(notice)
 
 
-def _audit_financial(operation, source, document, amount, result, *, error=None, stage=None):
+def _audit_financial(operation, source, document, amount, result, *, error=None, stage=None,
+                     company=None, error_code="financial_postcondition_failed"):
     # This records validation, not a claim that the RPC already committed.
     # Do not copy exception text or private party/bank/form data into this log.
     # The original exception is re-raised by the caller for native RPC handling.
     entry = {"operation": operation, "source": source, "document": document,
              "amount": str(amount or ""), "result": result}
+    if company is not None:
+        entry["company"] = company
     if error is not None:
-        entry.update(error_type=type(error).__name__, error_code="financial_postcondition_failed", stage=stage)
+        entry.update(error_type=type(error).__name__, error_code=error_code, stage=stage)
     frappe.logger("operating_finance", allow_site=True).info(entry)
 
 
@@ -197,7 +204,6 @@ def save_sync_settings(company_mappings, api_token=None):
     values = frappe.parse_json(company_mappings)
     if not isinstance(values, dict) or len(values) > 200:
         frappe.throw("公司映射格式无效")
-    settings = _settings()
     rows = []
     for raw, company in values.items():
         if not isinstance(raw, str) or not raw.strip() or len(raw) > 200:
@@ -205,10 +211,19 @@ def save_sync_settings(company_mappings, api_token=None):
         _read("Company", company, {"name"})
         # Existing mapped/drafted documents cannot be reassigned by changing sync settings.
         rows.append({"source_company": raw, "company": company})
-    settings.set("company_mappings", rows)
     if api_token is not None:
         if not isinstance(api_token, str) or not 8 <= len(api_token) <= 500:
             frappe.throw("同步密钥格式无效")
+    settings = _settings(for_update=True)
+    # The settings editor owns organization mappings, not per-application
+    # decisions saved by another manager since that editor was opened.
+    overrides = {raw: legal for raw, legal in _maps(settings).items() if raw.startswith("source:")}
+    submitted = {row["source_company"]: row["company"] for row in rows}
+    if any(submitted.get(raw, legal) != legal for raw, legal in overrides.items()):
+        frappe.throw("单据法律公司请在对应申请中核对，不能通过同步设置覆盖")
+    submitted.update(overrides)
+    settings.set("company_mappings", [{"source_company": raw, "company": legal} for raw, legal in submitted.items()])
+    if api_token is not None:
         settings.api_token = api_token
     settings.enabled = 0
     settings.preview_fingerprint = None
@@ -451,8 +466,8 @@ def _reconcile_oa_cache(until, maps):
 @frappe.whitelist(methods=["POST"])
 def preview_sync():
     _manager()
-    settings = _settings()
     result = _source_page({"limit": 100})
+    settings = _settings(for_update=True)
     maps = _maps(settings)
     fingerprint = _sync_preview_fingerprint(settings, result)
     settings.preview_fingerprint = fingerprint
@@ -467,8 +482,9 @@ def _sync_preview_fingerprint(settings, result):
 @frappe.whitelist(methods=["POST"])
 def enable_sync(preview_fingerprint):
     _manager()
-    settings = _settings()
-    expected = _sync_preview_fingerprint(settings, _source_page({"limit": 100}))
+    result = _source_page({"limit": 100})
+    settings = _settings(for_update=True)
+    expected = _sync_preview_fingerprint(settings, result)
     if not _maps(settings) or not settings.preview_fingerprint or preview_fingerprint != settings.preview_fingerprint or expected != preview_fingerprint:
         frappe.throw("请先预览并确认法律公司映射")
     settings.enabled = 1
@@ -513,14 +529,17 @@ def _issues(item, mapping=None, include_payment_dates=True):
     return issues
 
 
-def _upsert(item, maps):
+def _upsert(item, maps, *, doc=None):
     # A malformed identity cannot safely be cached under an invented key.
     identifier(item.get("source_id"))
     if len(json.dumps(item).encode()) > MAX_JSON_BYTES:
         frappe.throw("来源数据过大")
     name = item["source_id"]
-    existing = frappe.db.exists(SOURCE, name)
-    doc = frappe.get_doc(SOURCE, name, for_update=True) if existing else frappe.new_doc(SOURCE)
+    existing = bool(doc) or frappe.db.exists(SOURCE, name)
+    if doc is not None and (doc.doctype != SOURCE or doc.name != name or not doc.flags.for_update):
+        frappe.throw("来源锁定身份不符")
+    if doc is None:
+        doc = frappe.get_doc(SOURCE, name, for_update=True) if existing else frappe.new_doc(SOURCE)
     company = _mapped_company(item, maps)
     issues = _issues(item)
     effective_type = item.get("application_type")
@@ -572,19 +591,10 @@ def _upsert(item, maps):
 
 
 def _sync_page():
-    settings = _settings()
+    settings = _settings(for_update=True)
     if not settings.enabled:
         frappe.throw("同步未启用")
-    # Single-row SELECT FOR UPDATE serializes manual/background jobs and cursor state.
-    current = frappe.db.sql("SELECT field, value FROM `tabSingles` WHERE doctype=%s FOR UPDATE", SETTINGS, as_dict=True)
-    current = {row.field: row.value for row in current}
-    if str(current.get("enabled")) != "1":
-        frappe.throw("同步未启用")
-    settings.reload()
-    # Use the current locking read's cursor, not a snapshot taken before another
-    # sync completed. Framework optimistic timestamps still reject concurrent setup edits.
-    for key in ("changed_since", "until", "cursor", "last_sync_at", "last_error", "preview_fingerprint"):
-        settings.set(key, current.get(key))
+    maps = _maps(settings)
     params = {"limit": 500}
     if settings.changed_since:
         params["changed_since"] = settings.changed_since
@@ -598,13 +608,13 @@ def _sync_page():
             frappe.throw("来源页包含重复标识")
         seen.add(root)
         current_version, current_company = frappe.db.get_value(SOURCE, root, ["source_version", "company"]) or (None, None)
-        if current_version != item.get("version") or (current_company or "") != (_mapped_company(item, _maps(settings)) or ""):
-            _upsert(item, _maps(settings))
+        if current_version != item.get("version") or (current_company or "") != (_mapped_company(item, maps) or ""):
+            _upsert(item, maps)
     settings.cursor = result["next_cursor"] if not result["end"] else None
     settings.until = result["until"] if not result["end"] else None
     if result["end"]:
         if _source_mode() == "oa_cashier":
-            _reconcile_oa_cache(result["until"], _maps(settings))
+            _reconcile_oa_cache(result["until"], maps)
         settings.changed_since = result["until"]
     settings.last_sync_at = now_datetime()
     settings.last_error = None
@@ -1069,31 +1079,76 @@ def validate_operating_journal(doc, method=None):
         doc.validate_against_jv()
 
 
-@frappe.whitelist(methods=["POST"])
-def save_source_company(source_id, company, expected_source_version):
-    """Explicit legal Company decision for records without a source legal identity."""
+def _save_source_company(source_id, company, expected_source_version):
     _manager()
-    doc = _source(source_id, write=True)
-    _read("Company", company, {"name"})
-    result = _source_page({"source_id": doc.source_id, "limit": 1})
+    before = _source(source_id)
+    legal = _read("Company", company, {"name"})
+    initial_settings = _settings()
+    token_key = {"doctype": SETTINGS, "name": SETTINGS, "fieldname": "api_token", "encrypted": 1}
+    token_before = frappe.db.get_value("__Auth", token_key, "password", order_by=None)
+    result = _source_page({"source_id": before.source_id, "limit": 1})
     if not result["end"] or len(result["items"]) != 1:
         frappe.throw("来源已撤回，请重新同步")
     item = result["items"][0]
-    if item.get("source_id") != doc.source_id:
+    if item.get("source_id") != before.source_id:
         frappe.throw("来源标识不符，请重新同步")
     if item["version"] != expected_source_version:
         frappe.throw("来源版本已变化，请刷新后复核")
-    if frappe.db.exists(MAPPING, doc.name) or frappe.db.exists(EVENT, {"source": doc.name}):
-        frappe.throw("已有财务确认，不可改变法律公司")
-    settings = _settings()
+    settings = _settings(for_update=True)
+    if (settings.enabled != initial_settings.enabled
+            or frappe.db.get_value("__Auth", token_key, "password", order_by=None, for_update=True) != token_before):
+        frappe.throw("同步设置已变化，请刷新后复核")
+    doc = _source(source_id, write=True)
+    legal.check_permission("read")
+    if doc.source_id != before.source_id:
+        frappe.throw("来源标识不符，请重新同步")
+    if doc.source_version != before.source_version and doc.source_version != expected_source_version:
+        frappe.throw("来源版本已变化，请刷新后复核")
+    from .operating_payment_service import PAYMENT, TAKEOVER
+    # The source lock serializes financial writes. Use current reads here: a
+    # consistent snapshot taken before remote IO can miss a newly committed row.
+    for doctype in (MAPPING, EVENT, TAKEOVER, PAYMENT):
+        if frappe.db.get_value(doctype, {"source": doc.name}, "name", for_update=True):
+            frappe.throw("已有财务确认，不可改变法律公司")
     maps = _maps(settings)
     maps["source:" + doc.name] = company
     settings.set("company_mappings", [{"source_company": raw, "company": legal} for raw, legal in maps.items()])
     _save(settings)
     doc.company = company
-    _save(doc)
-    updated = _upsert(item, maps)
+    updated = _upsert(item, maps, doc=doc)
+    _assert_financial_fields(frappe.db.get_value(SOURCE, doc.name, ["company", "source_version"], as_dict=True, for_update=True),
+                            {"company": company, "source_version": expected_source_version}, "法律公司保存结果不一致，已取消本次操作")
+    persisted = frappe.db.get_values("Operating Expense Company Map",
+        {"parent": SETTINGS, "parenttype": SETTINGS, "parentfield": "company_mappings", "source_company": "source:" + doc.name},
+        "company", for_update=True)
+    if len(persisted) != 1 or persisted[0][0] != company:
+        frappe.throw("法律公司映射保存结果不一致，已取消本次操作")
+    _audit_financial("save_source_company", doc.name, doc.name, "0", "validated", company=company)
     return {"source_id": updated.name, "company": updated.company}
+
+
+@frappe.whitelist(methods=["POST"])
+def save_source_company(source_id, company, expected_source_version):
+    """One RPC transaction: settings first, source second; no intermediate commit."""
+    response_before = dict(frappe.response)
+    messages_before = list(frappe.message_log)
+    for attempt in range(3):
+        try:
+            return _save_source_company(source_id, company, expected_source_version)
+        except frappe.QueryDeadlockError as error:
+            frappe.db.rollback()
+            frappe.response.clear()
+            frappe.response.update(response_before)
+            frappe.message_log[:] = messages_before
+            _audit_financial("save_source_company", source_id, source_id, "0", "rolled_back",
+                company=company, error=error, stage="retry" if attempt < 2 else "exhausted", error_code="transaction_conflict")
+            if attempt == 2:
+                frappe.throw("操作冲突，法律公司未保存，请稍后重试。")
+        except Exception as error:
+            frappe.db.rollback()
+            _audit_financial("save_source_company", source_id, source_id, "0", "rolled_back",
+                company=company, error=error, stage="validation_or_save", error_code="company_save_failed")
+            raise
 
 
 LIST_FIELDS = ["name", "source_id", "source_system", "company", "application_type", "effective_application_type", "application_type_raw", "applicant", "payee_name", "summary", "request_date", "currency", "amount", "paid_amount", "pending_amount", "source_status", "approval_state", "source_company", "source_sheet", "source_version", "issues"]

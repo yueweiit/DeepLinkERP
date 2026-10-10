@@ -124,6 +124,44 @@ test("operating workflow distinguishes cancellable reads from saved mapping and 
  assert.deepEqual(modes,["read","write","read","write"]);
 });
 
+test("legal company save uses the existing write gate and preserves detail on failure", async () => {
+	const d = drawer(), calls = [];
+	const original = { ...detail(), company: null };
+	const a = create(host(async (req) => {
+		calls.push(req);
+		if (req.method.endsWith("get_operating_expense_detail")) return { message: original };
+		throw { _server_messages: JSON.stringify([JSON.stringify({ message: "操作冲突，法律公司未保存，请稍后重试。" })]) };
+	}));
+	const w = a.workflow(d, "source:1");
+	await w.load();
+	await assert.rejects(() => w.saveCompany("C"), /法律公司未保存/);
+	assert.equal(w.detail, original);
+	assert.equal(d.busy, false);
+	assert.equal(calls.at(-1).args.company, "C");
+	assert.equal(calls.at(-1).args.expected_source_version, "v1");
+	assert.equal(calls.length, 2);
+});
+
+test("pending legal company save cannot dispatch twice or refresh a closed drawer", async () => {
+	let finish;
+	const d = drawer(), calls = [], invalidations = [];
+	const a = create(host(async (req) => {
+		calls.push(req);
+		if (req.method.endsWith("get_operating_expense_detail")) return { message: detail() };
+		return new Promise((resolve) => { finish = () => resolve({ message: { company: "C" } }); });
+	}));
+	const w = a.workflow(d, "source:1", { onInvalidate: () => invalidations.push(true) });
+	await w.load();
+	const saving = w.saveCompany("C");
+	await assert.rejects(() => w.saveCompany("C"), /等待/);
+	const count = invalidations.length;
+	d.close();
+	finish();
+	assert.equal(await saving, undefined);
+	assert.equal(invalidations.length, count);
+	assert.equal(calls.length, 2);
+});
+
 test("source mapping uses exact decimal strings and preserves hidden payment terms", () => {
 	assert.equal(typeof api.editSession, "function");
 	const s = api.editSession(recognizedDetail());

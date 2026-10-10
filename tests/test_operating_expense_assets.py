@@ -34,7 +34,7 @@ class OperatingExpenseAssetsTest(unittest.TestCase):
 		self.assertIn(provider, files)
 		self.assertLess(files.index(shell), files.index(drawer))
 		self.assertLess(files.index(drawer), files.index(provider))
-		self.assertIn(drawer + "?v=0.0.16", hooks.app_include_js)
+		self.assertIn(drawer + "?v=0.0.17", hooks.app_include_js)
 		panel = "/assets/deeplinkerp_branding/js/operating_payment_panel.js"
 		self.assertEqual(files.count(panel), 1)
 		self.assertLess(files.index(panel), files.index(drawer))
