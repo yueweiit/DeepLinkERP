@@ -488,7 +488,7 @@
 				try { root.localStorage?.setItem(providerActive(this) ? `${key}:unified` : key, JSON.stringify(this.preferences)); } catch (_) { /* Rendering must work without storage. */ }
 				list.$frappe_list?.toggleClass("dlp-po-standard", this.preferences.density === "standard");
 			},
-			setColumns(columns) {
+			setColumns(columns, notify=true) {
 				this.preferences.columns = columns;
 				this.savePreferences();
 				const hadSelection = Boolean(list.$checks?.length);
@@ -496,7 +496,7 @@
 				list.set_rows_as_checked?.();
 				// Native restoration calls on_row_checked itself only when there were checked elements.
 				if (!hadSelection) list.on_row_checked?.();
-				return config.onColumnsChange?.(this);
+				if(notify)return config.onColumnsChange?.(this);
 			},
 			async clearQuickFilters() {
 				if (this.resetting) return;
@@ -838,7 +838,7 @@
 		controller.$toolbar = $(`<div class="dlp-po-toolbar"><label>${escapeHTML(t("密度"))} <select class="form-control input-xs dlp-po-density"><option value="tight">${escapeHTML(t("紧凑"))}</option><option value="standard">${escapeHTML(t("标准"))}</option></select></label><button class="btn btn-default btn-sm dlp-po-columns" type="button">${escapeHTML(t("列设置"))}</button></div>`).prependTo(list.$frappe_list);
 		controller.$toolbar.find(".dlp-po-density").val(controller.preferences.density).on("change.dlpPO", (event) => {
 			controller.preferences.density = event.target.value;
-			controller.savePreferences();
+			controller.setColumns(controller.preferences.columns, false);
 		});
 		controller.$toolbar.find(".dlp-po-columns").on("click.dlpPO", () => columnDialog(controller));
 		if ((!config.pageRoute || config.provider.exportCurrent) && root.frappe.model.can_export?.(DOCTYPE)) {

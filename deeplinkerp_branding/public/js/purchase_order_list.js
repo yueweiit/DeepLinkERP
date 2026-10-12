@@ -28,7 +28,7 @@
   const selected=c.preferences.columns.map(field=>provider.columns.find(col=>col.fieldname===field)).filter(Boolean);
   const visible=selected.filter(col=>!itemFields.has(col.fieldname));
   const frozenThrough=visible.findIndex(col=>col.fieldname==='supplier_name');let left=76;
-  return visible.map((col,index)=>{const width=engine.columnWidth(col,c.preferences.density,'Purchase Order'),value={...col,width,left,frozen:index<=frozenThrough};left+=width;return value;});
+  return visible.map((col,index)=>{const width=engine.columnWidth?.(col,c.preferences.density,'Purchase Order') ?? col.width,value={...col,width,left,frozen:index<=frozenThrough};left+=width;return value;});
  }
  function cell(tag,field,value,span=1,width=null,extra='') {
   const col=typeof width==='object'?width:{width,frozen:['_select','_sequence'].includes(field),left:field==='_sequence'?36:0};

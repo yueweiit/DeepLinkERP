@@ -885,12 +885,12 @@ function mountedPurchase(beforeMount) {
 	};
 	class Surface {
 		constructor() { this.length = 1; this.value = ""; }
-		find() { return new Surface(); } first() { return this; } parent() { return this; }
+		find(selector) { const surface=new Surface();surface.selector=selector;return surface; } first() { return this; } parent() { return this; }
 		appendTo() { return this; } prependTo() { return this; } insertBefore() { return this; } insertAfter() { return this; }
 		addClass() { return this; } removeClass() { return this; } toggleClass() { return this; } toggle() { return this; } show() { return this; } hide() { return this; } remove() { return this; }
 		append(value) { this.value += value; return this; } html(value) { this.value = value; return this; } text(value) { if (value === undefined) return this.value; this.value = value; return this; }
 		val() { return this; } prop() { return this; } each() { return this; } attr(name, value) { if (value !== undefined) return this; return this.attributes?.[name]; } off() { return this; }
-		on(events, selector, handler) { if (typeof selector === "string") { handlers.set(selector, handler); if (this === list.$result && events.startsWith("change")) changes.push({ selector, handler }); if(this===list.$result && events.startsWith('click'))clicks.push({selector,handler}); } return this; }
+		on(events, selector, handler) { if(typeof selector==='function' && this.selector==='.dlp-po-density')handlers.set('.dlp-po-density',selector);if (typeof selector === "string") { handlers.set(selector, handler); if (this === list.$result && events.startsWith("change")) changes.push({ selector, handler }); if(this===list.$result && events.startsWith('click'))clicks.push({selector,handler}); } return this; }
 	}
 	env.$ = target => target instanceof Surface ? target : new Surface(); env.document = { body: { classList: { toggle() {} } } }; env.cur_list = list;
 	env.frappe.model.can_export = () => false;
@@ -903,17 +903,29 @@ function mountedPurchase(beforeMount) {
 	function click(name) { const target = new Surface(); target.attributes = { "data-name": name }; return handlers.get(".dlp-purchase-expand")({ currentTarget: target, preventDefault() {}, stopPropagation() {} }); }
 	return { ...fixture, controller, calls, controls, handlers, payload, click, resultNode, captures,clickCaptures };
 }
-test('purchase table uses the shared density widths with complete permitted company text and unchanged column order',()=>{
- const {controller:c,list}=mountedPurchase(),company='拉丁购国际电子商务（东莞）有限公司<&';
+test('purchase table uses the shared density widths with complete permitted company text and unchanged column order',async()=>{
+ const {controller:c,list,handlers,calls,nativeRefreshes}=mountedPurchase(),company='拉丁购国际电子商务（东莞）有限公司<&';
+ list.$result.append=html=>{list.$result.value=html;return list.$result;};
  c.setColumns(['status','name','company','receipt_action','grand_total','transaction_date']);
- const doc={name:'PO',row_type:'purchase_order',company,grand_total:123,currency:'CNY'},tight=list.get_list_row_html(doc);
+ const doc={name:'PO',row_type:'purchase_order',company,grand_total:123,currency:'CNY',order_progress:{item_fields:['name','item_code'],items:[{name:'I',item_code:'ITEM'}]}},tight=list.get_list_row_html(doc);
  assert.match(tight,/data-fieldname="company"[^>]*width:180px/);assert.match(tight,/有限公司&lt;&amp;/);
  assert.match(tight,/data-fieldname="receipt_action"[^>]*width:128px/);assert.match(tight,/data-fieldname="grand_total"[^>]*width:140px/);
  assert.deepEqual(c.preferences.columns,['status','name','company','receipt_action','grand_total','transaction_date']);
- c.preferences.density='standard';const standard=list.get_list_row_html(doc);
+ c.setPage(2);c.providerRows=list.data=[doc];await c.toggleRowDetails(doc.name);c.quick.company='C';c.providerOrderBy='name asc';
+ list.$checks=[{name:'PO'}];let restored=0;c.originals.set_rows_as_checked=()=>restored++;
+ const change=handlers.get('.dlp-po-density');change({target:{value:'standard'}});const standard=list.$result.value;
  assert.match(standard,/data-fieldname="company"[^>]*width:180px/);assert.match(standard,/data-fieldname="receipt_action"[^>]*width:176px/);assert.match(standard,/data-fieldname="status"[^>]*width:104px/);
+ change({target:{value:'tight'}});assert.match(list.$result.value,/data-fieldname="receipt_action"[^>]*width:128px/);assert.match(list.$result.value,/data-fieldname="status"[^>]*width:88px/);
+ assert.equal(restored,2);assert.deepEqual(list.$checks,[{name:'PO'}]);assert.ok(c.expandedDetails.has('PO'));assert.ok(c.detailCache.has('PO'));assert.equal(c.page,2);assert.deepEqual(c.quick,{company:'C'});assert.equal(c.providerOrderBy,'name asc');assert.equal(calls.length,0);assert.equal(nativeRefreshes(),0);
  const denied=mountedPurchase(({list,env})=>{list.meta.fields.find(df=>df.fieldname==='company').permlevel=1;env.frappe.perm.has_perm=(_dt,level)=>level===0;});
  denied.controller.setColumns(['name','company']);assert.doesNotMatch(denied.list.get_list_row_html({...doc,company:'PRIVATE-COMPANY'}),/PRIVATE-COMPANY|data-fieldname="company"/);
+ for(const available of [true,false]){
+  const shared=require('../deeplinkerp_branding/public/js/compact_list.js');let config;
+  const host={DeepLinkERPCompactList:{...shared,columnWidth:available?shared.columnWidth:undefined,create(value){config=value;return shared.create(value);}},DeepLinkERPUnifiedPurchase:require('../deeplinkerp_branding/public/js/unified_purchase_list.js')};
+  require('node:vm').runInNewContext(fs.readFileSync(modulePath,'utf8'),{globalThis:host});
+  const html=config.renderRow({preferences:{columns:['company'],density:'tight'},providerScope:'orders',root:{frappe:{}},list:{},allowed:new Set(['company']),translate:value=>value},doc);
+  assert.match(html,new RegExp(`data-fieldname="company"[^>]*width:${available?180:90}px`));
+ }
 });
 test('order page expansion uses projected permitted details only and toolbar never becomes a selection action',async()=>{
  const {controller:c,list,calls,handlers}=mountedPurchase();

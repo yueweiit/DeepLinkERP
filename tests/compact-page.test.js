@@ -5,9 +5,9 @@ const engine=require('../deeplinkerp_branding/public/js/compact_list.js');
 // Only jQuery/Frappe host boundaries are replaced. Renderer/controller run intact.
 class Surface {
   constructor(){this.value='';this.length=1;}
-  find(){return new Surface();} first(){return this;} html(value){if(value===undefined)return this.value;this.value=value;return this;}
+  find(selector){this.children ||=new Map();if(!this.children.has(selector))this.children.set(selector,new Surface());return this.children.get(selector);} first(){return this;} html(value){if(value===undefined)return this.value;this.value=value;return this;}
   text(value){this.value=value;return this;} append(value){this.value+=value;return this;} appendTo(parent){this.parent=parent;return this;} prependTo(){return this;} insertBefore(){return this;} insertAfter(){return this;}
-  addClass(){return this;} removeClass(){return this;} toggleClass(){return this;} toggle(){return this;} hide(){return this;} show(){return this;} remove(){return this;} off(){return this;} on(_event,selector,callback){this.handlers ||=new Map();this.handlers.set(selector,callback);return this;} attr(){return this;} prop(){return this;} val(){return this;} each(){return this;}
+  addClass(){return this;} removeClass(){return this;} toggleClass(){return this;} toggle(){return this;} hide(){return this;} show(){return this;} remove(){return this;} off(){return this;} on(event,selector,callback){this.handlers ||=new Map();this.handlers.set(typeof selector==='function'?event:selector,callback || selector);return this;} attr(){return this;} prop(){return this;} val(){return this;} each(){return this;}
 }
 function setup(options={}){
   let route=['purchase-payment-records'];const calls=[],classes=new Map(),storage=new Map(),routes=[];
@@ -227,5 +227,8 @@ test('shared business column widths follow field identity and density while full
  assert.match(c.list.$result.value,/data-fieldname="company"[^>]*width:180px/);
  assert.match(c.list.$result.value,/拉丁购国际电子商务（东莞）有限公司&lt;&amp;/);
  assert.doesNotMatch(c.list.$result.value,/class="[^"]*ellipsis[^"]*" data-fieldname="company"/);
- c.preferences.density='standard';c.list.render_list();assert.match(c.list.$result.value,/data-fieldname="state"[^>]*width:155px/);
+ const change=c.$toolbar.find('.dlp-po-density').handlers.get('change.dlpPO');c.setPage(1);c.quick.search='PE';c.providerOrderBy='name asc';
+ change({target:{value:'standard'}});assert.match(c.list.$result.value,/data-fieldname="state"[^>]*width:155px/);
+ change({target:{value:'tight'}});assert.match(c.list.$result.value,/data-fieldname="state"[^>]*width:112px/);
+ assert.equal(c.page,1);assert.deepEqual(c.quick,{search:'PE'});assert.equal(c.providerOrderBy,'name asc');assert.equal(calls.length,1);
 });
