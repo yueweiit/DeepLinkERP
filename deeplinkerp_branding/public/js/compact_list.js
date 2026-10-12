@@ -967,7 +967,7 @@
 			list?.[config.controllerKey]?.syncDisclosureRowGuard?.(isListRoute(frappe));
 			config.onRouteChange?.(list?.[config.controllerKey], isListRoute(frappe));
 			if (!isListRoute(frappe)) { list?.[config.controllerKey]?.stopInitialOnboarding?.(); list?.[config.controllerKey]?.cancelPendingRowDetails?.(); }
-			if (isListRoute(frappe) && isNativeList(list)) mount(list, root);
+			if (isListRoute(frappe)) list?.[config.controllerKey]?.activate();
 		});
 	}
 

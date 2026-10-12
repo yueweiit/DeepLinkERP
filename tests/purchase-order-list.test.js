@@ -230,6 +230,9 @@ test("installation chains native settings and only mounts a native Purchase Orde
 
 test("installed route callbacks are safe before a Purchase Order controller mounts", () => {
 	const { list, env } = bareList(), routes = [], cancelled = [];
+	let clears=0;list.clear_checked_items=()=>clears++;
+	env.frappe.views={list_view:{'Purchase Order':{},'List/Purchase Order/List':list}};
+	env.frappe.get_list_view=doctype=>env.frappe.views.list_view[`List/${doctype}/List`];
 	env.frappe.router.on = (_, callback) => routes.push(callback);
 	env.DeepLinkERPPurchasePayments = { cancelCrossborderForList: owner => cancelled.push(owner) };
 	production("install")(env);
@@ -237,10 +240,14 @@ test("installed route callbacks are safe before a Purchase Order controller moun
 	for (const route of [["List", "Purchase Order", "List"], ["Form", "Supplier", "S-1"]]) {
 		env.frappe.get_route = () => route;
 		assert.doesNotThrow(() => routes[0]());
+		assert.equal(list.dlpPurchaseOrderGrid,undefined,'route change cannot mount a native list before its onload initializes selection DOM');
+		assert.equal(clears,0,'initial route change must not enter native selection mutation');
 	}
 	env.cur_list = list;
 	assert.doesNotThrow(() => routes[0](), "an unmounted cached list is safe on route exit");
 	assert.deepEqual(cancelled, [], "no unmounted drawer owner is forwarded");
+	env.frappe.get_route=()=>['List','Purchase Order','List'];env.frappe.listview_settings['Purchase Order'].onload(list);
+	assert.ok(list.dlpPurchaseOrderGrid,'native onload remains the owner of first mounting');
 });
 
 test("page responses replace rows, retain offset after native reset, and reset to zero on filter changes", () => {
