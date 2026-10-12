@@ -132,7 +132,7 @@
    for(const doc of c.providerRows)if(doc.row_type==='purchase_order' && (!targets || targets.has(doc.name)) && doc.order_progress){delete doc.order_progress.items;delete doc.order_progress.item_fields;}
    c.list.render_list();c.list.set_rows_as_checked?.();
   };
-  c.$purchaseTabs=c.root.$('<nav class="dlp-purchase-scope-tabs" role="tablist" aria-label="采购来源视图"><button type="button" class="btn btn-default btn-sm" role="tab" data-purchase-scope="orders">采购订单</button><button type="button" class="btn btn-default btn-sm" role="tab" data-purchase-scope="oa">钉钉待完善</button></nav>').appendTo(c.$advancedFilters);
+  c.$purchaseTabs=c.root.$('<nav class="dlp-purchase-scope-tabs" role="tablist" aria-label="采购来源视图"><button type="button" class="btn btn-default btn-sm" role="tab" data-purchase-scope="orders">采购订单</button><button type="button" class="btn btn-default btn-sm" role="tab" data-purchase-scope="oa">钉钉待完善</button></nav>').appendTo(c.$toolbar);
   c.$purchaseTabs.on('click.dlpPurchaseScope','[data-purchase-scope]',event=>c.setProviderScope(event.currentTarget.dataset.purchaseScope));
   c.$purchaseActions=c.root.$('<div class="dlp-purchase-selection-actions"><span class="dlp-purchase-selected-count" aria-live="polite"></span><button type="button" class="btn btn-primary btn-sm" data-purchase-action="receipt" disabled>入库</button><span class="text-muted dlp-purchase-action-notice" aria-live="polite"></span></div>').prependTo(c.$toolbar);
   c.$purchaseActions.on('click.dlpPurchaseAction','[data-purchase-action]',event=>c.runPurchaseAction(event.currentTarget.dataset.purchaseAction));

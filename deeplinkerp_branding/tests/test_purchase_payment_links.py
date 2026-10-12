@@ -20,6 +20,13 @@ def native(doctype, name, **changes):
 
 
 class PurchaseLinkTests(unittest.TestCase):
+    def test_chronological_default_sort_has_descending_name_ties_and_manual_sort_is_preserved(self):
+        with patch.object(service, '_require_fields'):
+            self.assertEqual(service._order_by('Payment Entry', None, {'posting_date', 'creation', 'name'}), 'posting_date desc, name desc')
+            self.assertEqual(service._order_by('Payment Entry', 'posting_date desc', {'posting_date', 'name'}), 'posting_date desc, name desc')
+            self.assertEqual(service._order_by('Payment Entry', 'posting_date asc', {'posting_date', 'name'}), 'posting_date asc, name asc')
+            self.assertEqual(service._order_by('Payment Entry', 'name asc', {'posting_date', 'name'}), 'name asc')
+
     def test_procurement_payment_rejects_order_sources_before_reads(self):
         def reject(message, exception=frappe.ValidationError):
             raise exception(message)
@@ -135,6 +142,11 @@ class PurchaseLinkTests(unittest.TestCase):
 
 
 class PurchasePayableScopeTests(unittest.TestCase):
+    def test_payable_manual_sort_uses_existing_query_and_export_scope(self):
+        result = self.scope({'PI': self.invoice()}, {('PI', 'Purchase Receipt'): ['PR']}, order_by='supplier asc')
+        self.assertEqual(result['rows'][0]['name'], 'PI')
+        self.assertEqual(self.last_query.kwargs['order_by'], 'supplier asc, name asc')
+
     def setUp(self):
         flags = patch.object(frappe, 'flags', frappe._dict())
         flags.start()
@@ -154,8 +166,10 @@ class PurchasePayableScopeTests(unittest.TestCase):
              patch.object(service._RecordReader, 'preload'), \
              patch.object(service, '_source_links', side_effect=lambda doc, dt, field, warnings: sources.get((doc.name, dt), [])), \
              patch.object(frappe, 'has_permission', return_value=True), \
-             patch.object(frappe, 'get_list', return_value=[frappe._dict(name=name) for name in [*docs, *docs]]):
-            return service.get_purchase_payables(**args)
+             patch.object(frappe, 'get_list', return_value=[frappe._dict(name=name) for name in [*docs, *docs]]) as query:
+            result = service.get_purchase_payables(**args)
+            self.last_query = query.call_args
+            return result
 
     def test_po_only_pr_only_both_share_one_native_invoice_scope_contract(self):
         for orders, receipts in ((['PO'], []), ([], ['PR']), (['PO'], ['PR'])):

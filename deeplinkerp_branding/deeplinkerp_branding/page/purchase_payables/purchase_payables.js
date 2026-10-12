@@ -43,11 +43,11 @@
 			preferenceVersion:4,
 			migratePreferences:value=>value?.version===4?value:{...value,columns:provider.defaultColumns},
 			freezeUntil: "supplier",
-			sortFields: [],
+			sortFields: ['posting_date','name','supplier','company','grand_total','status'],
 			summary: c => `应付账户币种汇总：${(c.providerPayload?.totals || []).map(row=>`应付 ${money(row.total,row.currency)} · 已付 / 核销 ${money(row.settled,row.currency)} · 未付 ${money(row.outstanding,row.currency)}`).join(' ｜ ') || '—'}`,
 			request: (c) => ({
 				method: "deeplinkerp_branding.services.purchase_payment_service.get_purchase_payables",
-				args: { ...c.quick, start: c.page * c.pageSize, page_length: c.pageSize },
+				args: { ...c.quick, order_by:c.providerOrderBy, start: c.page * c.pageSize, page_length: c.pageSize },
 			}),
 			exportCurrent: async c => {
 				const args={...provider.request(c).args,export_format:'xlsx',columns:JSON.stringify(c.preferences.columns.filter(field=>field!=='action'))};

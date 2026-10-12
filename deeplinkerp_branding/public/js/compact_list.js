@@ -1,5 +1,56 @@
 (function (root, factory) {
- const engine = { create: factory, fitViewport, detailTable, invalidateExpandedDetails, mountRowDetails };
+ const businessDateFields = Object.fromEntries([
+  ...['Material Request','Request for Quotation','Supplier Quotation','Purchase Order','Quotation','Sales Order'].map(doctype=>[doctype,'transaction_date']),
+  ...['Purchase Receipt','Purchase Invoice','Payment Entry','Sales Invoice','Delivery Note','POS Invoice','POS Opening Entry','POS Closing Entry'].map(doctype=>[doctype,'posting_date']),
+  ['OA Purchase Request','apply_date'],
+ ]);
+ const engine = { create: config=>factory(config,engine), fitViewport, detailTable, invalidateExpandedDetails, mountRowDetails, businessDateFields, bindBusinessDateSort, installBusinessDateSort };
+ function businessRoute(root) {
+  const route=root.frappe.get_route?.() || [];
+  return String(route[0]).toLowerCase()==='list'?`List/${route[1]}/${route[2] || 'List'}`:String(route[0] || '');
+ }
+ function businessEntries(root, trackRoutes=false) {
+  const frappe=root.frappe;
+  if (!frappe.dlpBusinessDateEntries) {
+   const state={route:businessRoute(root),revision:0,sync(){const route=businessRoute(root);if(route!==this.route){this.route=route;this.revision++;}}};
+   frappe.dlpBusinessDateEntries=state;
+  }
+  const state=frappe.dlpBusinessDateEntries;
+  if(trackRoutes && !state.watching){frappe.router?.on('change',()=>state.sync());state.watching=true;}
+  state.sync();return state;
+ }
+ // A route entry is shared by cached ListViews and standalone Pages. Native
+ // refresh/filter/paging never creates another entry or rewrites a manual sort.
+ function bindBusinessDateSort(list, root, owner, pageRoute, trackRoutes=true) {
+  const date=businessDateFields[list.doctype || owner?.doctype];
+  if (!date || (!pageRoute && list.view_name!=='List')) return;
+  let binding=list.dlpBusinessDateSort;
+  if (!binding) {
+   binding=list.dlpBusinessDateSort={entry:null,enter(){
+    const state=businessEntries(root,trackRoutes),active=state.route===(pageRoute || `List/${list.doctype}/List`);
+    if (!active || this.entry===state.revision)return;
+    this.entry=state.revision;
+    const allowed=this.owner?.nativeAllowed || this.owner?.allowed;
+    const readable=field=>allowed?allowed.has(field):field==='name'?root.frappe.perm.has_perm(list.doctype,0,'read'):(list.meta?.fields || []).some(df=>df.fieldname===field && !df.is_virtual && root.frappe.perm.has_perm(list.doctype,df.permlevel || 0,'read'));
+    const field=readable(date)?date:readable('name')?'name':null;if(!field)return;
+    list.sort_by=field;list.sort_order='desc';list.order_by=`${field} desc`;list.sort_selector?.set_value(field,'desc');list.last_args=null;
+    if(this.owner){this.owner.providerOrderBy=`${field} desc`;this.owner.providerNativeOrder=undefined;this.owner.providerSortSource='native';this.owner.setPage(0);}
+   }};
+   if(list.get_args){const getArgs=list.get_args;list.get_args=function(...args){binding.enter();return getArgs.apply(this,args);};}
+  }
+  if(owner && binding.owner!==owner){binding.owner=owner;binding.entry=null;}
+  binding.enter();return binding;
+ }
+ function installBusinessDateSort(root) {
+  const settings=root.frappe?.listview_settings;if(!settings)return;
+  for(const doctype of Object.keys(businessDateFields)) {
+   const config=settings[doctype] || (settings[doctype]={});
+   if(config.onload?.dlpBusinessDateSort)continue;
+   const onload=config.onload;
+   config.onload=function(list){if(!config.dlpCompactList)bindBusinessDateSort(list,root);return onload?.apply(this,arguments);};
+   config.onload.dlpBusinessDateSort=true;
+  }
+ }
  // One page index and a bounded version cache shared by procurement list adapters.
  function mountRowDetails(owner, {rows, load, active=()=>true, canExpand=()=>true}) {
   owner.expandedDetails=new Set(); owner.detailCache=new Map(); owner.detailPending=new Map(); owner.detailRows=new Map(); owner.detailVersions=new Map();
@@ -175,7 +226,8 @@
  }
  if (typeof module === "object" && module.exports) module.exports = engine;
  root.DeepLinkERPCompactList = engine;
-})(typeof globalThis !== "undefined" ? globalThis : this, function (config) {
+ if(root.document && root.frappe)installBusinessDateSort(root);
+})(typeof globalThis !== "undefined" ? globalThis : this, function (config, shared) {
  "use strict";
  const DOCTYPE = config.doctype;
 	const COLUMNS = config.columns;
@@ -361,6 +413,7 @@
 			return list[config.controllerKey];
 		}
 		const frappe = root.frappe;
+		shared.bindBusinessDateSort(list, root, undefined, undefined, false);
 		const allowed = allowedFields(list.meta, (level) => frappe.perm.has_perm(DOCTYPE, level, "read"), frappe.model.std_fields_list);
 		const missing = (config.optionalFields || []).filter((field) => !(list.meta?.fields || []).some((df) => df.fieldname === field));
 		const displayAllowed = new Set(allowed);
@@ -387,7 +440,7 @@
 		}
 		const controller = {
 			list, root, allowed, displayAllowed, originals, quick: {}, controls: {}, resetting: false, preferences: config.provider?.alwaysActive ? normalizePreferences(providerSaved, providerAllowed, config.provider.columns) : normalizePreferences(saved, displayAllowed),
-			providerAllowed, providerScope: "orders", providerRows: [], providerPayload: null, providerOrderBy: "transaction_date desc",
+			providerAllowed, providerScope: "orders", providerRows: [], providerPayload: null, providerOrderBy: config.defaultSort,
 			nativePreferences: normalizePreferences(saved, displayAllowed), providerPreferences: config.provider ? normalizePreferences(providerSaved, providerAllowed, config.provider.columns) : null,
 			page: 0, pageSize: 100, requestId: 0, querySignature: null, total: null, summary: [],
 			translate: root.__ || ((label) => label),
@@ -399,6 +452,7 @@
 				list.last_args = null;
 			},
 			activate() {
+				list.dlpBusinessDateSort?.enter();
 				this.syncDisclosureRowGuard?.(isListRoute(frappe));
 				root.document?.body?.classList.toggle(config.routeClass, isListRoute(frappe));
 				root.document?.body?.classList.toggle(`${config.routeClass}-readonly`, isListRoute(frappe) && providerReadonly(this));
@@ -461,6 +515,7 @@
 			},
 		};
 		list[config.controllerKey] = controller;
+		shared.bindBusinessDateSort(list, root, controller, undefined, false);
 		mountDisclosureRowGuard(controller);
 		config.onMount?.(controller);
 		controller.setPage(0);
@@ -756,11 +811,16 @@
 	}
 
 	function movePurchaseNativeFilterSection(controller) {
-		if (!config.purchaseChrome || !controller.$advancedFilters) return;
+		if (!config.purchaseChrome || !controller.$appliedFilters) return;
 		// Native restrictions live under page-form, not the table surface. Move
 		// the original section so its permission indicator and bindings survive.
-		controller.list.page.wrapper.find('.page-form > .filter-section').appendTo(controller.$advancedFilters);
-		controller.list.$frappe_list.find('> .filter-section').appendTo(controller.$advancedFilters);
+		controller.list.page.wrapper.find('.page-form > .filter-section').appendTo(controller.$appliedFilters);
+		controller.list.$frappe_list.find('> .filter-section').appendTo(controller.$appliedFilters);
+		const filters=controller.list.filter_area?.get?.() || controller.originals?.get_args?.call(controller.list)?.filters || [];
+		controller.$nativeFilterValues?.text(filters.map(filter=>{
+			const [,field,operator,value]=filter,df=controller.list.meta.fields.find(df=>df.fieldname===field);
+			return `${controller.translate(df?.label || field)} ${operator} ${Array.isArray(value)?value.join(', '):value}`;
+		}).join(' · ')).toggle(Boolean(filters.length));
 	}
 	function mountControls(controller) {
 		const { list, root, translate: t } = controller;
@@ -793,7 +853,8 @@
 		if(config.purchaseChrome) {
 			controller.$moreFilters=$(`<details class="dlp-purchase-more-filters"><summary class="btn btn-default btn-sm">${escapeHTML(t('更多筛选'))}</summary><div class="dlp-purchase-advanced-filters"></div></details>`).appendTo(controller.$filters);
 			controller.$advancedFilters=controller.$moreFilters.find('.dlp-purchase-advanced-filters');
-			list.page.wrapper.find('.page-form .filter-selector, .page-form .sort-selector, .page-form .sort-selector-group, .page-form .filter-button').appendTo(controller.$advancedFilters);
+			controller.$appliedFilters=$('<div class="dlp-purchase-applied-filters" aria-label="当前筛选"></div>').insertAfter(controller.$filters);
+			controller.$nativeFilterValues=$('<button type="button" class="btn btn-link btn-xs dlp-native-filter-values"></button>').appendTo(controller.$appliedFilters).on('click.dlpPOFilters',()=>list.filter_area?.filter_button?.trigger('click'));
 			movePurchaseNativeFilterSection(controller);
 			list.page.inner_toolbar?.find('.inner-group-button').appendTo(controller.$advancedFilters);
 		}
@@ -947,6 +1008,8 @@
 		if (!frappe?.listview_settings || installed.has(frappe)) return;
 		installed.add(frappe);
 		const settings = frappe.listview_settings[DOCTYPE] || (frappe.listview_settings[DOCTYPE] = {});
+		settings.dlpCompactList=true;
+		shared.installBusinessDateSort(root);
 		const onload = settings.onload;
 		const refresh = settings.refresh;
 		settings.onload = function (list) {
@@ -963,6 +1026,7 @@
 			root.document?.body?.classList.toggle(config.routeClass, isListRoute(frappe));
 			// Native ListFactory caches by route; its doctype key may be an empty namespace.
 			const list = [frappe.get_list_view?.(DOCTYPE), frappe.views?.list_view?.[`List/${DOCTYPE}/List`], frappe.views?.list_view?.[DOCTYPE], root.cur_list].find(isNativeList);
+			list?.dlpBusinessDateSort?.enter();
 			root.document?.body?.classList.toggle(`${config.routeClass}-readonly`, isListRoute(frappe) && Boolean(list?.[config.controllerKey] && providerReadonly(list[config.controllerKey])));
 			list?.[config.controllerKey]?.syncDisclosureRowGuard?.(isListRoute(frappe));
 			config.onRouteChange?.(list?.[config.controllerKey], isListRoute(frappe));
@@ -976,7 +1040,7 @@
 	function mountPage(page, root) {
 		const $ = root.$, frappe = root.frappe;
 		const meta = frappe.get_meta?.(DOCTYPE) || { fields: config.controls || [] };
-		const surface = { page, meta, data: [],
+		const surface = { page, meta, data: [], doctype: DOCTYPE,
 			$frappe_list: $('<div class="frappe-list dlp-page-grid"></div>').appendTo(page.main) };
 		surface.$result = $('<div class="result"></div>').appendTo($('<div class="result-container"></div>').appendTo(surface.$frappe_list));
 		surface.$paging_area = $('<div></div>').appendTo(surface.$frappe_list);
@@ -997,10 +1061,10 @@
 		}
 		const c = { pageSurface: true, root, list: surface, nativeAllowed, allowed: permitted, displayAllowed: permitted, providerAllowed: permitted,
 			preferences, controls: {}, quick: {}, resetting: false,
-			providerRows: [], providerPayload: null, providerOrderBy: config.defaultSort || 'posting_date desc', page: 0, pageSize: 100, total: null, requestId: 0, querySignature: null,
+			providerRows: [], providerPayload: null, providerOrderBy: config.defaultSort, page: 0, pageSize: 100, total: null, requestId: 0, querySignature: null,
 			translate: root.__ || (x => x),
 			setPage(value) { this.page = Math.max(0, Number(value) || 0); },
-			activate() { root.document.body.classList.toggle(config.routeClass, active()); this.restoreRowDetails?.(); },
+			activate() { surface.dlpBusinessDateSort?.enter(); root.document.body.classList.toggle(config.routeClass, active()); this.restoreRowDetails?.(); },
 			savePreferences() { this.preferences = normalizePreferences(this.preferences, permitted, config.provider.columns); try { root.localStorage?.setItem(key, JSON.stringify(this.preferences)); } catch (_) { /* Rendering must work without storage. */ } surface.$frappe_list.toggleClass('dlp-po-standard', this.preferences.density === 'standard'); },
 			setColumns(columns) { this.preferences.columns = columns; this.savePreferences(); render(); },
 			async clearQuickFilters() { this.resetting = true; this.quick = {}; this.setPage(0); try { this.resetAdvancedFilters?.(); await Promise.all(Object.values(this.controls).map(control => control.set_value(''))); } finally { this.resetting = false; } return this.refresh(); },
@@ -1023,6 +1087,14 @@
 		function active() { return (frappe.get_route?.() || [])[0] === config.pageRoute; }
 		function render() { surface.$result.html(headerHTML(c) + c.providerRows.map((row, index) => { row._idx = index; return rowHTML(c, row); }).join('')); if (!c.providerRows.length) surface.$result.append(`<div class="dlp-provider-empty text-muted" role="status">${escapeHTML(c.translate(config.emptyLabel || '没有符合条件的采购付款记录'))}</div>`); movePurchaseNativeFilterSection(c); config.afterRender?.(c); c.afterRowDetailsRender?.(); paintSummary(c); }
 		surface.render_list = render; surface.refresh = () => c.refresh();
+		shared.bindBusinessDateSort(surface, root, c, config.pageRoute, false);
+		if(shared.businessDateFields[DOCTYPE])surface.$result.on('click.dlpPageSort','[data-provider-sort]',event=>{
+			const field=event.currentTarget.dataset.providerSort;
+			if(!config.provider.sortFields?.includes(field) || !c.allowed.has(field))return;
+			const [previous,order]=c.providerOrderBy.split(' ');
+			c.providerOrderBy=`${field} ${previous===field && order==='asc'?'desc':'asc'}`;
+			c.setPage(0);c.refresh();
+		});
 		config.onMount?.(c);
 		mountControls(c); render(); c.activate();
 		if (config.dismissInitialOnboarding) dismissAutomaticOnboarding(c, root);

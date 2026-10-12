@@ -66,6 +66,10 @@ web_include_css = "/assets/deeplinkerp_branding/css/deeplinkerp_branding.css"
 # include js in doctype views
 # doctype_js = {"doctype" : "public/js/doctype.js"}
 doctype_list_js = {
+	**{doctype: "public/js/compact_list.js" for doctype in (
+		"Request for Quotation", "Supplier Quotation", "Quotation", "Purchase Invoice", "Payment Entry",
+		"Sales Invoice", "Delivery Note", "POS Invoice", "POS Opening Entry", "POS Closing Entry", "OA Purchase Request",
+	)},
 	"Purchase Receipt": "public/js/purchase_receipt_list.js",
 	"Sales Order": "public/js/sales_order_list.js",
 	"Purchase Order": "public/js/purchase_order_list.js",

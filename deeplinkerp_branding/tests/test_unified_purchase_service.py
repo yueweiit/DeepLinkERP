@@ -216,13 +216,17 @@ def test_currency_codes_require_recognition_or_currency_master_evidence():
 	assert known["rows"][0]["oa_currency"] == "XYZ"
 
 
-def test_unconfirmed_company_and_creation_fallback_are_filterable():
+def test_unconfirmed_company_uses_original_cached_date_without_creation_fallback():
 	s = backend()
-	result = s.build_unified_purchase_payload([], [oa(apply_date=None, target_company=None)],
+	request = oa(apply_date=None, target_company=None, _source={"apply_date": "2026-09-29"})
+	result = s.build_unified_purchase_payload([], [request],
 		filters={"company": "__unconfirmed__", "from_date": "2026-09-29", "to_date": "2026-09-29"})
 	assert result["rows"][0]["transaction_date"] == "2026-09-29"
 	assert result["rows"][0]["company"] is None
 	assert result["rows"][0]["status"] == "未生成订单"
+	row = s.build_unified_purchase_payload([], [oa(apply_date=None)])["rows"][0]
+	assert row["transaction_date"] is None
+	assert s.build_unified_purchase_payload([], [oa(apply_date=None)], filters={"from_date": "2026-09-29"})["total_count"] == 0
 
 
 @pytest.mark.parametrize(("scope", "names"), [
@@ -241,15 +245,17 @@ def test_scope_tabs_partition_real_orders_and_unconverted_oa_sources(scope, name
 
 def test_pagination_is_stable_and_totals_cover_all_filtered_rows():
 	s = backend()
-	orders = [po("PO-3", grand_total=3), po("PO-1", grand_total=1), po("PO-2", grand_total=2)]
+	orders = [po("PO-3", grand_total=3), po("PO-1", grand_total=1), po("PO-2", grand_total=2), po("PO-MISSING", grand_total=0, transaction_date=None)]
 	first = s.build_unified_purchase_payload(orders, [], page_length=1)
 	second = s.build_unified_purchase_payload(orders, [], start=1, page_length=1)
-	assert first["rows"][0]["name"] == "PO-1"
+	assert first["rows"][0]["name"] == "PO-3"
 	assert second["rows"][0]["name"] == "PO-2"
 	assert first["has_previous"] is False and first["has_next"] is True
 	assert second["has_previous"] is True and second["has_next"] is True
 	assert first["totals"] == second["totals"]
 	assert first["totals"]["orders"] == [{"currency": "USD", "amount": 6}]
+	assert [row["name"] for row in s.build_unified_purchase_payload(orders, [], start=1)["rows"]] == ["PO-2", "PO-1", "PO-MISSING"]
+	assert [row[0] for row in s.build_unified_purchase_export(orders, [], columns=["name"])[1:]] == ["PO-3", "PO-2", "PO-1", "PO-MISSING"]
 
 
 @pytest.mark.parametrize("kwargs", [
@@ -428,6 +434,17 @@ def connect_native_queries(monkeypatch, boundary, *, workflow_field=None, fieldt
 	monkeypatch.setattr(s, "get_workflow_name", lambda dt: "Active Purchase Workflow" if workflow_field else "", raising=False)
 	monkeypatch.setattr(s, "get_workflow", lambda dt: SimpleNamespace(workflow_state_field=workflow_field), raising=False)
 	return s
+
+
+@pytest.mark.parametrize(("readable", "source_date"), [(True, "2026-03-05"), (False, "2026-03-05"), (True, None)])
+def test_cached_original_source_date_obeys_apply_date_projection_permission(monkeypatch, readable, source_date):
+	request = oa(apply_date="2026-10-12", custom_purchase_source_json=json.dumps({"apply_date": source_date, "private": "PRIVATE-SOURCE"}))
+	fields = set(request) - ({"apply_date"} if not readable else set())
+	boundary = ReadBoundary([], [request], fields={"Purchase Order": {"name"}, "OA Purchase Request": fields})
+	s = connect(monkeypatch, boundary)
+	row = s.get_unified_purchase_list(order_by="name desc")["rows"][0]
+	assert row["transaction_date"] == (source_date if readable else None)
+	assert "PRIVATE-SOURCE" not in str(row)
 
 
 @pytest.mark.parametrize("field", ["creation", "modified"])
@@ -768,7 +785,7 @@ def test_export_builder_uses_complete_same_filtered_result_and_selected_columns(
 		rows, [], filters={"company": "Yuewei"}, columns=["name", "grand_total", "party_account_currency"],
 	)
 	assert result["total_count"] == 2
-	assert data == [["采购订单号 / 待完善来源", "订单金额", "预付款币种"], ["PO-1", 1, "CNY"], ["PO-2", 2, "CNY"]]
+	assert data == [["采购订单号 / 待完善来源", "订单金额", "预付款币种"], ["PO-2", 2, "CNY"], ["PO-1", 1, "CNY"]]
 	with pytest.raises(ValueError):
 		s.build_unified_purchase_export(rows, [], columns=["process_instance_id"])
 
@@ -927,7 +944,7 @@ def test_computed_phase_and_beneficiary_filter_before_page100_count_and_totals(p
 		filters={"beneficiary_company": "FACTORY", "progress_phase": phase})
 	assert result["total_count"] == 150
 	assert len(result["rows"]) == 50
-	assert result["rows"][0]["name"] == "PO-0200"
+	assert result["rows"][0]["name"] == "PO-0098"
 	assert result["totals"]["orders"] == [{"currency": "USD", "amount": 150}]
 
 

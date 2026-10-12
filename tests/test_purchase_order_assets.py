@@ -35,10 +35,10 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		):
 			self.assertIn(suite, workflow)
 
-	def test_compact_list_is_registered_only_for_supported_native_lists(self):
+	def test_shared_business_date_adapter_reuses_native_lists_without_replacing_compact_adapters(self):
 		self.assertEqual(
 			getattr(hooks, "doctype_list_js", {}),
-			{"Purchase Order": "public/js/purchase_order_list.js", "Material Request": "public/js/material_request_list.js", "Purchase Receipt": "public/js/purchase_receipt_list.js", "Sales Order": "public/js/sales_order_list.js"},
+			{"Purchase Order": "public/js/purchase_order_list.js", "Material Request": "public/js/material_request_list.js", "Purchase Receipt": "public/js/purchase_receipt_list.js", "Sales Order": "public/js/sales_order_list.js", **{doctype: "public/js/compact_list.js" for doctype in ("Request for Quotation", "Supplier Quotation", "Quotation", "Purchase Invoice", "Payment Entry", "Sales Invoice", "Delivery Note", "POS Invoice", "POS Opening Entry", "POS Closing Entry", "OA Purchase Request")}},
 		)
 
 	def test_unified_adapter_loads_after_cache_busted_shared_engine(self):

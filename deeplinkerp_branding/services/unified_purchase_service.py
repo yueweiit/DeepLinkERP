@@ -460,7 +460,7 @@ def _canonical_rows(purchase_orders, oa_requests, currency_codes: set[str], oa_r
 			status = "订单关联不可见"
 			row["oa_warning"] = _combine_warnings(row["oa_warning"], status)
 		row.update({
-			"source": "OA", "transaction_date": _date(request.get("apply_date") or request.get("creation")) or None,
+			"source": "OA", "transaction_date": _date(request["_source"].get("apply_date") if request["_source"] else request.get("apply_date")) or None,
 			"company": role.get("purchasing_company"), "owner": request.get("owner"), "role_context": role,
 			"_company_readable": "target_company" in request,
 			"status": status,
@@ -634,7 +634,8 @@ def _pipeline(purchase_orders, oa_requests, *, filters=None, order_by="transacti
 	if full_progress or _needs_full_progress(parsed):
 		_attach_progress(rows, progress_loader)
 	rows = [row for row in rows if _computed_matches(row, parsed)]
-	rows.sort(key=lambda row: row["row_key"])
+	chronological = field == "transaction_date" and descending
+	rows.sort(key=lambda row: (_text(row.get("name")).casefold(), row["row_key"]) if chronological else (row["row_key"],), reverse=chronological)
 	nonempty, empty = [], []
 	for row in rows:
 		(empty if row.get(field) is None else nonempty).append(row)
@@ -908,7 +909,7 @@ def _read_records(native_filters=None, native_or_filters=None, order_by="transac
 			proof = json.loads(data["custom_cashier_payment_evidence"]) if data.get("custom_cashier_payment_evidence") else {}
 			reconciliation = json.loads(data["custom_purchase_payment_reconciliation"]) if data.get("custom_purchase_payment_reconciliation") else {}
 			projected = {"version": source.get("version"), "issues": source.get("issues") if {"payment_amount", "detail_total_amount", "items_json"} <= permitted else []} if source else {}
-			for original, key in (("approval_status", "eligible"), ("oa_code", "business_id"), ("payment_amount", "requested_amount"),
+			for original, key in (("apply_date", "apply_date"), ("approval_status", "eligible"), ("oa_code", "business_id"), ("payment_amount", "requested_amount"),
 				("detail_total_amount", "detail_total_amount"), ("currency", "currency"), ("custom_purchase_beneficiary_company", "beneficiary_company"),
 				("custom_purchase_project", "project")):
 				if original in permitted and source:

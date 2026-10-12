@@ -59,8 +59,9 @@ test('both finance pages upgrade v4 defaults once and keep density and subsequen
 test('payable export freezes all authorized filters and selected columns before lazy loading and removes page bounds',async()=>{
  const config=financePageConfiguration('../deeplinkerp_branding/deeplinkerp_branding/page/purchase_payables/purchase_payables.js','purchase-payables');
  assert.equal(typeof config.provider.exportCurrent,'function');let resolve,exported;
- const c={quick:{company:'C',search:'PI'},page:3,pageSize:100,preferences:{columns:['name','total','settled','outstanding','action']},root:{frappe:{require:()=>new Promise(done=>resolve=done)}}};
+ const c={quick:{company:'C',search:'PI'},providerOrderBy:'name asc',page:3,pageSize:100,preferences:{columns:['name','total','settled','outstanding','action']},root:{frappe:{require:()=>new Promise(done=>resolve=done)}}};
  const loading=config.provider.exportCurrent(c);c.quick.search='changed';c.preferences.columns=['name'];
  c.root.DeepLinkERPPurchaseOrderExport={downloadWorkbook(){},fetchNativeWorkbook:async(_root,args,method)=>{exported={args,method};return new Uint8Array();}};resolve();await loading;
  assert.equal(exported.args.company,'C');assert.equal(exported.args.search,'PI');assert.deepEqual(JSON.parse(exported.args.columns),['name','total','settled','outstanding']);assert.equal(exported.args.start,undefined);assert.equal(exported.args.page_length,undefined);assert.equal(exported.args.export_format,'xlsx');assert.match(exported.method,/get_purchase_payables$/);
+ assert.equal(exported.args.order_by,'name asc');assert.ok(config.provider.sortFields.includes('posting_date'));
 });

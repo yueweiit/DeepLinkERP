@@ -7,13 +7,13 @@ class Surface {
   constructor(){this.value='';this.length=1;}
   find(){return new Surface();} first(){return this;} html(value){if(value===undefined)return this.value;this.value=value;return this;}
   text(value){this.value=value;return this;} append(value){this.value+=value;return this;} appendTo(parent){this.parent=parent;return this;} prependTo(){return this;} insertBefore(){return this;} insertAfter(){return this;}
-  addClass(){return this;} removeClass(){return this;} toggleClass(){return this;} toggle(){return this;} hide(){return this;} show(){return this;} remove(){return this;} off(){return this;} on(){return this;} attr(){return this;} prop(){return this;} val(){return this;} each(){return this;}
+  addClass(){return this;} removeClass(){return this;} toggleClass(){return this;} toggle(){return this;} hide(){return this;} show(){return this;} remove(){return this;} off(){return this;} on(_event,selector,callback){this.handlers ||=new Map();this.handlers.set(selector,callback);return this;} attr(){return this;} prop(){return this;} val(){return this;} each(){return this;}
 }
 function setup(options={}){
   let route=['purchase-payment-records'];const calls=[],classes=new Map(),storage=new Map(),routes=[];
   const root={$:()=>new Surface(),document:{body:{classList:{toggle:(key,value)=>classes.set(key,value)}}},localStorage:{getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value)},frappe:{get_route:()=>route,router:{on:(_,callback)=>routes.push(callback)},session:{user:'buyer'},boot:{sitename:'qa'},get_meta:()=>options.meta,perm:{has_perm:(doctype,level)=>level!==1},model:{can_export:()=>false},ui:{form:{make_control:()=>({set_value:async()=>{},get_value:()=>''})}},call(request){return new Promise(resolve=>calls.push({request,resolve}));}}};
   const columns=[{fieldname:'name',label:'付款单',width:150},{fieldname:'amount',label:'金额',width:130},{fieldname:'references',label:'引用',width:100}];
-  const grid=engine.create({doctype:'Payment Entry',purchaseChrome:options.purchaseChrome,mainFilterFields:[],pageRoute:'purchase-payment-records',routeClass:'only-payment-page',columns,numbers:['amount'],pageFieldMap:options.fieldMap,controls:options.controls,provider:{columns,formLink:doc=>`/desk/payment-entry/${encodeURIComponent(doc.name)}`,request:c=>({method:'records',args:{search:c.quick.search,native_filters:JSON.stringify(c.nativeFilters || []),or_filters:JSON.stringify(c.orFilters || []),order_by:c.providerOrderBy,start:c.page*c.pageSize,page_length:c.pageSize}}),renderValue:field=>field==='references'?'引用':undefined,summary:()=>''}});
+  const grid=engine.create({doctype:'Payment Entry',purchaseChrome:options.purchaseChrome,mainFilterFields:[],pageRoute:'purchase-payment-records',routeClass:'only-payment-page',columns,numbers:['amount'],pageFieldMap:options.fieldMap,controls:options.controls,provider:{columns,sortFields:options.sortFields,formLink:doc=>`/desk/payment-entry/${encodeURIComponent(doc.name)}`,request:c=>({method:'records',args:{search:c.quick.search,native_filters:JSON.stringify(c.nativeFilters || []),or_filters:JSON.stringify(c.orFilters || []),order_by:c.providerOrderBy,start:c.page*c.pageSize,page_length:c.pageSize}}),renderValue:field=>field==='references'?'引用':undefined,summary:()=>''}});
   let showForm=0;const form=new Surface();
   const controller=grid.mountPage({main:new Surface(),wrapper:new Surface(),...(options.pageForm?{page_form:form,show_form:()=>showForm++}:{})},root);
   return {controller,calls,classes,storage,shown:()=>showForm,leave:()=>route=['List','Item'],navigate:value=>{route=value;routes.forEach(callback=>callback());}};
@@ -171,9 +171,42 @@ test('standalone route departure invalidates a pending detail even when returnin
  resolve({header:{modified:'v1'},items:[{item_code:'OLD'}]});await pending;
  assert.equal(c.detailCache.has('PR'),false);assert.equal(c.expandedDetails.has('PR'),false);
 });
-test('native page-form restriction section moves into the active advanced disclosure on existing render lifecycle',()=>{
+test('native applied filters remain visible beside quick filters on the existing render lifecycle',()=>{
  const {controller:c}=setup({purchaseChrome:true}),section=new Surface();
  c.list.page.wrapper.find=selector=>selector==='.page-form > .filter-section'?section:new Surface();
- c.list.render_list();assert.equal(section.parent,c.$advancedFilters);
- section.parent=c.list.page.wrapper;c.list.render_list();assert.equal(section.parent,c.$advancedFilters,'native reattachment stays accessible in the same advanced container');
+ c.list.render_list();assert.ok(c.$appliedFilters);assert.equal(section.parent,c.$appliedFilters);
+ section.parent=c.list.page.wrapper;c.list.render_list();assert.equal(section.parent,c.$appliedFilters,'native reattachment stays visible in the same applied-filter container');
+});
+
+test('business document native sort resets on entry and preserves manual sort within an entry',()=>{
+ let route=['List','Purchase Receipt','List'];const routes=[];
+ const root={frappe:{get_route:()=>route,router:{on:(_,callback)=>routes.push(callback)},perm:{has_perm:()=>true},model:{std_fields_list:['name']}}};
+ const list={doctype:'Purchase Receipt',view_name:'List',meta:{fields:[{fieldname:'posting_date'}]},get_args(){return {order_by:this.sort_selector.get_sql_string()};},sort_selector:{set_value(field,order){this.sort_by=field;this.sort_order=order;},get_sql_string(){return `${this.sort_by} ${this.sort_order}`+(this.sort_by==='name'?'':`, name ${this.sort_order}`);}}};
+ assert.equal(typeof engine.bindBusinessDateSort,'function');engine.bindBusinessDateSort(list,root);engine.bindBusinessDateSort(list,root);
+ assert.equal(list.get_args().order_by,'posting_date desc, name desc');assert.equal(routes.length,1);
+ list.sort_selector.set_value('name','asc');assert.equal(list.get_args().order_by,'name asc');
+ routes[0]();assert.equal(list.get_args().order_by,'name asc','same list route preserves manual choice');
+ route=['Form','Purchase Receipt','PR'];routes[0]();route=['List','Purchase Receipt','List'];routes[0]();
+ assert.equal(list.get_args().order_by,'posting_date desc, name desc');
+});
+test('shared business date map preserves native callbacks and uses readable name when date is denied',()=>{
+ const dates={transaction_date:['Material Request','Request for Quotation','Supplier Quotation','Purchase Order','Quotation','Sales Order'],posting_date:['Purchase Receipt','Purchase Invoice','Payment Entry','Sales Invoice','Delivery Note','POS Invoice','POS Opening Entry','POS Closing Entry'],apply_date:['OA Purchase Request']};
+ let loaded=0;const root={frappe:{listview_settings:{'Quotation':{onload(){loaded++;}}},get_route:()=>['List','Quotation','List'],router:{on(){}},perm:{has_perm:(_dt,level)=>level===0},model:{std_fields_list:['name']}}};
+ assert.equal(typeof engine.installBusinessDateSort,'function');engine.installBusinessDateSort(root);engine.installBusinessDateSort(root);
+ const list={doctype:'Quotation',view_name:'List',meta:{fields:[{fieldname:'transaction_date',permlevel:1}]},get_args(){return {order_by:this.sort_by+' '+this.sort_order};}};
+ root.frappe.listview_settings.Quotation.onload(list);assert.equal(loaded,1);assert.equal(list.get_args().order_by,'name desc');
+ for(const [field,doctypes] of Object.entries(dates))for(const doctype of doctypes)assert.equal(engine.businessDateFields[doctype],field);
+ assert.equal(engine.businessDateFields.Item,undefined);
+});
+test('standalone finance page starts and reenters by readable business date while same-entry refresh keeps chosen sort',()=>{
+ const {controller:c,navigate}=setup({meta:{fields:[{fieldname:'posting_date'}]}});
+ assert.equal(c.providerOrderBy,'posting_date desc');c.providerOrderBy='name asc';c.activate();assert.equal(c.providerOrderBy,'name asc');
+ navigate(['List','Item']);navigate(['purchase-payment-records']);assert.equal(c.providerOrderBy,'posting_date desc');
+ const denied=setup({meta:{fields:[{fieldname:'posting_date',permlevel:1}]}}).controller;assert.equal(denied.providerOrderBy,'name desc');
+});
+test('shared standalone header sorting sends one refreshed query and keeps chosen order through paging',()=>{
+ const {controller:c,calls}=setup({sortFields:['posting_date','name'],meta:{fields:[{fieldname:'posting_date'}]}});
+ const click=c.list.$result.handlers?.get('[data-provider-sort]');assert.equal(typeof click,'function');
+ c.setPage(2);click({currentTarget:{dataset:{providerSort:'name'}}});assert.equal(calls.length,1);assert.equal(calls[0].request.args.order_by,'name asc');assert.equal(c.page,0);
+ c.setPage(1);c.refresh();assert.equal(calls[1].request.args.order_by,'name asc');assert.equal(calls[1].request.args.start,100);
 });

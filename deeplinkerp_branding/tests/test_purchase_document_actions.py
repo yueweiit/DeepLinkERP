@@ -587,7 +587,7 @@ class NativeQueryTests(unittest.TestCase):
     def test_same_doctype_qualified_sort_preserves_name_tie_breaker(self):
         for doctype in ("Purchase Receipt", "Payment Entry"):
             with self.subTest(doctype=doctype), patch.object(actions.service, "_require_fields"):
-                self.assertEqual(actions.service._order_by(doctype, "`tab" + doctype + "`.`posting_date` desc", {"posting_date", "name"}), "posting_date desc, name asc")
+                self.assertEqual(actions.service._order_by(doctype, "`tab" + doctype + "`.`posting_date` desc", {"posting_date", "name"}), "posting_date desc, name desc")
 
 
 class PaymentCompletionTests(unittest.TestCase):

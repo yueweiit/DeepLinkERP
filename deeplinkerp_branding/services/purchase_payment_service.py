@@ -328,7 +328,7 @@ def _native_filters(doctype, value, allowed):
 
 def _order_by(doctype, value, allowed):
     clauses = []
-    for part in str(value or "posting_date desc, creation desc").split(","):
+    for part in str(value or "posting_date desc").split(","):
         match = re.fullmatch(r"\s*(?:(?:`([^`]+)`|([a-z_][a-z0-9_ ]*))\s*\.\s*)?(?:`([a-z_][a-z0-9_]*)`|([a-z_][a-z0-9_]*))\s*(asc|desc)?\s*", part, re.I)
         if not match:
             frappe.throw("排序字段无效")
@@ -338,7 +338,7 @@ def _order_by(doctype, value, allowed):
         _require_fields(doctype, {field})
         clauses.append(field + " " + (match[5] or "asc").lower())
     if not any(clause.startswith("name ") for clause in clauses):
-        clauses.append("name asc")
+        clauses.append("name desc" if clauses[0] == "posting_date desc" else "name asc")
     return ", ".join(clauses)
 
 
@@ -499,17 +499,17 @@ def summarize(invoices):
 
 @frappe.whitelist()
 def get_purchase_payables(company=None, supplier=None, search=None, from_date=None, to_date=None,
-                          start=0, page_length=100, export_format=None, columns=None):
+                          start=0, page_length=100, export_format=None, columns=None, order_by=None):
     if not frappe.has_permission("Payment Entry", "read"):
         frappe.throw("采购人员请在采购订单查看订单进度；应付与付款办理由财务处理", frappe.PermissionError)
     token = _record_reader.set(_RecordReader())
     try:
-        return _get_purchase_payables(company, supplier, search, from_date, to_date, start, page_length, export_format, columns)
+        return _get_purchase_payables(company, supplier, search, from_date, to_date, start, page_length, export_format, columns, order_by)
     finally:
         _record_reader.reset(token)
 
 
-def _get_purchase_payables(company, supplier, search, from_date, to_date, start, page_length, export_format=None, columns=None):
+def _get_purchase_payables(company, supplier, search, from_date, to_date, start, page_length, export_format=None, columns=None, order_by=None):
     """Native PI documents with readable procurement sources, once per invoice.
 
     Totals/balances are whole native invoices, including mixed expense lines.
@@ -525,7 +525,7 @@ def _get_purchase_payables(company, supplier, search, from_date, to_date, start,
     candidates = frappe.get_list("Purchase Invoice", filters=filters,
         or_filters=[["Purchase Invoice Item", field, "is", "set"]
                     for field in ("purchase_order", "purchase_receipt")],
-        fields=["name"], order_by="posting_date desc, name desc", limit_page_length=0)
+        fields=["name"], order_by=_order_by("Purchase Invoice", order_by, fields), limit_page_length=0)
     reader = _record_reader.get()
     reader.preload("Purchase Invoice", [row.name for row in candidates])
     invoices = [doc for (dt, _), doc in reader.docs.items() if dt == "Purchase Invoice" and doc]
