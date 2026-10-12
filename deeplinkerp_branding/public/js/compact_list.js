@@ -112,7 +112,9 @@
   for(const [name,detail] of expanded || []) {const row=byName.get(name);if(!row || (row.modified && row.modified!==modified(detail)))expanded.delete(name);}
  }
  function detailTable({columns, items=[], escape, translate=x=>x, format, wrapperClass='', tableClass='', columnClass=()=>''}) {
-  return `<div class="${escape(wrapperClass)}"><table class="table ${escape(tableClass)}"><thead><tr>${columns.map(([field,label],i)=>`<th data-fieldname="${escape(field)}" class="${escape(columnClass(field,i))}">${escape(translate(label))}</th>`).join('')}</tr></thead><tbody>${items.map(item=>`<tr>${columns.map(([field],i)=>`<td data-fieldname="${escape(field)}" title="${escape(item[field] ?? '—')}" class="${escape(columnClass(field,i))}">${format?.(field,item) ?? escape(item[field] ?? '—')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+  const compactText=wrapperClass.split(/\s+/).includes('dlp-purchase-detail-scroll') && tableClass.split(/\s+/).includes('dlp-purchase-detail-table');
+  const content=(field,item)=>{const value=format?.(field,item) ?? escape(item[field] ?? '—');return compactText && ['item_name','warehouse','uom'].includes(field)?`<span class="dlp-purchase-detail-text">${value}</span>`:value;};
+  return `<div class="${escape(wrapperClass)}"><table class="table ${escape(tableClass)}"><thead><tr>${columns.map(([field,label],i)=>`<th data-fieldname="${escape(field)}" class="${escape(columnClass(field,i))}">${escape(translate(label))}</th>`).join('')}</tr></thead><tbody>${items.map(item=>`<tr>${columns.map(([field],i)=>`<td data-fieldname="${escape(field)}" title="${escape(item[field] ?? '—')}" class="${escape(columnClass(field,i))}">${content(field,item)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
  }
  // Opt-in sizing shared by Sales and inventory; other list heights stay native.
  function fitViewport(owner, options) {

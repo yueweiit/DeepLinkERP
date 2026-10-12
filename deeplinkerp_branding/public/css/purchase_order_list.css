@@ -591,6 +591,11 @@ body.dlp-purchase-order-grid-active .dlp-purchase-table .dlp-purchase-expanded >
 body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active) .dlp-purchase-detail-scroll { box-sizing:border-box; overflow:auto; width:var(--dlp-purchase-detail-width,760px); max-width:var(--dlp-purchase-detail-width,760px); border:1px solid var(--dlp-po-border); border-radius:4px; }
 body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active) .dlp-purchase-detail-table { table-layout:auto; width:calc(var(--dlp-purchase-detail-width,760px) - 2px); min-width:760px; max-width:none; margin:0; font-size:13px; }
 body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active) .dlp-purchase-detail-table :is(td,th) { position:static; white-space:normal; overflow:visible; overflow-wrap:anywhere; text-overflow:clip; padding:6px 10px; border-right:1px solid var(--dlp-po-border); }
+body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active) .dlp-purchase-detail-table [data-fieldname="item_code"] { min-width:180px; white-space:nowrap; }
+body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active) .dlp-purchase-detail-table [data-fieldname="item_name"] { min-width:260px; }
+body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active) .dlp-purchase-detail-table [data-fieldname="warehouse"] { min-width:200px; }
+body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active) .dlp-purchase-detail-table [data-fieldname="uom"] { min-width:110px; }
+body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active) .dlp-purchase-detail-text { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:3; overflow:hidden; line-height:1.45; max-height:4.35em; }
 body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active) .dlp-purchase-detail-table .dlp-po-number { text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }
 body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active) .dlp-purchase-detail-actions { display:inline-flex; gap:6px; }
 body.dlp-purchase-order-grid-active :is(.dlp-po-provenance,.dlp-po-row-warning) { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; line-height:15px; }

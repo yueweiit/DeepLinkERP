@@ -848,6 +848,12 @@ test("purchase table CSS preserves table layout and sticky scrolling with access
  assert.match(scroll,/width:\s*var\(--dlp-purchase-detail-width/);assert.doesNotMatch(scroll,/(?:width|max-width):\s*100%/);
  const cells=css.match(/\.dlp-purchase-detail-table :is\(td,th\)\s*\{([^}]*)\}/)?.[1];
  assert.match(cells,/white-space:\s*normal/);assert.match(cells,/overflow-wrap:\s*anywhere/);assert.doesNotMatch(cells,/ellipsis|overflow:\s*hidden/);
+ assert.doesNotMatch(cells,/display:\s*(?:block|-webkit-box)/,'table cells retain their native layout');
+ const text=css.match(/\.dlp-purchase-detail-text\s*\{([^}]*)\}/)?.[1];
+ assert.match(text,/-webkit-line-clamp:\s*3/);assert.match(text,/-webkit-box-orient:\s*vertical/);assert.match(text,/overflow:\s*hidden/);
+ for(const [field,width] of [['item_name',260],['warehouse',200],['uom',110],['item_code',180]])assert.ok(css.includes(`.dlp-purchase-detail-table [data-fieldname="${field}"] { min-width:${width}px;`),`${field} has a readable minimum width`);
+ assert.match(css,/\.dlp-purchase-detail-table \[data-fieldname="item_code"\]\s*\{[^}]*white-space:\s*nowrap/);
+ assert.match(css,/\.dlp-purchase-detail-table \.dlp-po-number\s*\{[^}]*text-align:\s*right[^}]*white-space:\s*nowrap/);
  assert.match(css,/\.dlp-purchase-expanded\s*\{[^}]*contain:\s*inline-size/);
 });
 

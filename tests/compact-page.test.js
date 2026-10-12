@@ -139,13 +139,19 @@ test('page and company changes close details while same-page refresh preserves t
  owner.setPage(1);assert.equal(owner.expandedDetails.size,0);assert.equal(owner.detailCache.size,1);
  await owner.expandAllRowDetails();owner.quick.company='B';owner.reconcileRowDetails();assert.equal(owner.expandedDetails.size,0);
 });
-test('detail sizing follows only outer viewport pixels and its resize observer',()=>{
+test('detail sizing follows outer viewport pixels and procurement text clamping preserves complete content only when opted in',()=>{
  const frames=[],values=new Map(),observed=[];let resized;
  const viewport={clientWidth:1200},result={style:{setProperty:(key,value)=>values.set(key,value)}};
  const owner={providerRows:[],list:{$result:{0:result,parent:()=>({0:viewport})},render_list(){}},root:{getComputedStyle:()=>({paddingLeft:'10px',paddingRight:'10px'}),requestAnimationFrame:callback=>{frames.push(callback);return frames.length;},addEventListener:(_,callback)=>resized=callback,ResizeObserver:class{constructor(callback){this.callback=callback;}observe(node){observed.push(node);}}}};
  engine.mountRowDetails(owner,{rows:()=>owner.providerRows,load:()=>({})});assert.equal(typeof owner.afterRowDetailsRender,'function');owner.afterRowDetailsRender();frames.shift()();
  assert.equal(values.get('--dlp-purchase-detail-width'),'1152px');assert.deepEqual(observed,[viewport]);
  viewport.clientWidth=620;resized();frames.shift()();assert.equal(values.get('--dlp-purchase-detail-width'),'572px');
+ const escape=engine.create({doctype:'Purchase Order',columns:[]}).escapeHTML,item={item_code:'CODE'.repeat(12),item_name:'完整<&物料名称'.repeat(20),warehouse:'完整仓库'.repeat(15),uom:'完整单位'.repeat(10),amount:'12,193,259,148.30'};
+ const options={columns:Object.keys(item).map(field=>[field,field]),items:[item],escape};
+ const html=engine.detailTable({...options,wrapperClass:'dlp-purchase-detail-scroll',tableClass:'dlp-purchase-detail-table'});
+ for(const field of ['item_name','warehouse','uom'])assert.ok(html.includes(`<td data-fieldname="${field}" title="${escape(item[field])}" class=""><span class="dlp-purchase-detail-text">${escape(item[field])}</span></td>`),`${field} retains full escaped title and DOM text in its inner clamp`);
+ for(const field of ['item_code','amount'])assert.ok(html.includes(`<td data-fieldname="${field}" title="${escape(item[field])}" class="">${escape(item[field])}</td>`),`${field} is never text-clamped`);
+ assert.doesNotMatch(engine.detailTable({...options,tableClass:'table-bordered'}),/dlp-purchase-detail-text/,'other detailTable consumers preserve their existing rendering');
 });
 test('async detail completion replaces only the expanded region and preserves native selection nodes',async()=>{
  let resolve,renders=0,updates=0;const frames=[],checkbox={checked:true},region={set outerHTML(value){updates++;assert.match(value,/READY/);}};
