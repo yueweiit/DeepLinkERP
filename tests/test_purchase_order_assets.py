@@ -111,6 +111,21 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		self.assertIsNotNone(header_rule)
 		self.assertRegex(header_rule.group(1), r"font-size:\s*inherit\s*;")
 
+	def test_business_compact_density_and_company_wrapping_preserve_standard_and_detail_clamps(self):
+		css = (Path(__file__).resolve().parents[1] / "deeplinkerp_branding/public/css/purchase_order_list.css").read_text()
+		compact = re.search(r"body:is\([^)]*\) \.dlp-po-grid:not\(\.dlp-po-standard\)\s*\{([^}]+)\}", css)
+		self.assertIsNotNone(compact)
+		self.assertRegex(compact.group(1), r"font-size:\s*12px;")
+		self.assertRegex(compact.group(1), r"--dlp-po-cell-padding:\s*3px 5px;")
+		standard = re.search(r"\.dlp-po-standard \.dlp-po-grid\s*\{([^}]+)\}", css)
+		self.assertRegex(standard.group(1), r"font-size:\s*14px;")
+		self.assertRegex(standard.group(1), r"--dlp-po-cell-padding:\s*7px 9px;")
+		company = next((rule for selector, rule in table_style_rules() if selector.endswith('.dlp-po-grid-row [data-fieldname="company"]')), None)
+		self.assertIsNotNone(company)
+		for property_name, value in (("white-space", "normal"), ("overflow", "visible"), ("text-overflow", "clip"), ("overflow-wrap", "anywhere")):
+			self.assertRegex(company, re.escape(property_name) + r":\s*" + value + r";")
+		self.assertRegex(css, r"\.dlp-purchase-detail-text\s*\{[^}]*-webkit-line-clamp:\s*3;")
+
 	def test_header_outer_stack_beats_native_first_row_and_both_body_sticky_columns(self):
 		css = (Path(__file__).resolve().parents[1] / "deeplinkerp_branding/public/css/purchase_order_list.css").read_text()
 		css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)

@@ -903,6 +903,18 @@ function mountedPurchase(beforeMount) {
 	function click(name) { const target = new Surface(); target.attributes = { "data-name": name }; return handlers.get(".dlp-purchase-expand")({ currentTarget: target, preventDefault() {}, stopPropagation() {} }); }
 	return { ...fixture, controller, calls, controls, handlers, payload, click, resultNode, captures,clickCaptures };
 }
+test('purchase table uses the shared density widths with complete permitted company text and unchanged column order',()=>{
+ const {controller:c,list}=mountedPurchase(),company='拉丁购国际电子商务（东莞）有限公司<&';
+ c.setColumns(['status','name','company','receipt_action','grand_total','transaction_date']);
+ const doc={name:'PO',row_type:'purchase_order',company,grand_total:123,currency:'CNY'},tight=list.get_list_row_html(doc);
+ assert.match(tight,/data-fieldname="company"[^>]*width:180px/);assert.match(tight,/有限公司&lt;&amp;/);
+ assert.match(tight,/data-fieldname="receipt_action"[^>]*width:128px/);assert.match(tight,/data-fieldname="grand_total"[^>]*width:140px/);
+ assert.deepEqual(c.preferences.columns,['status','name','company','receipt_action','grand_total','transaction_date']);
+ c.preferences.density='standard';const standard=list.get_list_row_html(doc);
+ assert.match(standard,/data-fieldname="company"[^>]*width:180px/);assert.match(standard,/data-fieldname="receipt_action"[^>]*width:176px/);assert.match(standard,/data-fieldname="status"[^>]*width:104px/);
+ const denied=mountedPurchase(({list,env})=>{list.meta.fields.find(df=>df.fieldname==='company').permlevel=1;env.frappe.perm.has_perm=(_dt,level)=>level===0;});
+ denied.controller.setColumns(['name','company']);assert.doesNotMatch(denied.list.get_list_row_html({...doc,company:'PRIVATE-COMPANY'}),/PRIVATE-COMPANY|data-fieldname="company"/);
+});
 test('order page expansion uses projected permitted details only and toolbar never becomes a selection action',async()=>{
  const {controller:c,list,calls,handlers}=mountedPurchase();
  const unrendered=['idx','description'].map(field=>({name:`PO-${field}`,row_type:'purchase_order',order_progress:{item_fields:['name',field],items:[{name:'I',[field]:'unrendered'}]}}));

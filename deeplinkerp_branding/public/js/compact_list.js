@@ -4,7 +4,13 @@
   ...['Purchase Receipt','Purchase Invoice','Payment Entry','Sales Invoice','Delivery Note','POS Invoice','POS Opening Entry','POS Closing Entry'].map(doctype=>[doctype,'posting_date']),
   ['OA Purchase Request','apply_date'],
  ]);
- const engine = { create: config=>factory(config,engine), fitViewport, detailTable, invalidateExpandedDetails, mountRowDetails, businessDateFields, bindBusinessDateSort, installBusinessDateSort };
+ const compactWidths={status:88,advance_payment_status:84,payment_progress:108,receipt_progress:100,receipt_action:128,payment_action:176,payment_state:112,state:112,action:160,custom_process_status:124,dlp_actions:96};
+ function columnWidth(column,density,doctype) {
+  if(!['Purchase Order','Purchase Receipt','Purchase Invoice','Payment Entry','Sales Order'].includes(doctype))return column.width;
+  if(column.fieldname==='company')return Math.max(180,column.width);
+  return density==='standard'?column.width:Math.min(column.width,compactWidths[column.fieldname] || column.width);
+ }
+ const engine = { create: config=>factory(config,engine), fitViewport, detailTable, invalidateExpandedDetails, mountRowDetails, businessDateFields, bindBusinessDateSort, installBusinessDateSort, columnWidth };
  function businessRoute(root) {
   const route=root.frappe.get_route?.() || [];
   return String(route[0]).toLowerCase()==='list'?`List/${route[1]}/${route[2] || 'List'}`:String(route[0] || '');
@@ -752,14 +758,15 @@
 		let left = config.freezeSelection === false ? 0 : config.hideSequence ? 36 : 76;
 		return cols.map((col, index) => {
 			const frozen = frozenFields ? frozenFields.includes(col.fieldname) : lastFrozen >= 0 && index <= lastFrozen;
-			const result = { ...col, frozen, left };
-			if (!frozenFields || frozen) left += col.width;
+			const width=shared.columnWidth(col,controller.preferences.density,DOCTYPE);
+			const result = { ...col, width, frozen, left };
+			if (!frozenFields || frozen) left += width;
 			return result;
 		});
 	}
 
 	function cellHTML(col, value, title = "", header = false, readonly = false) {
-		const classes = ["dlp-po-grid-cell", "ellipsis", col.frozen ? "dlp-po-frozen" : "", NUMBERS.has(col.fieldname) ? "dlp-po-number" : "", DATES.has(col.fieldname) ? "dlp-po-date" : "", col.fieldname === "status" ? "dlp-po-status" : "", col.fieldname === "name" ? "list-subject" : ""].filter(Boolean).join(" ");
+		const classes = ["dlp-po-grid-cell", col.fieldname==='company'?"":"ellipsis", col.frozen ? "dlp-po-frozen" : "", NUMBERS.has(col.fieldname) ? "dlp-po-number" : "", DATES.has(col.fieldname) ? "dlp-po-date" : "", col.fieldname === "status" ? "dlp-po-status" : "", col.fieldname === "name" ? "list-subject" : ""].filter(Boolean).join(" ");
 		return `<div class="${classes}" data-fieldname="${col.fieldname}" style="--dlp-po-left:${col.left}px;width:${col.width}px" title="${escapeHTML(title)}"${header ? ` data-${readonly ? "provider-sort" : "sort-by"}="${col.fieldname}"` : ""}>${value}</div>`;
 	}
 

@@ -12,7 +12,7 @@ class Surface {
 function setup(options={}){
   let route=['purchase-payment-records'];const calls=[],classes=new Map(),storage=new Map(),routes=[];
   const root={$:()=>new Surface(),document:{body:{classList:{toggle:(key,value)=>classes.set(key,value)}}},localStorage:{getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value)},frappe:{get_route:()=>route,router:{on:(_,callback)=>routes.push(callback)},session:{user:'buyer'},boot:{sitename:'qa'},get_meta:()=>options.meta,perm:{has_perm:(doctype,level)=>level!==1},model:{can_export:()=>false},ui:{form:{make_control:()=>({set_value:async()=>{},get_value:()=>''})}},call(request){return new Promise(resolve=>calls.push({request,resolve}));}}};
-  const columns=[{fieldname:'name',label:'付款单',width:150},{fieldname:'amount',label:'金额',width:130},{fieldname:'references',label:'引用',width:100}];
+  const columns=options.columns || [{fieldname:'name',label:'付款单',width:150},{fieldname:'amount',label:'金额',width:130},{fieldname:'references',label:'引用',width:100}];
   const grid=engine.create({doctype:'Payment Entry',purchaseChrome:options.purchaseChrome,mainFilterFields:[],pageRoute:'purchase-payment-records',routeClass:'only-payment-page',columns,numbers:['amount'],pageFieldMap:options.fieldMap,controls:options.controls,provider:{columns,sortFields:options.sortFields,formLink:doc=>`/desk/payment-entry/${encodeURIComponent(doc.name)}`,request:c=>({method:'records',args:{search:c.quick.search,native_filters:JSON.stringify(c.nativeFilters || []),or_filters:JSON.stringify(c.orFilters || []),order_by:c.providerOrderBy,start:c.page*c.pageSize,page_length:c.pageSize}}),renderValue:field=>field==='references'?'引用':undefined,summary:()=>''}});
   let showForm=0;const form=new Surface();
   const controller=grid.mountPage({main:new Surface(),wrapper:new Surface(),...(options.pageForm?{page_form:form,show_form:()=>showForm++}:{})},root);
@@ -209,4 +209,23 @@ test('shared standalone header sorting sends one refreshed query and keeps chose
  const click=c.list.$result.handlers?.get('[data-provider-sort]');assert.equal(typeof click,'function');
  c.setPage(2);click({currentTarget:{dataset:{providerSort:'name'}}});assert.equal(calls.length,1);assert.equal(calls[0].request.args.order_by,'name asc');assert.equal(c.page,0);
  c.setPage(1);c.refresh();assert.equal(calls[1].request.args.order_by,'name asc');assert.equal(calls[1].request.args.start,100);
+});
+test('shared business column widths follow field identity and density while full company cells stay unclamped',async()=>{
+ assert.equal(typeof engine.columnWidth,'function');
+ for(const doctype of ['Purchase Order','Purchase Receipt','Purchase Invoice','Payment Entry','Sales Order']){
+  assert.equal(engine.columnWidth({fieldname:'company',width:90},'tight',doctype),180);
+  assert.equal(engine.columnWidth({fieldname:'company',width:90},'standard',doctype),180);
+  assert.equal(engine.columnWidth({fieldname:'company',width:220},'tight',doctype),220);
+  assert.equal(engine.columnWidth({fieldname:'status',width:104},'tight',doctype),88);
+  assert.equal(engine.columnWidth({fieldname:'status',width:104},'standard',doctype),104);
+  for(const [field,width] of [['posting_date',96],['grand_total',160],['amount',140]])assert.equal(engine.columnWidth({fieldname:field,width},'tight',doctype),width);
+ }
+ assert.equal(engine.columnWidth({fieldname:'company',width:90},'tight','Material Request'),90);
+ const columns=[{fieldname:'name',width:150},{fieldname:'company',width:140},{fieldname:'state',width:155},{fieldname:'amount',width:140}];
+ const {controller:c,calls}=setup({columns}),company='拉丁购国际电子商务（东莞）有限公司<&',pending=c.refresh();
+ calls[0].resolve({message:{rows:[{name:'PE',company,state:'草稿',amount:12}],total_count:1}});await pending;
+ assert.match(c.list.$result.value,/data-fieldname="company"[^>]*width:180px/);
+ assert.match(c.list.$result.value,/拉丁购国际电子商务（东莞）有限公司&lt;&amp;/);
+ assert.doesNotMatch(c.list.$result.value,/class="[^"]*ellipsis[^"]*" data-fieldname="company"/);
+ c.preferences.density='standard';c.list.render_list();assert.match(c.list.$result.value,/data-fieldname="state"[^>]*width:155px/);
 });
