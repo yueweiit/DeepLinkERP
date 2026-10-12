@@ -22,7 +22,8 @@
 		tail: ["name", "custom_odt", "status", "per_delivered", "owner", "creation", "modified_by", "modified", "dlp_actions"],
 		finance: ["name", "customer_name", "custom_process_status", "grand_total", "dlp_receipts", "dlp_last_confirmation", "dlp_actions"],
 	};
-	const itemColumns = [["idx", "序号"], ["item_code", "品目编码"], ["item_name", "品项名"], ["custom_specifications", "规格型号"], ["custom_version", "版本"], ["qty", "数量"], ["rate", "ERP 单价"], ["custom_item_tax_amount", "IVA 增值税"], ["amount", "ERP 明细金额"], ["delivery_date", "交付日期"], ["description", "摘要"], ["custom_product", "产品系列"], ["warehouse", "仓库"]];
+	const itemColumns = [["item_code", "品目编码"], ["item_name", "品项名"], ["custom_specifications", "颜色"], ["qty", "数量"], ["rate", "单价"], ["amount", "金额"], ["idx", "序号"], ["custom_item_tax_amount", "IVA 增值税"], ["delivery_date", "交付日期"], ["custom_product", "产品系列"], ["warehouse", "仓库"]];
+	const primaryItemFields = new Set(["item_code", "item_name", "custom_specifications", "qty", "rate", "amount"]);
 	const esc = value => String(value ?? "").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]);
 	const t = (value, args) => (root.__ || ((x, values = []) => x.replace(/\{(\d+)\}/g, (_, i) => values[i] ?? "")))(value, args);
 	const state = value => t(statusLabels[value] || value || "—");
@@ -32,7 +33,7 @@
 		const permitted = new Set(detail.item_fields || []), currency = detail.header.currency;
 		const columns = itemColumns.filter(([field]) => permitted.has(field));
 		if (!columns.length) return `<p>${esc(t("无权查看产品明细"))}</p>`;
-		return engine.detailTable({columns,items:detail.items,escape:esc,translate:t,wrapperClass:"dlp-sales-items-scroll",tableClass:`dlp-sales-items ${full ? "" : "dlp-sales-items-overview"}`,textFields:["item_name","custom_specifications","description","warehouse"],textClass:"dlp-sales-item-text",columnClass:(field,i)=>[i>7?"dlp-sales-extra-item":"",["idx","qty","rate","custom_item_tax_amount","amount"].includes(field)?"dlp-sales-item-number":""].filter(Boolean).join(" "),format:(field,item)=>["rate","custom_item_tax_amount","amount"].includes(field)?money(item[field],currency):field==="qty"?esc(item[field] ?? "—")+(permitted.has("uom")?` ${esc(item.uom)}`:""):undefined});
+		return engine.detailTable({columns,items:detail.items,escape:esc,translate:t,wrapperClass:"dlp-sales-items-scroll",tableClass:`dlp-sales-items ${full ? "" : "dlp-sales-items-overview"}`,textFields:["item_name","custom_specifications","warehouse"],textClass:"dlp-sales-item-text",columnClass:field=>[primaryItemFields.has(field)?"":"dlp-sales-extra-item",["idx","qty","rate","custom_item_tax_amount","amount"].includes(field)?"dlp-sales-item-number":""].filter(Boolean).join(" "),format:(field,item)=>["rate","custom_item_tax_amount","amount"].includes(field)?money(item[field],currency):field==="qty"?esc(item[field] ?? "—")+(permitted.has("uom")?` ${esc(item.uom)}`:""):undefined});
 	}
 	function detailsHTML(detail) {
 		const header = detail.header;
@@ -198,6 +199,63 @@
 			} } finally { button.prop("disabled", false); }
 		});
 		mountScrollTop(controller, true);
+		mountHorizontalScroll(controller, true);
+	}
+	function mountHorizontalScroll(controller, active) {
+		if (!controller) return;
+		if (!active) return controller.stopSalesHorizontalScroll?.();
+		if (controller.updateSalesHorizontalScroll) return controller.updateSalesHorizontalScroll();
+		const host = controller.root, viewport = controller.list.$result?.parent?.(".result-container")?.[0];
+		if (!viewport?.getBoundingClientRect || !viewport.querySelectorAll || !host.document?.createElement || !host.addEventListener) return;
+		const scroller = controller.list.page.wrapper?.[0]?.closest?.(".main-section");
+		let bar = controller.salesHorizontalScroll;
+		if (!bar) {
+			bar = controller.salesHorizontalScroll = host.document.createElement("div");
+			bar.className = "dlp-sales-horizontal-scroll"; bar.hidden = true;
+			bar.setAttribute("tabindex", "0"); bar.setAttribute("role", "region"); bar.setAttribute("aria-label", t("横向滚动订单表格"));
+			const spacer = host.document.createElement("div"); spacer.setAttribute("aria-hidden", "true"); bar.appendChild(spacer);
+			host.document.body.appendChild(bar);
+		}
+		let target, frame, observed = [];
+		const fromTarget = () => { if (bar.scrollLeft !== target.scrollLeft) bar.scrollLeft = target.scrollLeft; };
+		const fromBar = () => { if (target && target.scrollLeft !== bar.scrollLeft) target.scrollLeft = bar.scrollLeft; };
+		const schedule = () => { if (frame === undefined) frame = host.requestAnimationFrame ? host.requestAnimationFrame(measure) : (measure(), undefined); };
+		const observer = host.ResizeObserver ? new host.ResizeObserver(schedule) : null;
+		function measure() {
+			frame = undefined;
+			const rect = viewport.getBoundingClientRect(), pageRect = scroller?.getBoundingClientRect();
+			const left = Math.max(0, rect.left + (viewport.clientLeft || 0)), right = Math.min(host.innerWidth, left + viewport.clientWidth);
+			const top = Math.max(0, rect.top, pageRect?.top || 0), bottom = Math.min(host.innerHeight, rect.bottom, pageRect?.bottom ?? host.innerHeight);
+			const details = [...viewport.querySelectorAll(".dlp-sales-items-scroll")];
+			let selected = viewport, greatestArea = 0;
+			for (const detail of details) {
+				const box = detail.getBoundingClientRect();
+				const area = Math.max(0, Math.min(right, box.right) - Math.max(left, box.left)) * Math.max(0, Math.min(bottom, box.bottom) - Math.max(top, box.top));
+				if (area > greatestArea) { selected = detail; greatestArea = area; }
+			}
+			if (target !== selected) { target?.removeEventListener("scroll", fromTarget); target = selected; target.addEventListener("scroll", fromTarget, { passive: true }); }
+			const width = Math.max(0, right - left), overflow = Math.max(0, target.scrollWidth - target.clientWidth);
+			bar.style.left = `${left}px`; bar.style.width = `${width}px`; bar.firstElementChild.style.width = `${width + overflow}px`;
+			bar.scrollLeft = target.scrollLeft;
+			bar.hidden = !salesListActive(controller) || host.document.body.classList?.contains("modal-open") || width <= 0 || overflow <= 0;
+			const nodes = [...new Set([viewport, scroller, viewport.firstElementChild, ...details, ...details.map(detail => detail.firstElementChild)].filter(Boolean))];
+			if (observer && (nodes.length !== observed.length || nodes.some((node, index) => node !== observed[index]))) {
+				observer.disconnect(); nodes.forEach(node => observer.observe(node)); observed = nodes;
+			}
+		}
+		const modalObserver = host.MutationObserver ? new host.MutationObserver(schedule) : null;
+		modalObserver?.observe(host.document.body, { attributes: true, attributeFilter: ["class"] });
+		bar.addEventListener("scroll", fromBar, { passive: true });
+		host.addEventListener("scroll", schedule, { passive: true, capture: true }); host.addEventListener("resize", schedule);
+		scroller?.addEventListener("scroll", schedule, { passive: true });
+		controller.updateSalesHorizontalScroll = schedule;
+		controller.stopSalesHorizontalScroll = () => {
+			bar.hidden = true; target?.removeEventListener("scroll", fromTarget); bar.removeEventListener("scroll", fromBar);
+			host.removeEventListener("scroll", schedule, true); host.removeEventListener("resize", schedule); scroller?.removeEventListener("scroll", schedule);
+			observer?.disconnect(); modalObserver?.disconnect(); if (frame !== undefined) host.cancelAnimationFrame?.(frame);
+			controller.updateSalesHorizontalScroll = null; controller.stopSalesHorizontalScroll = null;
+		};
+		schedule();
 	}
 	function mountScrollTop(controller, active) {
 		if (!controller) return;
@@ -231,11 +289,11 @@
 		exportOptions: args => ({ columnTransforms: Object.fromEntries(args.fields.flatMap((field, index) => field === "custom_process_status" ? [[index + 2, { header: t("财务审核状态"), value: value => t(financialLabel(value)) }]] : [])) }),
 		searchConflictMessage: "现有 OR 筛选已保留；清除后可使用订单 / 客户搜索。",
 		transformQuery, onRows, onColumnsChange, mountControls, renderValue, onRequestStart: invalidateReleaseSelection,
-		onRouteChange: (controller, active) => { if (controller) controller.salesRouteActive = active; mountScrollTop(controller, active); if (!active && controller) { invalidateReleaseSelection(controller, t("未选择订单")); controller.stopInitialOnboarding?.(); } else controller?.updateSalesSelection?.(); },
+		onRouteChange: (controller, active) => { if (controller) controller.salesRouteActive = active; mountScrollTop(controller, active); mountHorizontalScroll(controller, active); if (!active && controller) { invalidateReleaseSelection(controller, t("未选择订单")); controller.stopInitialOnboarding?.(); } else controller?.updateSalesSelection?.(); },
 		renderLink: (controller, doc, value) => `<button type="button" class="dlp-sales-name dlp-sales-detail" data-name="${esc(doc.name)}">${value}</button>`,
 		renderSequence: (controller, doc, sequence) => `<button class="dlp-sales-expand" type="button" data-name="${esc(doc.name)}" aria-expanded="${controller.salesExpanded?.has(doc.name) || false}" aria-label="${esc(t("展开产品明细"))}">${controller.salesExpanded?.has(doc.name) ? "⌄" : "›"} ${sequence}</button>`,
 		rowExtra: (controller, doc) => controller.salesExpanded?.has(doc.name) ? `<section class="dlp-sales-expanded"><strong>${esc(t("订单产品明细"))}</strong>${itemTable(controller.salesExpanded.get(doc.name))}</section>` : "",
-		afterRender: controller => { controller.updateSalesSelection?.(); mountScrollTop(controller, salesListActive(controller)); },
+		afterRender: controller => { controller.updateSalesSelection?.(); mountScrollTop(controller, salesListActive(controller)); mountHorizontalScroll(controller, salesListActive(controller)); },
 	});
 	return { ...grid, COLUMNS, presets, itemTable, detailsHTML, transformQuery, financialLabel, statusLabels, orderStatusLabels, updateReleaseSelection, invalidateExpandedDetails, dismissAutomaticOnboarding };
 });

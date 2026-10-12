@@ -121,18 +121,29 @@ test('sales scope and release controls mount inside the existing personal-column
  assert.equal(f.controller.salesView,'finance');
 });
 
-test('expanded sales items retain every permitted column and all 52 rows with full hover text',()=>{
+test('sales items prioritize six permitted columns, hide version and description, and retain all 52 rows with full hover text',()=>{
  const fields=['idx','item_code','item_name','custom_specifications','custom_version','qty','uom','rate','custom_item_tax_amount','amount','delivery_date','description','custom_product','warehouse'];
- const detail={header:{currency:'MXN'},item_fields:fields,items:Array.from({length:52},(_,i)=>({idx:i+1,item_code:`CODE-${i}`,item_name:'Long <product> name',custom_specifications:'Long specifications',description:'Complete <description>',warehouse:'Long warehouse',qty:2,uom:'件',rate:12345.6,amount:24691.2,delivery_date:'2026-12-31'}))};
+ const detail={header:{currency:'MXN'},item_fields:fields,items:Array.from({length:52},(_,i)=>({idx:i+1,item_code:`CODE-${i}`,item_name:'Long <product> name',custom_specifications:'Long specifications',custom_version:'Source version',description:'Complete <description>',warehouse:'Long warehouse',qty:2,uom:'件',rate:12345.6,amount:24691.2,delivery_date:'2026-12-31'}))};
  const html=grid.itemTable(detail);
  assert.equal((html.match(/<tbody>[\s\S]*?<\/tbody>/)?.[0].match(/<tr>/g)||[]).length,52);
- for(const field of fields.filter(field=>field!=='uom'))assert.ok(html.includes(`<th data-fieldname="${field}"`),field);
- for(const field of ['item_name','custom_specifications','description','warehouse'])assert.match(html,new RegExp(`<td data-fieldname="${field}" title="[^"]+"[^>]*><span class="dlp-sales-item-text">`));
+ assert.deepEqual([...html.matchAll(/<th data-fieldname="([^"]+)"/g)].map(match=>match[1]),['item_code','item_name','custom_specifications','qty','rate','amount','idx','custom_item_tax_amount','delivery_date','custom_product','warehouse']);
+ assert.deepEqual([...html.matchAll(/<th[^>]+>([^<]+)<\/th>/g)].slice(0,6).map(match=>match[1]),['品目编码','品项名','颜色','数量','单价','金额']);
+ for(const field of ['item_name','custom_specifications','warehouse'])assert.match(html,new RegExp(`<td data-fieldname="${field}" title="[^"]+"[^>]*><span class="dlp-sales-item-text">`));
  for(const field of ['qty','rate','custom_item_tax_amount','amount'])assert.match(html,new RegExp(`<td data-fieldname="${field}"[^>]+class="[^"]*dlp-sales-item-number`));
- assert.match(html,/title="Complete &lt;description&gt;"/);
+ assert.doesNotMatch(html,/data-fieldname="custom_version"|data-fieldname="description"|Complete &lt;description&gt;|Source version/);
+ assert.equal(detail.items[0].description,'Complete <description>');assert.equal(detail.items[0].custom_version,'Source version');
  assert.match(html,/2 件/);assert.match(html,/12,345\.60 MXN/);
  assert.doesNotMatch(html,/dlp-sales-items-overview/);
  const denied=grid.itemTable({...detail,item_fields:['item_code']});assert.doesNotMatch(denied,/data-fieldname="amount"|dlp-sales-item-text/);
+ const dialog=grid.detailsHTML(detail);assert.match(dialog,/dlp-sales-items-overview/);
+ assert.deepEqual([...dialog.matchAll(/<th data-fieldname="([^"]+)"/g)].map(match=>match[1]),[...html.matchAll(/<th data-fieldname="([^"]+)"/g)].map(match=>match[1]));
+ assert.doesNotMatch(grid.itemTable({...detail,item_fields:fields.filter(field=>!['custom_version','description'].includes(field))}),/data-fieldname="custom_version"|data-fieldname="description"/);
+});
+
+test('overview extra columns are classified by field meaning when primary permissions are omitted',()=>{
+ const html=grid.itemTable({header:{currency:'MXN'},item_fields:['idx','qty','custom_item_tax_amount','amount','delivery_date','warehouse'],items:[{idx:1,qty:2,custom_item_tax_amount:3,amount:19,warehouse:'Full warehouse'}]},false);
+ for(const field of ['qty','amount'])assert.match(html,new RegExp(`<th data-fieldname="${field}" class="(?![^"]*dlp-sales-extra-item)`));
+ for(const field of ['idx','custom_item_tax_amount','delivery_date','warehouse'])assert.match(html,new RegExp(`<th data-fieldname="${field}" class="[^"]*dlp-sales-extra-item`));
 });
 
 test('finance reviews supplement all orders when financial columns are visible and ignore stale reviews',async()=>{
@@ -348,6 +359,101 @@ function viewportFixture() {
  const controller={root,list:{$result:{parent:()=>[result]},$frappe_list:[list],page:{wrapper:{find:()=>[{}]}}},$toolbar:[{}],$filters:[{parentElement:{}}],$summary:[{}],$paging:[{}],$salesViewbar:[{}],$salesNotice:[{}]};
  return {controller,state,main,result,list,header,row,root,values,frames,listeners,observers,flush(){const callbacks=[...frames.values()];frames.clear();callbacks.forEach(fn=>fn());}};
 }
+
+function horizontalScrollFixture() {
+ const f=mountedReleaseFixture(),frames=new Map(),observers=[],mutations=[];let frameId=0;
+ function node(rect={left:240,right:1260,top:100,bottom:720},clientWidth=rect.right-rect.left,scrollWidth=clientWidth) {
+  const listeners=new Map(),children=[];
+  return {rect,clientWidth,scrollWidth,scrollLeft:0,style:{},children,hidden:false,className:'',attributes:{},
+   getBoundingClientRect(){return this.rect;},get firstElementChild(){return children[0];},
+   appendChild(child){children.push(child);return child;},setAttribute(key,value){this.attributes[key]=value;},
+   addEventListener(type,fn){if(!listeners.has(type))listeners.set(type,new Set());listeners.get(type).add(fn);},
+   removeEventListener(type,fn){listeners.get(type)?.delete(fn);},
+   emit(type){for(const fn of listeners.get(type)||[])fn({target:this});},
+   listenerCount(){return [...listeners.values()].reduce((sum,set)=>sum+set.size,0);}};
+ }
+ const viewport=node(undefined,1020,1700),page=node(),body=node(),details=[];let modal=false;
+ page.scrollHeight=2500;page.clientHeight=720;page.scrollTop=0;
+ viewport.querySelectorAll=()=>details;
+ body.classList={contains:className=>className==='modal-open' && modal};
+ f.controller.list.$result={parent:()=>[viewport]};f.controller.list.page.wrapper={0:{closest:()=>page}};
+ f.env.innerWidth=1280;f.env.innerHeight=720;f.env.document={body,createElement:()=>node()};
+ const host=node();f.env.addEventListener=host.addEventListener;f.env.removeEventListener=host.removeEventListener;
+ f.env.requestAnimationFrame=fn=>{frames.set(++frameId,fn);return frameId;};f.env.cancelAnimationFrame=id=>frames.delete(id);
+ f.env.ResizeObserver=class {constructor(callback){this.callback=callback;this.targets=new Set();observers.push(this);}observe(target){this.targets.add(target);}disconnect(){this.targets.clear();this.disconnected=true;}};
+ f.env.MutationObserver=class {constructor(callback){this.callback=callback;mutations.push(this);}observe(){}disconnect(){this.disconnected=true;}};
+ return {...f,viewport,page,body,details,frames,observers,mutations,host,node,
+  bar(){const element=body.children.find(child=>child.className==='dlp-sales-horizontal-scroll');assert.ok(element,'Sales native bottom scrollbar is mounted');return element;},
+  flush(){while(frames.size){const callbacks=[...frames.values()];frames.clear();callbacks.forEach(fn=>fn());}},
+  render(){f.config.afterRender(f.controller);this.flush();},
+  modal(value){modal=value;mutations.at(-1)?.callback();this.flush();}};
+}
+
+test('sales bottom scrollbar selects the detail with greatest visible area and keeps DOM order for ties',()=>{
+ const f=horizontalScrollFixture(),a=f.node({left:250,right:1250,top:-200,bottom:300},1000,1600),b=f.node({left:250,right:1250,top:310,bottom:700},1000,1800);
+ f.details.push(a,b);f.render();const bar=f.bar();
+ bar.scrollLeft=140;bar.emit('scroll');assert.equal(b.scrollLeft,140);assert.equal(a.scrollLeft,0);
+ a.rect={...b.rect};f.host.emit('scroll');f.flush();bar.scrollLeft=190;bar.emit('scroll');assert.equal(a.scrollLeft,190);assert.equal(b.scrollLeft,140);
+});
+
+test('sales bottom scrollbar falls back to the main result when every detail is outside the viewport',()=>{
+ const f=horizontalScrollFixture();f.details.push(f.node({left:250,right:1250,top:730,bottom:900},1000,1800));f.render();
+ const bar=f.bar();bar.scrollLeft=270;bar.emit('scroll');assert.equal(f.viewport.scrollLeft,270);assert.equal(f.details[0].scrollLeft,0);
+ assert.equal(bar.style.left,'240px');assert.equal(bar.style.width,'1020px');assert.equal(bar.firstElementChild.style.width,'1700px');
+});
+
+test('sales native bottom scrollbar synchronizes both ways with the selected detail without changing the main grid',()=>{
+ const f=horizontalScrollFixture(),detail=f.node({left:250,right:1250,top:120,bottom:2500},1000,1700);detail.scrollLeft=120;
+ f.details.push(detail);f.render();const bar=f.bar();assert.equal(bar.scrollLeft,120);assert.equal(bar.firstElementChild.style.width,'1720px');
+ detail.scrollLeft=380;detail.emit('scroll');assert.equal(bar.scrollLeft,380);
+ bar.scrollLeft=620;bar.emit('scroll');assert.equal(detail.scrollLeft,620);assert.equal(f.viewport.scrollLeft,0);
+ assert.equal(bar.attributes.tabindex,'0');assert.ok(bar.attributes['aria-label']);
+});
+
+test('sales scrollbar remeasures sidebar width, detail resize and replaced rows while releasing old targets',()=>{
+ const f=horizontalScrollFixture(),old=f.node({left:250,right:1250,top:120,bottom:650},1000,1700);f.details.push(old);f.render();const bar=f.bar();
+ f.viewport.rect={left:80,right:1260,top:100,bottom:720};f.viewport.clientWidth=1180;old.clientWidth=1160;old.scrollWidth=1900;
+ f.observers[0].callback();f.flush();assert.equal(bar.style.left,'80px');assert.equal(bar.style.width,'1180px');assert.equal(bar.firstElementChild.style.width,'1920px');
+ const replacement=f.node({left:90,right:1250,top:120,bottom:650},1160,2000);replacement.scrollLeft=230;f.details.splice(0,1,replacement);f.render();
+ assert.equal(old.listenerCount(),0);assert.equal(bar.scrollLeft,230);assert.equal(f.body.children.filter(child=>child.className==='dlp-sales-horizontal-scroll').length,1);
+ old.scrollLeft=500;old.emit('scroll');assert.equal(bar.scrollLeft,230);
+ assert.ok(f.observers.at(-1).targets.has(replacement),'new detail widths are observed');
+});
+
+test('sales scrollbar hides for a visible detail without overflow rather than scrolling an unrelated main grid',()=>{
+ const f=horizontalScrollFixture(),detail=f.node({left:250,right:1250,top:120,bottom:650},1000,1000);f.details.push(detail);f.render();assert.equal(f.bar().hidden,true);
+ detail.scrollWidth=1700;f.observers[0].callback();f.flush();assert.equal(f.bar().hidden,false);
+ f.details.length=0;f.viewport.scrollWidth=f.viewport.clientWidth;f.render();assert.equal(f.bar().hidden,true);
+});
+
+test('sales scrollbar route departure removes listeners and observers and cached return reuses one mirror',()=>{
+ const f=horizontalScrollFixture(),detail=f.node({left:250,right:1250,top:120,bottom:650},1000,1700);f.details.push(detail);f.render();const bar=f.bar();
+ f.setRoute(['List','Purchase Order','List']);f.config.onRouteChange(f.controller,false);assert.equal(bar.hidden,true);assert.equal(detail.listenerCount(),0);assert.equal(f.host.listenerCount(),0);assert.equal(f.page.listenerCount(),0);assert.equal(bar.listenerCount(),0);assert.equal(f.frames.size,0);
+ assert.ok(f.observers.every(observer=>observer.disconnected));assert.ok(f.mutations.every(observer=>observer.disconnected));
+ f.setRoute(['List','Sales Order','List']);f.config.onRouteChange(f.controller,true);f.flush();f.config.onRouteChange(f.controller,true);f.flush();
+ assert.equal(f.bar(),bar);assert.equal(f.body.children.filter(child=>child.className==='dlp-sales-horizontal-scroll').length,1);assert.equal(bar.listenerCount(),1);
+});
+
+test('sales bottom scrollbar hides under a modal and restores the current target on close',()=>{
+ const f=horizontalScrollFixture(),detail=f.node({left:250,right:1250,top:120,bottom:650},1000,1700);f.details.push(detail);f.render();const bar=f.bar();
+ f.modal(true);assert.equal(bar.hidden,true);f.modal(false);assert.equal(bar.hidden,false);bar.scrollLeft=210;bar.emit('scroll');assert.equal(detail.scrollLeft,210);
+});
+
+test('sales detail widths and native scrollbar hover contract reserve a fixed slot and keep codes and money complete',()=>{
+ const css=fs.readFileSync(require.resolve('../deeplinkerp_branding/public/css/sales_order_list.css'),'utf8');
+ for(const [field,width] of [['item_code',160],['item_name',260],['custom_specifications',80],['qty',90],['rate',120],['amount',140]])assert.match(css,new RegExp(`\\[data-fieldname=${field}\\]\\s*\\{[^}]*min-width:\\s*${width}px`));
+ assert.doesNotMatch(css,/\[data-fieldname=(?:custom_version|description)\]/);
+ assert.match(css,/\.dlp-sales-horizontal-scroll\s*\{[^}]*position:\s*fixed;[^}]*bottom:\s*0;[^}]*height:\s*12px;[^}]*overflow-x:\s*auto/);
+ assert.match(css,/::-webkit-scrollbar-thumb\s*\{[^}]*background:[^;]*var\(--dlp-table-scrollbar-thumb[^;]*;[^}]*background-clip:\s*content-box;[^}]*border:\s*3px solid transparent/);
+ assert.match(css,/:hover[^}]*::-webkit-scrollbar-thumb[\s\S]*?\{[^}]*border-width:\s*0/);
+ assert.match(css,/::-webkit-scrollbar-thumb:active[\s\S]*?\{[^}]*border-width:\s*0/);
+ assert.match(css,/\.dlp-sales-horizontal-scroll\s*\{[^}]*scrollbar-color:\s*auto/,'Blink keeps the 6px-to-12px native thumb styling enabled');
+ assert.match(css,/@supports not selector\(::-webkit-scrollbar\)\s*\{[^}]*\.dlp-sales-horizontal-scroll[^}]*scrollbar-color:\s*var\(--dlp-table-scrollbar-thumb/,'other engines retain themed native scrollbar colors');
+ assert.match(css,/body\.modal-open[^}]*\.dlp-sales-horizontal-scroll[^}]*\{[^}]*display:\s*none/);
+ assert.match(css,/\.dlp-sales-items-scroll[^{}]*::-webkit-scrollbar/);
+ const code='LONGCODE'.repeat(5)+'XX',html=grid.itemTable({header:{currency:'MXN'},item_fields:['item_code','amount'],items:[{item_code:code,amount:987654321098.76}]});
+ assert.ok(html.includes(code));assert.match(html,/987,654,321,098\.76 MXN/);assert.doesNotMatch(html,/dlp-sales-item-text/);
+});
 
 test('sales owns no viewport height adapter and its full-height grids scroll horizontally only',()=>{
  assert.equal(grid.fitViewport,undefined);
