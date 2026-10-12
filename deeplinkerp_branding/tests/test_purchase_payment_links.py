@@ -143,9 +143,29 @@ class PurchaseLinkTests(unittest.TestCase):
 
 class PurchasePayableScopeTests(unittest.TestCase):
     def test_payable_manual_sort_uses_existing_query_and_export_scope(self):
-        result = self.scope({'PI': self.invoice()}, {('PI', 'Purchase Receipt'): ['PR']}, order_by='supplier asc')
-        self.assertEqual(result['rows'][0]['name'], 'PI')
-        self.assertEqual(self.last_query.kwargs['order_by'], 'supplier asc, name asc')
+        docs, sources = {'PI': self.invoice()}, {('PI', 'Purchase Receipt'): ['PR']}
+        for order in ('supplier asc', 'name asc', 'name desc'):
+            expected = 'supplier asc, name asc' if order == 'supplier asc' else order
+            for export_format in (None, 'xlsx'):
+                with self.subTest(order=order, export_format=export_format), \
+                     patch.object(frappe, 'throw', side_effect=frappe.ValidationError), \
+                     patch.object(service, '_export', return_value=None) as export:
+                    result = self.scope(docs, sources, order_by=order, export_format=export_format, columns=['name'])
+                    self.assertEqual(self.last_query.kwargs['order_by'], expected)
+                    if export_format:
+                        self.assertIsNone(result)
+                        self.assertEqual([row['name'] for row in export.call_args.args[1]], ['PI'])
+                    else:
+                        self.assertEqual(result['rows'][0]['name'], 'PI')
+                        export.assert_not_called()
+
+    def test_payable_sort_rejects_foreign_tables_and_sql_before_any_query(self):
+        with patch.object(service, '_require_fields'), patch.object(frappe, 'has_permission', return_value=True), \
+             patch.object(frappe, 'throw', side_effect=frappe.ValidationError), patch.object(frappe, 'get_list') as query:
+            for order in ('`tabPayment Entry`.`name` asc', 'name desc; select 1', 'unknown asc'):
+                with self.subTest(order=order), self.assertRaises(frappe.ValidationError):
+                    service.get_purchase_payables(order_by=order)
+            query.assert_not_called()
 
     def setUp(self):
         flags = patch.object(frappe, 'flags', frappe._dict())

@@ -515,7 +515,7 @@ def _get_purchase_payables(company, supplier, search, from_date, to_date, start,
     Totals/balances are whole native invoices, including mixed expense lines.
     No amount is reallocated or reclassified as a procurement cost.
     """
-    fields = PI_FIELDS | {"posting_date", "status"}
+    fields = PI_FIELDS | {"name", "posting_date", "status"}
     _require_fields("Purchase Invoice", fields)
     _require_fields("Purchase Invoice Item", {"purchase_order", "purchase_receipt"}, "Purchase Invoice")
     start, page_length = _pagination(start, page_length)
