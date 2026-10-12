@@ -363,8 +363,9 @@ function viewportFixture() {
 function horizontalScrollFixture() {
  const f=mountedReleaseFixture(),frames=new Map(),observers=[],mutations=[];let frameId=0;
  function node(rect={left:240,right:1260,top:100,bottom:720},clientWidth=rect.right-rect.left,scrollWidth=clientWidth) {
-  const listeners=new Map(),children=[];
-  return {rect,clientWidth,scrollWidth,scrollLeft:0,style:{},children,hidden:false,className:'',attributes:{},
+  const listeners=new Map(),children=[];let scrollLeft=0;
+  return {rect,clientWidth,scrollWidth,style:{},children,hidden:false,className:'',attributes:{},
+   get scrollLeft(){return this.hidden?0:scrollLeft;},set scrollLeft(value){if(!this.hidden)scrollLeft=value;},
    getBoundingClientRect(){return this.rect;},get firstElementChild(){return children[0];},
    appendChild(child){children.push(child);return child;},setAttribute(key,value){this.attributes[key]=value;},
    addEventListener(type,fn){if(!listeners.has(type))listeners.set(type,new Set());listeners.get(type).add(fn);},
@@ -430,13 +431,20 @@ test('sales scrollbar route departure removes listeners and observers and cached
  const f=horizontalScrollFixture(),detail=f.node({left:250,right:1250,top:120,bottom:650},1000,1700);f.details.push(detail);f.render();const bar=f.bar();
  f.setRoute(['List','Purchase Order','List']);f.config.onRouteChange(f.controller,false);assert.equal(bar.hidden,true);assert.equal(detail.listenerCount(),0);assert.equal(f.host.listenerCount(),0);assert.equal(f.page.listenerCount(),0);assert.equal(bar.listenerCount(),0);assert.equal(f.frames.size,0);
  assert.ok(f.observers.every(observer=>observer.disconnected));assert.ok(f.mutations.every(observer=>observer.disconnected));
- f.setRoute(['List','Sales Order','List']);f.config.onRouteChange(f.controller,true);f.flush();f.config.onRouteChange(f.controller,true);f.flush();
+ detail.scrollLeft=430;f.setRoute(['List','Sales Order','List']);f.config.onRouteChange(f.controller,true);f.flush();assert.equal(bar.scrollLeft,430,'cached return restores the retained detail position');f.config.onRouteChange(f.controller,true);f.flush();
  assert.equal(f.bar(),bar);assert.equal(f.body.children.filter(child=>child.className==='dlp-sales-horizontal-scroll').length,1);assert.equal(bar.listenerCount(),1);
 });
 
-test('sales bottom scrollbar hides under a modal and restores the current target on close',()=>{
- const f=horizontalScrollFixture(),detail=f.node({left:250,right:1250,top:120,bottom:650},1000,1700);f.details.push(detail);f.render();const bar=f.bar();
- f.modal(true);assert.equal(bar.hidden,true);f.modal(false);assert.equal(bar.hidden,false);bar.scrollLeft=210;bar.emit('scroll');assert.equal(detail.scrollLeft,210);
+test('sales bottom scrollbar restores changed or replaced target positions after modal hiding',()=>{
+ for(const replaced of [false,true]){
+  const f=horizontalScrollFixture();let detail=f.node({left:250,right:1250,top:120,bottom:650},1000,1700);
+  detail.scrollLeft=300;f.details.push(detail);f.render();f.render();const bar=f.bar();assert.equal(bar.scrollLeft,300);
+  f.modal(true);assert.equal(bar.hidden,true);assert.equal(bar.scrollLeft,0,'display:none has no scroll box');
+  if(replaced){detail=f.node(detail.rect,1000,1700);f.details.splice(0,1,detail);f.render();}
+  else {detail.scrollLeft=500;detail.emit('scroll');}
+  const expected=detail.scrollLeft;f.modal(false);assert.equal(bar.hidden,false);assert.equal(bar.scrollLeft,expected,replaced?'rebuilt target starts at zero':'hidden target position changed');
+  bar.scrollLeft=expected+30;bar.emit('scroll');assert.equal(detail.scrollLeft,expected+30,'subsequent scrolling starts from the restored position');
+ }
 });
 
 test('sales detail widths and native scrollbar hover contract reserve a fixed slot and keep codes and money complete',()=>{

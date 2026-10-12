@@ -236,8 +236,8 @@
 			if (target !== selected) { target?.removeEventListener("scroll", fromTarget); target = selected; target.addEventListener("scroll", fromTarget, { passive: true }); }
 			const width = Math.max(0, right - left), overflow = Math.max(0, target.scrollWidth - target.clientWidth);
 			bar.style.left = `${left}px`; bar.style.width = `${width}px`; bar.firstElementChild.style.width = `${width + overflow}px`;
-			bar.scrollLeft = target.scrollLeft;
 			bar.hidden = !salesListActive(controller) || host.document.body.classList?.contains("modal-open") || width <= 0 || overflow <= 0;
+			bar.scrollLeft = target.scrollLeft;
 			const nodes = [...new Set([viewport, scroller, viewport.firstElementChild, ...details, ...details.map(detail => detail.firstElementChild)].filter(Boolean))];
 			if (observer && (nodes.length !== observed.length || nodes.some((node, index) => node !== observed[index]))) {
 				observer.disconnect(); nodes.forEach(node => observer.observe(node)); observed = nodes;
