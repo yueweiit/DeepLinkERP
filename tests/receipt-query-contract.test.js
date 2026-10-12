@@ -123,6 +123,12 @@ test('receipt lines read only on expansion, retain one version and omit field-le
  assert.match(config.rowExtra(c,doc),/MAT|2\.00/);assert.doesNotMatch(config.rowExtra(c,doc),/300|单价/);
  await c.toggleRowDetails('PR');await c.toggleRowDetails('PR');assert.equal(calls.length,1);
 });
+test('receipt page expansion reads visible native or financial rows and exposes no entry without item permission',async()=>{
+ const config=receiptConfiguration(),calls=[];
+ const c={providerScope:'orders',providerRows:[{name:'HIDDEN'}],allowed:new Set(['items']),requestId:1,list:{data:[{name:'PR1'},{name:'PR2'}],render_list(){}},root:{frappe:{get_route:()=>['List','Purchase Receipt'],model:{with_doctype:async()=>{}},get_meta:()=>({fields:[{fieldname:'item_code'}]}),perm:{has_perm:()=>true},call:async request=>{calls.push(request);return {message:{items:[{item_code:request.args.name}]}};}}}};
+ config.onMount(c);await c.expandAllRowDetails();assert.deepEqual(calls.map(call=>call.args.name),['PR1','PR2']);assert.ok(calls.every(call=>call.method==='frappe.client.get'));
+ c.collapseAllRowDetails();c.allowed.delete('items');await c.expandAllRowDetails();assert.equal(c.expandedDetails.size,0);assert.equal(calls.length,2);assert.equal(config.renderSequence(c,c.list.data[0]),'');
+});
 test('receipt preferences migrate once with backup and preserve density and v4 choices',()=>{
  const config=receiptConfiguration(),grid=require('../deeplinkerp_branding/public/js/compact_list.js').create(config),allowed=new Set(config.provider.columns.map(col=>col.fieldname));
  const next=grid.normalizePreferences({columns:['name','currency'],density:'standard',version:3},allowed,config.provider.columns);

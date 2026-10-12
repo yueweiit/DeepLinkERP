@@ -1,35 +1,108 @@
 (function (root, factory) {
  const engine = { create: factory, fitViewport, detailTable, invalidateExpandedDetails, mountRowDetails };
  // One page index and a bounded version cache shared by procurement list adapters.
- function mountRowDetails(owner, {rows, load, active=()=>true}) {
+ function mountRowDetails(owner, {rows, load, active=()=>true, canExpand=()=>true}) {
   owner.expandedDetails=new Set(); owner.detailCache=new Map(); owner.detailPending=new Map(); owner.detailRows=new Map(); owner.detailVersions=new Map();
+  const queue=[],dirty=new Set();let live=0,frame,detailElements=new Map(),previousScope,pumping=false;
   const version=doc=>String(doc?.modified || doc?.order_progress?.modified || '');
+  const scope=()=>JSON.stringify([owner.page,owner.pageSize,owner.providerScope,owner.quick,owner.querySignature]);
   const render=()=>{owner.list.render_list();owner.list.set_rows_as_checked?.();};
+  const eligible=doc=>doc && active() && canExpand(doc);
+  const current=token=>eligible(owner.detailRows.get(token.doc.name)) && owner.expandedDetails.has(token.doc.name) && owner.detailPending.get(token.doc.name)===token && owner.requestId===token.requestId && scope()===token.scope && version(owner.detailRows.get(token.doc.name))===token.version;
+  function cancel(name) {const token=owner.detailPending.get(name);owner.detailPending.delete(name);token?.done();}
+  function flush() {
+   frame=undefined;const names=[...dirty];dirty.clear();if(!active())return;
+   const template=owner.root.document?.createElement?.('template');
+   if(!template || !owner.list.get_list_row_html){render();return;}
+   for(const name of names){
+    const doc=owner.detailRows.get(name),region=detailElements.get(name)?.querySelector('.dlp-purchase-expanded');
+    if(!doc || !region || !owner.expandedDetails.has(name))continue;
+    template.innerHTML=owner.list.get_list_row_html(doc);
+    const replacement=template.content.querySelector('.dlp-purchase-expanded');
+    // Keep the native row, checkbox, focus and selection cursor intact.
+    if(replacement)region.outerHTML=replacement.outerHTML;
+   }
+   updateControls();
+  }
+  function schedule(name) {
+   dirty.add(name);if(frame!==undefined)return;
+   frame=owner.root.requestAnimationFrame?owner.root.requestAnimationFrame(flush):setTimeout(flush,0);
+  }
+  function finish(token,detail,error,asynchronous) {
+   const accepted=current(token),name=token.doc.name;
+   if(accepted)owner.detailCache.set(name,error?{error:error.message || '明细读取失败，请重试。'}:detail?.header?.modified && token.version && String(detail.header.modified)!==token.version?{error:'明细已更新，请刷新列表后查看。'}:detail);
+   if(owner.detailPending.get(name)===token)owner.detailPending.delete(name);
+   live--;token.done();pump();if(accepted && asynchronous)schedule(name);
+  }
+  function pump() {
+   if(pumping)return;pumping=true;
+   while(live<4 && queue.length){
+    const token=queue.shift();if(!current(token)){if(owner.detailPending.get(token.doc.name)===token)cancel(token.doc.name);else token.done();continue;}
+    live++;
+    try {const value=load(token.doc);if(value?.then)value.then(detail=>finish(token,detail,null,true),error=>finish(token,null,error,true));else finish(token,value,null,false);}
+    catch(error){finish(token,null,error,false);}
+   }pumping=false;
+  }
+  function open(doc,retry=false) {
+   const name=doc.name;if(owner.expandedDetails.has(name))return owner.detailPending.get(name)?.promise;
+   owner.expandedDetails.add(name);if(retry && owner.detailCache.get(name)?.error)owner.detailCache.delete(name);
+   if(owner.detailCache.has(name))return;
+   const token={doc,version:version(doc),requestId:owner.requestId,scope:scope()};
+   token.promise=new Promise(resolve=>token.done=resolve);owner.detailPending.set(name,token);queue.push(token);pump();return token.promise;
+  }
+  function updateControls() {
+   const available=[...owner.detailRows.values()].filter(eligible);
+   owner.$rowDetailControls?.toggle(Boolean(available.length));
+   owner.$rowDetailControls?.find('[data-row-details="expand"]').prop('disabled',!available.some(doc=>!owner.expandedDetails.has(doc.name)));
+   owner.$rowDetailControls?.find('[data-row-details="collapse"]').prop('disabled',!owner.expandedDetails.size);
+  }
   owner.reconcileRowDetails=()=>{
+   const signature=scope();if(previousScope!==undefined && signature!==previousScope)owner.cancelPendingRowDetails();previousScope=signature;
    const next=new Map(rows().map(doc=>[doc.name,doc]));
-   for(const [name,previous] of owner.detailVersions)if(!next.has(name) || version(next.get(name))!==previous){owner.expandedDetails.delete(name);owner.detailCache.delete(name);owner.detailPending.delete(name);}
+   for(const [name,previous] of owner.detailVersions)if(!next.has(name) || version(next.get(name))!==previous){owner.expandedDetails.delete(name);owner.detailCache.delete(name);cancel(name);}
+   for(const [name,token] of owner.detailPending)if(token.requestId!==owner.requestId || !eligible(next.get(name))){owner.expandedDetails.delete(name);cancel(name);}
+   for(const name of owner.expandedDetails)if(!eligible(next.get(name)))owner.expandedDetails.delete(name);
    owner.detailRows=next;owner.detailVersions=new Map([...next].map(([name,doc])=>[name,version(doc)]));
+   updateControls();
   };
   owner.invalidateRowDetails=names=>{
    const targets=names==null?new Set(owner.detailRows.keys()):new Set(Array.isArray(names)?names:[names]);
-   for(const name of targets){owner.expandedDetails.delete(name);owner.detailCache.delete(name);owner.detailPending.delete(name);}
+   for(const name of targets){owner.expandedDetails.delete(name);owner.detailCache.delete(name);cancel(name);}updateControls();
   };
   owner.cancelPendingRowDetails=()=>{
-   for(const name of owner.detailPending.keys())owner.expandedDetails.delete(name);
-   owner.detailPending.clear();
+   // Forget queued work immediately; live calls retain their slots until settled.
+   owner.expandedDetails.clear();for(const name of owner.detailPending.keys())cancel(name);queue.length=0;dirty.clear();updateControls();
   };
-  owner.toggleRowDetails=async name=>{
-   owner.reconcileRowDetails();const doc=owner.detailRows.get(name);if(!doc || !active())return;
-   if(owner.expandedDetails.has(name)){owner.expandedDetails.delete(name);owner.detailPending.delete(name);render();return;}
-   owner.expandedDetails.add(name);
-   if(owner.detailCache.get(name)?.error)owner.detailCache.delete(name);
-   if(owner.detailCache.has(name)){render();return;}
-   const scope=()=>JSON.stringify([owner.page,owner.pageSize,owner.providerScope,owner.quick,owner.querySignature]);
-   const token={doc,version:version(doc),requestId:owner.requestId,scope:scope()};owner.detailPending.set(name,token);render();
-   const current=()=>active() && owner.expandedDetails.has(name) && owner.detailPending.get(name)===token && owner.requestId===token.requestId && scope()===token.scope && owner.detailRows.has(name) && version(owner.detailRows.get(name))===token.version;
-   try {const detail=await load(doc);if(current())owner.detailCache.set(name,detail?.header?.modified && token.version && String(detail.header.modified)!==token.version?{error:'明细已更新，请刷新列表后查看。'}:detail);}
-   catch(error){if(current())owner.detailCache.set(name,{error:error.message || '明细读取失败，请重试。'});}
-   finally {if(owner.detailPending.get(name)===token){owner.detailPending.delete(name);if(active())render();}}
+  owner.collapseAllRowDetails=()=>{owner.cancelPendingRowDetails();render();};
+  owner.expandAllRowDetails=()=>{
+   owner.reconcileRowDetails();const pending=[];let changed=false;
+   for(const doc of owner.detailRows.values())if(eligible(doc) && !owner.expandedDetails.has(doc.name)){changed=true;pending.push(open(doc));}
+   if(changed)render();return Promise.all(pending);
+  };
+  owner.toggleRowDetails=name=>{
+   owner.reconcileRowDetails();const doc=owner.detailRows.get(name);if(!eligible(doc))return;
+   if(owner.expandedDetails.has(name)){owner.expandedDetails.delete(name);cancel(name);render();return;}
+   const pending=open(doc,true);render();return pending;
+  };
+  const setPage=owner.setPage;
+  if(setPage)owner.setPage=function(...args){const expanded=owner.expandedDetails.size;owner.cancelPendingRowDetails();const value=setPage.apply(this,args);if(expanded && active())render();return value;};
+  owner.mountRowDetailControls=()=>{
+   if(!owner.$rowDetailControls && owner.$toolbar){
+    owner.$rowDetailControls=owner.root.$('<span class="dlp-purchase-detail-actions"><button type="button" class="btn btn-default btn-sm" data-row-details="expand">展开</button><button type="button" class="btn btn-default btn-sm" data-row-details="collapse">收起</button></span>').appendTo(owner.$toolbar);
+    owner.$rowDetailControls.on('click.dlpRowDetails','[data-row-details="expand"]',()=>owner.expandAllRowDetails()).on('click.dlpRowDetails','[data-row-details="collapse"]',()=>owner.collapseAllRowDetails());
+   }updateControls();
+  };
+  owner.afterRowDetailsRender=()=>{
+   detailElements=new Map([...(owner.list.$result?.[0]?.querySelectorAll?.('[data-dlp-detail-name]') || [])].map(node=>[node.getAttribute('data-dlp-detail-name'),node]));
+   owner.mountRowDetailControls();
+   const result=owner.list.$result?.[0],host=owner.root;
+   if(!result?.style || !host.requestAnimationFrame)return;
+   const viewport=owner.list.$result.parent?.('.result-container')?.[0];if(!viewport)return;
+   if(!owner.updateRowDetailViewport){
+    let resizeFrame;const measure=()=>{resizeFrame=undefined;const style=host.getComputedStyle?.(viewport) || {},width=`${Math.max(0,Math.floor(viewport.clientWidth-(parseFloat(style.paddingLeft)||0)-(parseFloat(style.paddingRight)||0)-28))}px`;if(result.style.getPropertyValue?.('--dlp-purchase-detail-width')!==width)result.style.setProperty('--dlp-purchase-detail-width',width);};
+    const schedule=()=>{if(resizeFrame===undefined)resizeFrame=host.requestAnimationFrame(measure);};
+    const observer=host.ResizeObserver?new host.ResizeObserver(schedule):null;observer?.observe(viewport);host.addEventListener?.('resize',schedule);owner.updateRowDetailViewport=schedule;
+   }owner.updateRowDetailViewport();
   };
   owner.list.$result?.on?.('click.dlpRowDetails','.dlp-purchase-expand',event=>{event.preventDefault();event.stopPropagation();return owner.toggleRowDetails(owner.root.$(event.currentTarget).attr('data-name'));});
   owner.reconcileRowDetails();
@@ -537,7 +610,7 @@
 				});
 			}
 			movePurchaseNativeFilterSection(controller);
-			config.afterRender?.(controller);
+			config.afterRender?.(controller);controller.afterRowDetailsRender?.();
 			if (providerActive(controller) && !currentRows(controller).length) this.$result?.append('<div class="list-row-container dlp-provider-empty text-muted text-center" role="status">没有符合条件的采购记录</div>');
 		};
 		list.toggle_result_area = function () {
@@ -669,7 +742,7 @@
 			return cellHTML(col, value, controller.allowed.has(col.fieldname) && (raw === null || typeof raw !== 'object') ? raw ?? "—" : "");
 		}).join("");
 		const sequence = controller.page * controller.pageSize + (doc._idx || 0) + 1;
-		return `<div class="list-row-container" tabindex="0"><div class="level ${readonly ? "dlp-po-readonly-row" : "list-row"} dlp-po-grid-row" style="--dlp-po-columns:${template(controller)}">${selectionCell(checkbox, config.renderSequence?.(controller, doc, sequence) ?? sequence)}${cells}</div>${config.rowExtra?.(controller, doc) || ""}</div>`;
+		return `<div class="list-row-container"${config.rowExtra?` data-dlp-detail-name="${escapeHTML(doc.name)}"`:''} tabindex="0"><div class="level ${readonly ? "dlp-po-readonly-row" : "list-row"} dlp-po-grid-row" style="--dlp-po-columns:${template(controller)}">${selectionCell(checkbox, config.renderSequence?.(controller, doc, sequence) ?? sequence)}${cells}</div>${config.rowExtra?.(controller, doc) || ""}</div>`;
 	}
 
 	function movePurchaseNativeFilterSection(controller) {
@@ -747,6 +820,7 @@
 				controller.refresh();
 			});
 		}
+		controller.mountRowDetailControls?.();
 		controller.savePreferences();
 		config.provider?.mountControls?.(controller);
 		config.mountControls?.(controller);
@@ -937,7 +1011,7 @@
 			},
 		};
 		function active() { return (frappe.get_route?.() || [])[0] === config.pageRoute; }
-		function render() { surface.$result.html(headerHTML(c) + c.providerRows.map((row, index) => { row._idx = index; return rowHTML(c, row); }).join('')); if (!c.providerRows.length) surface.$result.append(`<div class="dlp-provider-empty text-muted" role="status">${escapeHTML(c.translate(config.emptyLabel || '没有符合条件的采购付款记录'))}</div>`); movePurchaseNativeFilterSection(c); config.afterRender?.(c); paintSummary(c); }
+		function render() { surface.$result.html(headerHTML(c) + c.providerRows.map((row, index) => { row._idx = index; return rowHTML(c, row); }).join('')); if (!c.providerRows.length) surface.$result.append(`<div class="dlp-provider-empty text-muted" role="status">${escapeHTML(c.translate(config.emptyLabel || '没有符合条件的采购付款记录'))}</div>`); movePurchaseNativeFilterSection(c); config.afterRender?.(c); c.afterRowDetailsRender?.(); paintSummary(c); }
 		surface.render_list = render; surface.refresh = () => c.refresh();
 		config.onMount?.(c);
 		mountControls(c); render(); c.activate();

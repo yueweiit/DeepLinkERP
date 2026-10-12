@@ -15,6 +15,7 @@
  const itemFields = new Set(['warehouse','item_code','item_name','qty','uom','rate','amount','received_qty']);
  const payments = c => c?.root?.DeepLinkERPPurchasePayments || root.DeepLinkERPPurchasePayments;
  const isOA = c => c.providerScope==='oa';
+ const canExpand = (c,doc) => !isOA(c) && doc.row_type==='purchase_order' && doc.order_progress?.state!=='restricted' && (doc.order_progress?.item_fields || []).some(field=>field!=='name');
  function cancelPending(c) { payments(c)?.cancelCrossborderForList?.(c); }
  function fit(c,active) {
   if(!c)return;
@@ -63,7 +64,7 @@
   const cols=columns(c),expanded=c.expandedDetails?.has(doc.name),detail=doc.order_progress || {};
   const selectable=doc.row_type==='purchase_order' && !isOA(c);
   const check=selectable?`<input type="checkbox" class="list-row-checkbox" data-doctype="Purchase Order" data-name="${esc(doc.name)}">`:'';
-  const arrow=doc.row_type==='purchase_order'?`<button type="button" class="dlp-purchase-expand" data-name="${esc(doc.name)}" aria-expanded="${Boolean(expanded)}" aria-label="${esc(c.translate(expanded?'收起物料明细':'展开物料明细'))}">${expanded?'⌄':'›'}</button>`:'';
+  const arrow=canExpand(c,doc)?`<button type="button" class="dlp-purchase-expand" data-name="${esc(doc.name)}" aria-expanded="${Boolean(expanded)}" aria-label="${esc(c.translate(expanded?'收起物料明细':'展开物料明细'))}">${expanded?'⌄':'›'}</button>`:'';
   let extra='';
   if(expanded){
    const permitted=new Set(detail.item_fields || []),items=detail.state!=='restricted' && permitted.has('name')?(detail.items || []).filter(item=>item.name):[];
@@ -71,7 +72,7 @@
    const contents=detail.state==='restricted'?'<span class="text-warning">物料明细不可见，请核对权限</span>':engine.detailTable({columns:definitions,items,escape:esc,translate:c.translate,wrapperClass:'dlp-purchase-detail-scroll',tableClass:'dlp-purchase-detail-table',columnClass:field=>['qty','rate','amount','received_qty'].includes(field)?'dlp-po-number':'',format:(field,item)=>['qty','rate','amount','received_qty'].includes(field)?numeric(item[field]):esc(item[field] ?? '—')});
    extra=`<tr class="dlp-purchase-expanded"><td colspan="${cols.length+2}">${contents || '暂无可读物料明细'}</td></tr>`;
   }
-  return `<tbody class="list-row-container dlp-purchase-order-body" data-order-name="${esc(doc.name)}" tabindex="0"><tr class="${selectable?'level list-row ':''}dlp-po-grid-row" data-order-name="${esc(doc.name)}">${cell('td','_select',check,1,36)}${cell('td','_sequence',arrow,1,40)}${cols.map(col=>cell('td',col.fieldname,orderValue(c,doc,col.fieldname),1,col,` title="${esc(typeof doc[col.fieldname]==='object'?'':doc[col.fieldname] ?? '')}"`)).join('')}</tr>${extra}</tbody>`;
+  return `<tbody class="list-row-container dlp-purchase-order-body" data-dlp-detail-name="${esc(doc.name)}" data-order-name="${esc(doc.name)}" tabindex="0"><tr class="${selectable?'level list-row ':''}dlp-po-grid-row" data-order-name="${esc(doc.name)}">${cell('td','_select',check,1,36)}${cell('td','_sequence',arrow,1,40)}${cols.map(col=>cell('td',col.fieldname,orderValue(c,doc,col.fieldname),1,col,` title="${esc(typeof doc[col.fieldname]==='object'?'':doc[col.fieldname] ?? '')}"`)).join('')}</tr>${extra}</tbody>`;
  }
  function table(c,rows) { return `<div class="list-row-container dlp-purchase-table-wrap"><table class="dlp-purchase-table">${header(c)}${rows.map(doc=>row(c,doc)).join('')}</table><div class="checkbox-actions" style="display:none"></div></div>`; }
  function selectionChanged(c) {
@@ -139,7 +140,7 @@
  }
  const onPayload=provider.onPayload;
  provider.onPayload=c=>{onPayload?.(c);selectionChanged(c);};
- const grid = engine.create({doctype:'Purchase Order',purchaseChrome:true,backupMigratedPreferences:true,mainFilterFields:['search','company','status','from_date','to_date'],onMount:c=>engine.mountRowDetails(c,{rows:()=>c.providerRows,load:doc=>doc.order_progress,active:()=>engineRoute(c)}),dismissInitialOnboarding:true,keepColumnHeader:true,columns:COLUMNS,defaultColumns:provider.defaultColumns,provider,providerSelectable:doc=>doc.row_type==='purchase_order',computedFields:['receipt_action','order_settled','order_unpaid'],moneyPrecision:2,
+ const grid = engine.create({doctype:'Purchase Order',purchaseChrome:true,backupMigratedPreferences:true,mainFilterFields:['search','company','status','from_date','to_date'],onMount:c=>engine.mountRowDetails(c,{rows:()=>c.providerRows,load:doc=>doc.order_progress,canExpand:doc=>canExpand(c,doc),active:()=>engineRoute(c)}),dismissInitialOnboarding:true,keepColumnHeader:true,columns:COLUMNS,defaultColumns:provider.defaultColumns,provider,providerSelectable:doc=>doc.row_type==='purchase_order',computedFields:['receipt_action','order_settled','order_unpaid'],moneyPrecision:2,
   onRequestStart:c=>{cancelPending(c);clearSelection(c);},onPageChange:clearSelection,onScopeChange:scopeChanged,onSelectionChange:selectionChanged,mountControls:mount,renderHeader:c=>`<table class="dlp-purchase-table">${header(c)}</table>`,renderRow:row,renderTable:table,
   afterRender:c=>{selectionChanged(c);fit(c);},onRouteChange:fit,controllerKey:'dlpPurchaseOrderGrid',routeClass:'dlp-purchase-order-grid-active',freezeUntil:'supplier_name',moneySummary:true,
   numbers:['grand_total','advance_paid','per_received','per_billed'],dates:['transaction_date','schedule_date'],quickFields:['company','status','advance_payment_status'],searchFields:['name','supplier_name','project'],extraFields:['supplier','party_account_currency','docstatus'],optionLabels:{progress_phase:{supplier_unpaid:'供应商未付',internal_unsettled:'内部待结算',factory_pending:'工厂待入库'}},controls:[

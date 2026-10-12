@@ -7,7 +7,7 @@ class Surface {
   constructor(){this.value='';this.length=1;}
   find(){return new Surface();} first(){return this;} html(value){if(value===undefined)return this.value;this.value=value;return this;}
   text(value){this.value=value;return this;} append(value){this.value+=value;return this;} appendTo(parent){this.parent=parent;return this;} prependTo(){return this;} insertBefore(){return this;} insertAfter(){return this;}
-  addClass(){return this;} removeClass(){return this;} toggleClass(){return this;} hide(){return this;} show(){return this;} remove(){return this;} off(){return this;} on(){return this;} attr(){return this;} prop(){return this;} val(){return this;} each(){return this;}
+  addClass(){return this;} removeClass(){return this;} toggleClass(){return this;} toggle(){return this;} hide(){return this;} show(){return this;} remove(){return this;} off(){return this;} on(){return this;} attr(){return this;} prop(){return this;} val(){return this;} each(){return this;}
 }
 function setup(options={}){
   let route=['purchase-payment-records'];const calls=[],classes=new Map(),storage=new Map(),routes=[];
@@ -103,6 +103,59 @@ test('detail caches survive a replacement row with the same version and invalida
  await owner.toggleRowDetails('PR');owner.providerRows=[{name:'PR',modified:'v1'}];owner.reconcileRowDetails();
  assert.equal(owner.detailCache.size,1);assert.equal(owner.expandedDetails.size,1);
  owner.providerRows[0].modified='v2';owner.reconcileRowDetails();assert.equal(owner.detailCache.size,0);assert.equal(owner.expandedDetails.size,0);assert.equal(reads,1);
+});
+test('page expansion uses every visible row independently of selection and reuses open and cached details',async()=>{
+ let renders=0,reads=0;
+ const owner={page:0,requestId:1,providerRows:[{name:'A'},{name:'B'},{name:'C'}],root:{},list:{render_list:()=>renders++,get_checked_items:()=>['A']}};
+ engine.mountRowDetails(owner,{rows:()=>owner.providerRows,load:doc=>{reads++;return {items:[doc]};}});
+ assert.equal(typeof owner.expandAllRowDetails,'function');
+ await owner.toggleRowDetails('A');const before=renders;
+ await owner.expandAllRowDetails();assert.deepEqual([...owner.expandedDetails],['A','B','C']);assert.equal(reads,3);assert.equal(renders,before+1);
+ await owner.expandAllRowDetails();assert.equal(reads,3);
+ owner.collapseAllRowDetails();assert.equal(owner.expandedDetails.size,0);
+ await owner.expandAllRowDetails();assert.equal(reads,3);assert.equal(owner.expandedDetails.size,3);
+});
+test('four live detail reads remain bounded across collapse, new batches and manual clicks with local failures',async()=>{
+ const reads=[];let live=0,peak=0;
+ const owner={page:0,requestId:1,providerRows:Array.from({length:10},(_,i)=>({name:`R${i}`})),root:{},list:{render_list(){}}};
+ engine.mountRowDetails(owner,{rows:()=>owner.providerRows,load:doc=>new Promise((resolve,reject)=>{live++;peak=Math.max(peak,live);reads.push({doc,resolve:value=>{live--;resolve(value);},reject:error=>{live--;reject(error);}});})});
+ assert.equal(typeof owner.expandAllRowDetails,'function');
+ const old=owner.expandAllRowDetails();assert.equal(reads.length,4);
+ owner.collapseAllRowDetails();assert.equal(owner.expandedDetails.size,0);assert.equal(owner.detailPending.size,0);
+ const fresh=owner.expandAllRowDetails();assert.equal(reads.length,4,'cancelled reads still occupy their live slots');
+ for(let i=0;i<4;i++)reads[i].resolve({items:[{item_code:'OLD'}]});await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(reads.length,8);assert.equal(owner.detailCache.size,0);
+ reads[4].reject(new Error('row failed'));for(let i=5;i<8;i++)reads[i].resolve({items:[]});await new Promise(resolve=>setImmediate(resolve));
+ let next=8;while(owner.detailPending.size){for(;next<reads.length;next++)reads[next].resolve({items:[]});await new Promise(resolve=>setImmediate(resolve));}await Promise.all([old,fresh]);
+ assert.equal(peak,4);assert.match(owner.detailCache.get('R0').error,/row failed/);assert.equal(owner.detailCache.get('R9').items.length,0);
+ owner.collapseAllRowDetails();owner.detailCache.clear();const manual=owner.toggleRowDetails('R0');const batch=owner.expandAllRowDetails();assert.equal(live,4);
+ owner.collapseAllRowDetails();for(const read of reads.slice(14))read.resolve({items:[]});await Promise.all([manual,batch]);assert.equal(peak,4);
+});
+test('page and company changes close details while same-page refresh preserves the version cache',async()=>{
+ const owner={page:0,quick:{company:'A'},requestId:1,providerRows:[{name:'R',modified:'v1'}],root:{},list:{render_list(){}},setPage(page){this.page=page;}};
+ engine.mountRowDetails(owner,{rows:()=>owner.providerRows,load:()=>({items:[]})});
+ assert.equal(typeof owner.expandAllRowDetails,'function');
+ await owner.expandAllRowDetails();owner.requestId++;owner.providerRows=[{name:'R',modified:'v1'}];owner.reconcileRowDetails();assert.equal(owner.expandedDetails.size,1);
+ owner.setPage(1);assert.equal(owner.expandedDetails.size,0);assert.equal(owner.detailCache.size,1);
+ await owner.expandAllRowDetails();owner.quick.company='B';owner.reconcileRowDetails();assert.equal(owner.expandedDetails.size,0);
+});
+test('detail sizing follows only outer viewport pixels and its resize observer',()=>{
+ const frames=[],values=new Map(),observed=[];let resized;
+ const viewport={clientWidth:1200},result={style:{setProperty:(key,value)=>values.set(key,value)}};
+ const owner={providerRows:[],list:{$result:{0:result,parent:()=>({0:viewport})},render_list(){}},root:{getComputedStyle:()=>({paddingLeft:'10px',paddingRight:'10px'}),requestAnimationFrame:callback=>{frames.push(callback);return frames.length;},addEventListener:(_,callback)=>resized=callback,ResizeObserver:class{constructor(callback){this.callback=callback;}observe(node){observed.push(node);}}}};
+ engine.mountRowDetails(owner,{rows:()=>owner.providerRows,load:()=>({})});assert.equal(typeof owner.afterRowDetailsRender,'function');owner.afterRowDetailsRender();frames.shift()();
+ assert.equal(values.get('--dlp-purchase-detail-width'),'1152px');assert.deepEqual(observed,[viewport]);
+ viewport.clientWidth=620;resized();frames.shift()();assert.equal(values.get('--dlp-purchase-detail-width'),'572px');
+});
+test('async detail completion replaces only the expanded region and preserves native selection nodes',async()=>{
+ let resolve,renders=0,updates=0;const frames=[],checkbox={checked:true},region={set outerHTML(value){updates++;assert.match(value,/READY/);}};
+ const row={getAttribute:()=> 'R',querySelector:()=>region},result={querySelectorAll:()=>[row]};
+ const template={content:{querySelector:()=>({outerHTML:'<div class="dlp-purchase-expanded">READY</div>'})}};
+ const owner={providerRows:[{name:'R'}],list:{$result:{0:result},render_list(){renders++;owner.afterRowDetailsRender();},get_list_row_html:()=>'<div>READY</div>',$checkbox_cursor:checkbox},root:{document:{createElement:()=>template},requestAnimationFrame:fn=>{frames.push(fn);return frames.length;}}};
+ engine.mountRowDetails(owner,{rows:()=>owner.providerRows,load:()=>new Promise(done=>resolve=done)});
+ assert.equal(typeof owner.afterRowDetailsRender,'function');
+ const pending=owner.toggleRowDetails('R');assert.equal(renders,1);resolve({items:[]});await pending;frames.shift()();
+ assert.equal(renders,1);assert.equal(updates,1);assert.equal(owner.list.$checkbox_cursor,checkbox);assert.equal(checkbox.checked,true);
 });
 test('standalone route departure invalidates a pending detail even when returning before it resolves',async()=>{
  const {controller:c,navigate}=setup();let resolve;

@@ -584,14 +584,15 @@ body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active,.dlp-p
 body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active,.dlp-purchase-payable-grid-active,.dlp-purchase-payment-grid-active) .dlp-purchase-expand { border:0; background:transparent; color:var(--text-muted,#4b5c72); cursor:pointer; font-size:20px; width:26px; height:26px; line-height:22px; padding:0; }
 body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active,.dlp-purchase-payable-grid-active,.dlp-purchase-payment-grid-active) .dlp-purchase-expand[aria-expanded="true"] { color:var(--primary,#1677ff); }
 body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active) .dlp-purchase-expanded { background:var(--dlp-po-row-alt); padding:12px; }
-/* An expanded block must not contribute cyclic percentage intrinsic sizing to
-   native max-content rows. Its own scroller owns the fixed compact detail grid. */
+/* The outer list viewport supplies pixel width. Receipt size containment keeps
+   the nested table from feeding back into native max-content row sizing. */
 body.dlp-purchase-receipt-grid-active .dlp-purchase-expanded { contain:inline-size; }
 body.dlp-purchase-order-grid-active .dlp-purchase-table .dlp-purchase-expanded > td { padding:12px 14px; white-space:normal; overflow:visible; }
-body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active) .dlp-purchase-detail-scroll { overflow:auto; max-width:100%; border:1px solid var(--dlp-po-border); border-radius:4px; scrollbar-gutter:stable; }
-body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active) .dlp-purchase-detail-table { table-layout:fixed; width:900px; min-width:900px; max-width:none; margin:0; font-size:13px; }
-body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active) .dlp-purchase-detail-table :is(td,th) { position:static; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; padding:6px 10px; border-right:1px solid var(--dlp-po-border); }
-body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active) .dlp-purchase-detail-table .dlp-po-number { text-align:right; font-variant-numeric:tabular-nums; }
+body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active) .dlp-purchase-detail-scroll { box-sizing:border-box; overflow:auto; width:var(--dlp-purchase-detail-width,760px); max-width:var(--dlp-purchase-detail-width,760px); border:1px solid var(--dlp-po-border); border-radius:4px; }
+body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active) .dlp-purchase-detail-table { table-layout:auto; width:calc(var(--dlp-purchase-detail-width,760px) - 2px); min-width:760px; max-width:none; margin:0; font-size:13px; }
+body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active) .dlp-purchase-detail-table :is(td,th) { position:static; white-space:normal; overflow:visible; overflow-wrap:anywhere; text-overflow:clip; padding:6px 10px; border-right:1px solid var(--dlp-po-border); }
+body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active) .dlp-purchase-detail-table .dlp-po-number { text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }
+body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active) .dlp-purchase-detail-actions { display:inline-flex; gap:6px; }
 body.dlp-purchase-order-grid-active :is(.dlp-po-provenance,.dlp-po-row-warning) { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; line-height:15px; }
 body:is(.dlp-purchase-receipt-grid-active,.dlp-purchase-payable-grid-active,.dlp-purchase-payment-grid-active) .dlp-po-grid-cell:is([data-fieldname="grand_total"],[data-fieldname="settled"],[data-fieldname="outstanding"],[data-fieldname="amount"]) { text-align:right; font-variant-numeric:tabular-nums; }
 @media(max-width:768px) {

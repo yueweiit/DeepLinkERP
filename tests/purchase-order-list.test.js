@@ -808,7 +808,7 @@ test("a unified page payload supplies material progress directly without an expa
 	const { list, env } = bareList(), calls = [];
 	env.frappe.call = async request => { calls.push(request); return { message: {} }; }; env.cur_list = list;
 	const controller = production("mount")(list, env); controller.setProviderScope("all", false);
-	const call = dispatch(list), doc = { name: "PO-1", row_type: "purchase_order", modified: "v1", _idx: 2, order_progress: { modified: "v1", external: { state: "exact", settled: 1, order_unpaid: 2, currency: "CNY" } } };
+	const call = dispatch(list), doc = { name: "PO-1", row_type: "purchase_order", modified: "v1", _idx: 2, order_progress: { modified: "v1", item_fields:['name','item_code'],items:[{name:'I',item_code:'M'}], external: { state: "exact", settled: 1, order_unpaid: 2, currency: "CNY" } } };
 	const response = { message: { rows: [doc], total_count: 1 } }; call.callback(response); list.prepare_data(response);
 	await new Promise(resolve => setImmediate(resolve)); assert.equal(calls.length, 0);
 	assert.equal(controller.providerRows[0].order_progress.external.settled, 1);
@@ -841,8 +841,14 @@ test("purchase table CSS preserves table layout and sticky scrolling with access
  assert.match(css, /\.dlp-purchase-expand\s*\{/);
  assert.match(css, /body\.dlp-purchase-order-grid-active \.result-container\s*\{[^}]*scroll-padding-top:/);
  const details=css.match(/\.dlp-purchase-detail-table\s*\{([^}]*)\}/)?.[1];
- assert.match(details,/width:\s*(?:900px|auto)/,'nested tables must not use cyclic percentage widths inside max-content native rows');
+ assert.match(details,/width:\s*calc\(var\(--dlp-purchase-detail-width[^;]+-\s*2px\)/,'nested tables fill the measured scroller content width without counting its borders');
  assert.doesNotMatch(details,/(?:^|;)\s*width:\s*100%/);
+ assert.doesNotMatch(details,/900px/);
+ const scroll=css.match(/\.dlp-purchase-detail-scroll\s*\{([^}]*)\}/)?.[1];
+ assert.match(scroll,/width:\s*var\(--dlp-purchase-detail-width/);assert.doesNotMatch(scroll,/(?:width|max-width):\s*100%/);
+ const cells=css.match(/\.dlp-purchase-detail-table :is\(td,th\)\s*\{([^}]*)\}/)?.[1];
+ assert.match(cells,/white-space:\s*normal/);assert.match(cells,/overflow-wrap:\s*anywhere/);assert.doesNotMatch(cells,/ellipsis|overflow:\s*hidden/);
+ assert.match(css,/\.dlp-purchase-expanded\s*\{[^}]*contain:\s*inline-size/);
 });
 
 function mountedPurchase(beforeMount) {
@@ -884,6 +890,15 @@ function mountedPurchase(beforeMount) {
 	function click(name) { const target = new Surface(); target.attributes = { "data-name": name }; return handlers.get(".dlp-purchase-expand")({ currentTarget: target, preventDefault() {}, stopPropagation() {} }); }
 	return { ...fixture, controller, calls, controls, handlers, payload, click, resultNode, captures,clickCaptures };
 }
+test('order page expansion uses projected permitted details only and toolbar never becomes a selection action',async()=>{
+ const {controller:c,list,calls,handlers}=mountedPurchase();
+ c.providerRows=[{name:'PO-A',row_type:'purchase_order',order_progress:{item_fields:['name','item_code'],items:[{name:'I',item_code:'M'}]}},{name:'OA',row_type:'oa_request'},{name:'DENIED',row_type:'purchase_order',order_progress:{state:'restricted'}}];
+ c.reconcileRowDetails();c.afterRowDetailsRender();
+ assert.ok(handlers.has('[data-row-details="expand"]'));assert.ok(handlers.has('[data-row-details="collapse"]'));
+ await c.expandAllRowDetails();assert.deepEqual([...c.expandedDetails],['PO-A']);assert.equal(calls.length,0);
+ assert.doesNotMatch(list.get_list_row_html(c.providerRows[2]),/dlp-purchase-expand/);
+ c.setProviderScope('oa',false);await c.expandAllRowDetails();assert.equal(c.expandedDetails.size,0);
+});
 
 test('summary bubbling opens its disclosure without native row navigation and keeps ordinary clicks and captured buttons intact',()=>{
  let navigation=0,buttons=0;
