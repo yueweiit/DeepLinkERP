@@ -1,0 +1,318 @@
+{
+  "sources": [
+    {
+      "brand": "MOTOROLA",
+      "country": "MX",
+      "country_name": "Mexico",
+      "name": "摩托罗拉墨西哥官网",
+      "start_urls": [
+        "https://www.motorola.com.mx/",
+        "https://www.motorola.com.mx/smartphones"
+      ],
+      "render": true
+    },
+    {
+      "brand": "OPPO",
+      "country": "MX",
+      "country_name": "Mexico",
+      "name": "OPPO墨西哥官网",
+      "start_urls": [
+        "https://www.oppo.com/mx/",
+        "https://www.oppo.com/mx/smartphones/"
+      ],
+      "render": true
+    },
+    {
+      "brand": "VIVO",
+      "country": "MX",
+      "country_name": "Mexico",
+      "name": "vivo墨西哥官网",
+      "start_urls": [
+        "https://www.vivo.com/mx",
+        "https://www.vivo.com/mx/products"
+      ],
+      "render": true
+    },
+    {
+      "brand": "HONOR",
+      "country": "MX",
+      "country_name": "Mexico",
+      "name": "HONOR墨西哥官网",
+      "start_urls": [
+        "https://www.honor.com/mx/",
+        "https://www.honor.com/mx/phones/"
+      ],
+      "render": true
+    },
+    {
+      "brand": "XIAOMI",
+      "country": "MX",
+      "country_name": "Mexico",
+      "name": "小米墨西哥官网",
+      "start_urls": [
+        "https://www.mi.com/mx/",
+        "https://www.mi.com/mx/phone"
+      ],
+      "render": true
+    },
+    {
+      "brand": "ZTE",
+      "country": "MX",
+      "country_name": "Mexico",
+      "name": "ZTE墨西哥官网",
+      "start_urls": [
+        "https://www.ztedevices.mx/",
+        "https://www.ztedevices.mx/smartphones"
+      ],
+      "render": true
+    },
+    {
+      "brand": "SAMSUNG",
+      "country": "MX",
+      "country_name": "Mexico",
+      "name": "三星墨西哥官网",
+      "start_urls": [
+        "https://www.samsung.com/mx/",
+        "https://www.samsung.com/mx/smartphones/all-smartphones/",
+        "https://www.samsung.com/mx/smartphones/galaxy-z-flip7/",
+        "https://www.samsung.com/mx/smartphones/galaxy-z-fold7/"
+      ],
+      "render": true
+    },
+    {
+      "brand": "MOTOROLA",
+      "country": "MX",
+      "country_name": "Mexico",
+      "name": "Walmart Mexico Motorola",
+      "start_urls": [
+        "https://www.walmart.com.mx/search?q=motorola%20celular",
+        "https://www.walmart.com.mx/search?q=motorola%20smartphone"
+      ]
+    },
+    {
+      "brand": "OPPO",
+      "country": "MX",
+      "country_name": "Mexico",
+      "name": "Walmart Mexico OPPO",
+      "start_urls": [
+        "https://www.walmart.com.mx/search?q=oppo%20celular",
+        "https://www.walmart.com.mx/search?q=oppo%20smartphone"
+      ]
+    },
+    {
+      "brand": "VIVO",
+      "country": "MX",
+      "country_name": "Mexico",
+      "name": "Walmart Mexico vivo",
+      "start_urls": [
+        "https://www.walmart.com.mx/search?q=vivo%20celular",
+        "https://www.walmart.com.mx/search?q=vivo%20smartphone"
+      ]
+    },
+    {
+      "brand": "HONOR",
+      "country": "MX",
+      "country_name": "Mexico",
+      "name": "Walmart Mexico HONOR",
+      "start_urls": [
+        "https://www.walmart.com.mx/search?q=honor%20celular",
+        "https://www.walmart.com.mx/search?q=honor%20smartphone"
+      ]
+    },
+    {
+      "brand": "XIAOMI",
+      "country": "MX",
+      "country_name": "Mexico",
+      "name": "Walmart Mexico Xiaomi",
+      "start_urls": [
+        "https://www.walmart.com.mx/search?q=xiaomi%20celular",
+        "https://www.walmart.com.mx/search?q=redmi%20celular",
+        "https://www.walmart.com.mx/search?q=poco%20celular"
+      ]
+    },
+    {
+      "brand": "ZTE",
+      "country": "MX",
+      "country_name": "Mexico",
+      "name": "Walmart Mexico ZTE",
+      "start_urls": [
+        "https://www.walmart.com.mx/search?q=zte%20celular",
+        "https://www.walmart.com.mx/search?q=nubia%20celular"
+      ]
+    },
+    {
+      "brand": "SAMSUNG",
+      "country": "MX",
+      "country_name": "Mexico",
+      "name": "Walmart Mexico Samsung",
+      "start_urls": [
+        "https://www.walmart.com.mx/search?q=samsung%20celular",
+        "https://www.walmart.com.mx/search?q=galaxy%20celular"
+      ]
+    },
+    {
+      "brand": "MOTOROLA",
+      "country": "CN",
+      "country_name": "China",
+      "name": "摩托罗拉中国官网",
+      "start_urls": [
+        "https://www.motorola.com.cn/",
+        "https://www.motorola.com.cn/smartphones"
+      ],
+      "render": true
+    },
+    {
+      "brand": "OPPO",
+      "country": "CN",
+      "country_name": "China",
+      "name": "OPPO中国官网",
+      "start_urls": [
+        "https://www.oppo.com/cn/",
+        "https://www.oppo.com/cn/smartphones/",
+        "https://www.oppo.com/cn/events/reno16-series-launch/"
+      ],
+      "render": true
+    },
+    {
+      "brand": "VIVO",
+      "country": "CN",
+      "country_name": "China",
+      "name": "vivo中国官网",
+      "start_urls": [
+        "https://www.vivo.com.cn/",
+        "https://www.vivo.com.cn/vivo/s60/"
+      ],
+      "render": true
+    },
+    {
+      "brand": "HONOR",
+      "country": "CN",
+      "country_name": "China",
+      "name": "HONOR中国官网",
+      "start_urls": [
+        "https://www.honor.com/cn/",
+        "https://www.honor.com/cn/phones/"
+      ],
+      "render": true
+    },
+    {
+      "brand": "XIAOMI",
+      "country": "CN",
+      "country_name": "China",
+      "name": "小米中国商城",
+      "start_urls": [
+        "https://www.mi.com/index.html",
+        "https://www.mi.com/shop/",
+        "https://www.mi.com/shop",
+        "https://www.mi.com/shop/category/list?categoryId=100000",
+        "https://list.mi.com/xinpin",
+        "https://www.mi.com/shop/search?keyword=%E6%96%B0%E5%93%81",
+        "https://www.mi.com/shop/search?keyword=Xiaomi%2017",
+        "https://www.mi.com/shop/search?keyword=%E5%B0%8F%E7%B1%B317"
+      ],
+      "render": true
+    },
+    {
+      "brand": "ZTE",
+      "country": "CN",
+      "country_name": "China",
+      "name": "ZTE中国官网",
+      "start_urls": [
+        "https://www.ztedevices.com/cn/"
+      ],
+      "render": true
+    },
+    {
+      "brand": "SAMSUNG",
+      "country": "CN",
+      "country_name": "China",
+      "name": "三星中国官网",
+      "start_urls": [
+        "https://www.samsung.com.cn/",
+        "https://www.samsung.com.cn/smartphones/all-smartphones/"
+      ],
+      "render": true
+    },
+    {
+      "brand": "SAMSUNG",
+      "country": "KR",
+      "country_name": "Korea",
+      "name": "三星韩国官网",
+      "start_urls": [
+        "https://www.samsung.com/sec/",
+        "https://www.samsung.com/sec/smartphones/all-smartphones/"
+      ],
+      "render": true
+    },
+    {
+      "brand": "MOTOROLA",
+      "country": "GLOBAL",
+      "country_name": "Global",
+      "name": "GSMArena 摩托罗拉",
+      "start_urls": [
+        "https://www.gsmarena.com/motorola-phones-4.php"
+      ],
+      "reference_only": true
+    },
+    {
+      "brand": "OPPO",
+      "country": "GLOBAL",
+      "country_name": "Global",
+      "name": "GSMArena OPPO",
+      "start_urls": [
+        "https://www.gsmarena.com/oppo-phones-82.php"
+      ],
+      "reference_only": true
+    },
+    {
+      "brand": "VIVO",
+      "country": "GLOBAL",
+      "country_name": "Global",
+      "name": "GSMArena vivo",
+      "start_urls": [
+        "https://www.gsmarena.com/vivo-phones-98.php"
+      ],
+      "reference_only": true
+    },
+    {
+      "brand": "HONOR",
+      "country": "GLOBAL",
+      "country_name": "Global",
+      "name": "GSMArena HONOR",
+      "start_urls": [
+        "https://www.gsmarena.com/honor-phones-121.php"
+      ],
+      "reference_only": true
+    },
+    {
+      "brand": "XIAOMI",
+      "country": "GLOBAL",
+      "country_name": "Global",
+      "name": "GSMArena Xiaomi",
+      "start_urls": [
+        "https://www.gsmarena.com/xiaomi-phones-80.php"
+      ],
+      "reference_only": true
+    },
+    {
+      "brand": "ZTE",
+      "country": "GLOBAL",
+      "country_name": "Global",
+      "name": "GSMArena ZTE",
+      "start_urls": [
+        "https://www.gsmarena.com/zte-phones-62.php"
+      ],
+      "reference_only": true
+    },
+    {
+      "brand": "SAMSUNG",
+      "country": "GLOBAL",
+      "country_name": "Global",
+      "name": "GSMArena Samsung",
+      "start_urls": [
+        "https://www.gsmarena.com/samsung-phones-9.php"
+      ],
+      "reference_only": true
+    }
+  ]
+}

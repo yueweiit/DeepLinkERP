@@ -1,0 +1,64 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: phone-watch-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${PHONE_WATCH_APP_PG_DATABASE:-phone_scraper}
+      POSTGRES_USER: ${PHONE_WATCH_APP_PG_USER:-postgres}
+      POSTGRES_PASSWORD: ${PHONE_WATCH_APP_PG_PASSWORD:-phone_watch_dev_password}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - phone_watch_pg_data:/var/lib/postgresql/data
+      - "${PHONE_WATCH_DUMP_PATH:-./data/phone-scraper.dump}:/backups/phone-scraper.dump:ro"
+      - ./docker/restore-production-copy.sh:/docker-entrypoint-initdb.d/20-restore-production-copy.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PHONE_WATCH_APP_PG_USER:-postgres} -d ${PHONE_WATCH_APP_PG_DATABASE:-phone_scraper}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  phone-watch:
+    build: .
+    container_name: phone-watch
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment: &phone-watch-environment
+      PHONE_WATCH_DB_BACKEND: ${PHONE_WATCH_DB_BACKEND:-postgres}
+      PHONE_WATCH_PG_DRIVER: ${PHONE_WATCH_PG_DRIVER:-pg8000}
+      PHONE_WATCH_PG_HOST: ${PHONE_WATCH_APP_PG_HOST:-${PHONE_WATCH_PG_HOST:-postgres}}
+      PHONE_WATCH_PG_DATABASE: ${PHONE_WATCH_APP_PG_DATABASE:-${PHONE_WATCH_PG_DATABASE:-phone_scraper}}
+      PHONE_WATCH_PG_USER: ${PHONE_WATCH_APP_PG_USER:-${PHONE_WATCH_PG_USER:-postgres}}
+      PHONE_WATCH_PG_PASSWORD: ${PHONE_WATCH_APP_PG_PASSWORD:-${PHONE_WATCH_PG_PASSWORD:-phone_watch_dev_password}}
+      PHONE_WATCH_PG_PORT: ${PHONE_WATCH_APP_PG_PORT:-${PHONE_WATCH_PG_PORT:-5432}}
+      PHONE_WATCH_PG_OPTIONS: ${PHONE_WATCH_PG_OPTIONS:--c client_encoding=utf8}
+      PHONE_WATCH_PG_CONNECT_TIMEOUT: ${PHONE_WATCH_PG_CONNECT_TIMEOUT:-10}
+      PHONE_WATCH_LOCAL_ONLY: "true"
+      PHONE_WATCH_INTERNAL_TOKEN: ${PHONE_WATCH_INTERNAL_TOKEN:-change-me-for-local-development}
+      PHONE_WATCH_LEGACY_API_ENABLED: "false"
+      PHONE_WATCH_DINGTALK_WRITE_ENABLED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: python -m phone_watch serve --host 0.0.0.0 --port 8000
+
+  phone-watch-worker:
+    build: .
+    container_name: phone-watch-worker
+    restart: unless-stopped
+    environment: *phone-watch-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: python -m phone_watch schedule --hour 8 --minute 0
+
+volumes:
+  phone_watch_pg_data:

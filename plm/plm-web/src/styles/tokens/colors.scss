@@ -1,0 +1,32 @@
+/* PLM color tokens */
+:root {
+  --plm-color-primary: #409eff;
+  --plm-color-primary-light: #66b1ff;
+  --plm-color-success: #67c23a;
+  --plm-color-warning: #e6a23c;
+  --plm-color-danger: #f56c6c;
+  --plm-color-info: #909399;
+  --plm-color-page: #f4f6f8;
+  --plm-color-surface: #ffffff;
+  --plm-color-surface-alt: #f8fafc;
+  --plm-color-text-primary: #303133;
+  --plm-color-text-regular: #606266;
+  --plm-color-text-secondary: #909399;
+  --plm-color-border: #dcdfe6;
+  --plm-color-border-light: #e9edf2;
+  --plm-color-sidebar: #162033;
+  --plm-color-sidebar-accent: #1f2b43;
+  --plm-color-navbar: rgba(255, 255, 255, 0.92);
+  --plm-color-audit: #ff4d4f;
+
+  --plm-status-draft: #909399;
+  --plm-status-active: #67c23a;
+  --plm-status-developing: #409eff;
+  --plm-status-released: #67c23a;
+  --plm-status-archived: #909399;
+  --plm-status-confirmed: #409eff;
+  --plm-status-in-production: #e6a23c;
+  --plm-status-completed: #67c23a;
+  --plm-status-closed: #909399;
+  --plm-status-locked: #f56c6c;
+}

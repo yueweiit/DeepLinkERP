@@ -1,0 +1,15 @@
+# Build output
+dist/
+
+# Dependencies
+node_modules/
+
+# Environment files (keep .env.example if exists)
+.env.development
+.env.production
+
+# Logs
+*.log
+
+# CoDEX temporary workspace
+.codex_tmp/

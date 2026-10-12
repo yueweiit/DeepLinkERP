@@ -1,0 +1,40 @@
+<script setup lang="ts">
+import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { onBeforeRouteLeave } from 'vue-router'
+import { getPilotTasks, savePilotTask, getPilotTaskFiles, downloadPilotFile } from '@/api/modules/pilot'
+import type { PilotTask, PilotFile } from '@/types/pilot'
+import type { CellValue } from '@/types/collaboration'
+import { useUserStore } from '@/stores/user'
+const user=useUserStore(),rows=ref<PilotTask[]>([]),total=ref(0),page=ref(1),keyword=ref(''),loading=ref(false),saving=ref(false),error=ref(''),selected=ref<PilotTask|null>(null),action=ref(''),drawer=ref(false),draft=ref<Record<string,CellValue>>({}),files=ref<PilotFile[]>([])
+type TaskField={key:string;label:string;kind:'date'|'status'|'acceptance'|'text'}
+const actionNames:Record<string,string>={processing:'加工进度',testing:'试模完成',ship:'确认发货',arrival:'签收 / 到厂',acceptance:'验收 / 异常'}
+const visibleActions=computed(()=>Object.entries(actionNames).filter(([key])=>user.hasPermission('task:'+key)))
+const actionFields:Record<string,TaskField[]>={processing:[{key:'pcStatus',label:'PC 加工进度',kind:'status'},{key:'tpuStatus',label:'TPU 加工进度',kind:'status'}],testing:[{key:'actualSupplierTrialDate',label:'供应商实际试模日期',kind:'date'}],ship:[{key:'actualShipDate',label:'实际发模日期',kind:'date'}],arrival:[{key:'pcSignedDate',label:'PC 签收日期',kind:'date'},{key:'tpuSignedDate',label:'TPU 签收日期',kind:'date'},{key:'pcFactoryArrivalDate',label:'PC 实际到墨西哥工厂',kind:'date'},{key:'tpuFactoryArrivalDate',label:'TPU 实际到墨西哥工厂',kind:'date'}],acceptance:['pc','tpu'].flatMap(part=>[{key:part+'AcceptanceStatus',label:part.toUpperCase()+' 验收结果',kind:'acceptance' as const},{key:part+'AcceptanceDate',label:part.toUpperCase()+' 验收日期',kind:'date' as const},{key:part+'AcceptanceIssues',label:part.toUpperCase()+' 问题说明',kind:'text' as const}])}
+const fields=computed(()=>actionFields[action.value]||[])
+const changes=computed(()=>!selected.value?[]:fields.value.filter(f=>(draft.value[f.key]??null)!==(selected.value?.[f.key]??null)).map(f=>({field:f.key,before:(selected.value?.[f.key]??null) as CellValue,after:draft.value[f.key]??null})))
+async function load(){loading.value=true;error.value='';try{const result=await getPilotTasks(page.value,keyword.value);rows.value=result.content;total.value=result.totalElements}catch{error.value='任务加载失败，请重试'}finally{loading.value=false}}
+function open(row:PilotTask,type:string){selected.value=row;action.value=type;draft.value=Object.fromEntries(actionFields[type].map(f=>[f.key,(row[f.key]??null) as CellValue]));files.value=[];drawer.value=true}
+async function close(){if(changes.value.length){try{await ElMessageBox.confirm('有未保存录入，确认放弃？','未保存内容',{type:'warning'})}catch{return false}}drawer.value=false;selected.value=null;return true}
+async function save(){if(!selected.value||!changes.value.length)return;saving.value=true;error.value='';try{const result=await savePilotTask(selected.value.moldSetId,action.value,{entityType:'mold_set',id:selected.value.moldSetId,changes:changes.value});if(result.status==='saved'){drawer.value=false;selected.value=null;await load();ElMessage.success('已保存，真实账号已留痕')}else{error.value=result.message||'保存冲突，请核对';if(result.conflicts?.length)error.value+='：'+result.conflicts.map(c=>c.label+' 当前值 '+String(c.current)+' / 待保存 '+String(c.attempted)).join('；')}}catch{error.value='保存失败或越权，草稿仍保留'}finally{saving.value=false}}
+async function loadFiles(row:PilotTask){selected.value=row;files.value=await getPilotTaskFiles(row.moldSetId);action.value='files';draft.value={};drawer.value=true}
+onBeforeRouteLeave(async()=>!changes.value.length||await close())
+function beforeUnload(event:BeforeUnloadEvent){if(changes.value.length){event.preventDefault();event.returnValue=''}}
+watch(()=>user.token,()=>{rows.value=[];draft.value={};selected.value=null;drawer.value=false;files.value=[]})
+onMounted(()=>{void load();window.addEventListener('beforeunload',beforeUnload)})
+onBeforeUnmount(()=>window.removeEventListener('beforeunload',beforeUnload))
+</script>
+<template>
+ <section class="mobile-tasks"><header><h2>我的协作任务</h2><p>{{user.profile?.userName}} · {{user.profile?.roleName}} · 只显示真实账号获授权的对象</p></header><el-alert v-if="error" :title="error" type="error" :closable="false"/>
+  <div class="search"><el-input v-model="keyword" placeholder="搜索模具 / 款式 / 型号" @keyup.enter="page=1;load()"/><el-button @click="page=1;load()">查询</el-button><el-button @click="load">刷新</el-button></div>
+  <div v-loading="loading" class="task-grid"><article v-for="row in rows" :key="row.moldSetId" class="task-card"><small>{{row.assetNumber}} · {{row.setName}}</small><h3>{{row.styleName}}</h3><p>{{row.compatibleModels}}</p><dl><dt>计划模具交付</dt><dd>{{row.plannedMoldDeliveryDate||'待填写'}}</dd><dt>PC / TPU 加工</dt><dd>{{row.pcStatus}} / {{row.tpuStatus}}</dd></dl><div class="task-actions"><el-button v-for="[key,name] in visibleActions" :key="key" @click="open(row,key)">{{name}}</el-button><el-button v-if="user.hasPermission('file:read')" @click="loadFiles(row)">已授权文件</el-button></div></article><el-empty v-if="!loading&&!rows.length" description="没有已分配的模具任务，联系管理员授权"/></div>
+  <el-pagination v-model:current-page="page" :page-size="20" :total="total" layout="prev,pager,next" @current-change="load"/>
+  <el-drawer v-model="drawer" :title="actionNames[action]||'已授权文件'" size="100%" :close-on-click-modal="false" :before-close="async(done:()=>void)=>{if(await close())done()}">
+   <div class="task-entry"><h3>{{selected?.styleName}}</h3><p>{{selected?.compatibleModels}} · {{selected?.assetNumber}}</p><el-alert v-if="error" :title="error" type="error" :closable="false"/><el-alert title="抵达墨西哥不等于到厂；验收通过须已有到厂日期与验收日期。两部分分别录入。" type="info" :closable="false"/>
+    <label v-for="f in fields" :key="f.key" class="entry-field"><strong>{{f.label}}</strong><el-date-picker v-if="f.kind==='date'" v-model="draft[f.key]" type="date" value-format="YYYY-MM-DD"/><el-select v-else-if="f.kind==='status'" v-model="draft[f.key]"><el-option label="未开始" value="pending"/><el-option label="加工中" value="making"/><el-option label="制作完成" value="ready"/></el-select><el-select v-else-if="f.kind==='acceptance'" v-model="draft[f.key]"><el-option label="待验收" value="pending"/><el-option label="验收通过" value="passed"/><el-option label="验收不通过" value="failed"/></el-select><el-input v-else v-model="draft[f.key]" type="textarea" :rows="5"/></label>
+    <div v-if="action==='files'"><el-empty v-if="!files.length" description="没有单独授权的文件"/><div v-for="file in files" :key="file.attachmentId" class="file"><span>{{file.fileName}} · {{file.versionNo||'无版本'}}</span><el-button @click="downloadPilotFile(file.attachmentId,file.fileName)">下载</el-button></div></div>
+   </div><template #footer><el-button @click="close">撤销未保存修改</el-button><el-button v-if="action!=='files'" type="primary" :loading="saving" :disabled="!changes.length" @click="save">保存 {{changes.length}} 项修改</el-button></template>
+  </el-drawer>
+ </section>
+</template>
+<style scoped>.mobile-tasks{display:flex;flex-direction:column;gap:14px;width:100%;max-width:none}.mobile-tasks h2{margin:0}.mobile-tasks header p{color:#64748b}.search{display:flex;gap:8px}.task-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}.task-card{border:1px solid #dce3eb;border-radius:12px;padding:20px;background:white}.task-card h3{margin:14px 0 8px}.task-card small{color:#64748b}.task-card dl{display:grid;grid-template-columns:130px 1fr;gap:8px}.task-card dd{margin:0}.task-actions{display:flex;flex-wrap:wrap;gap:8px}.task-actions .el-button{margin:0;min-height:44px}.task-entry{max-width:1100px;margin:auto}.entry-field{display:flex;flex-direction:column;gap:10px;margin:24px 0}.entry-field .el-select,.entry-field :deep(.el-date-editor){width:100%;min-height:44px}.file{display:flex;justify-content:space-between;align-items:center;margin:14px 0}@media(max-width:650px){.task-grid{grid-template-columns:1fr}.search{flex-wrap:wrap}.search .el-input{width:100%}}</style>

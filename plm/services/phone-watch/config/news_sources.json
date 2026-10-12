@@ -1,0 +1,117 @@
+{
+  "retention_days": 7,
+  "fallback_limit": 3,
+  "brand_keywords": {
+    "ZTE": [
+      "中兴手机",
+      "努比亚",
+      "红魔"
+    ],
+    "MOTOROLA": [
+      "摩托罗拉"
+    ],
+    "XIAOMI": [
+      "小米"
+    ],
+    "SAMSUNG": [
+      "三星手机"
+    ],
+    "OPPO": [
+      "OPPO"
+    ],
+    "HONOR": [
+      "荣耀"
+    ],
+    "VIVO": [
+      "vivo"
+    ],
+    "HUAWEI": [
+      "华为手机"
+    ]
+  },
+  "sources": [
+    {
+      "brand": "MOTOROLA",
+      "source_type": "ithome_brand_search",
+      "source_name": "IT之家品牌关键词搜索",
+      "search_keywords": [
+        "摩托罗拉"
+      ],
+      "render": false
+    },
+    {
+      "brand": "OPPO",
+      "source_type": "ithome_brand_search",
+      "source_name": "IT之家品牌关键词搜索",
+      "search_keywords": [
+        "OPPO"
+      ],
+      "render": false
+    },
+    {
+      "brand": "VIVO",
+      "source_type": "ithome_brand_search",
+      "source_name": "IT之家品牌关键词搜索",
+      "search_keywords": [
+        "vivo"
+      ],
+      "render": false
+    },
+    {
+      "brand": "HONOR",
+      "source_type": "ithome_brand_search",
+      "source_name": "IT之家品牌关键词搜索",
+      "search_keywords": [
+        "荣耀"
+      ],
+      "render": false
+    },
+    {
+      "brand": "XIAOMI",
+      "source_type": "ithome_brand_search",
+      "source_name": "IT之家品牌关键词搜索",
+      "search_keywords": [
+        "小米"
+      ],
+      "render": false
+    },
+    {
+      "brand": "ZTE",
+      "source_type": "ithome_brand_search",
+      "source_name": "IT之家品牌关键词搜索",
+      "search_keywords": [
+        "中兴手机",
+        "努比亚",
+        "红魔"
+      ],
+      "render": false
+    },
+    {
+      "brand": "SAMSUNG",
+      "source_type": "ithome_brand_search",
+      "source_name": "IT之家品牌关键词搜索",
+      "search_keywords": [
+        "三星手机"
+      ],
+      "render": false
+    },
+    {
+      "brand": "HUAWEI",
+      "source_type": "ithome_brand_search",
+      "source_name": "IT之家品牌关键词搜索",
+      "search_keywords": [
+        "华为手机"
+      ],
+      "render": false
+    },
+    {
+      "brand": "ALL",
+      "source_type": "ithome_phone_today",
+      "source_name": "IT之家手机分区当日新闻",
+      "start_urls": [
+        "https://mobile.ithome.com/"
+      ],
+      "render": false
+    }
+  ]
+}

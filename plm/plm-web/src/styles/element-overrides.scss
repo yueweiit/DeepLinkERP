@@ -1,0 +1,19 @@
+.el-card {
+  border-radius: var(--plm-radius-base);
+  border-color: var(--plm-color-border-light);
+  box-shadow: none;
+}
+
+.el-table {
+  --el-table-header-bg-color: #f8fafc;
+  --el-table-border-color: var(--plm-color-border-light);
+}
+
+.el-button + .el-button {
+  margin-left: 0;
+}
+
+.el-dialog,
+.el-drawer {
+  border-radius: var(--plm-radius-md);
+}

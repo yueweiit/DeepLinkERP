@@ -1,0 +1,72 @@
+package com.yuewei.plm.service.vo;
+
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.util.List;
+import com.yuewei.plm.module.product.mold.vo.ProductMoldCodeVO;
+import lombok.Builder;
+import lombok.Data;
+
+@Data
+@Builder
+public class ProductVO {
+    private Long productId;
+    private Long parentProductId;
+    private Long customerId;
+    private String productCode;
+    private String productCodePrefix;
+    private String moldCodePrefix;
+    private String moldCodes;
+    private List<ProductMoldCodeVO> moldCodeDetails;
+    private String productSpecificCode;
+    private String phoneModelCode;
+    private String colorCode;
+    private String finishedProductCode;
+    private String importShortCode;
+    private String productName;
+    private String productType;
+    private String seriesName;
+    private String model;
+    private String color;
+    private String material;
+    private String packageType;
+    private String surfaceProcess;
+    private String coreProcess;
+    private String composition;
+    private Long ownerUserId;
+    private String versionNo;
+    private String status;
+    private LocalDate expectedDeliveryDate;
+    private LocalDateTime moldTransferAt;
+    private LocalDateTime expectedArrivalAt;
+    private LocalDateTime actualArrivalAt;
+    private String networkType;
+    private String holeType;
+    private String mobileFunction;
+    private String tipo;
+    private String priority;
+    private String manufacturingLocation;
+    private String moldMarking;
+    private String referenceUrl;
+    private String requirementType;
+    private String customerRequirement;
+    private Integer currentStepNo;
+    private LocalDate effectiveDate;
+    private LocalDateTime releasedAt;
+    private String releasedBy;
+    private LocalDateTime frozenAt;
+    private String frozenBy;
+    private String freezeReason;
+    private LocalDateTime archivedAt;
+    private String archivedBy;
+    private String archiveReason;
+    private LocalDateTime abandonedAt;
+    private String abandonedBy;
+    private String abandonReason;
+    private String lockStatus;
+    private String remark;
+    private LocalDateTime createdAt;
+    private String createdBy;
+    private LocalDateTime updatedAt;
+    private String updatedBy;
+}

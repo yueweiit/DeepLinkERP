@@ -1,0 +1,78 @@
+spring:
+  application:
+    name: ${APP_NAME:plm-server}
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:dev}
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+    deserialization:
+      fail-on-unknown-properties: false
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+    multipart:
+      max-file-size: ${APP_MULTIPART_MAX_FILE_SIZE:50MB}
+      max-request-size: ${APP_MULTIPART_MAX_REQUEST_SIZE:60MB}
+  flyway:
+    enabled: ${FLYWAY_ENABLED:true}
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    baseline-version: "20260703.0000"
+
+server:
+  port: ${SERVER_PORT:8080}
+
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    path: /swagger-ui.html
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    db-config:
+      logic-delete-field: deleted_flag
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level [%X{requestId:-no-request}] %logger{36} - %msg%n"
+  level:
+    com.yuewei.plm: ${LOG_LEVEL:info}
+
+app:
+  security:
+    enabled: ${APP_SECURITY_ENABLED:true}
+    dev-token: ${APP_SECURITY_DEV_TOKEN:dev-token}
+  storage:
+    local-root: ${APP_STORAGE_LOCAL_ROOT:data/uploads}
+    max-file-size-bytes: ${APP_STORAGE_MAX_FILE_SIZE_BYTES:209715200}
+    allowed-extensions: ${APP_STORAGE_ALLOWED_EXTENSIONS:pdf,doc,docx,xls,xlsx,ppt,pptx,txt,csv,jpg,jpeg,png,webp,zip,rar,7z,dwg,dxf,step,stp,igs,iges,stl,obj,3dm,prt,sldprt,sldasm}
+  phone-watch:
+    enabled: ${APP_PHONE_WATCH_ENABLED:false}
+    base-url: ${APP_PHONE_WATCH_BASE_URL:http://phone-watch:8000}
+    token: ${APP_PHONE_WATCH_TOKEN:}
+    connect-timeout-ms: ${APP_PHONE_WATCH_CONNECT_TIMEOUT_MS:2000}
+    read-timeout-ms: ${APP_PHONE_WATCH_READ_TIMEOUT_MS:10000}
+
+plm:
+  integrations:
+    dingtalk:
+      enabled: ${DINGTALK_INTEGRATION_ENABLED:true}
+      corp-id: ${DINGTALK_CORP_ID:}
+      app-key: ${DINGTALK_APP_KEY:}
+      app-secret: ${DINGTALK_APP_SECRET:}
+      agent-id: ${DINGTALK_AGENT_ID:}
+      product-line-process-code: ${DINGTALK_PRODUCT_LINE_PROCESS_CODE:PROC-88C58F86-D55A-4A04-BA6E-CB71071F0468}
+      model-variant-process-code: ${DINGTALK_MODEL_VARIANT_PROCESS_CODE:PROC-BD65F530-F66F-46B9-8F72-0567DD68F60C}
+      ship-mold-process-code: ${DINGTALK_SHIP_MOLD_PROCESS_CODE:}
+      outbound-endpoint: ${DINGTALK_OUTBOUND_ENDPOINT:}
+      callback-token: ${DINGTALK_CALLBACK_TOKEN:}
+      auto-approver-user-id: ${DINGTALK_AUTO_APPROVER_USER_ID:02356802443226388318}
+      product-line-cc-user-ids: ${DINGTALK_PRODUCT_LINE_CC_USER_IDS:02356802443226388318}

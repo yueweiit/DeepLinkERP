@@ -1,0 +1,109 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: plm-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - plm_redisdata:/data
+    restart: unless-stopped
+    networks:
+      - plm-net
+
+  server:
+    build:
+      context: ./plm-server
+      dockerfile: Dockerfile
+      args:
+        BUILD_IMAGE: ${SERVER_BUILD_IMAGE:-maven:3.9-eclipse-temurin-17}
+        RUNTIME_IMAGE: ${SERVER_RUNTIME_IMAGE:-eclipse-temurin:17-jre}
+    container_name: plm-server
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SERVER_PORT: "8080"
+      DB_URL: ${DB_URL}
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      APP_SECURITY_ENABLED: "${APP_SECURITY_ENABLED:-true}"
+      APP_SECURITY_DEV_TOKEN: "${APP_SECURITY_DEV_TOKEN:-dev-token}"
+      APP_STORAGE_LOCAL_ROOT: data/uploads
+      DINGTALK_MODEL_VARIANT_PROCESS_CODE: "${DINGTALK_MODEL_VARIANT_PROCESS_CODE:-PROC-BD65F530-F66F-46B9-8F72-0567DD68F60C}"
+      DINGTALK_APP_KEY: "${DINGTALK_APP_KEY:-}"
+      DINGTALK_APP_SECRET: "${DINGTALK_APP_SECRET:-}"
+      DINGTALK_CALLBACK_TOKEN: "${DINGTALK_CALLBACK_TOKEN:-}"
+      DINGTALK_AUTO_APPROVER_USER_ID: "${DINGTALK_AUTO_APPROVER_USER_ID:-}"
+      DINGTALK_PRODUCT_LINE_CC_USER_IDS: "${DINGTALK_PRODUCT_LINE_CC_USER_IDS:-}"
+      DINGTALK_OUTBOUND_ENDPOINT: "${DINGTALK_OUTBOUND_ENDPOINT:-}"
+      APP_PHONE_WATCH_ENABLED: "${APP_PHONE_WATCH_ENABLED:-false}"
+      APP_PHONE_WATCH_BASE_URL: "${APP_PHONE_WATCH_BASE_URL:-http://phone-watch:8000}"
+      APP_PHONE_WATCH_TOKEN: "${PHONE_WATCH_INTERNAL_TOKEN:-}"
+      APP_PHONE_WATCH_CONNECT_TIMEOUT_MS: "${APP_PHONE_WATCH_CONNECT_TIMEOUT_MS:-2000}"
+      APP_PHONE_WATCH_READ_TIMEOUT_MS: "${APP_PHONE_WATCH_READ_TIMEOUT_MS:-10000}"
+    volumes:
+      - plm_uploads:/app/data/uploads
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - plm-net
+
+  phone-watch:
+    build:
+      context: ./services/phone-watch
+    container_name: phone-watch
+    environment: &phone-watch-environment
+      PHONE_WATCH_DB_BACKEND: postgres
+      PHONE_WATCH_PG_DRIVER: pg8000
+      PHONE_WATCH_PG_HOST: "${PHONE_WATCH_PG_HOST:-}"
+      PHONE_WATCH_PG_DATABASE: "${PHONE_WATCH_PG_DATABASE:-phone_scraper}"
+      PHONE_WATCH_PG_USER: "${PHONE_WATCH_PG_USER:-postgres}"
+      PHONE_WATCH_PG_PASSWORD: "${PHONE_WATCH_PG_PASSWORD:-}"
+      PHONE_WATCH_PG_PORT: "${PHONE_WATCH_PG_PORT:-5432}"
+      PHONE_WATCH_LOCAL_ONLY: "false"
+      PHONE_WATCH_INTERNAL_TOKEN: "${PHONE_WATCH_INTERNAL_TOKEN:-}"
+      PHONE_WATCH_LEGACY_API_ENABLED: "false"
+      PHONE_WATCH_DINGTALK_WRITE_ENABLED: "false"
+    volumes:
+      - phone_watch_data:/app/data
+      - phone_watch_logs:/app/logs
+    command: ["python", "-m", "phone_watch", "serve", "--host", "0.0.0.0", "--port", "8000"]
+    restart: unless-stopped
+    networks:
+      - plm-net
+
+  phone-watch-worker:
+    build:
+      context: ./services/phone-watch
+    container_name: phone-watch-worker
+    environment: *phone-watch-environment
+    volumes:
+      - phone_watch_data:/app/data
+      - phone_watch_logs:/app/logs
+    command: ["python", "-m", "phone_watch", "schedule", "--hour", "8", "--minute", "0"]
+    restart: unless-stopped
+    networks:
+      - plm-net
+
+  web:
+    build:
+      context: ./plm-web
+      dockerfile: Dockerfile
+    container_name: plm-web
+    ports:
+      - "${WEB_PORT:-8110}:80"
+    depends_on:
+      - server
+    restart: unless-stopped
+    networks:
+      - plm-net
+
+networks:
+  plm-net:
+    driver: bridge
+
+volumes:
+  plm_redisdata:
+  plm_uploads:
+  phone_watch_data:
+  phone_watch_logs:

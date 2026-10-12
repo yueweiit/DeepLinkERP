@@ -1,0 +1,27 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: plm-postgres
+    environment:
+      POSTGRES_DB: plm
+      POSTGRES_USER: plm
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-plm123}
+      TZ: Asia/Shanghai
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - plm_pgdata:/var/lib/postgresql/data
+      - ./V1.0__init_schema.sql:/docker-entrypoint-initdb.d/01-init-schema.sql:ro
+      - ./V1.1__init_seed_data.sql:/docker-entrypoint-initdb.d/02-init-seed-data.sql:ro
+      - ./V1.2__erp_item_bom_alignment.sql:/docker-entrypoint-initdb.d/03-erp-item-bom-alignment.sql:ro
+      - ./V1.3__workflow_locking_alignment.sql:/docker-entrypoint-initdb.d/04-workflow-locking-alignment.sql:ro
+      - ./V1.3__workflow_locking_seed_data.sql:/docker-entrypoint-initdb.d/05-workflow-locking-seed-data.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U plm -d plm"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  plm_pgdata:

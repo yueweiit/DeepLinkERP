@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+
+# Environment files with secrets
+.env.database
+.env
+*.env
+!.env.example
+!.env.database.example
+
+# IDE
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+
+# Claude Code
+.claude/
+
+# Local toolchains
+.jdks/
+
+# CoDEX temporary workspace
+.codex_tmp/
+
+# Runtime / credentials / private business uploads
+.env*
+!.env*.example
+**/logs/
+**/data/
+**/uploads/
+**/target/
+**/dist*/
+**/node_modules/
+**/.playwright-cli/
+**/.codex_tmp/
+**/__pycache__/
+**/output*/
+*.dump
+*.log
+*.jar
+*.sqlite*

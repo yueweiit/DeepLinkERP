@@ -1,0 +1,12 @@
+<script setup lang="ts">
+import { onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
+import { getApprovalTasks } from '@/api/modules/approval'
+import { getScheduleTasks, type ScheduleTask } from '@/api/modules/schedule'
+import { useUserStore } from '@/stores/user'
+const router=useRouter(), user=useUserStore(), loading=ref(false), error=ref(''), page=ref(1), total=ref(0), tasks=ref<ScheduleTask[]>([]), approvals=ref<unknown[]>([])
+async function load(){loading.value=true;error.value='';try{const result=await getScheduleTasks({page:page.value,size:50,mineOnly:true});tasks.value=result.content;total.value=result.totalElements;if(user.hasPermission('approval:view'))approvals.value=await getApprovalTasks()}catch(e){error.value=e instanceof Error?e.message:'待办查询失败'}finally{loading.value=false}}
+onMounted(load)
+</script>
+<template><section class="tasks-page" v-loading="loading"><header><div><h2>我的待办</h2><p>按真实登录账号及字段职责显示未完成任务，不使用预览身份。</p></div><el-button @click="load">刷新</el-button></header><el-alert v-if="error" :title="error" type="error" :closable="false"/><el-table :data="tasks" border height="calc(100vh - 290px)" empty-text="暂无分配给你的模具任务"><el-table-column prop="assetNumber" label="实物编号" min-width="170" fixed="left"/><el-table-column prop="styleName" label="款式" min-width="170"/><el-table-column prop="compatibleModels" label="兼容手机型号" min-width="280"/><el-table-column prop="title" label="待完成事项" min-width="220"/><el-table-column prop="dueDate" label="计划日期" width="150"/><el-table-column label="状态" width="130"><template #default="{row}"><el-tag :type="row.overdue?'danger':'info'">{{ row.overdue?'已逾期':'待完成' }}</el-tag></template></el-table-column><el-table-column label="操作" width="130" fixed="right"><template #default="{row}"><el-button link @click="router.push({path:'/mold-schedules',query:{moldSetId:row.moldSetId}})">打开填写</el-button></template></el-table-column></el-table><el-pagination v-model:current-page="page" :total="total" :page-size="50" layout="total,prev,pager,next" @current-change="load"/><details v-if="user.hasPermission('approval:view')"><summary>流程审批待办 {{ approvals.length }}</summary><pre>{{ JSON.stringify(approvals,null,2) }}</pre></details></section></template>
+<style scoped>.tasks-page{display:flex;flex-direction:column;gap:16px;width:100%;min-width:0}header{display:flex;align-items:center;gap:16px}header>div{flex:1}h2{margin:0}p{color:#64748b}pre{white-space:pre-wrap}</style>
