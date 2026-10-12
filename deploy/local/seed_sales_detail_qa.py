@@ -22,8 +22,15 @@ def seed():
 	if not warehouse:
 		raise RuntimeError("Expected existing synthetic warehouse")
 	protected = [
-		"GL Entry", "Stock Ledger Entry", "Payment Entry", "Sales Invoice", "Delivery Note",
-		"Work Order", "Production Plan", "CRM Integration Log", "MES Integration Log",
+		"GL Entry",
+		"Stock Ledger Entry",
+		"Payment Entry",
+		"Sales Invoice",
+		"Delivery Note",
+		"Work Order",
+		"Production Plan",
+		"CRM Integration Log",
+		"MES Integration Log",
 	]
 	before = {dt: frappe.db.count(dt) for dt in protected if frappe.db.exists("DocType", dt)}
 	name = "QA-SALES-DETAIL-20261012"
