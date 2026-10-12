@@ -15,7 +15,7 @@
  const itemFields = new Set(['warehouse','item_code','item_name','qty','uom','rate','amount','received_qty']);
  const payments = c => c?.root?.DeepLinkERPPurchasePayments || root.DeepLinkERPPurchasePayments;
  const isOA = c => c.providerScope==='oa';
- const canExpand = (c,doc) => !isOA(c) && doc.row_type==='purchase_order' && doc.order_progress?.state!=='restricted' && (doc.order_progress?.item_fields || []).some(field=>field!=='name');
+ const canExpand = (c,doc) => !isOA(c) && doc.row_type==='purchase_order' && doc.order_progress?.state!=='restricted' && (doc.order_progress?.item_fields || []).some(field=>itemFields.has(field));
  function cancelPending(c) { payments(c)?.cancelCrossborderForList?.(c); }
  function fit(c,active) {
   if(!c)return;

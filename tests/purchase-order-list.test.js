@@ -892,11 +892,17 @@ function mountedPurchase(beforeMount) {
 }
 test('order page expansion uses projected permitted details only and toolbar never becomes a selection action',async()=>{
  const {controller:c,list,calls,handlers}=mountedPurchase();
- c.providerRows=[{name:'PO-A',row_type:'purchase_order',order_progress:{item_fields:['name','item_code'],items:[{name:'I',item_code:'M'}]}},{name:'OA',row_type:'oa_request'},{name:'DENIED',row_type:'purchase_order',order_progress:{state:'restricted'}}];
+ const unrendered=['idx','description'].map(field=>({name:`PO-${field}`,row_type:'purchase_order',order_progress:{item_fields:['name',field],items:[{name:'I',[field]:'unrendered'}]}}));
+ c.providerRows=[{name:'PO-A',row_type:'purchase_order',order_progress:{item_fields:['name','item_code'],items:[{name:'I',item_code:'M'}]}},{name:'OA',row_type:'oa_request'},{name:'DENIED',row_type:'purchase_order',order_progress:{state:'restricted'}},...unrendered];
  c.reconcileRowDetails();c.afterRowDetailsRender();
  assert.ok(handlers.has('[data-row-details="expand"]'));assert.ok(handlers.has('[data-row-details="collapse"]'));
  await c.expandAllRowDetails();assert.deepEqual([...c.expandedDetails],['PO-A']);assert.equal(calls.length,0);
  assert.doesNotMatch(list.get_list_row_html(c.providerRows[2]),/dlp-purchase-expand/);
+ let visible,disabled;c.$rowDetailControls.toggle=value=>visible=value;c.$rowDetailControls.find=selector=>({prop:(_,value)=>{if(selector==='[data-row-details="expand"]')disabled=value;}});
+ for(const doc of unrendered){
+  c.providerRows=[doc];c.reconcileRowDetails();c.afterRowDetailsRender();await c.expandAllRowDetails();
+  assert.equal(c.expandedDetails.size,0,`${doc.name} has no rendered detail field`);assert.doesNotMatch(list.get_list_row_html(doc),/dlp-purchase-expand/);assert.equal(visible,false);assert.equal(disabled,true);
+ }
  c.setProviderScope('oa',false);await c.expandAllRowDetails();assert.equal(c.expandedDetails.size,0);
 });
 
