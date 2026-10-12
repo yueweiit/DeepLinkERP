@@ -30,11 +30,11 @@ app_include_css = [
 	"/assets/deeplinkerp_branding/css/purchase_payments.css?v=0.0.9",
 	"/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.24",
     "/assets/deeplinkerp_branding/css/operating_expenses.css?v=0.0.6",
-	"/assets/deeplinkerp_branding/css/sales_order_list.css?v=0.0.8",
+	"/assets/deeplinkerp_branding/css/sales_order_list.css?v=0.0.9",
 	"/assets/deeplinkerp_branding/css/inventory_detail.bundle.css?v=0.0.3",
 ]
 app_include_js = [
-	"/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.26",
+	"/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.27",
 	"/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.28",
 	"/assets/deeplinkerp_branding/js/crossborder_procurement.js?v=0.0.5",
 	"/assets/deeplinkerp_branding/js/purchase_source.js?v=0.0.2",

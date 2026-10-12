@@ -43,7 +43,7 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 
 	def test_unified_adapter_loads_after_cache_busted_shared_engine(self):
 		scripts = hooks.app_include_js
-		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.26"
+		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.27"
 		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.12"
 		self.assertIn(engine, scripts)
 		self.assertIn(adapter, scripts)
@@ -130,9 +130,10 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		self.assertRegex(css, r"\.dlp-po-filters \.dlp-po-clear-filters\s*\{[^}]*display:\s*inline-flex\s*!important;")
 		self.assertRegex(css[css.index("@media (max-width: 767.98px)"):], r"\.dlp-po-frozen\s*\{\s*position:\s*static;")
 		sales = (root / "sales_order_list.css").read_text()
-		self.assertRegex(sales, r"body\.dlp-sales-order-grid-active \.dlp-po-grid \.result-container\{max-height:var\(--dlp-sales-result-max-height,")
-		viewbar = re.search(r"\.dlp-sales-viewbar\{([^}]+)\}", sales).group(1)
-		self.assertIn("position:static", viewbar)
+		self.assertNotIn("--dlp-sales-result-max-height", sales)
+		self.assertRegex(sales, r"body\.dlp-sales-order-grid-active \.dlp-po-grid \.result-container\s*\{[^}]*max-height:\s*none;[^}]*overflow-x:\s*auto;[^}]*overflow-y:\s*hidden;")
+		viewbar = re.search(r"\.dlp-sales-viewbar\s*\{([^}]+)\}", sales).group(1)
+		self.assertIn("display:contents", viewbar)
 		mode_menu = re.search(r"body\.dlp-sales-order-grid-active:not\(\.dlp-mes-navigation-enabled\) \.dlp-interface-mode-menu\s*\{([^}]+)\}", sales)
 		self.assertIsNotNone(mode_menu, "The narrow classic Sales sidebar must keep its mode menu inside the viewport")
 		self.assertRegex(mode_menu.group(1), r"left:\s*0\s*;")

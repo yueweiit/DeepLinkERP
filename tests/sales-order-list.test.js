@@ -98,8 +98,41 @@ test('mounted configuration defaults to finance without resetting saved columns'
  assert.equal(control.permission_field,'custom_process_status');
  assert.deepEqual(JSON.parse(JSON.stringify(f.grid.selectOptions(control,null,x=>x))),[{value:'',label:'全部审核状态'},{value:'pending',label:'待财务审核'},{value:'approved',label:'已放行生产'},{value:'rejected',label:'已驳回'}]);
  assert.ok(!f.config.controls.some(control=>['status','custom_process_status'].includes(control.fieldname)));
- const css=fs.readFileSync(require.resolve('../deeplinkerp_branding/public/css/sales_order_list.css'),'utf8');
- assert.match(css,/body\.dlp-sales-order-grid-active\s+\.dlp-po-filter\[data-fieldname=financial_status\]\{width:220px\}/);
+ assert.equal(f.config.purchaseChrome,true,'reuse the native advanced-filter disclosure');
+ assert.deepEqual(Array.from(f.config.mainFilterFields),['search','customer','financial_status','from_date','to_date','company']);
+ assert.ok(!f.config.mainFilterFields.includes('product'),'product stays reachable under more filters');
+});
+
+test('sales scope and release controls mount inside the existing personal-column toolbar',()=>{
+ const f=mountedReleaseFixture(),nodes=[];
+ class Surface {
+  constructor(html=''){this.html=html;this.nodes=new Map();nodes.push(this);}
+  find(selector){if(!this.nodes.has(selector))this.nodes.set(selector,new Surface());return this.nodes.get(selector);}
+  prependTo(parent){this.parent=parent;return this;} appendTo(parent){this.parent=parent;return this;}
+  insertBefore(target){this.before=target;return this;} insertAfter(target){this.after=target;return this;}
+  on(){return this;} text(){return this;} prop(){return this;}
+ }
+ f.env.$=html=>new Surface(html);f.controller.$toolbar=new Surface('existing toolbar');
+ const columns=f.controller.preferences.columns.slice();f.config.mountControls(f.controller);
+ assert.equal(f.controller.$salesViewbar.parent,f.controller.$toolbar);
+ assert.equal(f.controller.$salesNotice.after,f.controller.$toolbar);
+ assert.equal(nodes.find(node=>node.html.includes('dlp-sales-preset')).parent,f.controller.$toolbar);
+ assert.deepEqual(f.controller.preferences.columns,columns);
+ assert.equal(f.controller.salesView,'finance');
+});
+
+test('expanded sales items retain every permitted column and all 52 rows with full hover text',()=>{
+ const fields=['idx','item_code','item_name','custom_specifications','custom_version','qty','uom','rate','custom_item_tax_amount','amount','delivery_date','description','custom_product','warehouse'];
+ const detail={header:{currency:'MXN'},item_fields:fields,items:Array.from({length:52},(_,i)=>({idx:i+1,item_code:`CODE-${i}`,item_name:'Long <product> name',custom_specifications:'Long specifications',description:'Complete <description>',warehouse:'Long warehouse',qty:2,uom:'件',rate:12345.6,amount:24691.2,delivery_date:'2026-12-31'}))};
+ const html=grid.itemTable(detail);
+ assert.equal((html.match(/<tbody>[\s\S]*?<\/tbody>/)?.[0].match(/<tr>/g)||[]).length,52);
+ for(const field of fields.filter(field=>field!=='uom'))assert.ok(html.includes(`<th data-fieldname="${field}"`),field);
+ for(const field of ['item_name','custom_specifications','description','warehouse'])assert.match(html,new RegExp(`<td data-fieldname="${field}" title="[^"]+"[^>]*><span class="dlp-sales-item-text">`));
+ for(const field of ['qty','rate','custom_item_tax_amount','amount'])assert.match(html,new RegExp(`<td data-fieldname="${field}"[^>]+class="[^"]*dlp-sales-item-number`));
+ assert.match(html,/title="Complete &lt;description&gt;"/);
+ assert.match(html,/2 件/);assert.match(html,/12,345\.60 MXN/);
+ assert.doesNotMatch(html,/dlp-sales-items-overview/);
+ const denied=grid.itemTable({...detail,item_fields:['item_code']});assert.doesNotMatch(denied,/data-fieldname="amount"|dlp-sales-item-text/);
 });
 
 test('finance reviews supplement all orders when financial columns are visible and ignore stale reviews',async()=>{
@@ -213,7 +246,7 @@ function mountedReleaseFixture() {
  const list={doctype:'Sales Order',view_name:'List',view:'List',page:{},meta:{fields:grid.COLUMNS.map(col=>({fieldname:col.fieldname,permlevel:0}))},fields:[],data:[{name:'SO-A',modified:'old'}],settings:{},get_args:()=>({filters:[],or_filters:[]}),get_call_args(){return {args:this.get_args()};},no_change:()=>false,render_header(){},refresh(){},get_checked_items(){return this.data;},on_row_checked(){}};
  const controller=env.DeepLinkERPSalesWorkspace.mount(list,env);
  controller.$salesViewbar=f.controller.$salesViewbar;controller.salesExpanded=new Map();
- return {...f,controller,list,config,grid:env.DeepLinkERPSalesWorkspace,setRoute(value){route=value;}};
+ return {...f,controller,list,config,env,grid:env.DeepLinkERPSalesWorkspace,setRoute(value){route=value;}};
 }
 
 test('native dispatch invalidates release eligibility immediately and rejects an earlier response',async()=>{
@@ -304,7 +337,7 @@ function viewportFixture() {
  const state={top:318.18,tail:75.5,header:32,height:720,scroll:0}, frames=new Map(), listeners=new Map(), observers=[];
  const values=new Map(), style={getPropertyValue:key=>values.get(key)||'',setProperty:(key,value)=>values.set(key,value),removeProperty:key=>values.delete(key)};
  const main={scrollTop:0,clientTop:0,get clientHeight(){return state.height;},getBoundingClientRect:()=>({top:0,bottom:state.height}),parentElement:null};
- const tableHeight=()=>Math.min(800,parseFloat(values.get('--dlp-sales-result-max-height'))||400);
+ const tableHeight=()=>Math.min(800,parseFloat(values.get('--dlp-test-result-max-height'))||400);
  const list={scrollTop:0,parentElement:main,getBoundingClientRect:()=>({top:state.top-state.scroll-43,bottom:state.top-state.scroll+tableHeight()+state.tail})};
  const header={getBoundingClientRect:()=>({height:state.header})}, row={};
  const result={style,scrollTop:0,parentElement:list,get offsetHeight(){return tableHeight();},get clientHeight(){return tableHeight()-17;},getBoundingClientRect:()=>({top:state.top-state.scroll,bottom:state.top-state.scroll+tableHeight()}),querySelector:selector=>selector==='.dlp-po-grid-header'?header:row};
@@ -316,37 +349,46 @@ function viewportFixture() {
  return {controller,state,main,result,list,header,row,root,values,frames,listeners,observers,flush(){const callbacks=[...frames.values()];frames.clear();callbacks.forEach(fn=>fn());}};
 }
 
-test('sales table reserves its measured footer and recalculates after wrapping, resize and existing outer scroll',()=>{
- const fixture=viewportFixture(),{controller,state,main,values,listeners,observers}=fixture;
- assert.equal(typeof grid.fitViewport,'function');grid.fitViewport(controller,true);fixture.flush();
- assert.equal(values.get('--dlp-sales-result-max-height'),'326px');
- state.scroll=73.5;main.scrollTop=73.5;observers[0].callback();fixture.flush();
- assert.equal(values.get('--dlp-sales-result-max-height'),'326px','outer scrolling must not make the table grow');
- state.height=860;state.top=400;state.tail=95;listeners.get('resize')();fixture.flush();
- assert.equal(values.get('--dlp-sales-result-max-height'),'365px');
- state.height=360;state.top=260;state.header=80;state.tail=75;observers[0].callback();fixture.flush();
- assert.equal(values.get('--dlp-sales-result-max-height'),'139px','short screens keep a header and row, with outer scrolling available');
+test('sales owns no viewport height adapter and its full-height grids scroll horizontally only',()=>{
+ assert.equal(grid.fitViewport,undefined);
+ const script=fs.readFileSync(require.resolve('../deeplinkerp_branding/public/js/sales_order_list.js'),'utf8');
+ assert.doesNotMatch(script,/syncPageHeaders|--dlp-sales-header-offset/,'native headers scroll with the page');
+ const css=fs.readFileSync(require.resolve('../deeplinkerp_branding/public/css/sales_order_list.css'),'utf8');
+ assert.doesNotMatch(css,/--dlp-sales-result-max-height|100vw - 260px/);
+ assert.match(css,/\.result-container\s*\{[^}]*max-height:\s*none;[^}]*overflow-x:\s*auto;[^}]*overflow-y:\s*hidden;/);
+ assert.match(css,/\.dlp-sales-items-scroll\s*\{[^}]*overflow-x:\s*auto;[^}]*overflow-y:\s*hidden;/);
+ assert.match(css,/\.dlp-sales-expanded\s*\{[^}]*width:\s*100cqw;/);
+ assert.match(css,/\.dlp-sales-item-text\s*\{[^}]*-webkit-line-clamp:\s*3;/);
+ assert.match(css,/\.dlp-sales-items\s*:is\(td,th\)\s*\{[^}]*border:\s*1px solid/);
 });
 
 test('shared viewport can reserve two usable purchase rows below sticky header and scrollbar on short screens',()=>{
  const engine=require('../deeplinkerp_branding/public/js/compact_list.js'),fixture=viewportFixture();
  fixture.state.height=360;fixture.state.top=300;
- engine.fitViewport(fixture.controller,{active:true,root:fixture.root,scrollElement:fixture.result,layoutTailElement:fixture.list,property:'--dlp-sales-result-max-height',headerSelector:'.dlp-po-grid-header',rowSelector:'.dlp-po-grid-row',minimumRows:2});
- fixture.flush();assert.equal(fixture.values.get('--dlp-sales-result-max-height'),'133px');
+ engine.fitViewport(fixture.controller,{active:true,root:fixture.root,scrollElement:fixture.result,layoutTailElement:fixture.list,property:'--dlp-test-result-max-height',headerSelector:'.dlp-po-grid-header',rowSelector:'.dlp-po-grid-row',minimumRows:2});
+ fixture.flush();assert.equal(fixture.values.get('--dlp-test-result-max-height'),'133px');
  fixture.state.scroll=100;fixture.main.scrollTop=100;fixture.observers[0].callback();fixture.flush();
- assert.equal(fixture.values.get('--dlp-sales-result-max-height'),'133px','outer overflow preserves usable row space');
+ assert.equal(fixture.values.get('--dlp-test-result-max-height'),'133px','outer overflow preserves usable row space');
 });
 
-test('sales viewport fitting cleans up on departure and resumes once on a cached route return',()=>{
- const fixture=viewportFixture(),{controller,values,frames,listeners,observers}=fixture;
- assert.equal(typeof grid.fitViewport,'function');grid.fitViewport(controller,true);grid.fitViewport(controller,true);
- assert.equal(observers.length,1);assert.equal(frames.size,1);fixture.flush();
- observers[0].callback();assert.equal(frames.size,1);grid.fitViewport(controller,false);
- assert.equal(frames.size,0);assert.equal(listeners.size,0);assert.equal(observers[0].disconnected,true);assert.equal(values.size,0);
- observers[0].callback();assert.equal(frames.size,0,'a delivered stale observer callback must stay inert');
- grid.fitViewport(controller,true);grid.fitViewport(controller,true);fixture.flush();
- assert.equal(observers.length,2);assert.equal(listeners.size,1);assert.equal(values.get('--dlp-sales-result-max-height'),'326px');
- grid.fitViewport(controller,false);
+test('sales back-to-top follows page scrolling, reduced motion and route lifecycle with one reusable button',()=>{
+ const f=mountedReleaseFixture(),listeners=new Map(),clicks=[],button={hidden:true,events:{},setAttribute(){},addEventListener(name,fn){this.events[name]=fn;}},documentScroller={scrollTop:0,scrollTo:options=>clicks.push(['document',options])};
+ const scroller={scrollHeight:2000,clientHeight:700,scrollTop:0,scrollTo:options=>clicks.push(['page',options]),addEventListener:(name,fn)=>listeners.set(name,fn),removeEventListener:name=>listeners.delete(name)};
+ let created=0,reduced=false;f.controller.list.page.wrapper={0:{closest:()=>scroller}};
+ f.env.document={createElement:()=>button,body:{appendChild(){created++;}},scrollingElement:documentScroller};
+ f.env.addEventListener=(name,fn)=>listeners.set(`root-${name}`,fn);f.env.removeEventListener=name=>listeners.delete(`root-${name}`);f.env.matchMedia=()=>({matches:reduced});
+ f.config.onRouteChange(f.controller,true);assert.equal(created,1);assert.equal(button.hidden,true);
+ scroller.scrollTop=301;listeners.get('scroll')();assert.equal(button.hidden,false);
+ button.events.click();assert.equal(clicks[0][0],'page');assert.deepEqual({...clicks[0][1]},{top:0,behavior:'smooth'});
+ reduced=true;button.events.click();assert.equal(clicks[1][1].behavior,'auto');
+ f.config.onRouteChange(f.controller,false);assert.equal(button.hidden,true);assert.equal(listeners.size,0);
+ button.events.click();assert.equal(clicks.length,2,'departed route cannot scroll another page');
+ f.config.onRouteChange(f.controller,true);f.config.onRouteChange(f.controller,true);assert.equal(created,1);assert.equal(listeners.size,2);
+ scroller.scrollTop=0;listeners.get('scroll')();assert.equal(button.hidden,true);
+ scroller.scrollHeight=700;documentScroller.scrollTop=500;listeners.get('root-scroll')();assert.equal(button.hidden,false);
+ button.events.click();assert.equal(clicks[2][0],'document','classic document scrolling is supported');
+ documentScroller.scrollTop=0;listeners.get('root-scroll')();assert.equal(button.hidden,true);
+ f.config.onRouteChange(f.controller,false);
 });
 
 test('all four cached inventory pages share viewport fitting without stale loads reactivating departed owners',async()=>{

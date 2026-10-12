@@ -32,7 +32,7 @@
 		const permitted = new Set(detail.item_fields || []), currency = detail.header.currency;
 		const columns = itemColumns.filter(([field]) => permitted.has(field));
 		if (!columns.length) return `<p>${esc(t("无权查看产品明细"))}</p>`;
-		return engine.detailTable({columns,items:detail.items,escape:esc,translate:t,wrapperClass:"dlp-sales-items-scroll",tableClass:`dlp-sales-items ${full ? "" : "dlp-sales-items-overview"}`,columnClass:(_field,i)=>i>7?"dlp-sales-extra-item":"",format:(field,item)=>["rate","custom_item_tax_amount","amount"].includes(field)?money(item[field],currency):field==="qty"?esc(item[field] ?? "—")+(permitted.has("uom")?` ${esc(item.uom)}`:""):undefined});
+		return engine.detailTable({columns,items:detail.items,escape:esc,translate:t,wrapperClass:"dlp-sales-items-scroll",tableClass:`dlp-sales-items ${full ? "" : "dlp-sales-items-overview"}`,textFields:["item_name","custom_specifications","description","warehouse"],textClass:"dlp-sales-item-text",columnClass:(field,i)=>[i>7?"dlp-sales-extra-item":"",["idx","qty","rate","custom_item_tax_amount","amount"].includes(field)?"dlp-sales-item-number":""].filter(Boolean).join(" "),format:(field,item)=>["rate","custom_item_tax_amount","amount"].includes(field)?money(item[field],currency):field==="qty"?esc(item[field] ?? "—")+(permitted.has("uom")?` ${esc(item.uom)}`:""):undefined});
 	}
 	function detailsHTML(detail) {
 		const header = detail.header;
@@ -144,7 +144,6 @@
 			controller.salesReleaseNames = eligible;
 			bar.find(".dlp-sales-selected").text(label);
 			bar.find(".dlp-sales-release").text(t("允许生产（{0}单）", [eligible.length])).prop("disabled", !eligible.length);
-			controller.updateTableViewport?.();
 		};
 		paint(!names.length ? t("未选择订单") : names.length > 100 ? t("已选择：{0}；每次最多核验 100 单", [names.length]) : t("已选择：{0}；正在核验…", [names.length]));
 		if (!names.length || names.length > 100) return Promise.resolve();
@@ -167,9 +166,9 @@
 		controller.salesView = "finance"; controller.salesExpanded = new Map();
 		if (!root.$ || !controller.$toolbar) return;
 		dismissAutomaticOnboarding(controller);
-		const bar = root.$(`<div class="dlp-sales-viewbar"><div class="dlp-sales-tabs">${[["all", "全部订单"], ["mine", "我的订单"], ["finance", "Pending financial approval"]].map(([value, label]) => `<button class="btn btn-default btn-sm" type="button" data-sales-view="${value}" aria-pressed="${value === "finance"}">${esc(t(label))}</button>`).join("")}</div><div class="dlp-sales-release-action"><span class="dlp-sales-selected" role="status">${esc(t("未选择订单"))}</span><button type="button" class="btn btn-primary dlp-sales-release" disabled>${esc(t("允许生产（{0}单）", [0]))}</button></div></div>`).insertBefore(controller.list.$frappe_list);
+		const bar = root.$(`<div class="dlp-sales-viewbar"><div class="dlp-sales-tabs">${[["all", "全部订单"], ["mine", "我的订单"], ["finance", "待财务审核"]].map(([value, label]) => `<button class="btn btn-default btn-sm" type="button" data-sales-view="${value}" aria-pressed="${value === "finance"}">${esc(t(label))}</button>`).join("")}</div><div class="dlp-sales-release-action"><span class="dlp-sales-selected" role="status">${esc(t("未选择订单"))}</span><button type="button" class="btn btn-primary dlp-sales-release" disabled>${esc(t("允许生产（{0}单）", [0]))}</button></div></div>`).prependTo(controller.$toolbar);
 		controller.$salesViewbar = bar;
-		controller.$salesNotice = root.$(`<p class="dlp-sales-notice text-muted">${esc(t("收款记录未录入不代表未收款；定金由财务按线下约定判断。"))}</p>`).insertAfter(bar);
+		controller.$salesNotice = root.$(`<p class="dlp-sales-notice text-muted">${esc(t("收款记录未录入不代表未收款；定金由财务按线下约定判断。"))}</p>`).insertAfter(controller.$toolbar);
 		const updateSelection = () => updateReleaseSelection(controller);
 		controller.updateSalesSelection = updateSelection;
 		bar.find(".dlp-sales-release").on("click", async () => {
@@ -188,7 +187,7 @@
 			controller.refresh();
 			controller.$salesNotice.text(t(controller.salesView === "finance" ? "收款记录未录入不代表未收款；定金由财务按线下约定判断。" : "展开产品行或查看明细；左右滚动查看全部字段。"));
 		});
-		const select = root.$(`<select class="form-control input-xs dlp-sales-preset" aria-label="${esc(t("字段分组"))}">${[["main", "主要字段"], ["middle", "订单资料"], ["tail", "来源与进度"]].map(([value, label]) => `<option value="${value}">${esc(t(label))}</option>`).join("")}</select>`).prependTo(controller.$toolbar);
+		const select = root.$(`<select class="form-control input-xs dlp-sales-preset" aria-label="${esc(t("字段分组"))}">${[["main", "主要字段"], ["middle", "订单资料"], ["tail", "来源与进度"]].map(([value, label]) => `<option value="${value}">${esc(t(label))}</option>`).join("")}</select>`).appendTo(controller.$toolbar);
 		select.on("change", event => controller.setColumns(presets[event.target.value]));
 		controller.list.$result?.on("click.dlpSalesDetails", ".dlp-sales-detail,.dlp-sales-expand", async event => {
 			event.preventDefault(); event.stopPropagation(); const button = root.$(event.currentTarget), name = button.attr("data-name");
@@ -198,31 +197,45 @@
 				const dialog = new root.frappe.ui.Dialog({ title: `${t("订单详情")} · ${name}`, size: "extra-large", fields: [{ fieldname: "details", fieldtype: "HTML", options: detailsHTML(detail) }] }); dialog.$wrapper.addClass("dlp-sales-detail-dialog"); dialog.show(); dialog.$wrapper.find(".dlp-sales-all-items").on("click", e => { const expanded = e.currentTarget.getAttribute("aria-expanded") !== "true"; e.currentTarget.setAttribute("aria-expanded", String(expanded)); e.currentTarget.textContent = t(expanded ? "收起额外字段" : "显示全部明细字段"); dialog.$wrapper.find(".dlp-sales-items").toggleClass("dlp-sales-items-overview", !expanded); });
 			} } finally { button.prop("disabled", false); }
 		});
-		fitViewport(controller, true);
+		mountScrollTop(controller, true);
 	}
-	function fitViewport(controller, active) {
+	function mountScrollTop(controller, active) {
 		if (!controller) return;
-		return engine.fitViewport(controller, { active, root: controller.root,
-			scrollElement: controller.list.$result?.parent(".result-container")?.[0], layoutTailElement: controller.list.$frappe_list?.[0],
-			property: "--dlp-sales-result-max-height", headerSelector: ".dlp-po-grid-header", rowSelector: ".dlp-po-grid-row",
-			observeTargets: [controller.$filters?.[0]?.parentElement, controller.$toolbar?.[0], controller.$salesViewbar?.[0], controller.$salesNotice?.[0], controller.$summary?.[0], controller.$paging?.[0], controller.list.page.wrapper?.find?.(".page-head")?.[0]],
-		});
+		if (!active) return controller.stopSalesScrollTop?.();
+		if (controller.updateSalesScrollTop) return controller.updateSalesScrollTop();
+		const host = controller.root, scroller = controller.list.page.wrapper?.[0]?.closest?.(".main-section");
+		if (!host.document?.createElement) return;
+		const scrollOwner = () => scroller && scroller.scrollHeight > scroller.clientHeight ? scroller : host.document.scrollingElement || host.document.documentElement;
+		let button = controller.salesScrollTopButton;
+		if (!button) {
+			button = controller.salesScrollTopButton = host.document.createElement("button");
+			button.type = "button"; button.className = "btn btn-default dlp-sales-scroll-top"; button.textContent = t("回到顶部"); button.setAttribute("aria-label", t("回到顶部"));
+			host.document.body.appendChild(button);
+			button.addEventListener("click", () => {
+				if (!salesListActive(controller)) return;
+				scrollOwner()?.scrollTo({ top: 0, behavior: host.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+			});
+		}
+		const update = () => { button.hidden = !salesListActive(controller) || (scrollOwner()?.scrollTop || 0) <= 300; };
+		controller.updateSalesScrollTop = update;
+		controller.stopSalesScrollTop = () => { button.hidden = true; scroller?.removeEventListener("scroll", update); host.removeEventListener("scroll", update); controller.updateSalesScrollTop = null; controller.stopSalesScrollTop = null; };
+		scroller?.addEventListener("scroll", update, { passive: true }); host.addEventListener("scroll", update, { passive: true }); update();
 	}
 	function dismissAutomaticOnboarding(controller) {
 		return grid.dismissAutomaticOnboarding(controller, root);
 	}
-	const grid = engine.create({ doctype: "Sales Order", controllerKey: "dlpSalesOrderGrid", routeClass: "dlp-sales-order-grid-active", columns: COLUMNS, freezeUntil: "name", defaultColumns: presets.finance, preferenceVersion: 3, migratePreferences, keepColumnHeader: true, onSelectionChange: updateReleaseSelection,
+	const grid = engine.create({ doctype: "Sales Order", controllerKey: "dlpSalesOrderGrid", routeClass: "dlp-sales-order-grid-active", columns: COLUMNS, freezeUntil: "name", defaultColumns: presets.finance, preferenceVersion: 3, migratePreferences, keepColumnHeader: true, onSelectionChange: updateReleaseSelection, purchaseChrome: true, mainFilterFields: ["search", "customer", "financial_status", "from_date", "to_date", "company"],
 		computedFields: ["dlp_product", "dlp_quantity", "dlp_rate", "dlp_sales_person", "dlp_receipts", "dlp_sync", "dlp_last_confirmation", "dlp_actions"], extraFields: ["customer", "custom_crm_order_no", "party_account_currency"],
 		numbers: ["grand_total", "advance_paid", "per_delivered", "per_billed"], dates: ["transaction_date", "delivery_date"], moneySummary: true, quickFields: ["company", "customer"], searchFields: ["name", "custom_crm_order_no", "customer_name", "custom_odt"], optionLabels: { financial_status: financialLabels, custom_process_status: statusLabels, status: orderStatusLabels },
 		controls: [{ fieldname: "search", fieldtype: "Data", label: "订单号 / 客户 / ODT" }, { fieldname: "customer", fieldtype: "Link", options: "Customer", label: "客户" }, { fieldname: "financial_status", permission_field: "custom_process_status", fieldtype: "Select", label: "财务审核状态", emptyLabel: "全部审核状态", options: "\npending\napproved\nrejected" }, { fieldname: "from_date", permission_field: "transaction_date", fieldtype: "Date", label: "开始日期" }, { fieldname: "to_date", permission_field: "transaction_date", fieldtype: "Date", label: "结束日期" }, { fieldname: "product", permission_field: "items", fieldtype: "Link", options: "Item", label: "品目编码" }, { fieldname: "company", fieldtype: "Link", options: "Company", label: "公司" }],
 		exportOptions: args => ({ columnTransforms: Object.fromEntries(args.fields.flatMap((field, index) => field === "custom_process_status" ? [[index + 2, { header: t("财务审核状态"), value: value => t(financialLabel(value)) }]] : [])) }),
 		searchConflictMessage: "现有 OR 筛选已保留；清除后可使用订单 / 客户搜索。",
 		transformQuery, onRows, onColumnsChange, mountControls, renderValue, onRequestStart: invalidateReleaseSelection,
-		onRouteChange: (controller, active) => { if (controller) controller.salesRouteActive = active; fitViewport(controller, active); if (!active && controller) { invalidateReleaseSelection(controller, t("未选择订单")); controller.stopInitialOnboarding?.(); } else controller?.updateSalesSelection?.(); },
+		onRouteChange: (controller, active) => { if (controller) controller.salesRouteActive = active; mountScrollTop(controller, active); if (!active && controller) { invalidateReleaseSelection(controller, t("未选择订单")); controller.stopInitialOnboarding?.(); } else controller?.updateSalesSelection?.(); },
 		renderLink: (controller, doc, value) => `<button type="button" class="dlp-sales-name dlp-sales-detail" data-name="${esc(doc.name)}">${value}</button>`,
 		renderSequence: (controller, doc, sequence) => `<button class="dlp-sales-expand" type="button" data-name="${esc(doc.name)}" aria-expanded="${controller.salesExpanded?.has(doc.name) || false}" aria-label="${esc(t("展开产品明细"))}">${controller.salesExpanded?.has(doc.name) ? "⌄" : "›"} ${sequence}</button>`,
 		rowExtra: (controller, doc) => controller.salesExpanded?.has(doc.name) ? `<section class="dlp-sales-expanded"><strong>${esc(t("订单产品明细"))}</strong>${itemTable(controller.salesExpanded.get(doc.name))}</section>` : "",
-		afterRender: controller => { controller.updateSalesSelection?.(); controller.updateTableViewport?.(); },
+		afterRender: controller => { controller.updateSalesSelection?.(); mountScrollTop(controller, salesListActive(controller)); },
 	});
-	return { ...grid, COLUMNS, presets, itemTable, detailsHTML, transformQuery, financialLabel, statusLabels, orderStatusLabels, updateReleaseSelection, invalidateExpandedDetails, dismissAutomaticOnboarding, fitViewport };
+	return { ...grid, COLUMNS, presets, itemTable, detailsHTML, transformQuery, financialLabel, statusLabels, orderStatusLabels, updateReleaseSelection, invalidateExpandedDetails, dismissAutomaticOnboarding };
 });
