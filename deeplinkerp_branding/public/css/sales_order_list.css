@@ -34,6 +34,8 @@ body.dlp-sales-order-grid-active:not(.dlp-mes-navigation-enabled) .dlp-interface
 body.dlp-sales-order-grid-active .dlp-po-grid-row{min-height:34px}
 body.dlp-sales-order-grid-active .dlp-po-standard .dlp-po-grid-row{min-height:42px}
 body.dlp-sales-order-grid-active .dlp-po-grid-cell{line-height:1.35}
+body.dlp-sales-order-grid-active .dlp-po-grid-row .dlp-po-grid-cell[data-fieldname=_sequence]{padding:0}
+body.dlp-sales-order-grid-active .dlp-po-grid-row .dlp-sales-expand{display:flex;align-items:center;justify-content:center;width:100%;flex:1;align-self:stretch}
 body.dlp-sales-order-grid-active .dlp-po-grid-cell[data-fieldname=dlp_actions]{position:sticky;right:0;z-index:4;background:var(--fg-color,#fff);border-left:1px solid var(--dlp-po-border)}
 body.dlp-sales-order-grid-active .dlp-po-grid-header .dlp-po-grid-cell[data-fieldname=dlp_actions]{z-index:6;background:var(--dlp-po-header-bg)}
 body.dlp-sales-order-grid-active .dlp-po-grid-header{height:auto}
@@ -47,8 +49,11 @@ body.dlp-sales-order-grid-active .dlp-po-grid-row:has([data-fieldname=dlp_receip
 .dlp-sales-name:hover{text-decoration:underline}.dlp-sales-name{white-space:normal;word-break:break-word;font-size:13px}.dlp-sales-expand{font-size:12px}
 .dlp-sales-state{display:inline-block;font-size:12px;padding:3px 6px;background:#edf5ff;border-radius:4px;white-space:normal}
 .dlp-sales-expanded{padding:8px 10px;background:#fff;width:100cqw;max-width:100%;min-width:0;box-sizing:border-box;position:sticky;left:0;border-bottom:1px solid var(--dlp-po-border,#d9e3ed)}
+.dlp-sales-expanded>strong{display:block;line-height:20px;margin-bottom:4px}
 .dlp-sales-items-scroll{overflow-x:auto;overflow-y:hidden;max-height:none;margin:6px 0;width:100%;background:#fff}
+.dlp-sales-expanded>.dlp-sales-items-scroll{margin:0}
 .dlp-sales-items{font-size:12px;width:max-content;min-width:100%;max-width:none;margin:0;border-collapse:collapse;table-layout:auto;background:#fff}
+.dlp-sales-items-scroll>table.table.dlp-sales-items{margin:0}
 .dlp-sales-items :is(td,th){position:static;padding:6px 8px;border:1px solid var(--dlp-po-border,#d9e3ed);vertical-align:top;white-space:nowrap;overflow:visible;text-overflow:clip}
 .dlp-sales-items th{font-weight:600;background:#edf5ff}
 .dlp-sales-items [data-fieldname=idx]{min-width:42px}

@@ -28,10 +28,11 @@ test("detail output escapes source text and only renders permission-filtered ite
  assert.ok(html.includes('0 件'));
 });
 
-test("multi-item currency and unit summaries are not presented as one price or invented total unit", () => {
+test("main quantity summary renders authorized totals without units and removes the price renderer", () => {
  const render=grid.renderValue;
- assert.equal(render("dlp_quantity",{dlp_multiple_units:true},{translate:x=>x}),"多单位明细");
- assert.equal(render("dlp_rate",{dlp_item_count:3,dlp_rate:999,currency:"MXN"},{translate:x=>x}),"多明细");
+ for(const [doc,expected] of [[{dlp_quantity:3,dlp_uom:'件'},'3'],[{dlp_quantity:3.75,dlp_multiple_units:true},'3.75'],[{dlp_multiple_units:true},'—'],[{dlp_quantity:0,dlp_uom:'件'},'0']])assert.equal(render("dlp_quantity",doc,{translate:x=>x}),expected);
+ assert.equal(mountedReleaseFixture().config.renderValue("dlp_rate",{dlp_item_count:3,dlp_rate:999,currency:"MXN"},{translate:x=>x}),undefined);
+ assert.ok(!grid.COLUMNS.some(column=>column.fieldname==='dlp_rate'));
 });
 
 test("sales presets retain an explicit details action and ERP account identity fields", () => {
@@ -49,13 +50,18 @@ test('default finance columns show approval while delivery status stays optional
  assert.deepEqual(query.filters,[['Sales Order','status','=','Closed'],['Sales Order','custom_process_status','=','Pending Production']]);
 });
 
-test('old sales column preferences remove delivery status once without discarding order or density',()=>{
+test('saved sales columns prune obsolete price while keeping version-3 status, order and density',()=>{
  const allowed=new Set(grid.COLUMNS.map(col=>col.fieldname));
- const upgraded=grid.normalizePreferences({version:2,density:'standard',columns:['name','customer_name','custom_process_status','status','grand_total']},allowed);
+ const upgraded=grid.normalizePreferences({version:2,density:'standard',columns:['name','customer_name','custom_process_status','status','dlp_rate','grand_total']},allowed);
  assert.deepEqual(upgraded.columns,['name','customer_name','custom_process_status','grand_total']);
  assert.equal(upgraded.density,'standard');
  const hidden=grid.normalizePreferences({...upgraded,columns:['name','customer_name']},allowed);
  assert.deepEqual(hidden.columns,['name','customer_name'],'a deliberate hide after the upgrade remains respected');
+ for(const columns of [['name','status','dlp_rate','customer_name','grand_total'],['name','grand_total','dlp_rate','customer_name']]){
+  const saved=grid.normalizePreferences({version:3,density:'standard',columns},allowed);
+  assert.deepEqual(saved.columns,columns.filter(field=>field!=='dlp_rate'));
+  assert.equal(saved.version,3);assert.equal(saved.density,'standard');
+ }
 });
 
 test('financial grouping uses process state rather than release permission and unknown states show a dash',()=>{
@@ -94,6 +100,7 @@ test('mounted configuration defaults to finance without resetting saved columns'
  assert.equal(f.controller.salesView,'finance');
  assert.deepEqual(Array.from(f.config.defaultColumns),grid.presets.finance);
  assert.equal(f.config.preferenceVersion,3);
+ assert.ok(!f.config.computedFields.includes('dlp_rate'));
  const control=f.config.controls.find(control=>control.fieldname==='financial_status');
  assert.equal(control.permission_field,'custom_process_status');
  assert.deepEqual(JSON.parse(JSON.stringify(f.grid.selectOptions(control,null,x=>x))),[{value:'',label:'全部审核状态'},{value:'pending',label:'待财务审核'},{value:'approved',label:'已放行生产'},{value:'rejected',label:'已驳回'}]);
@@ -121,13 +128,13 @@ test('sales scope and release controls mount inside the existing personal-column
  assert.equal(f.controller.salesView,'finance');
 });
 
-test('sales items prioritize six permitted columns, hide version and description, and retain all 52 rows with full hover text',()=>{
+test('sales items prioritize seven permitted columns with sequence first, hide version and description, and retain all 52 rows with full hover text',()=>{
  const fields=['idx','item_code','item_name','custom_specifications','custom_version','qty','uom','rate','custom_item_tax_amount','amount','delivery_date','description','custom_product','warehouse'];
  const detail={header:{currency:'MXN'},item_fields:fields,items:Array.from({length:52},(_,i)=>({idx:i+1,item_code:`CODE-${i}`,item_name:'Long <product> name',custom_specifications:'Long specifications',custom_version:'Source version',description:'Complete <description>',warehouse:'Long warehouse',qty:2,uom:'件',rate:12345.6,amount:24691.2,delivery_date:'2026-12-31'}))};
  const html=grid.itemTable(detail);
  assert.equal((html.match(/<tbody>[\s\S]*?<\/tbody>/)?.[0].match(/<tr>/g)||[]).length,52);
- assert.deepEqual([...html.matchAll(/<th data-fieldname="([^"]+)"/g)].map(match=>match[1]),['item_code','item_name','custom_specifications','qty','rate','amount','idx','custom_item_tax_amount','delivery_date','custom_product','warehouse']);
- assert.deepEqual([...html.matchAll(/<th[^>]+>([^<]+)<\/th>/g)].slice(0,6).map(match=>match[1]),['品目编码','品项名','颜色','数量','单价','金额']);
+ assert.deepEqual([...html.matchAll(/<th data-fieldname="([^"]+)"/g)].map(match=>match[1]),['idx','item_code','item_name','custom_specifications','qty','rate','amount','custom_item_tax_amount','delivery_date','custom_product','warehouse']);
+ assert.deepEqual([...html.matchAll(/<th[^>]+>([^<]+)<\/th>/g)].slice(0,7).map(match=>match[1]),['序号','品目编码','品项名','颜色','数量','单价','金额']);
  for(const field of ['item_name','custom_specifications','warehouse'])assert.match(html,new RegExp(`<td data-fieldname="${field}" title="[^"]+"[^>]*><span class="dlp-sales-item-text">`));
  for(const field of ['qty','rate','custom_item_tax_amount','amount'])assert.match(html,new RegExp(`<td data-fieldname="${field}"[^>]+class="[^"]*dlp-sales-item-number`));
  assert.doesNotMatch(html,/data-fieldname="custom_version"|data-fieldname="description"|Complete &lt;description&gt;|Source version/);
@@ -137,13 +144,14 @@ test('sales items prioritize six permitted columns, hide version and description
  const denied=grid.itemTable({...detail,item_fields:['item_code']});assert.doesNotMatch(denied,/data-fieldname="amount"|dlp-sales-item-text/);
  const dialog=grid.detailsHTML(detail);assert.match(dialog,/dlp-sales-items-overview/);
  assert.deepEqual([...dialog.matchAll(/<th data-fieldname="([^"]+)"/g)].map(match=>match[1]),[...html.matchAll(/<th data-fieldname="([^"]+)"/g)].map(match=>match[1]));
+ assert.deepEqual([...dialog.matchAll(/<th data-fieldname="([^"]+)" class="([^"]*)"/g)].filter(match=>!match[2].includes('dlp-sales-extra-item')).map(match=>match[1]),['idx','item_code','item_name','custom_specifications','qty','rate','amount']);
  assert.doesNotMatch(grid.itemTable({...detail,item_fields:fields.filter(field=>!['custom_version','description'].includes(field))}),/data-fieldname="custom_version"|data-fieldname="description"/);
 });
 
 test('overview extra columns are classified by field meaning when primary permissions are omitted',()=>{
  const html=grid.itemTable({header:{currency:'MXN'},item_fields:['idx','qty','custom_item_tax_amount','amount','delivery_date','warehouse'],items:[{idx:1,qty:2,custom_item_tax_amount:3,amount:19,warehouse:'Full warehouse'}]},false);
- for(const field of ['qty','amount'])assert.match(html,new RegExp(`<th data-fieldname="${field}" class="(?![^"]*dlp-sales-extra-item)`));
- for(const field of ['idx','custom_item_tax_amount','delivery_date','warehouse'])assert.match(html,new RegExp(`<th data-fieldname="${field}" class="[^"]*dlp-sales-extra-item`));
+ for(const field of ['idx','qty','amount'])assert.match(html,new RegExp(`<th data-fieldname="${field}" class="(?![^"]*dlp-sales-extra-item)`));
+ for(const field of ['custom_item_tax_amount','delivery_date','warehouse'])assert.match(html,new RegExp(`<th data-fieldname="${field}" class="[^"]*dlp-sales-extra-item`));
 });
 
 test('finance reviews supplement all orders when financial columns are visible and ignore stale reviews',async()=>{
@@ -461,6 +469,27 @@ test('sales detail widths and native scrollbar hover contract reserve a fixed sl
  assert.match(css,/\.dlp-sales-items-scroll[^{}]*::-webkit-scrollbar/);
  const code='LONGCODE'.repeat(5)+'XX',html=grid.itemTable({header:{currency:'MXN'},item_fields:['item_code','amount'],items:[{item_code:code,amount:987654321098.76}]});
  assert.ok(html.includes(code));assert.match(html,/987,654,321,098\.76 MXN/);assert.doesNotMatch(html,/dlp-sales-item-text/);
+});
+
+test('sales sequence button fills only its row cell and retains native button accessibility',()=>{
+ const f=mountedReleaseFixture(),css=fs.readFileSync(require.resolve('../deeplinkerp_branding/public/css/sales_order_list.css'),'utf8');
+ assert.match(css,/body\.dlp-sales-order-grid-active \.dlp-po-grid-row \.dlp-po-grid-cell\[data-fieldname=_sequence\]\s*\{[^}]*padding:\s*0[;}]/);
+ assert.match(css,/body\.dlp-sales-order-grid-active \.dlp-po-grid-row \.dlp-sales-expand\s*\{[^}]*display:\s*flex;[^}]*align-items:\s*center;[^}]*justify-content:\s*center;[^}]*width:\s*100%;[^}]*flex:\s*1;[^}]*align-self:\s*stretch/);
+ const closed=f.config.renderSequence(f.controller,{name:'SO-A'},1);
+ assert.match(closed,/<button[^>]*type="button"[^>]*aria-expanded="false"[^>]*aria-label="展开产品明细"/);
+ f.controller.salesExpanded.set('SO-A',{});
+ assert.match(f.config.renderSequence(f.controller,{name:'SO-A'},1),/aria-expanded="true"/);
+});
+
+test('sales inline title and scoped tables keep a four-pixel gap despite late global table margins',()=>{
+ const f=mountedReleaseFixture(),css=fs.readFileSync(require.resolve('../deeplinkerp_branding/public/css/sales_order_list.css'),'utf8');
+ f.controller.salesExpanded.set('SO-A',{header:{},item_fields:['qty'],items:[{qty:1}]});
+ const html=f.config.rowExtra(f.controller,{name:'SO-A'});
+ assert.match(html,/<section class="dlp-sales-expanded"><strong>订单产品明细<\/strong><div class="dlp-sales-items-scroll"><table class="table dlp-sales-items/);
+ assert.match(css,/\.dlp-sales-items-scroll>table\.table\.dlp-sales-items\s*\{[^}]*margin:\s*0[;}]/,'three Sales table classes outrank the late global .table rule in inline and dialog details');
+ assert.match(css,/\.dlp-sales-expanded>strong\s*\{[^}]*display:\s*block;[^}]*line-height:\s*20px;[^}]*margin-bottom:\s*4px/);
+ assert.match(css,/\.dlp-sales-expanded>\.dlp-sales-items-scroll\s*\{[^}]*margin:\s*0[;}]/);
+ assert.match(css,/\.dlp-sales-expanded\s*\{[^}]*padding:\s*8px 10px/);
 });
 
 test('sales owns no viewport height adapter and its full-height grids scroll horizontally only',()=>{

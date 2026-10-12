@@ -65,9 +65,10 @@ def get_sales_display_details(sales_orders):
 			if fields:
 				row["dlp_item_count"] = len(doc.items)
 				row["dlp_product"] = details.get(name, {}).get("product") or (doc.items[0].item_name if doc.items and "item_name" in fields else "")
+				if "qty" in fields:
+					row["dlp_quantity"] = sum(item.qty for item in doc.items)
 				if {"qty", "uom"} <= fields:
 					units = {item.uom for item in doc.items}
-					row["dlp_quantity"] = sum(item.qty for item in doc.items) if len(units) == 1 else None
 					row["dlp_uom"] = next(iter(units)) if len(units) == 1 else ""
 					row["dlp_multiple_units"] = len(units) > 1
 				if "rate" in fields:
