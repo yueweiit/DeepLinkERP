@@ -1064,16 +1064,29 @@ test("native refresh filter sort and route cancellation notify only the optional
  delete env.DeepLinkERPPurchasePayments;env.frappe.get_route=()=>['List','Purchase Order','List'];list.last_args=null;assert.doesNotThrow(()=>dispatch(list),'cached list remains usable before optional resource loads');
 });
 
-test('native list departure cancels a late detail read even after cached-list reentry',async()=>{
+test('native list departure discards late details and restores collapsed cached DOM, selection and one viewport observer on reentry',async()=>{
  const {controller:c,list,env}=mountedPurchase(),routes=[];
- let resolve;
+ let resolve,reads=0,observers=0;const frames=[],widths=new Map(),viewport={clientWidth:1000},checked=new Set(['PO']);
+ env.requestAnimationFrame=callback=>{frames.push(callback);return frames.length;};env.getComputedStyle=()=>({paddingLeft:'0',paddingRight:'0'});env.addEventListener=()=>{};
+ env.ResizeObserver=class{constructor(){observers++;}observe(){}};
+ list.$result[0].style={setProperty:(key,value)=>widths.set(key,value)};list.$result.parent=()=>({0:viewport});
+ const render=list.render_list;list.render_list=function(){this.$result.value='';return render.call(this);};
+ c.originals.get_checked_items=names=>[...checked].map(name=>names?name:{name});
  const shared=require('../deeplinkerp_branding/public/js/compact_list.js');
- c.providerRows=[{name:'PO',row_type:'purchase_order',modified:'v1'}];
- shared.mountRowDetails(c,{rows:()=>c.providerRows,load:()=>new Promise(done=>resolve=done),active:()=>env.frappe.get_route()[0]==='List'});
+ c.providerRows=[{name:'PO',row_type:'purchase_order',modified:'v1',order_progress:{item_fields:['name','item_code'],items:[{name:'I',item_code:'M'}]}}];
+ list.data=c.providerRows;
+ shared.mountRowDetails(c,{rows:()=>c.providerRows,load:()=>{reads++;return new Promise(done=>resolve=done);},active:()=>env.frappe.get_route()[0]==='List' && env.frappe.get_route()[1]==='Purchase Order'});
  env.cur_list=list;env.frappe.router.on=(_,callback)=>routes.push(callback);production('install')(env);
- const pending=c.toggleRowDetails('PO');
- env.frappe.get_route=()=>['Form','Purchase Order','PO'];routes.forEach(callback=>callback());
+ const pending=c.toggleRowDetails('PO');frames.shift()();assert.match(list.$result.value,/dlp-purchase-expanded/);assert.equal(widths.get('--dlp-purchase-detail-width'),'972px');
+ env.frappe.get_route=()=>['List','Purchase Receipt','List'];routes.forEach(callback=>callback());
+ viewport.clientWidth=620;
  env.frappe.get_route=()=>['List','Purchase Order','List'];routes.forEach(callback=>callback());
+ assert.doesNotMatch(list.$result.value,/dlp-purchase-expanded/,'cancelled expansion must not remain in the cached list DOM');assert.match(list.$result.value,/aria-expanded="false"/);
+ frames.shift()();assert.equal(widths.get('--dlp-purchase-detail-width'),'592px');assert.equal(observers,1);assert.equal(reads,1);assert.deepEqual(list.get_checked_items(true),['PO']);
  resolve({header:{modified:'v1'},items:[{item_code:'OLD'}]});await pending;
  assert.equal(c.detailCache.has('PO'),false);assert.equal(c.expandedDetails.has('PO'),false);
+ const loaded=c.toggleRowDetails('PO');resolve({header:{modified:'v1'},items:[{item_code:'CURRENT'}]});await loaded;while(frames.length)frames.shift()();
+ assert.equal(c.detailCache.size,1);assert.equal(reads,2);assert.match(list.$result.value,/dlp-purchase-expanded/);
+ env.frappe.get_route=()=>['List','Purchase Receipt','List'];routes.forEach(callback=>callback());env.frappe.get_route=()=>['List','Purchase Order','List'];routes.forEach(callback=>callback());while(frames.length)frames.shift()();
+ assert.doesNotMatch(list.$result.value,/dlp-purchase-expanded/);assert.equal(c.detailCache.size,1);assert.equal(reads,2);assert.equal(observers,1);assert.deepEqual(list.get_checked_items(true),['PO']);
 });

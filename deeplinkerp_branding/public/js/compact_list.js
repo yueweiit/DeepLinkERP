@@ -3,7 +3,7 @@
  // One page index and a bounded version cache shared by procurement list adapters.
  function mountRowDetails(owner, {rows, load, active=()=>true, canExpand=()=>true}) {
   owner.expandedDetails=new Set(); owner.detailCache=new Map(); owner.detailPending=new Map(); owner.detailRows=new Map(); owner.detailVersions=new Map();
-  const queue=[],dirty=new Set();let live=0,frame,detailElements=new Map(),previousScope,pumping=false;
+  const queue=[],dirty=new Set();let live=0,frame,detailElements=new Map(),previousScope,pumping=false,needsRender=false;
   const version=doc=>String(doc?.modified || doc?.order_progress?.modified || '');
   const scope=()=>JSON.stringify([owner.page,owner.pageSize,owner.providerScope,owner.quick,owner.querySignature]);
   const render=()=>{owner.list.render_list();owner.list.set_rows_as_checked?.();};
@@ -71,7 +71,13 @@
   };
   owner.cancelPendingRowDetails=()=>{
    // Forget queued work immediately; live calls retain their slots until settled.
+   needsRender ||= Boolean(owner.expandedDetails.size);
    owner.expandedDetails.clear();for(const name of owner.detailPending.keys())cancel(name);queue.length=0;dirty.clear();updateControls();
+  };
+  owner.restoreRowDetails=()=>{
+   if(!active())return;
+   if(needsRender){needsRender=false;render();}
+   else {updateControls();owner.updateRowDetailViewport?.();}
   };
   owner.collapseAllRowDetails=()=>{owner.cancelPendingRowDetails();render();};
   owner.expandAllRowDetails=()=>{
@@ -93,6 +99,7 @@
    }updateControls();
   };
   owner.afterRowDetailsRender=()=>{
+   needsRender=false;
    detailElements=new Map([...(owner.list.$result?.[0]?.querySelectorAll?.('[data-dlp-detail-name]') || [])].map(node=>[node.getAttribute('data-dlp-detail-name'),node]));
    owner.mountRowDetailControls();
    const result=owner.list.$result?.[0],host=owner.root;
@@ -396,6 +403,7 @@
 				root.document?.body?.classList.toggle(config.routeClass, isListRoute(frappe));
 				root.document?.body?.classList.toggle(`${config.routeClass}-readonly`, isListRoute(frappe) && providerReadonly(this));
 				if (isListRoute(frappe) && providerActive(this)) config.provider.onActivate?.(this);
+				this.restoreRowDetails?.();
 			},
 			setProviderScope(scope, refresh = true) {
 				if (!config.provider || !["all", "orders", "oa"].includes(scope)) return;
@@ -992,7 +1000,7 @@
 			providerRows: [], providerPayload: null, providerOrderBy: config.defaultSort || 'posting_date desc', page: 0, pageSize: 100, total: null, requestId: 0, querySignature: null,
 			translate: root.__ || (x => x),
 			setPage(value) { this.page = Math.max(0, Number(value) || 0); },
-			activate() { root.document.body.classList.toggle(config.routeClass, active()); },
+			activate() { root.document.body.classList.toggle(config.routeClass, active()); this.restoreRowDetails?.(); },
 			savePreferences() { this.preferences = normalizePreferences(this.preferences, permitted, config.provider.columns); try { root.localStorage?.setItem(key, JSON.stringify(this.preferences)); } catch (_) { /* Rendering must work without storage. */ } surface.$frappe_list.toggleClass('dlp-po-standard', this.preferences.density === 'standard'); },
 			setColumns(columns) { this.preferences.columns = columns; this.savePreferences(); render(); },
 			async clearQuickFilters() { this.resetting = true; this.quick = {}; this.setPage(0); try { this.resetAdvancedFilters?.(); await Promise.all(Object.values(this.controls).map(control => control.set_value(''))); } finally { this.resetting = false; } return this.refresh(); },
