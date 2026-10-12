@@ -961,9 +961,9 @@
 		};
 		frappe.router?.on("change", () => {
 			root.document?.body?.classList.toggle(config.routeClass, isListRoute(frappe));
-			const current = frappe.views?.list_view?.[DOCTYPE] || root.cur_list;
-			root.document?.body?.classList.toggle(`${config.routeClass}-readonly`, isListRoute(frappe) && Boolean(current?.[config.controllerKey] && providerReadonly(current[config.controllerKey])));
-			const list = frappe.views?.list_view?.[DOCTYPE] || root.cur_list;
+			// Native ListFactory caches by route; its doctype key may be an empty namespace.
+			const list = [frappe.get_list_view?.(DOCTYPE), frappe.views?.list_view?.[`List/${DOCTYPE}/List`], frappe.views?.list_view?.[DOCTYPE], root.cur_list].find(isNativeList);
+			root.document?.body?.classList.toggle(`${config.routeClass}-readonly`, isListRoute(frappe) && Boolean(list?.[config.controllerKey] && providerReadonly(list[config.controllerKey])));
 			list?.[config.controllerKey]?.syncDisclosureRowGuard?.(isListRoute(frappe));
 			config.onRouteChange?.(list?.[config.controllerKey], isListRoute(frappe));
 			if (!isListRoute(frappe)) { list?.[config.controllerKey]?.stopInitialOnboarding?.(); list?.[config.controllerKey]?.cancelPendingRowDetails?.(); }
