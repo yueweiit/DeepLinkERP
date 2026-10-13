@@ -512,6 +512,22 @@
 				list.last_args = null;
 				return list.refresh();
 			},
+			async refreshFilters() {
+				if (!list.load_lib) return this.refresh();
+				// Native throttle returns the previous promise for a trailing call.
+				// Wait for the actual dispatch instead, without bypassing its throttle.
+				let resolve, reject;
+				const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+				const pending = this.pendingFilterRefresh = { resolve, reject };
+				try {
+					const refresh = this.refresh();
+					const dispatched = pending.request;
+					Promise.resolve(refresh).catch(error => { if (dispatched) reject(error); });
+					return await promise;
+				} finally {
+					if (this.pendingFilterRefresh === pending) this.pendingFilterRefresh = null;
+				}
+			},
 		};
 		list[config.controllerKey] = controller;
 		shared.bindBusinessDateSort(list, root, controller, undefined, false);
@@ -571,21 +587,40 @@
 			const callback = call.callback;
 			call.callback = (response) => {
 				responseRequests.set(response, request);
-				callback?.(response);
+				try { callback?.(response); } catch (error) { finishFilterRequest(request, error); throw error; }
+			};
+			const error = call.error, always = call.always;
+			call.error = (...args) => {
+				finishFilterRequest(request, args[0] instanceof Error ? args[0] : new Error(controller.translate('筛选更新失败，请重试。')));
+				return error?.(...args);
+			};
+			call.always = response => {
+				if (!response || response.exc || response.session_expired) finishFilterRequest(request, new Error(controller.translate('筛选更新失败，请重试。')));
+				return always?.(response);
 			};
 			return call;
 		};
 		list.no_change = function (call) {
 			const unchanged = originals.no_change.call(this, call);
+			const request = callRequests.get(call), pending = controller.pendingFilterRefresh;
 			// Only the native dispatch gate can distinguish duplicate checks from forced refreshes.
-			if (!unchanged && callRequests.has(call)) {
-				callRequests.get(call).id = ++controller.requestId;
+			if (!unchanged && request) {
+				request.id = ++controller.requestId;
+				controller.lastDispatchedRequest = request;
 				config.onRequestStart?.(controller);
+			}
+			if (pending && !pending.request && request) {
+				const dispatched = unchanged ? controller.lastDispatchedRequest : request;
+				if (dispatched?.key === request.key) {
+					pending.request = dispatched; dispatched.filterRefresh = pending;
+					if (dispatched.complete) finishFilterRequest(dispatched, dispatched.error);
+				} else pending.reject(new Error(controller.translate('筛选更新失败，请重试。')));
 			}
 			return unchanged;
 		};
 		list.prepare_data = function (response) {
 			const request = responseRequests.get(response);
+			controller.renderingRequest = request;
 			// Compare the current filters too: a pending throttled refresh may not have issued its new request yet.
 			const current = this.get_args();
 			if (request && (request.id !== controller.requestId || request.key !== requestKey(current))) return;
@@ -608,10 +643,13 @@
 			config.onRows?.(controller);
 		};
 		list.reset_defaults = function () {
-			originals.reset_defaults.call(this);
-			this.start = controller.page * controller.pageSize;
-			this.page_length = controller.pageSize;
-			this.selected_page_count = controller.pageSize;
+			try {
+				originals.reset_defaults.call(this);
+				this.start = controller.page * controller.pageSize;
+				this.page_length = controller.pageSize;
+				this.selected_page_count = controller.pageSize;
+				finishFilterRequest(controller.renderingRequest);
+			} catch (error) { finishFilterRequest(controller.renderingRequest, error); throw error; }
 		};
 		list.on_filter_change = function (...args) {
 			if (controller.resetting) return;
@@ -812,6 +850,11 @@
 	}
 
 	const filterKey = filter => JSON.stringify(filter.slice(0, 4));
+	function finishFilterRequest(request, error) {
+		if (!request) return;
+		request.complete = true; request.error = error;
+		if (error) request.filterRefresh?.reject(error); else request.filterRefresh?.resolve();
+	}
 	function appliedFilters(controller) {
 		const t = controller.translate, definitions = controller.filterDefinitions ||= new Map([...controller.list.meta.fields, ...(config.controls || [])].map(df => [df.fieldname, df]));
 		const result = [], seen = new Set(), native = controller.list.filter_area?.get?.() || controller.nativeFilterGroup?.get_filters() || controller.originals?.get_args?.call(controller.list)?.filters || [];
@@ -855,7 +898,7 @@
 						group?.update_filter_button?.(); group?.toggle_empty_filters?.(!(group.filters || []).length);
 					}
 					this.setPage(0);
-					try { await this.refresh(); } catch (error) { failure ||= error; }
+					try { await (this.refreshFilters ? this.refreshFilters() : this.refresh()); } catch (error) { failure ||= error; }
 					if (failure) throw failure;
 				}
 				finally {

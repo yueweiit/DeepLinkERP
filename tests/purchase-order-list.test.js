@@ -780,6 +780,32 @@ test('filter buttons are reset and repeated removal is blocked until the request
  assert.equal(list.page.fields_dict.company.value,'B');resolve();await clearing;assert.equal(c.filterMutationBusy,false);
 });
 
+test('native throttled refresh keeps the removal lock until its own dispatched request finishes',async(t)=>{
+ t.mock.timers.enable({apis:['setTimeout','Date'],now:10000});
+ for(const fails of [false,true]) {
+  const {list,c,env}=appliedFilterList(),calls=[];
+  list.load_lib=Promise.resolve(); // Native ListView installs this with its refresh throttle.
+  env.frappe.call=call=>new Promise((resolve,reject)=>calls.push({call,resolve,reject}));
+  useNativeRefreshFlow(list,env);
+  const rawRefresh=list.refresh;
+  list.refresh=require('./fixtures/frappe-native-throttle')(function(){
+   return rawRefresh.call(this).catch(error=>{calls.at(-1).call.error?.(error);});
+  },1000);
+  const priming=c.refresh();calls[0].resolve(unifiedPayload([]));await priming;
+  const removal=c.removeAppliedFilter(c.getAppliedFilters().find(tag=>tag.field==='company'));
+  const result=removal.then(()=>null,error=>error);
+  await new Promise(done=>setImmediate(done));
+  assert.equal(c.filterMutationBusy,true,'old resolved promise must not unlock the queued mutation');
+  await c.removeAppliedFilter(c.getAppliedFilters().find(tag=>tag.field==='status'));
+  assert.equal(list.page.fields_dict.status.value,'Closed');assert.equal(calls.length,1);
+  t.mock.timers.tick(1000);assert.equal(calls.length,2);assert.equal(c.filterMutationBusy,true);
+  assert.deepEqual(JSON.parse(calls[1].call.args.filters),{scope:'orders',status:'Closed'});
+  if(fails)calls[1].reject(new Error('network failed'));else calls[1].resolve(unifiedPayload([]));
+  const error=await result;if(fails)assert.match(error.message,/network failed/);else assert.equal(error,null);
+  assert.equal(c.filterMutationBusy,false);assert.equal(c.resetting,false);
+ }
+});
+
 test('a user filter change during a pending refresh is not cancelled at completion',async(t)=>{
  t.mock.timers.enable({apis:['setTimeout']});const {list,c}=appliedFilterList();let timer,resolve,refreshes=0;
  const debounce=()=>{clearTimeout(timer);timer=setTimeout(()=>{c.setPage(0);refreshes++;},300);};debounce.cancel=()=>clearTimeout(timer);
