@@ -319,4 +319,20 @@ class TestDeliveryNoteCRMEvents(UnitTestCase):
 			update_sales_orders_delivery_process_status(doc)
 
 		enqueue_shipment.assert_not_called()
-		enqueue_mes.assert_called_once_with("DN-001")
+		enqueue_mes.assert_not_called()
+
+	def test_crm_originated_cancellation_does_not_echo_to_crm_or_mes(self):
+		doc = frappe._dict(name="DN-001", company="Test Company", docstatus=2,
+			custom_crm_shipment_no="CRM-SHIP-001")
+		with (
+			patch("crm_integration.crm_integration.delivery_note.is_crm_integration_enabled", return_value=True),
+			patch("crm_integration.crm_integration.delivery_note.get_linked_sales_orders", return_value=["SO-001"]),
+			patch.object(frappe, "get_doc"),
+			patch("crm_integration.crm_integration.delivery_note.get_sales_order_delivery_process_status", return_value="Deliverable"),
+			patch("crm_integration.crm_integration.delivery_note.set_process_status"),
+			patch("crm_integration.crm_integration.delivery_note.enqueue_crm_delivery_note_cancellation_event") as cancellation,
+			patch("crm_integration.crm_integration.delivery_note.enqueue_mes_delivery_note_status_callback") as mes_callback,
+		):
+			update_sales_orders_delivery_process_status(doc)
+		cancellation.assert_not_called()
+		mes_callback.assert_not_called()

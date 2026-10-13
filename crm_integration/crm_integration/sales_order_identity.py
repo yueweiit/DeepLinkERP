@@ -24,7 +24,7 @@ def make_crm_order_lock_name(crm_order_no):
 
 
 @contextmanager
-def crm_sales_order_creation_lock(crm_order_no):
+def crm_sales_order_creation_lock(crm_order_no, hold_until_transaction_end=False):
 	"""Serialize Sales Order creation for one CRM order number across workers."""
 	lock_name = make_crm_order_lock_name(crm_order_no)
 	timeout = cint(frappe.conf.get("crm_order_lock_timeout") or CRM_ORDER_LOCK_TIMEOUT)
@@ -33,7 +33,14 @@ def crm_sales_order_creation_lock(crm_order_no):
 	if not acquired:
 		frappe.throw(_("CRM 销售订单号 {0} 正在处理中，请稍后重试。").format(crm_order_no))
 
+	def release_lock():
+		frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_name,))
+
 	try:
 		yield
 	finally:
-		frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_name,))
+		if hold_until_transaction_end:
+			frappe.db.after_commit.add(release_lock)
+			frappe.db.after_rollback.add(release_lock)
+		else:
+			release_lock()

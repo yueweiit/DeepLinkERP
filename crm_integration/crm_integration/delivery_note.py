@@ -164,6 +164,8 @@ def get_crm_shipment_sales_order(payload):
 		if not frappe.db.exists("Sales Order", sales_order_name):
 			frappe.throw(_("未找到销售订单 {0}。").format(sales_order_name))
 		sales_order = frappe.get_doc("Sales Order", sales_order_name)
+		if sales_order.docstatus != 1:
+			throw_crm_shipment_identity_conflict(_("ERP 销售订单 {0} 已失效，不能用于销售出库。").format(sales_order_name))
 		if crm_order_no and sales_order.get("custom_crm_order_no") != crm_order_no:
 			throw_crm_shipment_identity_conflict(
 				_("ERP 销售订单 {0} 与 CRM 订单号 {1} 不匹配。").format(sales_order_name, crm_order_no)
@@ -172,7 +174,7 @@ def get_crm_shipment_sales_order(payload):
 
 	names = frappe.get_all(
 		"Sales Order",
-		filters={"custom_crm_order_no": crm_order_no},
+		filters={"custom_crm_order_no": crm_order_no, "docstatus": 1},
 		pluck="name",
 		limit_page_length=2,
 	)
@@ -696,7 +698,7 @@ def update_sales_orders_delivery_process_status(doc):
 			enqueue_crm_delivery_note_shipment_event(
 				doc, sales_order_name, process_status
 			)
-		elif doc.docstatus == 2:
+		elif doc.docstatus == 2 and not doc.get(CRM_SHIPMENT_FIELD):
 			enqueue_crm_delivery_note_cancellation_event(
 				doc, sales_order_name, process_status
 			)
@@ -704,7 +706,7 @@ def update_sales_orders_delivery_process_status(doc):
 	frappe.logger().info(
 		f"Delivery Note {doc.name} updated Sales Order delivery process statuses: {', '.join(updated_statuses)}"
 	)
-	if doc.docstatus in (1, 2):
+	if doc.docstatus in (1, 2) and not doc.get(CRM_SHIPMENT_FIELD):
 		enqueue_mes_delivery_note_status_callback(doc.name)
 
 

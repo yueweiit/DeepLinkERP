@@ -1,5 +1,6 @@
 from unittest.mock import call, patch
 
+import frappe
 from frappe.tests import UnitTestCase
 
 from crm_integration.crm_integration.sales_order_identity import (
@@ -33,3 +34,17 @@ class TestSalesOrderIdentity(UnitTestCase):
 				call("SELECT RELEASE_LOCK(%s)", (lock_name,)),
 			],
 		)
+
+	def test_transaction_lock_is_released_by_commit_callback(self):
+		with (
+			patch("crm_integration.crm_integration.sales_order_identity.frappe.db.sql", return_value=[(1,)]) as sql,
+			patch.object(frappe.db, "after_commit") as after_commit,
+			patch.object(frappe.db, "after_rollback") as after_rollback,
+		):
+			with crm_sales_order_creation_lock("CRM-001", hold_until_transaction_end=True):
+				pass
+			self.assertEqual(sql.call_count, 1)
+			self.assertEqual(after_commit.add.call_count, 1)
+			self.assertEqual(after_rollback.add.call_count, 1)
+			after_commit.add.call_args.args[0]()
+			self.assertEqual(sql.call_count, 2)

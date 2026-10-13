@@ -6,15 +6,29 @@ from frappe.tests import UnitTestCase
 
 from crm_integration.crm_integration.api import (
 	create_and_submit_sales_order,
+	create_and_submit_delivery_note,
 	get_existing_sales_order_response,
 	update_sales_order_by_crm_order_no,
 	update_sales_order_items,
+	validate_sales_order_update_status,
 	validate_sales_order_payload,
 	validate_sales_order_update_payload,
 )
 
 
 class TestCRMAPI(UnitTestCase):
+	def test_crm_shipment_uses_order_lock_until_commit(self):
+		payload = {"custom_crm_order_no": "CRM-001", "items": []}
+		with (
+			patch("crm_integration.crm_integration.api.validate_crm_api_user"),
+			patch("crm_integration.crm_integration.api.get_shipment_request_payload", return_value=payload),
+			patch("crm_integration.crm_integration.api.crm_sales_order_creation_lock", return_value=nullcontext()) as lock,
+			patch("crm_integration.crm_integration.api.create_and_submit_delivery_note_from_crm", return_value={"status": "success"}),
+		):
+			result = create_and_submit_delivery_note(payload)
+		self.assertEqual(result["status"], "success")
+		lock.assert_called_once_with("CRM-001", hold_until_transaction_end=True)
+
 	def test_sales_order_create_requires_crm_order_no(self):
 		with self.assertRaises(frappe.ValidationError):
 			validate_sales_order_payload(
@@ -154,6 +168,16 @@ class TestCRMAPI(UnitTestCase):
 				doc,
 				[{"name": row.name, "new_item_code": "ITEM-NEW"}],
 			)
+
+	def test_sales_order_update_is_rejected_after_mes_push(self):
+		doc = MagicMock()
+		doc.name = "SO-001"
+		doc.get.side_effect = lambda fieldname: {
+			"custom_process_status": "Pending Production"
+		}.get(fieldname)
+
+		with self.assertRaisesRegex(frappe.ValidationError, "推送 MES 前"):
+			validate_sales_order_update_status(doc)
 
 	def test_sales_order_item_correction_is_rejected_with_downstream_qty(self):
 		row = frappe._dict(name="SOI-001", item_code="ITEM-OLD", delivered_qty=1)

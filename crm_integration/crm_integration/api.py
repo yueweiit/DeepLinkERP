@@ -11,7 +11,6 @@ from crm_integration.crm_integration.integration_log import create_crm_log, upda
 from crm_integration.crm_integration.sales_order import (
 	PENDING_CONFIRMATION,
 	PENDING_DEPOSIT_CONFIRMATION,
-	PENDING_PRODUCTION,
 )
 from crm_integration.crm_integration.sales_order_identity import (
 	crm_sales_order_creation_lock,
@@ -106,7 +105,7 @@ def create_and_submit_sales_order(sales_order=None):
 	if not is_crm_integration_enabled(payload.get("company")):
 		throw_crm_integration_disabled(payload.get("company"))
 
-	with crm_sales_order_creation_lock(payload["custom_crm_order_no"]):
+	with crm_sales_order_creation_lock(payload["custom_crm_order_no"], hold_until_transaction_end=True):
 		existing_response = get_existing_sales_order_response(payload)
 		if existing_response:
 			log_existing_sales_order_request(payload, existing_response)
@@ -115,7 +114,7 @@ def create_and_submit_sales_order(sales_order=None):
 		return create_sales_order(payload)
 
 
-def create_sales_order(payload):
+def create_sales_order(payload, resubmission=False):
 	ensure_sales_persons_exist(payload)
 	crm_log = create_crm_log(
 		direction="Inbound",
@@ -128,6 +127,8 @@ def create_sales_order(payload):
 
 	try:
 		doc = frappe.get_doc(payload)
+		if resubmission:
+			doc.flags.crm_resubmission = True
 		doc.insert(ignore_permissions=True)
 		preserve_explicit_zero_rates(doc, payload)
 		doc.submit()
@@ -165,13 +166,15 @@ def create_sales_order(payload):
 
 def get_existing_sales_order_response(payload):
 	crm_order_no = payload["custom_crm_order_no"]
-	sales_order_names = get_sales_order_names_by_crm_order_no(crm_order_no)
+	sales_order_names = get_sales_order_names_by_crm_order_no(crm_order_no, limit=0)
 	if not sales_order_names:
 		return None
-	if len(sales_order_names) > 1:
-		frappe.throw(_("CRM 销售订单号 {0} 已对应多笔销售订单，请先处理重复数据。").format(crm_order_no))
-
-	doc = frappe.get_doc("Sales Order", sales_order_names[0])
+	active_docs = [doc for doc in (frappe.get_doc("Sales Order", name) for name in sales_order_names) if doc.docstatus == 1]
+	if len(active_docs) > 1:
+		frappe.throw(_("CRM 销售订单号 {0} 已对应多笔有效销售订单，请先处理重复数据。").format(crm_order_no))
+	if not active_docs:
+		frappe.throw(_("CRM 销售订单号 {0} 只有历史或草稿单；重新提交请使用专用接口。").format(crm_order_no))
+	doc = active_docs[0]
 	if doc.get("company") != payload.get("company"):
 		frappe.throw(_("CRM 销售订单号 {0} 已被其他公司使用。").format(crm_order_no))
 	if doc.docstatus != 1:
@@ -230,9 +233,15 @@ def update_sales_order_by_crm_order_no(sales_order: Any = None):
 	validate_sales_order_update_payload(payload)
 
 	crm_order_no = payload["custom_crm_order_no"]
+	with crm_sales_order_creation_lock(crm_order_no, hold_until_transaction_end=True):
+		return update_existing_sales_order(payload)
+
+
+def update_existing_sales_order(payload):
+	crm_order_no = payload["custom_crm_order_no"]
 	sales_order_names = frappe.get_all(
 		"Sales Order",
-		filters={"custom_crm_order_no": crm_order_no},
+		filters={"custom_crm_order_no": crm_order_no, "docstatus": 1},
 		pluck="name",
 		limit_page_length=2,
 	)
@@ -241,7 +250,10 @@ def update_sales_order_by_crm_order_no(sales_order: Any = None):
 	if len(sales_order_names) > 1:
 		frappe.throw(_("CRM 销售订单号 {0} 对应多笔销售订单，无法安全修改。").format(crm_order_no))
 
+	locked_modified = frappe.db.get_value("Sales Order", sales_order_names[0], "modified", for_update=True)
 	doc = frappe.get_doc("Sales Order", sales_order_names[0])
+	if str(doc.modified) != str(locked_modified):
+		frappe.throw(_("销售订单刚被其他请求修改，请重新查询后重试。"))
 	if not is_crm_integration_enabled(doc.get("company")):
 		throw_crm_integration_disabled(doc.get("company"))
 	validate_sales_order_update_status(doc)
@@ -384,15 +396,16 @@ def replace_sales_order_item(doc, row, new_item_code):
 
 
 def validate_sales_order_update_status(doc):
+	if doc.get("custom_crm_production_started"):
+		frappe.throw(_("销售订单已进入生产阶段，不能修改。"))
 	allowed_statuses = {
 		PENDING_CONFIRMATION,
 		PENDING_DEPOSIT_CONFIRMATION,
-		PENDING_PRODUCTION,
 	}
 	process_status = doc.get("custom_process_status")
 	if process_status and process_status not in allowed_statuses:
 		frappe.throw(
-			_("销售订单 {0} 当前状态为 {1}，只有生产中及之前的状态允许修改。").format(
+			_("销售订单 {0} 当前状态为 {1}，只有推送 MES 前的状态允许修改。").format(
 				doc.name, process_status
 			)
 		)
@@ -495,6 +508,12 @@ def create_and_submit_delivery_note(shipment=None):
 	"""Create or submit the ERP Delivery Note for one CRM shipment."""
 	validate_crm_api_user()
 	payload = get_shipment_request_payload(shipment)
+	crm_order_no = payload.get("custom_crm_order_no") if isinstance(payload, dict) else None
+	if not crm_order_no and isinstance(payload, dict) and payload.get("sales_order"):
+		crm_order_no = frappe.db.get_value("Sales Order", payload["sales_order"], "custom_crm_order_no")
+	if crm_order_no:
+		with crm_sales_order_creation_lock(crm_order_no, hold_until_transaction_end=True):
+			return create_and_submit_delivery_note_from_crm(payload)
 	return create_and_submit_delivery_note_from_crm(payload)
 
 
@@ -520,6 +539,48 @@ def get_shipment_request_payload(shipment=None):
 	if isinstance(wrapped_payload, dict):
 		return wrapped_payload
 	return dict(frappe.form_dict)
+
+
+@frappe.whitelist(methods=["GET", "POST"])
+def get_crm_sales_order_state(crm_order_no=None, crm_order_id=None, erp_order_id=None):
+	from crm_integration.crm_integration.order_revision import get_order_state
+
+	return get_order_state(crm_order_no, crm_order_id, erp_order_id)
+
+
+@frappe.whitelist(methods=["POST"])
+def create_crm_sales_order(request=None):
+	from crm_integration.crm_integration.order_revision import create_order
+
+	return create_order(request)
+
+
+@frappe.whitelist(methods=["POST"])
+def revise_crm_sales_order(request=None):
+	from crm_integration.crm_integration.order_revision import revise_order
+
+	return revise_order(request)
+
+
+@frappe.whitelist(methods=["POST"])
+def revoke_crm_sales_order(request=None):
+	from crm_integration.crm_integration.order_revision import revoke_order
+
+	return revoke_order(request)
+
+
+@frappe.whitelist(methods=["POST"])
+def resubmit_crm_sales_order(request=None):
+	from crm_integration.crm_integration.order_revision import resubmit_order
+
+	return resubmit_order(request)
+
+
+@frappe.whitelist(methods=["GET", "POST"])
+def get_crm_order_operation_result(operation_id=None, crm_order_no=None):
+	from crm_integration.crm_integration.order_revision import get_operation_result
+
+	return get_operation_result(operation_id, crm_order_no)
 
 
 # ---------------------------------------------------------------------------
