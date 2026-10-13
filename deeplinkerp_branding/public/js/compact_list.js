@@ -837,20 +837,35 @@
 		return {
 			getAppliedFilters() { return appliedFilters(this); },
 			async mutateFilters(change) {
-				if (this.resetting) return;
+				if (this.filterMutationBusy) return;
 				const area = this.list.filter_area, previous = area?.trigger_refresh;
+				this.filterMutationBusy = true;
 				this.resetting = true;
+				area?.debounced_refresh_list_view?.cancel?.();
 				if (area) area.trigger_refresh = false;
 				this.$appliedFilters?.find('button').prop('disabled', true);
 				this.$filters?.find('.dlp-po-clear-filters').prop('disabled', true);
-				try { await change(); this.setPage(0); }
-				finally {
+				let failure;
+				try {
+					try { await change(); } catch (error) { failure = error; }
+					area?.debounced_refresh_list_view?.cancel?.();
 					if (area) area.trigger_refresh = previous;
 					this.resetting = false;
+					for (const group of new Set([area?.filter_list,this.nativeFilterGroup,this.orFilterGroup])) {
+						group?.update_filter_button?.(); group?.toggle_empty_filters?.(!(group.filters || []).length);
+					}
+					this.setPage(0);
+					try { await this.refresh(); } catch (error) { failure ||= error; }
+					if (failure) throw failure;
+				}
+				finally {
+					if (this.resetting) area?.debounced_refresh_list_view?.cancel?.();
+					if (area) area.trigger_refresh = previous;
+					this.resetting = false;
+					this.filterMutationBusy = false;
 					movePurchaseNativeFilterSection(this);
 					this.$filters?.find('.dlp-po-clear-filters').prop('disabled', false);
 				}
-				return this.refresh();
 			},
 			async removeAppliedFilter(tag) {
 				if (!tag || !this.getAppliedFilters().some(current => current.key === tag.key)) return;
@@ -894,7 +909,7 @@
 		controller.appliedFilterTags = controller.getAppliedFilters();
 		controller.$filterTags?.html(controller.appliedFilterTags.map((tag,index) => {
 			const text = `${tag.label} ${tag.operator} ${tag.value}`.trim(), remove = `${controller.translate('移除筛选')}：${text}`;
-			return `<span class="dlp-applied-filter"><span title="${escapeHTML(text)}">${escapeHTML(text)}</span><button type="button" data-applied-filter="${index}" aria-label="${escapeHTML(remove)}" title="${escapeHTML(remove)}">×</button></span>`;
+			return `<span class="dlp-applied-filter"><span title="${escapeHTML(text)}">${escapeHTML(text)}</span><button type="button" data-applied-filter="${index}"${controller.filterMutationBusy ? ' disabled' : ''} aria-label="${escapeHTML(remove)}" title="${escapeHTML(remove)}">×</button></span>`;
 		}).join('')).toggle(Boolean(controller.appliedFilterTags.length));
 	}
 	function mountControls(controller) {

@@ -754,6 +754,48 @@ test('failed filter mutation restores flags and does not drop unrelated native c
  assert.equal(c.resetting,false);assert.equal(list.filter_area.trigger_refresh,true);assert.equal(list.page.fields_dict.company.get_value(),'YUEWEI MX');
 });
 
+test('native delayed refresh is cancelled on filter batches and cannot reset the next page',async(t)=>{
+ t.mock.timers.enable({apis:['setTimeout']});
+ for(const action of ['remove','clear']) {
+  const {list,c}=appliedFilterList();let timer,refreshes=0;
+  const debounce=()=>{clearTimeout(timer);timer=setTimeout(()=>{c.setPage(0);c.refresh();},300);};debounce.cancel=()=>clearTimeout(timer);
+  list.filter_area.debounced_refresh_list_view=debounce;c.refresh=async()=>refreshes++;
+  for(const control of Object.values(list.page.fields_dict))control.set_value=async value=>{control.value=value;debounce();};
+  debounce();
+  if(action==='remove')await c.removeAppliedFilter(c.getAppliedFilters().find(tag=>tag.field==='status'));else await c.clearQuickFilters();
+  assert.equal(refreshes,1,action);c.setPage(1);t.mock.timers.tick(350);
+  assert.equal(refreshes,1,`${action}: no second request`);assert.equal(c.page,1,`${action}: no late page reset`);
+ }
+});
+
+test('filter buttons are reset and repeated removal is blocked until the request settles',async()=>{
+ const {list,c,add}=appliedFilterList();add(['Purchase Order Item','item_code','=','ITEM-A']);
+ let count=1,empty=false,resolve;
+ list.filter_area.filter_list.update_filter_button=()=>{count=list.filter_area.filter_list.filters.length;};
+ list.filter_area.filter_list.toggle_empty_filters=value=>{empty=value;};
+ c.refresh=()=>new Promise(done=>{resolve=done;});
+ const clearing=c.clearQuickFilters();await new Promise(done=>setImmediate(done));
+ assert.equal(count,0);assert.equal(empty,true);assert.equal(c.filterMutationBusy,true);
+ list.page.fields_dict.company.value='B';await c.removeAppliedFilter(c.getAppliedFilters().find(t=>t.field==='company'));
+ assert.equal(list.page.fields_dict.company.value,'B');resolve();await clearing;assert.equal(c.filterMutationBusy,false);
+});
+
+test('a user filter change during a pending refresh is not cancelled at completion',async(t)=>{
+ t.mock.timers.enable({apis:['setTimeout']});const {list,c}=appliedFilterList();let timer,resolve,refreshes=0;
+ const debounce=()=>{clearTimeout(timer);timer=setTimeout(()=>{c.setPage(0);refreshes++;},300);};debounce.cancel=()=>clearTimeout(timer);
+ list.filter_area.debounced_refresh_list_view=debounce;c.refresh=()=>new Promise(done=>{resolve=done;});
+ const removal=c.removeAppliedFilter(c.getAppliedFilters().find(tag=>tag.field==='status'));await new Promise(done=>setImmediate(done));
+ list.page.fields_dict.company.value='B';debounce();resolve();await removal;t.mock.timers.tick(350);assert.equal(refreshes,1);
+});
+
+test('partially failed clear refreshes actual remaining filters before reporting the failure',async()=>{
+ const {list,c}=appliedFilterList();c.setPage(3);c.quick.search='old';let shown,refreshes=0;
+ list.page.fields_dict.status.set_value=async()=>{throw new Error('status failed');};
+ c.refresh=async()=>{refreshes++;shown=list.filter_area.get();};
+ await assert.rejects(c.clearQuickFilters(),/status failed/);
+ assert.deepEqual(shown,[['Purchase Order','status','=','Closed']]);assert.equal(c.page,0);assert.equal(refreshes,1);assert.equal(c.filterMutationBusy,false);
+});
+
 function savedFilterPage() {
 	const groups = [];
 	const collection = (matches) => ({

@@ -10,6 +10,16 @@ test('unified purchase view preserves freezing through supplier like native purc
  assert.equal(adapter.configure([{fieldname:'name'},{fieldname:'supplier_name'}]).freezeUntil,'supplier_name');
 });
 
+test('matching advanced and standard company conditions retain the advanced PO-only scope in list and export',async()=>{
+ const filter=['Purchase Order','company','=','YUEWEI MX'];
+ const c={quick:{},providerScope:'oa',page:0,pageSize:100,nativeControlFields:new Set(['company']),controls:{company:{get_value:()=>filter[3]}},list:{filter_area:{filter_list:{get_filters:()=>[filter]}}}};
+ const provider=adapter.configure([]),native={filters:[filter],or_filters:[],order_by:'transaction_date desc'},args=provider.getArgs(c,native);
+ assert.deepEqual(JSON.parse(args.native_filters),[filter]);assert.equal(JSON.parse(args.filters).company,undefined);
+ let exported;c.originals={get_args:()=>native};c.preferences={columns:['name']};
+ c.root={DeepLinkERPPurchaseOrderExport:{downloadWorkbook(){},async fetchNativeWorkbook(_,args){exported=args;return new Uint8Array();}}};
+ await provider.exportCurrent(c);assert.equal(exported.native_filters,args.native_filters);assert.equal(exported.filters,args.filters);
+});
+
 function fixture(options={}) {
 	const native = options.columns || [{ fieldname: "name", label: "采购订单号", width: 166 }];
 	const provider = options.provider || {

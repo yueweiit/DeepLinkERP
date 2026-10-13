@@ -43,10 +43,10 @@
 			}
 			controller.providerNativeOrder = order;
 		}
-		const shared = filters(controller), native = [];
+		const shared = filters(controller), native = [], advanced = new Set((controller.list?.filter_area?.filter_list?.get_filters?.() || []).map(filter=>JSON.stringify(filter.slice(0,4))));
 		for (const filter of nativeArgs.filters || []) {
 			const [doctype,field,operator,value] = filter;
-			if (doctype === 'Purchase Order' && ['company','status','advance_payment_status'].includes(field) && operator === '=' && controller.nativeControlFields?.has(field) && controller.controls[field].get_value() === value) {
+			if (doctype === 'Purchase Order' && ['company','status','advance_payment_status'].includes(field) && operator === '=' && !advanced.has(JSON.stringify(filter.slice(0,4))) && controller.nativeControlFields?.has(field) && controller.controls[field].get_value() === value) {
 				if (!(field === 'company' && controller.quick?.pending_company)) shared[field] = value;
 			} else native.push(filter);
 		}
