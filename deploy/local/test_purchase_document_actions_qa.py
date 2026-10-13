@@ -897,40 +897,72 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
 	def test_source_sync_complete_pending_invalid_and_durable_replay(self):
 		from deeplinkerp_branding.services import purchase_operation
 
-		complete = self.purchase_source_row()
-		missing = self.purchase_source_row()
-		missing["form_component_values"] = [
-			v for v in missing["form_component_values"] if v["name"] != "采购公司"
-		]
-		invalid = self.purchase_source_row()
-		invalid["result"] = "refuse"
-		running = self.purchase_source_row()
-		running["status"] = "RUNNING"
+		process_codes = (
+			"PROC-BFDF6F09-4551-43B3-8C55-537AA74A241B",
+			"PROC-6E11B527-2F82-439C-817D-C868DE086C97",
+			"PROC-E69FCD3E-E374-4C54-9D8F-6E1F55AD741F",
+			"PROC-52D5584D-ED10-4B8B-9C7A-9D67257BF6EE",
+			"PROC-98934E07-96ED-491C-8650-DFE8C3B707BF",
+			"PROC-CA023EF7-CE63-4A0B-B4BB-66482C0E9972",
+		)
+		scenarios = {}
+		for code in process_codes:
+			rows = {
+				case: self.purchase_source_row() for case in ("complete", "missing", "invalid", "running")
+			}
+			for row in rows.values():
+				row["process_code"] = code
+			rows["missing"]["form_component_values"] = [
+				v for v in rows["missing"]["form_component_values"] if v["name"] != "采购公司"
+			]
+			rows["invalid"]["result"] = "refuse"
+			rows["running"]["status"] = "RUNNING"
+			scenarios[code] = rows
 		self.commit_fixture("Item", "QA-ATOMIC-")
 		before = {dt: frappe.db.count(dt) for dt in self.types}
 		key = str(uuid.uuid4())
-		with self.source_snapshot([complete, missing, invalid, running]) as sources:
+		with self.source_snapshot([row for rows in scenarios.values() for row in rows.values()]) as sources:
 			result = sources.sync_purchase_sources(request_id=key)
 			self.assertEqual(
-				(result["created"], result["pending"]),
-				(1, 1),
+				(result["created"], result["pending"], result["invalid"]),
+				(6, 6, 12),
 				[
 					frappe.db.get_value(sources.DOCTYPE, row["name"], sources.PENDING_FIELD)
 					for row in result["acknowledgements"]
 				],
 			)
-			po = frappe.get_doc("Purchase Order", result["documents"][0]["name"])
+			orders = [frappe.get_doc("Purchase Order", row["name"]) for row in result["documents"]]
+			self.assertEqual(len({po.name for po in orders}), 6)
+			self.assertEqual(frappe.db.count("Purchase Order"), before["Purchase Order"] + 6)
 			self.assertEqual(
-				(po.docstatus, str(po.transaction_date), str(po.schedule_date)),
-				(0, "2026-01-01", "2026-02-02"),
+				{frappe.db.get_value(sources.DOCTYPE, po.custom_oa_purchase_expense, "process_code") for po in orders},
+				set(process_codes),
 			)
-			self.assertEqual((po.items[0].qty, po.items[0].rate, po.grand_total), (2, 50, 100))
-			source = frappe.get_doc(sources.DOCTYPE, po.custom_oa_purchase_expense)
-			self.assertEqual(source.purchase_order, po.name)
-			pending = sources._cached_doc(sources._normalize(missing))
-			self.assertIn("采购公司", pending.get(sources.PENDING_FIELD))
-			self.assertEqual(pending.source_pending, 0)
-			self.assertEqual(sources._cached_doc(sources._normalize(running)).source_pending, 1)
+			for po in orders:
+				source = frappe.get_doc(sources.DOCTYPE, po.custom_oa_purchase_expense)
+				with self.subTest(code=source.process_code):
+					self.assertEqual(source.purchase_order, po.name)
+					self.assertEqual(
+						source.process_instance_id,
+						scenarios[source.process_code]["complete"]["process_instance_id"],
+					)
+					self.assertEqual(
+						(po.docstatus, str(po.transaction_date), str(po.schedule_date)),
+						(0, "2026-01-01", "2026-02-02"),
+					)
+					self.assertEqual((po.items[0].qty, po.items[0].rate, po.grand_total), (2, 50, 100))
+			for code, rows in scenarios.items():
+				with self.subTest(code=code):
+					pending = sources._cached_doc(sources._normalize(rows["missing"]))
+					self.assertIn("采购公司", pending.get(sources.PENDING_FIELD))
+					self.assertEqual(pending.source_pending, 0)
+					self.assertFalse(pending.purchase_order)
+					invalid = sources._cached_doc(sources._normalize(rows["invalid"]))
+					self.assertEqual(invalid.source_invalid, 1)
+					self.assertFalse(invalid.purchase_order)
+					running = sources._cached_doc(sources._normalize(rows["running"]))
+					self.assertEqual((running.source_pending, running.source_invalid), (1, 1))
+					self.assertFalse(running.purchase_order)
 			for dt in (
 				"Purchase Receipt",
 				"Purchase Invoice",
@@ -948,15 +980,18 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
 			):
 				replay = sources.sync_purchase_sources(request_id=key)
 			self.assertTrue(replay["reused"])
-			self.assertEqual(replay["created"], 1)
+			self.assertEqual(replay["created"], 6)
 			self.assertEqual(replay["documents"], result["documents"])
 			# A new run preserves linked native manual edits and never creates a duplicate.
-			po = frappe.get_doc("Purchase Order", po.name)
-			po.items[0].rate = 55
-			po.save()
+			for po in orders:
+				po.reload()
+				po.items[0].rate = 55
+				po.save()
 			again = sources.sync_purchase_sources(request_id=str(uuid.uuid4()))
-			self.assertEqual((again["created"], again["already_linked"]), (0, 1))
-			self.assertEqual(frappe.db.get_value("Purchase Order Item", po.items[0].name, "rate"), 55)
+			self.assertEqual((again["created"], again["already_linked"]), (0, 6))
+			self.assertEqual(frappe.db.count("Purchase Order"), before["Purchase Order"] + 6)
+			for po in orders:
+				self.assertEqual(frappe.db.get_value("Purchase Order Item", po.items[0].name, "rate"), 55)
 			frappe.db.commit()
 			self.remember_new_names()
 			original_receipt = frappe.db.get_value(
@@ -970,13 +1005,17 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
 				),
 				original_receipt,
 			)
-			self.assertEqual(frappe.db.get_value("Purchase Order Item", po.items[0].name, "rate"), 55)
+			self.assertEqual(frappe.db.count("Purchase Order"), before["Purchase Order"] + 6)
+			for po in orders:
+				self.assertEqual(frappe.db.get_value("Purchase Order Item", po.items[0].name, "rate"), 55)
+			for dt in ("Purchase Receipt", "Purchase Invoice", "Payment Entry", "Stock Ledger Entry", "GL Entry"):
+				self.assertEqual(frappe.db.count(dt), before[dt])
 		receipt = json.loads(
 			frappe.db.get_value(
 				"Integration Request", purchase_operation.identity("Administrator", key), "output"
 			)
 		)
-		self.assertEqual(receipt["result"]["created"], 1)
+		self.assertEqual(receipt["result"]["created"], 6)
 		self.assertTrue(receipt["acknowledgements"])
 
 	def test_source_sync_linked_only_replay_rechecks_current_purchase_order_read_acl(self):

@@ -5,6 +5,16 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 
+EXPECTED_PROCESS_CODES = (
+    "PROC-BFDF6F09-4551-43B3-8C55-537AA74A241B",
+    "PROC-6E11B527-2F82-439C-817D-C868DE086C97",
+    "PROC-E69FCD3E-E374-4C54-9D8F-6E1F55AD741F",
+    "PROC-52D5584D-ED10-4B8B-9C7A-9D67257BF6EE",
+    "PROC-98934E07-96ED-491C-8650-DFE8C3B707BF",
+    "PROC-CA023EF7-CE63-4A0B-B4BB-66482C0E9972",
+)
+
+
 def source(**values):
     return dict({"corp_id":"corp", "process_instance_id":"i1", "business_id":"DT-1",
         "process_code":"PROC-BFDF6F09-4551-43B3-8C55-537AA74A241B", "status":"COMPLETED", "result":"agree",
@@ -24,25 +34,32 @@ class PurchaseSourceContractTest(unittest.TestCase):
 		self.assertIsNotNone(self.module, "采购来源契约尚未实现")
 
 	def test_scope_requires_purchase_template_recognized_region_and_china_year(self):
-		self.assertTrue(self.module.in_scope(source()))
-		# Confirmed original purchase-expense template, not an operating template.
-		newer = source(process_code="PROC-E69FCD3E-E374-4C54-9D8F-6E1F55AD741F", status="RUNNING")
-		self.assertTrue(self.module.in_scope(newer))
-		self.assertFalse(self.module.normalize(newer)["eligible"])
-		for patch in (
-			{"process_code": "operation"},
-			{"create_time": datetime(2025, 12, 31, 15, 59, tzinfo=timezone.utc)},
-			{"create_time": datetime(2026, 12, 31, 16, tzinfo=timezone.utc)},
-		):
-			self.assertFalse(self.module.in_scope(source(**patch)))
-		for region in ("美国USA", "", "China待确认", "Mexico待确认"):
-			row = source()
-			row["form_component_values"][0]["value"] = region
-			self.assertFalse(self.module.in_scope(row))
+		self.assertEqual(self.module.PROCESS_CODES, EXPECTED_PROCESS_CODES)
+		for code in EXPECTED_PROCESS_CODES:
+			for region in ("中国China", "墨西哥Mexico"):
+				with self.subTest(code=code, region=region):
+					row = source(process_code=code)
+					row["form_component_values"][0]["value"] = region
+					self.assertTrue(self.module.in_scope(row))
+					self.assertTrue(self.module.normalize(row)["eligible"])
+					for values in (
+						{"process_code": "operation"},
+						{"create_time": datetime(2025, 12, 31, 15, 59, tzinfo=timezone.utc)},
+						{"create_time": datetime(2026, 12, 31, 16, tzinfo=timezone.utc)},
+					):
+						outside = {**row, **values}
+						self.assertFalse(self.module.in_scope(outside))
+						self.assertFalse(self.module.normalize(outside)["eligible"])
+			for region in ("美国USA", "", "China待确认", "Mexico待确认"):
+				with self.subTest(code=code, region=region):
+					row = source(process_code=code)
+					row["form_component_values"][0]["value"] = region
+					self.assertFalse(self.module.in_scope(row))
+					self.assertFalse(self.module.normalize(row)["eligible"])
 
 	def test_mexico_internal_molds_use_only_fixed_purchase_templates_and_known_regions(self):
 		for region in ("墨西哥", "墨西哥Mexico", "墨西哥México", "墨西哥 México", "Mexico", "México"):
-			for code in self.module.PROCESS_CODES:
+			for code in EXPECTED_PROCESS_CODES:
 				with self.subTest(region=region, code=code):
 					row = source(process_code=code)
 					row["form_component_values"][0]["value"] = region
@@ -129,16 +146,22 @@ class PurchaseSourceContractTest(unittest.TestCase):
 		self.assertEqual(occurrences.call_count, 1)
 
 	def test_only_completed_agree_without_deletion_can_convert(self):
-		for status, result, expected in [
-			("COMPLETED", "agree", True),
-			("COMPLETED", "refuse", False),
-			("RUNNING", "agree", False),
-			("REJECTED", None, False),
-		]:
-			self.assertEqual(
-				self.module.normalize(source(status=status, result=result))["eligible"], expected
-			)
-		self.assertFalse(self.module.normalize(source(deleted_at="2026-10-01"))["eligible"])
+		for code in EXPECTED_PROCESS_CODES:
+			for status, result, expected in [
+				("COMPLETED", "agree", True),
+				("COMPLETED", "refuse", False),
+				("RUNNING", "agree", False),
+				("REJECTED", None, False),
+				("WITHDRAWN", "agree", False),
+			]:
+				with self.subTest(code=code, status=status, result=result):
+					row = source(process_code=code, status=status, result=result)
+					self.assertTrue(self.module.in_scope(row))
+					self.assertEqual(self.module.normalize(row)["eligible"], expected)
+			with self.subTest(code=code, deleted=True):
+				row = source(process_code=code, deleted_at="2026-10-01")
+				self.assertTrue(self.module.in_scope(row))
+				self.assertFalse(self.module.normalize(row)["eligible"])
 
 	def test_original_items_and_amount_are_authoritative_not_planned_payment(self):
 		row = source()
