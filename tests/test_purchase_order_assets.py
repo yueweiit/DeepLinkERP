@@ -43,8 +43,8 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 
 	def test_unified_adapter_loads_after_cache_busted_shared_engine(self):
 		scripts = hooks.app_include_js
-		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.30"
-		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.12"
+		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.31"
+		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.13"
 		self.assertIn(engine, scripts)
 		self.assertIn(adapter, scripts)
 		self.assertLess(scripts.index(engine), scripts.index(adapter))
@@ -62,7 +62,7 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		self.assertIn(crossborder, scripts)
 		self.assertEqual(sum("/crossborder_procurement.js" in path for path in scripts), 1)
 		self.assertLess(scripts.index(payments), scripts.index(crossborder))
-		self.assertLess(scripts.index(crossborder), scripts.index("/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.12"))
+		self.assertLess(scripts.index(crossborder), scripts.index("/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.13"))
 		self.assertIn("/assets/deeplinkerp_branding/css/purchase_payments.css?v=0.0.9", hooks.app_include_css)
 		self.assertNotIn("crossborder_procurement", str(getattr(hooks, "web_include_js", None)))
 
@@ -79,7 +79,7 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 	def test_procurement_keeps_readable_sidebar_and_refreshes_styles(self):
 		css = (Path(__file__).resolve().parents[1] / "deeplinkerp_branding/public/css/purchase_order_list.css").read_text()
 		self.assertNotRegex(css, r"body\.dlp-purchase-order-grid-active:not\(\.dlp-mes-navigation-enabled\) \.body-sidebar")
-		self.assertIn("/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.26", hooks.app_include_css)
+		self.assertIn("/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.27", hooks.app_include_css)
 
 	def test_purchase_source_identity_stays_one_line_in_the_physical_table(self):
 		css = (Path(__file__).resolve().parents[1] / "deeplinkerp_branding/public/css/purchase_order_list.css").read_text()
