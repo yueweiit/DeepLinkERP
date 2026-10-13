@@ -108,14 +108,19 @@ def patch_main_nginx(source: bytes) -> bytes:
 		b"location / {\n        proxy_pass http://127.0.0.1:8888;",
 	)
 	if (
-		any(main.count(item) != 1 for item in required)
+		any(
+			len(re.findall(rb"^[ \t]*" + re.escape(item) + rb"[ \t]*(?:#[^\n]*)?$", main, re.MULTILINE)) != 1
+			for item in required
+		)
 		or main.count(b"proxy_pass http://127.0.0.1:8888") != 3
 		or _active_directives(main, b"server_name") != [b"deeplinkerp.com *.deeplinkerp.com"]
 		or _active_directives(main, b"listen") != [b"443 ssl"]
 		or not redirect.lstrip(b"\n").startswith(b"server {\n")
 		or _active_directives(redirect, b"server_name") != [b"deeplinkerp.com *.deeplinkerp.com"]
 		or _active_directives(redirect, b"listen") != [b"80"]
-		or b"return 301 https://$host$request_uri;" not in redirect
+		or not re.search(
+			rb"^[ \t]*return 301 https://\$host\$request_uri;[ \t]*(?:#[^\n]*)?$", redirect, re.MULTILINE
+		)
 	):
 		raise ValueError("Unknown or ambiguous main HTTPS/HTTP server shape")
 	return HTTP_MAPS + SERVER_HEADER + SERVER_GATE + source[len(SERVER_HEADER) :]

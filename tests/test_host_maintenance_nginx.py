@@ -80,6 +80,14 @@ class HostMaintenancePatchTests(unittest.TestCase):
 			SOURCE.replace(b"listen 80;", b"listen 80;\n    listen 8080; server_name other.example;"),
 			SOURCE.replace(b"listen 80;", b"listen 80;\n    listen\n    8080;"),
 			SOURCE.replace(b"location = /api/v1/mes/stock-entries", b"location /unrelated"),
+			SOURCE.replace(
+				b"location = /api/v1/mes/stock-entries {",
+				b"# location = /api/v1/mes/stock-entries {\n    location /unrelated {",
+			),
+			SOURCE.replace(
+				b"return 301 https://$host$request_uri;",
+				b"# return 301 https://$host$request_uri;\n    return 404;",
+			),
 			SOURCE.replace(b"proxy_pass http://127.0.0.1:8888", b"proxy_pass http://other", 3),
 		):
 			with self.subTest(source=source), self.assertRaises(ValueError):
