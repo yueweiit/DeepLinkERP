@@ -43,7 +43,14 @@
 			}
 			controller.providerNativeOrder = order;
 		}
-		return { filters: JSON.stringify(filters(controller)), native_filters: JSON.stringify(nativeArgs.filters || []), native_or_filters: JSON.stringify(nativeArgs.or_filters || []), start: controller.page * controller.pageSize, page_length: controller.pageSize, order_by: controller.providerOrderBy || "transaction_date desc" };
+		const shared = filters(controller), native = [];
+		for (const filter of nativeArgs.filters || []) {
+			const [doctype,field,operator,value] = filter;
+			if (doctype === 'Purchase Order' && ['company','status','advance_payment_status'].includes(field) && operator === '=' && controller.nativeControlFields?.has(field) && controller.controls[field].get_value() === value) {
+				if (!(field === 'company' && controller.quick?.pending_company)) shared[field] = value;
+			} else native.push(filter);
+		}
+		return { filters: JSON.stringify(shared), native_filters: JSON.stringify(native), native_or_filters: JSON.stringify(nativeArgs.or_filters || []), start: controller.page * controller.pageSize, page_length: controller.pageSize, order_by: controller.providerOrderBy || "transaction_date desc" };
 	}
 	function request(controller, nativeArgs) { return { method: `${SERVICE}get_unified_purchase_list`, args: getArgs(controller, nativeArgs) }; }
 	function formLink(doc) { return `/desk/${doc.row_type === "oa_request" ? "oa-purchase-request" : "purchase-order"}/${encodeURIComponent(doc.name)}`; }

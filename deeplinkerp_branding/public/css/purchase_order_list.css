@@ -579,7 +579,12 @@ body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active,.dlp-p
 body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active,.dlp-purchase-payable-grid-active,.dlp-purchase-payment-grid-active) .dlp-purchase-more-filters > summary { list-style:none; display:flex; align-items:center; cursor:pointer; }
 .dlp-purchase-applied-filters { display:flex; align-items:center; flex-wrap:wrap; gap:6px; width:100%; margin-top:4px; }
 .dlp-purchase-applied-filters .filter-section { display:flex; align-items:center; flex-wrap:wrap; gap:6px; padding:0; }
-.dlp-purchase-applied-filters .dlp-native-filter-values { padding:2px 0; text-align:left; white-space:normal; color:var(--text-muted); }
+.dlp-applied-filter-tags { display:flex; flex-wrap:wrap; gap:6px; min-width:0; }
+.dlp-applied-filter { display:inline-flex; align-items:center; gap:6px; padding:3px 6px 3px 9px; border:1px solid var(--border-color); border-radius:6px; background:var(--control-bg); color:var(--text-color); font-size:12px; max-width:100%; }
+.dlp-applied-filter > span { overflow-wrap:anywhere; }
+.dlp-applied-filter > button { border:0; border-radius:3px; padding:0 4px; background:transparent; color:var(--text-muted); line-height:20px; font-size:16px; cursor:pointer; flex-shrink:0; }
+.dlp-applied-filter > button:hover, .dlp-applied-filter > button:focus-visible { background:var(--fg-hover-color); color:var(--text-color); outline:2px solid var(--primary); outline-offset:1px; }
+.dlp-po-filter > .frappe-control { width:100%; max-width:none; }
 .dlp-purchase-scope-tabs { display:flex; align-items:center; gap:4px; }
 body:is(.dlp-purchase-order-grid-active,.dlp-purchase-receipt-grid-active,.dlp-purchase-payable-grid-active,.dlp-purchase-payment-grid-active,.dlp-sales-order-grid-active) .dlp-po-grid:not(.dlp-po-standard) {
 	font-size:12px;

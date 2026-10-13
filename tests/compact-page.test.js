@@ -178,6 +178,16 @@ test('native applied filters remain visible beside quick filters on the existing
  section.parent=c.list.page.wrapper;c.list.render_list();assert.equal(section.parent,c.$appliedFilters,'native reattachment stays visible in the same applied-filter container');
 });
 
+test('standalone page removes an exact OR tag without changing its AND group',async()=>{
+ const {controller:c}=setup({purchaseChrome:true});
+ const group=tuple=>({filters:[{field:{},get_value:()=>tuple,remove(){}}],get_filters(){return this.filters.map(f=>f.get_value());},update_filter_button(){}});
+ c.nativeFilterGroup=group(['Payment Entry','company','=','A']);c.orFilterGroup=group(['Payment Entry','company','=','B']);
+ let refreshes=0;c.refresh=async()=>refreshes++;
+ const tag=c.getAppliedFilters().find(tag=>tag.kind==='native_or');assert.ok(tag);
+ await c.removeAppliedFilter(tag);assert.deepEqual(c.orFilterGroup.get_filters(),[]);
+ assert.deepEqual(c.nativeFilterGroup.get_filters(),[['Payment Entry','company','=','A']]);assert.equal(refreshes,1);
+});
+
 test('business document native sort resets on entry and preserves manual sort within an entry',()=>{
  let route=['List','Purchase Receipt','List'];const routes=[];
  const root={frappe:{get_route:()=>route,router:{on:(_,callback)=>routes.push(callback)},perm:{has_perm:()=>true},model:{std_fields_list:['name']}}};

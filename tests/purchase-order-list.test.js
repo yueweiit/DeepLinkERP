@@ -668,21 +668,90 @@ test('mounted native clear button stays in quick filters and clears native and q
   appendTo(parent){this.parent=parent;return this;}prependTo(){return this;}insertBefore(){return this;}insertAfter(){return this;}
   addClass(){return this;}removeClass(){return this;}toggleClass(){return this;}toggle(){return this;}show(){return this;}hide(){return this;}remove(){return this;}append(){return this;}html(){return this;}
   text(value){this.label=value;return this;}val(){return this;}prop(){return this;}each(){return this;}attr(name,value){if(this===button)attrs.set(name,value);return this;}
-  off(event){if(this===button)handlers.delete(event);return this;}on(event,handler){if(this===button)handlers.set(event,handler);return this;}
+  off(event){if(this===button){if(event==='click')handlers.clear();else handlers.delete(event);}return this;}on(event,handler){if(this===button)handlers.set(event,handler);return this;}
  }
  const button=new Surface();handlers.set('click.native',()=>{nativeClears++;list.filters=[];});
+ list.filter_area={async clear(){nativeClears++;list.filters=[];}};
  env.$=()=>new Surface();env.document={body:{classList:{toggle(){}}}};
  env.frappe.model.can_export=()=>false;env.frappe.ui={form:{make_control:()=>({set_value:async()=>{},get_value:()=>''})}};
  list.$frappe_list=new Surface();list.$result=new Surface();list.$paging_area=new Surface();list.page={wrapper:new Surface()};
  const controller=production('mount')(list,env);
  assert.equal(button.parent,controller.$filters);assert.equal(button.label,'清空筛选');assert.equal(attrs.get('aria-label'),'清空筛选');
- production('mount')(list,env);assert.equal(handlers.size,2,'cached mounting retains one native handler and one quick handler');
+ production('mount')(list,env);assert.equal(handlers.size,1,'one owned handler clears both layers, even after cached mounting');
  for(const scope of ['all','orders']) {
   controller.setProviderScope(scope,false);controller.quick={search:'supplier',source:'OA'};controller.setPage(2);list.filters=[['Purchase Order','company','=','A']];
   await Promise.all([...handlers.values()].map(handler=>handler()));
   assert.deepEqual(list.filters,[]);assert.deepEqual(controller.quick,{});assert.equal(controller.page,0);
  }
- assert.equal(nativeClears,2);assert.equal(handlers.size,2);
+ assert.equal(nativeClears,2);assert.equal(handlers.size,1);
+});
+
+function appliedFilterList() {
+ const {list,env}=bareList();
+ class Surface {
+  constructor(){this.length=1;} find(){return new Surface();} first(){return this;}
+  appendTo(){return this;} prependTo(){return this;} insertBefore(){return this;} insertAfter(){return this;}
+  addClass(){return this;} removeClass(){return this;} toggleClass(){return this;} toggle(){return this;} show(){return this;} hide(){return this;} remove(){return this;} append(){return this;}
+  text(){return this;} html(value){this.content=value;return this;} val(){return this;} prop(){return this;} each(){return this;} attr(){return this;} off(){return this;} on(){return this;}
+ }
+ env.$=()=>new Surface();env.document={body:{classList:{toggle(){}}}};
+ env.__=value=>({Closed:'已结账',Company:'公司',Status:'状态'}[value] || value);
+ env.frappe.model.can_export=()=>false;
+ env.frappe.ui={form:{make_control:({df})=>({df,$wrapper:new Surface(),$input:new Surface(),get_value(){return this.value;},async set_value(value){this.value=value;df.change?.();}})}};
+ const control=(field,type,value)=>({df:{fieldname:field,fieldtype:type},value,$wrapper:new Surface(),$input:new Surface(),get_value(){return this.value;},async set_value(value){this.value=value;list.on_filter_change();}});
+ list.page={wrapper:new Surface(),fields_dict:{company:control('company','Link','YUEWEI MX'),status:control('status','Select','Closed')}};
+ list.$frappe_list=new Surface();list.$result=new Surface();list.$paging_area=new Surface();
+ list.meta.fields.find(df=>df.fieldname==='company').label='Company';list.meta.fields.find(df=>df.fieldname==='status').label='Status';
+ let clearCalls=0;
+ const group={filters:[],get_filters(){return this.filters.map(f=>f.get_value());},clear_filters(){this.filters=[];},update_filter_button(){},hide_popover(){}};
+ list.filter_area={trigger_refresh:true,filter_list:group,get_standard_filters(){return Object.entries(list.page.fields_dict).filter(([,c])=>c.get_value()).map(([field,c])=>[list.doctype,field,'=',c.get_value()]);},get(){return [...group.get_filters(),...this.get_standard_filters()];},async clear(){clearCalls++;group.clear_filters();for(const c of Object.values(list.page.fields_dict))await c.set_value('');}};
+ list.get_args=function(){return {doctype:this.doctype,filters:this.filter_area.get(),or_filters:[],fields:['name'],order_by:'transaction_date desc'};};
+ const c=production('mount')(list,env);
+ const add=tuple=>group.filters.push({get_value:()=>tuple,remove(){},field:{}});
+ return {list,c,env,add,clearCalls:()=>clearCalls};
+}
+
+test('company and status reuse native controls and shared OA filters instead of conflicting duplicate controls',()=>{
+ const {list,c}=appliedFilterList();
+ for(const field of ['company','status'])assert.equal(c.controls[field],list.page.fields_dict[field]);
+ c.setProviderScope('oa',false);
+ const args=list.get_call_args().args;
+ assert.equal(JSON.parse(args.filters).company,'YUEWEI MX');assert.equal(JSON.parse(args.filters).status,'Closed');
+ assert.deepEqual(JSON.parse(args.native_filters),[],'shared standard fields must not hide unlinked OA sources');
+});
+
+test('applied tags show translated native state and quick criteria with exact removable identities',()=>{
+ const {c,add}=appliedFilterList();c.quick.search='<订单>';add(['Purchase Order Item','item_code','=','ITEM-A']);
+ const tags=c.getAppliedFilters();
+ assert.equal(tags.length,4);assert.equal(tags.find(t=>t.field==='status').value,'已结账');
+ assert.equal(tags.find(t=>t.kind==='quick').field,'search');
+ assert.deepEqual(tags.find(t=>t.field==='item_code').filter,['Purchase Order Item','item_code','=','ITEM-A']);
+});
+
+test('removing a tag deletes only its exact condition and resets paging once',async()=>{
+ const {list,c,add}=appliedFilterList();
+ add(['Purchase Order Item','item_code','=','ITEM-A']);add(['Purchase Order Item','item_code','!=','ITEM-B']);
+ c.setPage(3);let refreshes=0;c.refresh=async()=>refreshes++;
+ const item=c.getAppliedFilters().find(t=>t.field==='item_code' && t.filter[2]==='=');
+ await c.removeAppliedFilter(item);
+ assert.deepEqual(list.filter_area.get(),[['Purchase Order Item','item_code','!=','ITEM-B'],['Purchase Order','company','=','YUEWEI MX'],['Purchase Order','status','=','Closed']]);
+ assert.equal(c.page,0);assert.equal(refreshes,1);assert.equal(list.filter_area.trigger_refresh,true);
+ await c.removeAppliedFilter(c.getAppliedFilters().find(t=>t.field==='status'));
+ assert.equal(c.controls.status.get_value(),'');assert.equal(c.controls.company.get_value(),'YUEWEI MX');
+});
+
+test('stale tags do not remove a new condition and clear-all clears native and quick once',async()=>{
+ const {list,c,clearCalls}=appliedFilterList();c.quick.search='first';const stale=c.getAppliedFilters().find(t=>t.kind==='quick');
+ c.quick.search='second';await c.removeAppliedFilter(stale);assert.equal(c.quick.search,'second');
+ let refreshes=0;c.refresh=async()=>refreshes++;await c.clearQuickFilters();
+ assert.deepEqual(list.filter_area.get(),[]);assert.deepEqual(c.quick,{});assert.equal(clearCalls(),1);assert.equal(refreshes,1);
+});
+
+test('failed filter mutation restores flags and does not drop unrelated native criteria',async()=>{
+ const {list,c}=appliedFilterList();const tag=c.getAppliedFilters().find(t=>t.field==='status');
+ list.page.fields_dict.status.set_value=async()=>{throw new Error('control failed');};
+ await assert.rejects(c.removeAppliedFilter(tag),/control failed/);
+ assert.equal(c.resetting,false);assert.equal(list.filter_area.trigger_refresh,true);assert.equal(list.page.fields_dict.company.get_value(),'YUEWEI MX');
 });
 
 function savedFilterPage() {

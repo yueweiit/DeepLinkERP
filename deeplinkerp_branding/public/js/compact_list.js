@@ -448,7 +448,7 @@
 			list, root, allowed, displayAllowed, originals, quick: {}, controls: {}, resetting: false, preferences: config.provider?.alwaysActive ? normalizePreferences(providerSaved, providerAllowed, config.provider.columns) : normalizePreferences(saved, displayAllowed),
 			providerAllowed, providerScope: "orders", providerRows: [], providerPayload: null, providerOrderBy: config.defaultSort,
 			nativePreferences: normalizePreferences(saved, displayAllowed), providerPreferences: config.provider ? normalizePreferences(providerSaved, providerAllowed, config.provider.columns) : null,
-			page: 0, pageSize: 100, requestId: 0, querySignature: null, total: null, summary: [],
+			page: 0, pageSize: 100, requestId: 0, querySignature: null, total: null, summary: [], nativeControlFields: new Set(),
 			translate: root.__ || ((label) => label),
 			setPage(page) {
 				config.onPageChange?.(this);
@@ -498,14 +498,7 @@
 				if (!hadSelection) list.on_row_checked?.();
 				if(notify)return config.onColumnsChange?.(this);
 			},
-			async clearQuickFilters() {
-				if (this.resetting) return;
-				this.resetting = true;
-				this.quick = {};
-				this.setPage(0);
-				try { await Promise.all(Object.values(this.controls).map((control) => control.set_value(""))); }
-				finally { this.resetting = false; this.$providerControls?.find("input, select").val("").prop("checked", false); this.restoreSavedFilterLabel?.(); await this.refresh(); }
-			},
+			...filterActions(),
 			async exportCurrent() {
 				if (providerActive(this)) return config.provider.exportCurrent(this);
 				if (!frappe.model.can_export?.(DOCTYPE)) throw new Error("当前用户没有导出权限。");
@@ -621,6 +614,7 @@
 			this.selected_page_count = controller.pageSize;
 		};
 		list.on_filter_change = function (...args) {
+			if (controller.resetting) return;
 			controller.setPage(0);
 			return originals.on_filter_change?.apply(this, args);
 		};
@@ -817,17 +811,91 @@
 		return `<div class="list-row-container"${config.rowExtra?` data-dlp-detail-name="${escapeHTML(doc.name)}"`:''} tabindex="0"><div class="level ${readonly ? "dlp-po-readonly-row" : "list-row"} dlp-po-grid-row" style="--dlp-po-columns:${template(controller)}">${selectionCell(checkbox, config.renderSequence?.(controller, doc, sequence) ?? sequence)}${cells}</div>${config.rowExtra?.(controller, doc) || ""}</div>`;
 	}
 
+	const filterKey = filter => JSON.stringify(filter.slice(0, 4));
+	function appliedFilters(controller) {
+		const t = controller.translate, definitions = controller.filterDefinitions ||= new Map([...controller.list.meta.fields, ...(config.controls || [])].map(df => [df.fieldname, df]));
+		const result = [], seen = new Set(), native = controller.list.filter_area?.get?.() || controller.nativeFilterGroup?.get_filters() || controller.originals?.get_args?.call(controller.list)?.filters || [];
+		const display = (field, value) => {
+			const df = definitions.get(field) || controller.controls[field]?.df;
+			const text = item => df?.fieldtype === 'Select' || controller.controls[field]?.df?.fieldtype === 'Select' ? t(config.optionLabels?.[field]?.[item] || item) : String(item);
+			return Array.isArray(value) ? value.map(text).join(', ') : text(value);
+		};
+		for (const [kind,filters] of [['native',native],['native_or',controller.orFilterGroup?.get_filters() || []]]) for (const filter of filters) {
+			const key = `${kind === 'native_or' ? 'or:' : ''}${filterKey(filter)}`; if (seen.has(key)) continue; seen.add(key);
+			const [,field,operator,value] = filter;
+			result.push({kind,key,filter:filter.slice(0,4),field,label:`${kind === 'native_or' ? `${t('任一条件')} · ` : ''}${t(definitions.get(field)?.label || field)}`,operator,value:display(field,value)});
+		}
+		const providerLabels = {source:'来源', approval_status:'审批状态', pending_company:'公司待确认'};
+		for (const [field,value] of Object.entries(controller.quick)) {
+			if (value == null || value === '' || value === false) continue;
+			const df = definitions.get(field), label = df?.label || providerLabels[field]; if (!label) continue;
+			result.push({kind:'quick',key:`quick:${JSON.stringify([field,value])}`,field,label:t(label),operator:'',value:typeof value === 'boolean' ? t('是') : display(field,value)});
+		}
+		return result;
+	}
+	function filterActions() {
+		return {
+			getAppliedFilters() { return appliedFilters(this); },
+			async mutateFilters(change) {
+				if (this.resetting) return;
+				const area = this.list.filter_area, previous = area?.trigger_refresh;
+				this.resetting = true;
+				if (area) area.trigger_refresh = false;
+				this.$appliedFilters?.find('button').prop('disabled', true);
+				this.$filters?.find('.dlp-po-clear-filters').prop('disabled', true);
+				try { await change(); this.setPage(0); }
+				finally {
+					if (area) area.trigger_refresh = previous;
+					this.resetting = false;
+					movePurchaseNativeFilterSection(this);
+					this.$filters?.find('.dlp-po-clear-filters').prop('disabled', false);
+				}
+				return this.refresh();
+			},
+			async removeAppliedFilter(tag) {
+				if (!tag || !this.getAppliedFilters().some(current => current.key === tag.key)) return;
+				return this.mutateFilters(async () => {
+					if (tag.kind === 'quick') {
+						delete this.quick[tag.field];
+						await this.controls[tag.field]?.set_value('');
+						this.$providerControls?.find(`[data-filter="${tag.field}"]`).val('').prop('checked', false);
+					} else {
+						const area = this.list.filter_area, group = tag.kind === 'native_or' ? this.orFilterGroup : area?.filter_list || this.nativeFilterGroup, key = filterKey(tag.filter);
+						const standard = tag.kind === 'native' && area?.get_standard_filters?.().some(filter => filterKey(filter) === key);
+						const remaining = [];
+						for (const filter of group?.filters || []) {
+							if (filter.field && filterKey(filter.get_value()) === key) filter.remove(true);
+							else remaining.push(filter);
+						}
+						if (group) { group.filters = remaining; group.update_filter_button?.(); }
+						if (standard) await this.list.page.fields_dict[tag.field].set_value('');
+					}
+					this.restoreSavedFilterLabel?.();
+				});
+			},
+			async clearQuickFilters() {
+				return this.mutateFilters(async () => {
+					this.quick = {};
+					this.resetAdvancedFilters?.();
+					await this.list.filter_area?.clear(false);
+					await Promise.all(Object.entries(this.controls).filter(([field]) => !this.nativeControlFields.has(field)).map(([,control]) => control.set_value('')));
+					this.$providerControls?.find('input, select').val('').prop('checked', false);
+					this.restoreSavedFilterLabel?.();
+				});
+			},
+		};
+	}
 	function movePurchaseNativeFilterSection(controller) {
 		if (!config.purchaseChrome || !controller.$appliedFilters) return;
 		// Native restrictions live under page-form, not the table surface. Move
 		// the original section so its permission indicator and bindings survive.
 		controller.list.page.wrapper.find('.page-form > .filter-section').appendTo(controller.$appliedFilters);
 		controller.list.$frappe_list.find('> .filter-section').appendTo(controller.$appliedFilters);
-		const filters=controller.list.filter_area?.get?.() || controller.originals?.get_args?.call(controller.list)?.filters || [];
-		controller.$nativeFilterValues?.text(filters.map(filter=>{
-			const [,field,operator,value]=filter,df=controller.list.meta.fields.find(df=>df.fieldname===field);
-			return `${controller.translate(df?.label || field)} ${operator} ${Array.isArray(value)?value.join(', '):value}`;
-		}).join(' · ')).toggle(Boolean(filters.length));
+		controller.appliedFilterTags = controller.getAppliedFilters();
+		controller.$filterTags?.html(controller.appliedFilterTags.map((tag,index) => {
+			const text = `${tag.label} ${tag.operator} ${tag.value}`.trim(), remove = `${controller.translate('移除筛选')}：${text}`;
+			return `<span class="dlp-applied-filter"><span title="${escapeHTML(text)}">${escapeHTML(text)}</span><button type="button" data-applied-filter="${index}" aria-label="${escapeHTML(remove)}" title="${escapeHTML(remove)}">×</button></span>`;
+		}).join('')).toggle(Boolean(controller.appliedFilterTags.length));
 	}
 	function mountControls(controller) {
 		const { list, root, translate: t } = controller;
@@ -861,7 +929,13 @@
 			controller.$moreFilters=$(`<details class="dlp-purchase-more-filters"><summary class="btn btn-default btn-sm">${escapeHTML(t('更多筛选'))}</summary><div class="dlp-purchase-advanced-filters"></div></details>`).appendTo(controller.$filters);
 			controller.$advancedFilters=controller.$moreFilters.find('.dlp-purchase-advanced-filters');
 			controller.$appliedFilters=$('<div class="dlp-purchase-applied-filters" aria-label="当前筛选"></div>').insertAfter(controller.$filters);
-			controller.$nativeFilterValues=$('<button type="button" class="btn btn-link btn-xs dlp-native-filter-values"></button>').appendTo(controller.$appliedFilters).on('click.dlpPOFilters',()=>list.filter_area?.filter_button?.trigger('click'));
+			controller.$filterTags=$('<div class="dlp-applied-filter-tags" aria-label="已应用的筛选条件"></div>').appendTo(controller.$appliedFilters);
+			controller.$filterTags.on('click.dlpPOFilters', '[data-applied-filter]', event => {
+				const tag = controller.appliedFilterTags[Number(event.currentTarget.dataset.appliedFilter)];
+				controller.removeAppliedFilter(tag).catch(error => root.frappe.msgprint({message:escapeHTML(error.message || t('筛选更新失败，请重试。')),indicator:'red'}));
+			});
+			const group = list.filter_area?.filter_list;
+			if (group) { const change = group.on_change; group.on_change = function (...args) { if (!controller.resetting) return change?.apply(this, args); }; }
 			movePurchaseNativeFilterSection(controller);
 			list.page.inner_toolbar?.find('.inner-group-button').appendTo(controller.$advancedFilters);
 		}
@@ -872,6 +946,14 @@
 			const field = list.meta.fields.find((df) => df.fieldname === control.fieldname);
 			if (control.fieldtype === "Select") control.options = selectOptions(control, field, t);
 			const holder = $(`<div class="dlp-po-filter" data-fieldname="${control.fieldname}"></div>`).appendTo(config.purchaseChrome && !(config.mainFilterFields || []).includes(control.fieldname) ? controller.$advancedFilters : controller.$filters);
+			const native = config.purchaseChrome && list.page.fields_dict?.[control.fieldname];
+			if (native && native.df.fieldtype === control.fieldtype && native.$wrapper) {
+				native.$wrapper.removeClass('input-max-width col-md-2').appendTo(holder);
+				native.$input?.attr('aria-label', t(control.label)).attr('placeholder', t(control.label));
+				controller.controls[control.fieldname] = native;
+				controller.nativeControlFields.add(control.fieldname);
+				continue;
+			}
 			const input = root.frappe.ui.form.make_control({ parent: holder, df: { ...control, label: t(control.label), placeholder: t(control.label), change: () => {
 				if (controller.resetting) return;
 				controller.quick[control.fieldname] = input.get_value();
@@ -883,7 +965,7 @@
 			if (control.fieldname === "search") controller.searchControl = input;
 		}
 		// Move the native button itself so its advanced/saved-filter handlers survive.
-		list.page.wrapper.find(".page-form .filter-x-button").off("click.dlpPOFilters").on("click.dlpPOFilters", () => controller.clearQuickFilters())
+		list.page.wrapper.find(".page-form .filter-x-button").off('click').on("click.dlpPOFilters", () => controller.clearQuickFilters().catch(error => root.frappe.msgprint({message:escapeHTML(error.message || t('筛选更新失败，请重试。')),indicator:'red'})))
 			.text(t("清空筛选")).attr("title", t("清空筛选")).attr("aria-label", t("清空筛选")).addClass("dlp-po-clear-filters").appendTo(controller.$filters);
 		controller.$summary = $('<div class="dlp-po-summary" aria-live="polite"></div>').insertBefore(list.$paging_area);
 		controller.$paging = $(`<div class="dlp-po-paging"><label>${escapeHTML(t("每页"))} <select class="form-control input-xs dlp-po-page-size">${[20, 100, 500, 2500].map((size) => `<option value="${size}">${size}</option>`).join("")}</select></label><span class="dlp-po-page-info"></span><button class="btn btn-default btn-sm dlp-po-previous" type="button">${escapeHTML(t("上一页"))}</button><button class="btn btn-default btn-sm dlp-po-next" type="button">${escapeHTML(t("下一页"))}</button></div>`).appendTo(list.$frappe_list);
@@ -1074,7 +1156,7 @@
 			activate() { surface.dlpBusinessDateSort?.enter(); root.document.body.classList.toggle(config.routeClass, active()); this.restoreRowDetails?.(); },
 			savePreferences() { this.preferences = normalizePreferences(this.preferences, permitted, config.provider.columns); try { root.localStorage?.setItem(key, JSON.stringify(this.preferences)); } catch (_) { /* Rendering must work without storage. */ } surface.$frappe_list.toggleClass('dlp-po-standard', this.preferences.density === 'standard'); },
 			setColumns(columns) { this.preferences.columns = columns; this.savePreferences(); render(); },
-			async clearQuickFilters() { this.resetting = true; this.quick = {}; this.setPage(0); try { this.resetAdvancedFilters?.(); await Promise.all(Object.values(this.controls).map(control => control.set_value(''))); } finally { this.resetting = false; } return this.refresh(); },
+			nativeControlFields: new Set(), ...filterActions(),
 			exportCurrent() { return config.provider.exportCurrent(this); },
 			async refresh() {
 				this.activate(); if (!active()) return;
