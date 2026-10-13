@@ -1,0 +1,4 @@
+# Exact commands only; existing password-required sudo privileges are unchanged.
+yuewei ALL=(root) NOPASSWD: NOSETENV: /usr/local/sbin/deeplinkerp-main-maintenance on
+yuewei ALL=(root) NOPASSWD: NOSETENV: /usr/local/sbin/deeplinkerp-main-maintenance off
+yuewei ALL=(root) NOPASSWD: NOSETENV: /usr/local/sbin/deeplinkerp-main-maintenance status
