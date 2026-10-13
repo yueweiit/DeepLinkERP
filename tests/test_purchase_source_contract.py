@@ -4,12 +4,11 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
 
-
 EXPECTED_PROCESS_CODES = (
     "PROC-BFDF6F09-4551-43B3-8C55-537AA74A241B",
     "PROC-6E11B527-2F82-439C-817D-C868DE086C97",
     "PROC-E69FCD3E-E374-4C54-9D8F-6E1F55AD741F",
-    "PROC-52D5584D-ED10-4B8B-9C7A-9D67257BF6EE",
+    "PROC-525D584D-ED10-4B8B-9C7A-9D67257BF6EE",
     "PROC-98934E07-96ED-491C-8650-DFE8C3B707BF",
     "PROC-CA023EF7-CE63-4A0B-B4BB-66482C0E9972",
 )
@@ -44,6 +43,7 @@ class PurchaseSourceContractTest(unittest.TestCase):
 					self.assertTrue(self.module.normalize(row)["eligible"])
 					for values in (
 						{"process_code": "operation"},
+						{"process_code": "PROC-52D5584D-ED10-4B8B-9C7A-9D67257BF6EE"},
 						{"create_time": datetime(2025, 12, 31, 15, 59, tzinfo=timezone.utc)},
 						{"create_time": datetime(2026, 12, 31, 16, tzinfo=timezone.utc)},
 					):
@@ -135,15 +135,19 @@ class PurchaseSourceContractTest(unittest.TestCase):
 		self.assertEqual(self.module.normalize(source()).get("beneficiary_company_status"), "missing")
 
 	def test_normalization_reads_field_occurrences_only_once(self):
-		row = source()
-		row["form_component_values"] = self.module.json.dumps(row["form_component_values"])
-		with patch.object(
-			self.module, "_field_occurrences", wraps=self.module._field_occurrences
-		) as occurrences:
-			item = self.module.normalize(row)
-		self.assertTrue(item["eligible"])
-		self.assertEqual(item["currency"], "CNY")
-		self.assertEqual(occurrences.call_count, 1)
+		for value, currency in (("人民币RMB", "CNY"), ("美元Dólar", "USD"), ("比索Peso", "MXN")):
+			with self.subTest(value=value):
+				row = source()
+				row["form_component_values"][1]["value"] = value
+				row["form_component_values"] = self.module.json.dumps(row["form_component_values"])
+				with patch.object(
+					self.module, "_field_occurrences", wraps=self.module._field_occurrences
+				) as occurrences:
+					item = self.module.normalize(row)
+				self.assertTrue(item["eligible"])
+				self.assertEqual(item["currency"], currency)
+				self.assertEqual(item["original_fields"]["currency"], value)
+				self.assertEqual(occurrences.call_count, 1)
 
 	def test_only_completed_agree_without_deletion_can_convert(self):
 		for code in EXPECTED_PROCESS_CODES:

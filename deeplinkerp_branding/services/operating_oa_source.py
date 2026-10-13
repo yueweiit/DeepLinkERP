@@ -39,7 +39,7 @@ TYPES = {"付款申请solicitud de pago": "payment", "付款申请 solicitud de 
          "费用报销reembolso de gastos": "reimbursement", "费用报销 reembolso de gastos": "reimbursement",
          "费用报销": "reimbursement", "reembolso de gastos": "reimbursement"}
 CURRENCIES = {"人民币": "CNY", "人民币cny": "CNY", "人民币rmb": "CNY", "cny": "CNY", "美元": "USD", "usd": "USD", "美元usd": "USD", "美元dólar": "USD",
-              "比索": "MXN", "mxn": "MXN", "peso": "MXN", "pesos": "MXN"}
+              "比索": "MXN", "比索peso": "MXN", "mxn": "MXN", "peso": "MXN", "pesos": "MXN"}
 _FORM_ALIASES = {"申请类型": "type", "执行地区": "region", "金额": "amount", "币种": "currency",
                  "事项说明": "summary", "收款人": "payee", "付款日期": "needed_date", "归属项目": "project", "项目": "project",
                  "申请部门/组织": "source_company", "部门/组织": "source_company", "部门Departamento": "source_company",

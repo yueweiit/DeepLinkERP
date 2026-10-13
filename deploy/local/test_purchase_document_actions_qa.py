@@ -901,7 +901,7 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
 			"PROC-BFDF6F09-4551-43B3-8C55-537AA74A241B",
 			"PROC-6E11B527-2F82-439C-817D-C868DE086C97",
 			"PROC-E69FCD3E-E374-4C54-9D8F-6E1F55AD741F",
-			"PROC-52D5584D-ED10-4B8B-9C7A-9D67257BF6EE",
+			"PROC-525D584D-ED10-4B8B-9C7A-9D67257BF6EE",
 			"PROC-98934E07-96ED-491C-8650-DFE8C3B707BF",
 			"PROC-CA023EF7-CE63-4A0B-B4BB-66482C0E9972",
 		)
@@ -935,7 +935,10 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
 			self.assertEqual(len({po.name for po in orders}), 6)
 			self.assertEqual(frappe.db.count("Purchase Order"), before["Purchase Order"] + 6)
 			self.assertEqual(
-				{frappe.db.get_value(sources.DOCTYPE, po.custom_oa_purchase_expense, "process_code") for po in orders},
+				{
+					frappe.db.get_value(sources.DOCTYPE, po.custom_oa_purchase_expense, "process_code")
+					for po in orders
+				},
 				set(process_codes),
 			)
 			for po in orders:
@@ -1008,7 +1011,13 @@ class NativeAtomicPurchaseTests(unittest.TestCase):
 			self.assertEqual(frappe.db.count("Purchase Order"), before["Purchase Order"] + 6)
 			for po in orders:
 				self.assertEqual(frappe.db.get_value("Purchase Order Item", po.items[0].name, "rate"), 55)
-			for dt in ("Purchase Receipt", "Purchase Invoice", "Payment Entry", "Stock Ledger Entry", "GL Entry"):
+			for dt in (
+				"Purchase Receipt",
+				"Purchase Invoice",
+				"Payment Entry",
+				"Stock Ledger Entry",
+				"GL Entry",
+			):
 				self.assertEqual(frappe.db.count(dt), before[dt])
 		receipt = json.loads(
 			frappe.db.get_value(

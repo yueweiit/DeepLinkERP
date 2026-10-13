@@ -11,7 +11,7 @@ from . import operating_oa_source as oa
 from .operating_expense_contract import digest
 
 PROCESS_CODES = ("PROC-BFDF6F09-4551-43B3-8C55-537AA74A241B", "PROC-6E11B527-2F82-439C-817D-C868DE086C97",
-                 "PROC-E69FCD3E-E374-4C54-9D8F-6E1F55AD741F", "PROC-52D5584D-ED10-4B8B-9C7A-9D67257BF6EE",
+                 "PROC-E69FCD3E-E374-4C54-9D8F-6E1F55AD741F", "PROC-525D584D-ED10-4B8B-9C7A-9D67257BF6EE",
                  "PROC-98934E07-96ED-491C-8650-DFE8C3B707BF", "PROC-CA023EF7-CE63-4A0B-B4BB-66482C0E9972")
 EXECUTION_REGIONS = frozenset({"中国", "中国china", "中国 china", "china", "墨西哥", "墨西哥mexico",
                               "墨西哥méxico", "墨西哥 mexico", "墨西哥 méxico", "mexico", "méxico"})

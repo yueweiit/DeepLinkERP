@@ -183,7 +183,7 @@ class OriginalOperatingSourceTest(unittest.TestCase):
             self.assertEqual(uncertain["cashier_reported_payment_status"], "未付款")
 
     def test_observed_bilingual_oa_currency_values_are_normalized_exactly(self):
-        for value, currency in (("人民币RMB", "CNY"), ("美元Dólar", "USD")):
+        for value, currency in (("人民币RMB", "CNY"), ("美元Dólar", "USD"), ("比索Peso", "MXN")):
             with self.subTest(value=value):
                 row = approval(); row["form_component_values"][3]["value"] = value
                 item = self.source.merge_application(row, [], {})
