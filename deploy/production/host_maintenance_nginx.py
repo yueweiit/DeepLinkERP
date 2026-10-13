@@ -31,12 +31,17 @@ def _nginx_string(value):
 
 
 def _active_directives(block, name):
-	return [
+	values = [
 		value.strip()
 		for value in re.findall(
 			rb"^[ \t]*" + name + rb"[ \t]+([^;#\n]+);[ \t]*(?:#[^\n]*)?$", block, re.MULTILINE
 		)
 	]
+	active = re.sub(rb"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|#[^\n]*", b" ", block)
+	starts = re.findall(rb"(?:^|[;{}])[ \t\r\n]*" + name + rb"\b", active, re.MULTILINE)
+	if len(starts) != len(values):
+		raise ValueError("Noncanonical or ambiguous active " + name.decode() + " directive")
+	return values
 
 
 _JSON_BODY = json.dumps(

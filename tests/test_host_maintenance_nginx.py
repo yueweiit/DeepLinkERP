@@ -73,6 +73,12 @@ class HostMaintenancePatchTests(unittest.TestCase):
 			SOURCE.replace(b"listen 80;", b"# listen 80;"),
 			SOURCE.replace(b"listen 80;", b"listen 80;\n    server_name other.example;"),
 			SOURCE.replace(b"listen 80;", b"listen 80; server_name other.example;"),
+			SOURCE.replace(
+				b"listen 443 ssl;", b"listen 443 ssl;\n    listen 8443 ssl; server_name other.example;"
+			),
+			SOURCE.replace(b"listen 443 ssl;", b"listen 443 ssl;\n    listen\n    8443 ssl;"),
+			SOURCE.replace(b"listen 80;", b"listen 80;\n    listen 8080; server_name other.example;"),
+			SOURCE.replace(b"listen 80;", b"listen 80;\n    listen\n    8080;"),
 			SOURCE.replace(b"location = /api/v1/mes/stock-entries", b"location /unrelated"),
 			SOURCE.replace(b"proxy_pass http://127.0.0.1:8888", b"proxy_pass http://other", 3),
 		):
