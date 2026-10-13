@@ -816,7 +816,7 @@ def get_sales_order_by_reference(payload, stock_entry_data, required=True):
 
     sales_order_names = frappe.get_list(
         "Sales Order",
-        filters={"custom_crm_order_no": sales_order_reference},
+        filters={"custom_crm_order_no": sales_order_reference, "docstatus": 1},
         pluck="name",
         limit_page_length=2,
     )

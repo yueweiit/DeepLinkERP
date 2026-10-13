@@ -226,7 +226,7 @@ class TestMESStockEntry(UnitTestCase):
 		), patch(
 			"mes_integration.mes_integration.stock_entry.frappe.get_list",
 			return_value=[sales_order.name],
-		), patch(
+		) as get_list, patch(
 			"mes_integration.mes_integration.stock_entry.frappe.get_doc",
 			return_value=sales_order,
 		) as get_doc:
@@ -236,6 +236,9 @@ class TestMESStockEntry(UnitTestCase):
 
 		self.assertEqual(result.name, "SAL-ORD-2026-00218")
 		get_doc.assert_called_once_with("Sales Order", "SAL-ORD-2026-00218")
+		self.assertEqual(get_list.call_args.kwargs["filters"], {
+			"custom_crm_order_no": "SHOP20260831001", "docstatus": 1,
+		})
 
 	def test_sales_order_reference_prefers_erp_order_number(self):
 		sales_order = frappe._dict(
