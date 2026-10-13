@@ -130,6 +130,7 @@ def create_sales_order(payload, resubmission=False):
 		if resubmission:
 			doc.flags.crm_resubmission = True
 		doc.insert(ignore_permissions=True)
+		doc.flags.crm_order_operation = True
 		preserve_explicit_zero_rates(doc, payload)
 		doc.submit()
 
@@ -209,18 +210,23 @@ def log_existing_sales_order_request(payload, response):
 
 def preserve_explicit_zero_rates(doc, payload):
 	"""Keep an explicitly supplied zero rate from being replaced by price lookup."""
+	has_zero_rate = False
 	for payload_item, item in zip(payload.get("items") or [], doc.get("items") or []):
 		if "rate" not in payload_item or payload_item.get("rate") is None:
 			continue
 		if flt(payload_item.get("rate")) != 0:
 			continue
 
+		has_zero_rate = True
 		item.rate = 0
 		item.price_list_rate = 0
 		item.discount_amount = 0
 		item.pricing_rules = None
 
-	doc.flags.ignore_pricing_rule = True
+	if not has_zero_rate:
+		return
+
+	doc.ignore_pricing_rule = 1
 	doc.calculate_taxes_and_totals()
 	doc.save(ignore_permissions=True)
 

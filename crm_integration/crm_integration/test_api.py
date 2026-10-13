@@ -7,6 +7,7 @@ from frappe.tests import UnitTestCase
 from crm_integration.crm_integration.api import (
 	create_and_submit_sales_order,
 	create_and_submit_delivery_note,
+	create_sales_order,
 	get_existing_sales_order_response,
 	update_sales_order_by_crm_order_no,
 	update_sales_order_items,
@@ -14,6 +15,7 @@ from crm_integration.crm_integration.api import (
 	validate_sales_order_payload,
 	validate_sales_order_update_payload,
 )
+from crm_integration.crm_integration.sales_order import protect_crm_order_identity
 
 
 class TestCRMAPI(UnitTestCase):
@@ -37,6 +39,42 @@ class TestCRMAPI(UnitTestCase):
 					"items": [{"item_code": "ITEM-001", "qty": 1}],
 				}
 			)
+
+	def test_create_order_handles_unset_approval_round_and_explicit_zero_rate(self):
+		for rate in (0, 25):
+			with self.subTest(rate=rate):
+				row = frappe._dict(rate=25, price_list_rate=25, discount_amount=2, pricing_rules="RULE")
+				doc = MagicMock(name="new_sales_order", flags=frappe._dict())
+				doc.name = "SO-001"
+				doc.docstatus = 1
+				doc.get.side_effect = lambda field: {
+					"items": [row], "custom_process_status": "Pending Deposit Confirmation",
+					"custom_crm_order_no": "CRM-001", "custom_crm_approval_round": None,
+				}.get(field)
+				doc.get_doc_before_save.return_value = frappe._dict(
+					custom_crm_order_no="CRM-001", custom_crm_approval_round=0,
+				)
+				doc.save.side_effect = lambda **kwargs: protect_crm_order_identity(doc)
+				doc.submit.side_effect = lambda: protect_crm_order_identity(doc)
+				payload = {"custom_crm_order_no": "CRM-001", "items": [{"rate": rate}]}
+				with (
+					patch("crm_integration.crm_integration.api.ensure_sales_persons_exist"),
+					patch("crm_integration.crm_integration.api.create_crm_log"),
+					patch("crm_integration.crm_integration.api.update_crm_log"),
+					patch("crm_integration.crm_integration.api.get_request_url", return_value="/api/method/create"),
+					patch.object(frappe, "get_doc", return_value=doc),
+				):
+					result = create_sales_order(payload)
+				self.assertEqual(result["status"], "success")
+				self.assertTrue(doc.flags.crm_order_operation)
+				doc.submit.assert_called_once()
+				if rate == 0:
+					self.assertEqual(row.rate, 0)
+					self.assertEqual(row.price_list_rate, 0)
+					self.assertEqual(doc.ignore_pricing_rule, 1)
+					doc.save.assert_called_once_with(ignore_permissions=True)
+				else:
+					doc.save.assert_not_called()
 
 	def test_sales_order_create_returns_existing_submitted_order(self):
 		doc = MagicMock(name="existing_sales_order")
