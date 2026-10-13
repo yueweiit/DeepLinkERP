@@ -643,13 +643,11 @@
 			config.onRows?.(controller);
 		};
 		list.reset_defaults = function () {
-			try {
-				originals.reset_defaults.call(this);
-				this.start = controller.page * controller.pageSize;
-				this.page_length = controller.pageSize;
-				this.selected_page_count = controller.pageSize;
-				finishFilterRequest(controller.renderingRequest);
-			} catch (error) { finishFilterRequest(controller.renderingRequest, error); throw error; }
+			originals.reset_defaults.call(this);
+			this.start = controller.page * controller.pageSize;
+			this.page_length = controller.pageSize;
+			this.selected_page_count = controller.pageSize;
+			finishFilterRequest(controller.renderingRequest);
 		};
 		list.on_filter_change = function (...args) {
 			if (controller.resetting) return;
@@ -726,6 +724,18 @@
 			controller.$paging?.show();
 		};
 		list.render_count = () => updateSummary(controller);
+		// A successful Ajax response can still fail while rendering. Keep the
+		// native pipeline and propagate its error to the dispatched waiter too.
+		for (const name of ['prepare_data', 'toggle_result_area', 'before_render', 'render', 'render_list', 'after_render', 'set_result_height', 'freeze', 'reset_defaults']) {
+			const stage = list[name]; if (typeof stage !== 'function') continue;
+			list[name] = function (...args) {
+				try { return stage.apply(this, args); }
+				catch (error) {
+					finishFilterRequest(name === 'freeze' && args[0] ? controller.lastDispatchedRequest : controller.renderingRequest, error);
+					throw error;
+				}
+			};
+		}
 		preserveRealtimePaging(controller);
 		preserveSavedFilterGroup(controller);
 		mountControls(controller);

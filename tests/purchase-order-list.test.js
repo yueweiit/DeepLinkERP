@@ -782,14 +782,14 @@ test('filter buttons are reset and repeated removal is blocked until the request
 
 test('native throttled refresh keeps the removal lock until its own dispatched request finishes',async(t)=>{
  t.mock.timers.enable({apis:['setTimeout','Date'],now:10000});
- for(const fails of [false,true]) {
+ for(const failure of [null,'network','render']) {
   const {list,c,env}=appliedFilterList(),calls=[];
   list.load_lib=Promise.resolve(); // Native ListView installs this with its refresh throttle.
-  env.frappe.call=call=>new Promise((resolve,reject)=>calls.push({call,resolve,reject}));
+  env.frappe.call=call=>new Promise((resolve,reject)=>calls.push({call,resolve,reject(error){call.error?.(error);reject(error);}}));
   useNativeRefreshFlow(list,env);
-  const rawRefresh=list.refresh;
+  const rawRefresh=list.refresh;let pipelineError;
   list.refresh=require('./fixtures/frappe-native-throttle')(function(){
-   return rawRefresh.call(this).catch(error=>{calls.at(-1).call.error?.(error);});
+   return rawRefresh.call(this).catch(error=>{pipelineError=error;});
   },1000);
   const priming=c.refresh();calls[0].resolve(unifiedPayload([]));await priming;
   const removal=c.removeAppliedFilter(c.getAppliedFilters().find(tag=>tag.field==='company'));
@@ -800,8 +800,11 @@ test('native throttled refresh keeps the removal lock until its own dispatched r
   assert.equal(list.page.fields_dict.status.value,'Closed');assert.equal(calls.length,1);
   t.mock.timers.tick(1000);assert.equal(calls.length,2);assert.equal(c.filterMutationBusy,true);
   assert.deepEqual(JSON.parse(calls[1].call.args.filters),{scope:'orders',status:'Closed'});
-  if(fails)calls[1].reject(new Error('network failed'));else calls[1].resolve(unifiedPayload([]));
-  const error=await result;if(fails)assert.match(error.message,/network failed/);else assert.equal(error,null);
+  if(failure==='render')c.reconcileRowDetails=()=>{throw new Error('render pipeline failed');};
+  if(failure==='network')calls[1].reject(new Error('network failed'));else calls[1].resolve(unifiedPayload([]));
+  await new Promise(done=>setImmediate(done));
+  assert.equal(c.filterMutationBusy,false,`${failure || 'success'} must release the dispatched mutation`);
+  const error=await result;if(failure){assert.match(error.message,new RegExp(`${failure}.*failed`));assert.equal(pipelineError,error);}else assert.equal(error,null);
   assert.equal(c.filterMutationBusy,false);assert.equal(c.resetting,false);
  }
 });
