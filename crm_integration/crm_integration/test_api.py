@@ -14,6 +14,7 @@ from crm_integration.crm_integration.api import (
 	validate_sales_order_update_status,
 	validate_sales_order_payload,
 	validate_sales_order_update_payload,
+	validate_crm_item_extra_fields,
 )
 from crm_integration.crm_integration.sales_order import protect_crm_order_identity
 
@@ -39,6 +40,15 @@ class TestCRMAPI(UnitTestCase):
 					"items": [{"item_code": "ITEM-001", "qty": 1}],
 				}
 			)
+
+	def test_create_item_extensions_validate_tax_and_route(self):
+		validate_crm_item_extra_fields({"custom_item_tax_amount": 0,
+			"custom_mes_route_scenario": "ROUTE-A"})
+		for value in (None, -1, "NaN", "Infinity", True):
+			with self.assertRaisesRegex(frappe.ValidationError, "custom_item_tax_amount"):
+				validate_crm_item_extra_fields({"custom_item_tax_amount": value})
+		with self.assertRaisesRegex(frappe.ValidationError, "custom_mes_route_scenario"):
+			validate_crm_item_extra_fields({"custom_mes_route_scenario": "X" * 65})
 
 	def test_create_order_handles_unset_approval_round_and_explicit_zero_rate(self):
 		for rate in (0, 25):

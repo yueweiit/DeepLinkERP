@@ -708,6 +708,7 @@ def build_mes_sales_order_items(sales_order):
 			"description": row.get("description"),
 			"color": row.get("custom_specifications"),
 			"custom_version": row.get("custom_version"),
+			"custom_mes_route_scenario": row.get("custom_mes_route_scenario"),
 			"qty": flt(row.get("qty")),
 			"uom": row.get("uom"),
 			"rate": flt(row.get("rate")),

@@ -1,3 +1,4 @@
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import frappe
@@ -452,6 +453,26 @@ def validate_sales_order_payload(payload):
 
 	if not payload.get("items"):
 		frappe.throw(_("缺少销售订单明细：items"))
+	for item in payload["items"]:
+		if isinstance(item, dict):
+			validate_crm_item_extra_fields(item)
+
+
+def validate_crm_item_extra_fields(item):
+	if "custom_item_tax_amount" in item:
+		value = item["custom_item_tax_amount"]
+		if isinstance(value, bool):
+			frappe.throw(_("custom_item_tax_amount 必须是有限的非负金额。"))
+		try:
+			amount = Decimal(str(value))
+		except (InvalidOperation, TypeError, ValueError):
+			frappe.throw(_("custom_item_tax_amount 必须是有限的非负金额。"))
+		if not amount.is_finite() or amount < 0:
+			frappe.throw(_("custom_item_tax_amount 必须是有限的非负金额。"))
+	if "custom_mes_route_scenario" in item:
+		value = item["custom_mes_route_scenario"]
+		if value is not None and (not isinstance(value, str) or len(value) > 64):
+			frappe.throw(_("custom_mes_route_scenario 必须是不超过 64 个字符的字符串。"))
 
 
 def validate_sales_order_update_payload(payload: Any):

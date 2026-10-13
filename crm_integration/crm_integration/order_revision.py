@@ -26,15 +26,19 @@ HEADER_FIELDS = {
 	"set_warehouse", "shipping_address_name", "shipping_address", "contact_person",
 	"contact_display", "contact_mobile", "contact_email", "customer_address",
 	"address_display", "payment_terms_template", "tc_name", "terms", "currency", "conversion_rate",
+	"sales_team",
 }
 ITEM_FIELDS = {
 	"qty", "rate", "custom_version", "custom_product", "custom_specifications",
 	"description", "warehouse", "delivery_date", "uom", "conversion_factor",
-	"discount_percentage", "discount_amount", "item_tax_template",
+	"discount_percentage", "discount_amount", "item_tax_template", "custom_item_tax_amount",
+	"custom_mes_route_scenario",
 }
 STRUCTURAL_ITEM_FIELDS = {
 	"qty", "item_code", "custom_version", "warehouse", "uom", "conversion_factor",
+	"custom_mes_route_scenario",
 }
+STOCK_STRUCTURAL_ITEM_FIELDS = STRUCTURAL_ITEM_FIELDS - {"custom_mes_route_scenario"}
 
 
 class CRMOrderConflict(frappe.ValidationError):
@@ -194,10 +198,17 @@ def describe_order(doc, rows):
 			 "tax_amount": row.tax_amount, "description": row.description}
 			for row in (doc.get("taxes") if doc else []) or []
 		],
+		"salesTeam": [
+			{"sales_person": row.sales_person, "allocated_percentage": row.allocated_percentage,
+			 "allocated_amount": row.allocated_amount}
+			for row in (doc.get("sales_team") if doc else []) or []
+		],
 		"history": [{"erpOrderId": row.name, "docstatus": row.docstatus, "active": row.docstatus == 1} for row in rows],
 		"items": [
 			{"crmOrderItemId": row.get("custom_crm_order_item_id"), "erpOrderItemId": row.name,
 			 "item_code": row.item_code, "custom_version": row.get("custom_version"),
+			 "custom_item_tax_amount": row.get("custom_item_tax_amount"),
+			 "custom_mes_route_scenario": row.get("custom_mes_route_scenario"),
 			 "qty": row.qty, "uom": row.uom, "deliveredQty": row.delivered_qty,
 			 "producedQty": row.get("produced_qty"), "productionQtySource": "ERP Sales Order Item"}
 			for row in (doc.items if doc else [])
@@ -295,14 +306,49 @@ def assert_revokeable(doc, facts):
 		raise CRMOrderConflict(_("{0}: {1}").format(code, reason))
 
 
+def validate_sales_team_revision(rows):
+	if not isinstance(rows, list):
+		frappe.throw(_("sales_team 必须是数组。"))
+	seen = set()
+	total = 0.0
+	precision = frappe.get_precision("Sales Team", "allocated_percentage") if rows else None
+	rounding_method = frappe.get_system_settings("rounding_method") if rows else None
+	for row in rows:
+		if not isinstance(row, dict) or set(row) != {"sales_person", "allocated_percentage"}:
+			frappe.throw(_("sales_team 每行只需 sales_person 和 allocated_percentage。"))
+		person = row["sales_person"]
+		if not isinstance(person, str) or not person or person != person.strip() or person in seen:
+			frappe.throw(_("sales_team 销售人员为空或重复。"))
+		seen.add(person)
+		person_details = frappe.db.get_value(
+			"Sales Person", person, ["enabled", "is_group"], as_dict=True
+		)
+		if not person_details or not cint(person_details.enabled):
+			frappe.throw(_("销售人员 {0} 不存在或未启用。").format(person))
+		if cint(person_details.is_group):
+			frappe.throw(_("销售人员 {0} 是分组，不能加入销售团队。").format(person))
+		if isinstance(row["allocated_percentage"], bool):
+			frappe.throw(_("allocated_percentage 必须在 0 到 100 之间。"))
+		try:
+			percentage = Decimal(str(row["allocated_percentage"]))
+		except (InvalidOperation, TypeError, ValueError):
+			frappe.throw(_("allocated_percentage 必须在 0 到 100 之间。"))
+		if not percentage.is_finite() or not 0 <= percentage <= 100:
+			frappe.throw(_("allocated_percentage 必须在 0 到 100 之间。"))
+		total += flt(percentage, precision, rounding_method=rounding_method)
+	if rows and total != 100:
+		frappe.throw(_("sales_team 的 allocated_percentage 按 ERP 精度舍入后合计必须为 100。"))
+
+
 def apply_items(doc, changes, facts):
 	from erpnext.controllers.accounts_controller import set_order_defaults
-	from crm_integration.crm_integration.api import replace_sales_order_item
+	from crm_integration.crm_integration.api import replace_sales_order_item, validate_crm_item_extra_fields
 
 	if not isinstance(changes, list) or not changes:
 		frappe.throw(_("items 必须是非空数组。"))
 	seen = set()
 	structural = False
+	stock_structural = False
 	by_name = {row.name: row for row in doc.items}
 	by_crm_id = {row.custom_crm_order_item_id: row for row in doc.items if row.get("custom_crm_order_item_id")}
 	if len(by_crm_id) != sum(bool(row.get("custom_crm_order_item_id")) for row in doc.items):
@@ -321,6 +367,7 @@ def apply_items(doc, changes, facts):
 		fields = set(change) - {"action", "crmOrderItemId", "erpOrderItemId"}
 		if fields - ITEM_FIELDS - {"item_code"}:
 			frappe.throw(_("存在不支持的明细字段：{0}。").format(", ".join(sorted(fields - ITEM_FIELDS - {"item_code"}))))
+		validate_crm_item_extra_fields(change)
 		if action == "ADD":
 			if erp_id or crm_id in by_crm_id or not change.get("item_code") or flt(change.get("qty")) <= 0:
 				raise CRMOrderConflict(_("新增明细的身份、物料或数量无效。"))
@@ -345,6 +392,7 @@ def apply_items(doc, changes, facts):
 				row.discount_amount = 0
 				row.pricing_rules = None
 			structural = True
+			stock_structural = True
 			continue
 		row = by_name.get(erp_id) if erp_id else by_crm_id.get(crm_id)
 		if not row or (erp_id and row.name != erp_id) or (row.get("custom_crm_order_item_id") and row.custom_crm_order_item_id != crm_id):
@@ -358,6 +406,7 @@ def apply_items(doc, changes, facts):
 				raise CRMOrderConflict(_("明细已有交付、生产或开票关联，不能删除。"))
 			doc.items.remove(row)
 			structural = True
+			stock_structural = True
 			continue
 		if not fields:
 			frappe.throw(_("UPDATE 明细至少需要一个变更字段。"))
@@ -378,11 +427,12 @@ def apply_items(doc, changes, facts):
 		if not row.get("custom_crm_order_item_id"):
 			row.custom_crm_order_item_id = crm_id
 		structural |= bool(fields & STRUCTURAL_ITEM_FIELDS)
+		stock_structural |= bool(fields & STOCK_STRUCTURAL_ITEM_FIELDS)
 	if structural and (doc.custom_process_status not in EARLY_STATUSES or facts["workOrders"]
 		or facts["productionPlans"] or facts["stockEntries"] or facts["stockReservations"]
 		or (facts.get("mesPush") or {}).get("lastPushStatus")):
 		raise CRMOrderConflict(_("STRUCTURAL_CHANGE_BLOCKED: 已推送 MES 或已有生产/库存预留关联，不能更改订单结构。"))
-	return structural
+	return structural, stock_structural
 
 
 def validate_financial_revision(doc, header, taxes, facts):
@@ -442,6 +492,10 @@ def execute_update(payload):
 		frappe.throw(_("taxes 必须是数组。"))
 	taxes = payload.get("taxes") if "taxes" in payload else None
 	validate_financial_revision(doc, header, taxes, facts)
+	if "sales_team" in header:
+		if facts["salesInvoices"]:
+			raise CRMOrderConflict(_("订单已有销售发票，不能修改销售团队。"))
+		validate_sales_team_revision(header["sales_team"])
 	if set(header) & {"set_warehouse", "payment_terms_template"} and (
 		doc.custom_process_status not in EARLY_STATUSES or facts["advancePaid"]
 		or facts["paymentEntries"] or facts["salesInvoices"] or facts["stockReservations"]
@@ -464,11 +518,12 @@ def execute_update(payload):
 	if taxes is not None:
 		doc.set("taxes_and_charges", None)
 		doc.set("taxes", taxes)
-	structural = apply_items(doc, payload["items"], facts) if payload.get("items") is not None else False
+	structural, stock_structural = apply_items(doc, payload["items"], facts) if payload.get("items") is not None else (False, False)
 	if "set_warehouse" in header:
 		for row in doc.items:
 			row.warehouse = header["set_warehouse"]
 		structural = True
+		stock_structural = True
 	if structural and (has_ordered_items or facts["purchaseOrders"]):
 		raise CRMOrderConflict(_("订单已有采购关联，不能更改订单结构。"))
 	if structural and (facts["advancePaid"] or facts["paymentEntries"] or facts["salesInvoices"]):
@@ -485,7 +540,7 @@ def execute_update(payload):
 		if (row.name in old_item_amounts and flt(row.get("amount")) != old_item_amounts[row.name]
 			and flt(row.get("billed_amt")) > flt(row.get("amount"))):
 			raise CRMOrderConflict(_("明细 {0} 的修订后金额低于已开票金额。").format(row.name))
-	if structural:
+	if stock_structural:
 		from erpnext.stock.doctype.packed_item.packed_item import make_packing_list
 
 		make_packing_list(doc)
@@ -502,7 +557,7 @@ def execute_update(payload):
 	doc.validate_for_items()
 	doc.validate_warehouse()
 	doc.save(ignore_permissions=True)
-	if structural:
+	if stock_structural:
 		from erpnext.stock.stock_balance import get_reserved_qty, update_bin_qty
 
 		for item_code, warehouse in old_item_warehouses:

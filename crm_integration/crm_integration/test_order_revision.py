@@ -24,6 +24,7 @@ from crm_integration.crm_integration.order_revision import (
 	run_operation,
 	validate_financial_revision,
 	validate_operation,
+	validate_sales_team_revision,
 )
 from crm_integration.crm_integration.sales_order import protect_crm_order_identity
 
@@ -178,8 +179,166 @@ class TestCRMOrderRevision(UnitTestCase):
 					apply_items(doc, [request], facts)
 			defaults.assert_not_called()
 			defaults.return_value = frappe._dict(item_code="ITEM-2")
-			self.assertTrue(apply_items(doc, [{**change, "rate": 0}], facts))
+			self.assertEqual(apply_items(doc, [{**change, "rate": 0}], facts), (True, True))
 		doc.append.assert_called_once()
+
+	def test_sales_team_revision_validates_members_and_percentage(self):
+		rows = [{"sales_person": "Alice", "allocated_percentage": 60},
+			{"sales_person": "Bob", "allocated_percentage": 40}]
+		with (
+			patch.object(frappe.db, "get_value", return_value=frappe._dict(enabled=1, is_group=0)),
+			patch.object(frappe, "get_precision", return_value=3),
+			patch.object(frappe, "get_system_settings", return_value="Commercial Rounding"),
+		):
+			validate_sales_team_revision(rows)
+			validate_sales_team_revision([])
+			with self.assertRaisesRegex(frappe.ValidationError, "合计必须为 100"):
+				validate_sales_team_revision([{**rows[0], "allocated_percentage": 50}, rows[1]])
+			with self.assertRaisesRegex(frappe.ValidationError, "按 ERP 精度舍入后合计必须为 100"):
+				validate_sales_team_revision([
+					{"sales_person": "Alice", "allocated_percentage": 33.3335},
+					{"sales_person": "Bob", "allocated_percentage": 33.3335},
+					{"sales_person": "Carol", "allocated_percentage": 33.333},
+				])
+			with self.assertRaisesRegex(frappe.ValidationError, "重复"):
+				validate_sales_team_revision([rows[0], rows[0]])
+			with self.assertRaisesRegex(frappe.ValidationError, "allocated_percentage"):
+				validate_sales_team_revision([{**rows[0], "allocated_percentage": "NaN"}, rows[1]])
+			with self.assertRaisesRegex(frappe.ValidationError, "每行只需"):
+				validate_sales_team_revision([{**rows[0], "allocated_amount": 60}, rows[1]])
+		with (
+			patch.object(frappe.db, "get_value", return_value=frappe._dict(enabled=0, is_group=0)),
+			patch.object(frappe, "get_precision", return_value=3),
+			patch.object(frappe, "get_system_settings", return_value="Commercial Rounding"),
+		):
+			with self.assertRaisesRegex(frappe.ValidationError, "未启用"):
+				validate_sales_team_revision(rows)
+		with (
+			patch.object(frappe.db, "get_value", return_value=frappe._dict(enabled=1, is_group=1)),
+			patch.object(frappe, "get_precision", return_value=3),
+			patch.object(frappe, "get_system_settings", return_value="Commercial Rounding"),
+		):
+			with self.assertRaisesRegex(frappe.ValidationError, "是分组"):
+				validate_sales_team_revision(rows)
+
+	def test_sales_team_revision_rejects_existing_invoice(self):
+		doc = MagicMock(custom_crm_revision=1)
+		doc.get.side_effect = lambda field: getattr(doc, field, None)
+		payload = {"crmOrderNo": "CRM-001", "erpOrderId": "SO-001", "crmOrderId": "CRM-ID",
+			"expectedCrmRevision": 1, "targetCrmRevision": 2, "crmApprovalRound": 1,
+			"header": {"sales_team": [{"sales_person": "Alice", "allocated_percentage": 100}]}}
+		facts = {"advancePaid": 0, "paymentEntries": [], "salesInvoices": ["INV-001"]}
+		with (
+			patch("crm_integration.crm_integration.order_revision.lock_expected_order"),
+			patch("crm_integration.crm_integration.order_revision.current_order", return_value=(doc, [])),
+			patch("crm_integration.crm_integration.order_revision.check_version"),
+			patch("crm_integration.crm_integration.order_revision.linked_facts", return_value=facts),
+			patch("crm_integration.crm_integration.order_revision.assert_editable"),
+			self.assertRaisesRegex(CRMOrderConflict, "销售发票"),
+		):
+			execute_update(payload)
+		doc.save.assert_not_called()
+
+	def test_r2_replaces_sales_team_without_changing_order_items(self):
+		row = frappe._dict(name="ROW-1", item_code="ITEM-1", warehouse="WH-1", ordered_qty=0)
+		doc = MagicMock(items=[row], custom_crm_revision=1,
+			custom_process_status="Pending Deposit Confirmation", flags=frappe._dict(),
+			currency="USD", conversion_rate=1, grand_total=100, base_grand_total=100,
+			payment_terms_template=None, payment_schedule=[])
+		doc.get.side_effect = lambda field: getattr(doc, field, None)
+		doc.set.side_effect = lambda field, value: setattr(doc, field, value)
+		team = [{"sales_person": "Alice", "allocated_percentage": 100}]
+		payload = {"crmOrderNo": "CRM-001", "erpOrderId": "SO-001", "crmOrderId": "CRM-ID",
+			"expectedCrmRevision": 1, "targetCrmRevision": 2, "crmApprovalRound": 1,
+			"header": {"sales_team": team}}
+		facts = {"purchaseOrders": [], "workOrders": [], "productionPlans": [],
+			"stockEntries": [], "stockReservations": [], "advancePaid": 0,
+			"paymentEntries": [], "salesInvoices": [], "mesPush": {}}
+		with (
+			patch("crm_integration.crm_integration.order_revision.lock_expected_order"),
+			patch("crm_integration.crm_integration.order_revision.current_order", return_value=(doc, [])),
+			patch("crm_integration.crm_integration.order_revision.check_version"),
+			patch("crm_integration.crm_integration.order_revision.linked_facts", return_value=facts),
+			patch("crm_integration.crm_integration.order_revision.assert_editable"),
+			patch("crm_integration.crm_integration.order_revision.describe_order", return_value={}),
+			patch.object(frappe.db, "get_value", return_value=frappe._dict(enabled=1, is_group=0)),
+			patch.object(frappe, "get_precision", return_value=3),
+			patch.object(frappe, "get_system_settings", return_value="Commercial Rounding"),
+		):
+			result = execute_update(payload)
+		self.assertEqual(result["operationStatus"], "SUCCEEDED")
+		self.assertEqual(doc.sales_team, team)
+		self.assertEqual(doc.items, [row])
+		doc.save.assert_called_once_with(ignore_permissions=True)
+
+	def test_route_revision_is_structural_and_tax_amount_accepts_zero(self):
+		row = frappe._dict(name="ROW-1", item_code="ITEM-1", custom_crm_order_item_id="LINE-1",
+			custom_mes_route_scenario="OLD")
+		row.set = lambda field, value: row.__setitem__(field, value)
+		doc = MagicMock(items=[row], custom_process_status="Pending Deposit Confirmation")
+		changes = [{"action": "UPDATE", "crmOrderItemId": "LINE-1", "erpOrderItemId": "ROW-1",
+			"custom_item_tax_amount": 0, "custom_mes_route_scenario": "ROUTE-A"}]
+		facts = {"workOrders": [], "productionPlans": [], "stockEntries": [],
+			"stockReservations": [], "mesPush": {}}
+		self.assertEqual(apply_items(doc, changes, facts), (True, False))
+		self.assertEqual(row.custom_item_tax_amount, 0)
+		self.assertEqual(row.custom_mes_route_scenario, "ROUTE-A")
+		facts["workOrders"] = ["WO-001"]
+		with self.assertRaisesRegex(CRMOrderConflict, "STRUCTURAL_CHANGE_BLOCKED"):
+			apply_items(doc, changes, facts)
+
+	def test_route_only_revision_does_not_rebuild_stock_structure(self):
+		row = frappe._dict(name="ROW-1", item_code="ITEM-1", warehouse="WH-1",
+			custom_crm_order_item_id="LINE-1", amount=100, ordered_qty=0)
+		row.set = lambda field, value: row.__setitem__(field, value)
+		doc = MagicMock(items=[row], custom_crm_revision=1,
+			custom_process_status="Pending Deposit Confirmation", flags=frappe._dict(),
+			currency="USD", conversion_rate=1, grand_total=100, base_grand_total=100,
+			payment_terms_template=None, payment_schedule=[])
+		doc.get.side_effect = lambda field: getattr(doc, field, None)
+		payload = {"crmOrderNo": "CRM-001", "erpOrderId": "SO-001", "crmOrderId": "CRM-ID",
+			"expectedCrmRevision": 1, "targetCrmRevision": 2, "crmApprovalRound": 1,
+			"items": [{"action": "UPDATE", "crmOrderItemId": "LINE-1", "erpOrderItemId": "ROW-1",
+				"custom_mes_route_scenario": "ROUTE-A"}]}
+		facts = {"purchaseOrders": [], "workOrders": [], "productionPlans": [],
+			"stockEntries": [], "stockReservations": [], "advancePaid": 0,
+			"paymentEntries": [], "salesInvoices": [], "mesPush": {}}
+		with (
+			patch("crm_integration.crm_integration.order_revision.lock_expected_order"),
+			patch("crm_integration.crm_integration.order_revision.current_order", return_value=(doc, [])),
+			patch("crm_integration.crm_integration.order_revision.check_version"),
+			patch("crm_integration.crm_integration.order_revision.linked_facts", return_value=facts),
+			patch("crm_integration.crm_integration.order_revision.assert_editable"),
+			patch("crm_integration.crm_integration.order_revision.describe_order", return_value={}),
+			patch("erpnext.stock.doctype.packed_item.packed_item.make_packing_list") as packing,
+			patch("erpnext.stock.stock_balance.update_bin_qty") as update_bin,
+		):
+			result = execute_update(payload)
+		self.assertEqual(result["operationStatus"], "SUCCEEDED")
+		self.assertEqual(row.custom_mes_route_scenario, "ROUTE-A")
+		packing.assert_not_called()
+		update_bin.assert_not_called()
+		doc.update_reserved_qty.assert_not_called()
+		doc.update_prevdoc_status.assert_not_called()
+
+	def test_r1_returns_sales_team_and_item_extensions(self):
+		row = frappe._dict(name="ROW-1", item_code="ITEM-1", qty=1, uom="Nos",
+			custom_crm_order_item_id="LINE-1", custom_item_tax_amount=0,
+			custom_mes_route_scenario="ROUTE-A")
+		doc = MagicMock(items=[row], sales_team=[frappe._dict(sales_person="Alice",
+			allocated_percentage=100, allocated_amount=50)])
+		doc.get.side_effect = lambda field: getattr(doc, field, None)
+		facts = {"workOrders": [], "productionPlans": [], "stockEntries": [],
+			"advancePaid": 0, "paymentEntries": [], "salesInvoices": [],
+			"mesPush": {"lastPushStatus": None}}
+		with (
+			patch("crm_integration.crm_integration.order_revision.linked_facts", return_value=facts),
+			patch("crm_integration.crm_integration.order_revision.eligibility", return_value=(None, None)),
+		):
+			state = describe_order(doc, [])
+		self.assertEqual(state["salesTeam"][0]["sales_person"], "Alice")
+		self.assertEqual(state["items"][0]["custom_item_tax_amount"], 0)
+		self.assertEqual(state["items"][0]["custom_mes_route_scenario"], "ROUTE-A")
 
 	def test_financial_revision_requires_valid_rate_and_actual_tax(self):
 		doc = MagicMock(company="Company", currency="USD", conversion_rate=1,
@@ -379,7 +538,7 @@ class TestCRMOrderRevision(UnitTestCase):
 			patch("crm_integration.crm_integration.order_revision.check_version"),
 			patch("crm_integration.crm_integration.order_revision.linked_facts", return_value=facts),
 			patch("crm_integration.crm_integration.order_revision.assert_editable"),
-			patch("crm_integration.crm_integration.order_revision.apply_items", return_value=True),
+			patch("crm_integration.crm_integration.order_revision.apply_items", return_value=(True, True)),
 		):
 			with self.assertRaisesRegex(CRMOrderConflict, "采购关联"):
 				execute_update(payload)

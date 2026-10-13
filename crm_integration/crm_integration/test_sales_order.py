@@ -33,7 +33,8 @@ class TestMESSalesOrderPayload(UnitTestCase):
 			name="SO-001",
 			custom_crm_order_no="CRM-001",
 			items=[
-				frappe._dict(name="SOI-PRINT", item_code="ITEM-001", qty=100, custom_version="PC_PRINT"),
+				frappe._dict(name="SOI-PRINT", item_code="ITEM-001", qty=100,
+					custom_version="PC_PRINT", custom_mes_route_scenario="ROUTE-A"),
 				frappe._dict(name="SOI-OTHER", item_code="ITEM-001", qty=50, custom_version="OTHER_VERSION"),
 			],
 		)
@@ -43,6 +44,8 @@ class TestMESSalesOrderPayload(UnitTestCase):
 			[(row["name"], row["custom_version"]) for row in payload["data"]["items"]],
 			[("SOI-PRINT", "PC_PRINT"), ("SOI-OTHER", "OTHER_VERSION")],
 		)
+		self.assertEqual(payload["data"]["items"][0]["custom_mes_route_scenario"], "ROUTE-A")
+		self.assertNotIn("custom_mes_route_scenario", payload["data"]["items"][1])
 
 	def test_orders_without_versions_keep_optional_field_absent(self):
 		for version_fields in ({}, {"custom_version": None}, {"custom_version": ""}):
