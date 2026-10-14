@@ -128,6 +128,9 @@ def create_sales_order(payload, resubmission=False):
 
 	try:
 		doc = frappe.get_doc(payload)
+		# Only orders created by this lifecycle can prove that E3 has not been attempted.
+		doc.custom_crm_production_started = 0
+		doc.custom_crm_production_milestone = "NOT_STARTED"
 		if resubmission:
 			doc.flags.crm_resubmission = True
 		doc.insert(ignore_permissions=True)
@@ -416,6 +419,8 @@ def validate_sales_order_update_status(doc):
 				doc.name, process_status
 			)
 		)
+	if doc.get("custom_crm_production_milestone") != "NOT_STARTED":
+		frappe.throw(_("ERP 无法确认订单尚未进入生产阶段，不能修改。"))
 
 
 def get_request_payload(sales_order=None):
@@ -444,6 +449,8 @@ def validate_sales_order_payload(payload):
 
 	if payload.get("docstatus"):
 		frappe.throw(_("请求体不能直接传 docstatus，请由接口自动提交销售订单。"))
+	if {"custom_crm_production_started", "custom_crm_production_milestone"} & set(payload):
+		frappe.throw(_("生产里程碑由 ERP 管理，建单请求不能直接设置。"))
 
 	if not payload.get("customer"):
 		frappe.throw(_("缺少必填字段：customer"))

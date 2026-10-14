@@ -148,6 +148,57 @@ class TestCRMOrderRevision(UnitTestCase):
 			with self.assertRaisesRegex(CRMOrderConflict, "PRODUCTION_STARTED"):
 				assert_editable(doc, facts)
 
+	def test_r1_marks_new_preproduction_order_editable_and_not_started(self):
+		doc = MagicMock(company="Company", status="Submitted",
+			custom_process_status="Pending Deposit Confirmation",
+			items=[frappe._dict(delivered_qty=0)])
+		doc.get.side_effect = lambda field: "NOT_STARTED" if field == "custom_crm_production_milestone" else None
+		facts = {"deliveryNotes": [], "stockEntries": [], "mesPush": {"lastPushStatus": None},
+			"workOrders": [], "productionPlans": [], "advancePaid": 0,
+			"paymentEntries": [], "salesInvoices": []}
+		with (
+			patch("crm_integration.crm_integration.order_revision.is_crm_integration_enabled", return_value=True),
+			patch("crm_integration.crm_integration.order_revision.linked_facts", return_value=facts),
+		):
+			state = describe_order(doc, [])
+		self.assertTrue(state["canEdit"])
+		self.assertTrue(state["canRevoke"])
+		self.assertIs(state["productionMilestone"]["reached"], False)
+		doc.custom_process_status = "Pending Final Payment"
+		with patch("crm_integration.crm_integration.order_revision.linked_facts", return_value=facts):
+			later_state = describe_order(doc, [])
+		self.assertIsNone(later_state["productionMilestone"]["reached"])
+
+	def test_r1_unknown_production_blocks_edit_but_allows_revoke(self):
+		doc = MagicMock(company="Company", status="Submitted",
+			custom_process_status="Pending Deposit Confirmation",
+			items=[frappe._dict(delivered_qty=0)])
+		doc.get.return_value = None
+		facts = {"deliveryNotes": [], "stockEntries": [], "mesPush": {"lastPushStatus": None},
+			"workOrders": [], "productionPlans": [], "advancePaid": 0,
+			"paymentEntries": [], "salesInvoices": []}
+		with (
+			patch("crm_integration.crm_integration.order_revision.is_crm_integration_enabled", return_value=True),
+			patch("crm_integration.crm_integration.order_revision.linked_facts", return_value=facts),
+		):
+			state = describe_order(doc, [])
+			self.assertEqual(eligibility(doc, facts)[0], "PRODUCTION_UNKNOWN")
+			assert_revokeable(doc, facts)
+			with self.assertRaisesRegex(CRMOrderConflict, "PRODUCTION_UNKNOWN"):
+				assert_editable(doc, facts)
+		self.assertFalse(state["canEdit"])
+		self.assertTrue(state["canRevoke"])
+		self.assertIsNone(state["productionMilestone"]["reached"])
+
+	def test_reached_milestone_blocks_edit_even_if_legacy_flag_is_missing(self):
+		doc = MagicMock(company="Company", status="Submitted",
+			custom_process_status="Pending Deposit Confirmation",
+			items=[frappe._dict(delivered_qty=0)])
+		doc.get.side_effect = lambda field: "REACHED" if field == "custom_crm_production_milestone" else None
+		facts = {"deliveryNotes": [], "stockEntries": [], "mesPush": {"lastPushStatus": None}}
+		with patch("crm_integration.crm_integration.order_revision.is_crm_integration_enabled", return_value=True):
+			self.assertEqual(eligibility(doc, facts)[0], "PRODUCTION_STARTED")
+
 	def test_delivery_blocks_revoke_even_after_production_started(self):
 		doc = MagicMock(company="Company", status="Submitted",
 			custom_process_status="Pending Production",

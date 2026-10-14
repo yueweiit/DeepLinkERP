@@ -80,7 +80,7 @@ def protect_crm_order_identity(doc, method=None):
 	previous = doc.get_doc_before_save()
 	if not previous:
 		return
-	for field in ("custom_crm_order_no", "custom_crm_order_id", "custom_crm_approval_round", "custom_crm_revision", "custom_crm_production_started"):
+	for field in ("custom_crm_order_no", "custom_crm_order_id", "custom_crm_approval_round", "custom_crm_revision", "custom_crm_production_started", "custom_crm_production_milestone"):
 		if doc.get(field) != previous.get(field):
 			frappe.throw(_("CRM 订单身份与版本只能通过受控接口修改：{0}。").format(field))
 	previous_rows = {row.name: row for row in previous.get("items") or []}
@@ -970,10 +970,17 @@ def run_confirm_deposit_sync(sales_order):
 		frappe.throw(_("只有待确认定金的销售订单可以推送至MES。"))
 
 	push_sales_order_status_to_crm(sales_order, CRM_STATUS_CONFIRMED_DEPOSIT_PUSH_PRODUCTION)
+	if not cint(sales_order.get("custom_crm_production_started")):
+		# A timeout can happen after CRM accepts E3. Persist uncertainty before the request.
+		sales_order.db_set("custom_crm_production_milestone", "ATTEMPTED", update_modified=True)
+		sales_order.custom_crm_production_milestone = "ATTEMPTED"
+		frappe.db.commit()
 	push_sales_order_status_to_crm(sales_order, CRM_STATUS_IN_PRODUCTION)
 	if not cint(sales_order.get("custom_crm_production_started")):
-		sales_order.db_set("custom_crm_production_started", 1, update_modified=True)
+		sales_order.db_set({"custom_crm_production_started": 1,
+			"custom_crm_production_milestone": "REACHED"}, update_modified=True)
 		sales_order.custom_crm_production_started = 1
+		sales_order.custom_crm_production_milestone = "REACHED"
 		frappe.db.commit()
 	push_sales_order_to_mes(sales_order)
 	set_process_status(sales_order, PENDING_PRODUCTION)

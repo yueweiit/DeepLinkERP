@@ -149,13 +149,18 @@ def eligibility(doc, facts):
 		return "SYNC_PROCESSING", "定金确认及 MES 下推正在处理中。"
 	if facts["deliveryNotes"] or any(flt(row.delivered_qty) for row in doc.items):
 		return "DELIVERED", "订单已经发生实际出库。"
-	if cint(doc.get("custom_crm_production_started")):
+	if (cint(doc.get("custom_crm_production_started"))
+		or doc.get("custom_crm_production_milestone") == "REACHED"):
 		return "PRODUCTION_STARTED", "ERP 已向 CRM 确认进入生产阶段，订单不能修订。"
+	if facts.get("stockEntries"):
+		return "PRODUCTION_STARTED", "订单已有库存移动，不能修订。"
 	mes_push = facts.get("mesPush") or {}
 	if doc.custom_process_status == PENDING_PRODUCTION or mes_push.get("lastPushStatus") == "Success":
 		return "MES_PUSHED", "订单已成功推送 MES，不能修改订单。"
 	if doc.custom_process_status not in EDIT_STATUSES:
 		return "STAGE_LOCKED", "订单已进入禁止修订或撤回阶段。"
+	if production_milestone(doc, facts)["reached"] is None:
+		return "PRODUCTION_UNKNOWN", "ERP 无法确认订单尚未进入生产阶段，不能修订。"
 	return None, None
 
 
@@ -170,6 +175,21 @@ def mes_push_state(doc):
 		"lastPushLog": logs[0].name if logs else None, "mesOrderId": None}
 
 
+def production_milestone(doc, facts):
+	if not doc:
+		return {"reached": None, "source": "UNKNOWN", "time": None}
+	if cint(doc.get("custom_crm_production_started")) or doc.get("custom_crm_production_milestone") == "REACHED":
+		return {"reached": True, "source": "ERP E3 acknowledged", "time": None}
+	mes_push = facts.get("mesPush") or {}
+	if doc.custom_process_status == PENDING_PRODUCTION or facts.get("stockEntries") or mes_push.get("lastPushStatus") == "Success":
+		return {"reached": True, "source": "ERP process/MES state", "time": None}
+	if (doc.custom_process_status in EARLY_STATUSES
+		and doc.get("custom_crm_production_milestone") == "NOT_STARTED"
+		and not mes_push.get("lastPushStatus")):
+		return {"reached": False, "source": "ERP E3 not attempted", "time": None}
+	return {"reached": None, "source": "UNKNOWN", "time": None}
+
+
 def describe_order(doc, rows):
 	facts = linked_facts(doc)
 	mes_push = facts.get("mesPush") or {"lastPushStatus": None, "lastPushLog": None, "mesOrderId": None}
@@ -177,7 +197,7 @@ def describe_order(doc, rows):
 		or mes_push["lastPushStatus"] == "Success"))
 	mes_linked = True if mes_confirmed else None if mes_push["lastPushStatus"] in {"Pending", "Failed"} else False
 	code, reason = eligibility(doc, facts)
-	can_revoke = code in (None, "MES_PUSHED", "PRODUCTION_STARTED") and not (
+	can_revoke = code in (None, "MES_PUSHED", "PRODUCTION_STARTED", "PRODUCTION_UNKNOWN") and not (
 		facts["workOrders"] or facts["productionPlans"] or facts["stockEntries"]
 		or facts["advancePaid"] or facts["paymentEntries"] or facts["salesInvoices"]
 	)
@@ -213,9 +233,7 @@ def describe_order(doc, rows):
 			 "producedQty": row.get("produced_qty"), "productionQtySource": "ERP Sales Order Item"}
 			for row in (doc.items if doc else [])
 		],
-		"productionMilestone": {"reached": True if doc and (cint(doc.get("custom_crm_production_started")) or mes_confirmed) else None,
-			"source": "ERP E3 acknowledged" if doc and cint(doc.get("custom_crm_production_started"))
-			else "ERP process/MES state" if mes_confirmed else "UNKNOWN", "time": None},
+		"productionMilestone": production_milestone(doc, facts),
 		"associations": facts,
 		"mesLinked": mes_linked,
 		"mesPush": mes_push,
@@ -302,7 +320,7 @@ def assert_editable(doc, facts):
 
 def assert_revokeable(doc, facts):
 	code, reason = eligibility(doc, facts)
-	if code not in (None, "MES_PUSHED", "PRODUCTION_STARTED"):
+	if code not in (None, "MES_PUSHED", "PRODUCTION_STARTED", "PRODUCTION_UNKNOWN"):
 		raise CRMOrderConflict(_("{0}: {1}").format(code, reason))
 
 

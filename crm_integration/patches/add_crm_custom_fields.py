@@ -90,6 +90,16 @@ def create_crm_custom_fields():
 					"no_copy": 1,
 				},
 				{
+					"fieldname": "custom_crm_production_milestone",
+					"fieldtype": "Select",
+					"label": "CRM Production Milestone",
+					"options": "\nNOT_STARTED\nATTEMPTED\nREACHED",
+					"insert_after": "custom_crm_production_started",
+					"read_only": 1,
+					"allow_on_submit": 1,
+					"no_copy": 1,
+				},
+				{
 					"fieldname": "custom_odt",
 					"fieldtype": "Data",
 					"label": "ODT",
