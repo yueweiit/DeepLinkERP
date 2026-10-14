@@ -1,6 +1,7 @@
-from contextlib import nullcontext
 import hashlib
 import json
+from contextlib import nullcontext
+from datetime import date
 from unittest.mock import MagicMock, patch
 
 import frappe
@@ -21,7 +22,9 @@ from crm_integration.crm_integration.order_revision import (
 	eligibility,
 	linked_facts,
 	lock_expected_order,
+	normalize_revision_date,
 	run_operation,
+	sync_header_delivery_date,
 	validate_financial_revision,
 	validate_operation,
 	validate_sales_team_revision,
@@ -232,6 +235,150 @@ class TestCRMOrderRevision(UnitTestCase):
 			defaults.return_value = frappe._dict(item_code="ITEM-2")
 			self.assertEqual(apply_items(doc, [{**change, "rate": 0}], facts), (True, True))
 		doc.append.assert_called_once()
+
+	def test_add_and_update_item_dates_pass_erp_delivery_date_validation(self):
+		order = frappe.get_doc({
+			"doctype": "Sales Order", "order_type": "Sales", "skip_delivery_note": 0,
+			"transaction_date": date(2026, 10, 20), "delivery_date": date(2026, 10, 20),
+			"custom_process_status": "Pending Deposit Confirmation",
+			"items": [{"item_code": "ITEM-1", "delivery_date": date(2026, 10, 20),
+				"custom_crm_order_item_id": "LINE-1"}],
+		})
+		order.name = "SO-001"
+		facts = {"workOrders": [], "productionPlans": [], "stockEntries": [], "stockReservations": []}
+		with patch("erpnext.controllers.accounts_controller.set_order_defaults",
+			return_value=frappe._dict(item_code="ITEM-2", delivery_date="2026-10-21")):
+			apply_items(order, [{"action": "ADD", "crmOrderItemId": "LINE-2",
+				"item_code": "ITEM-2", "qty": 1, "rate": 0, "delivery_date": "2026-10-21"}], facts)
+		self.assertEqual(order.items[-1].delivery_date, date(2026, 10, 21))
+		order.validate_delivery_date()
+		apply_items(order, [{"action": "UPDATE", "crmOrderItemId": "LINE-1",
+			"delivery_date": "2026-10-22"}], facts)
+		self.assertEqual(order.items[0].delivery_date, date(2026, 10, 22))
+		order.validate_delivery_date()
+		self.assertEqual(order.delivery_date, date(2026, 10, 22))
+
+	def test_revision_dates_reject_invalid_values_without_using_today(self):
+		self.assertEqual(normalize_revision_date("2026-10-21", "header.delivery_date"), date(2026, 10, 21))
+		self.assertIsNone(normalize_revision_date(None, "header.po_date"))
+		for value in ("2026-02-30", "21/10/2026", 20261021, True):
+			with self.subTest(value=value), self.assertRaisesRegex(frappe.ValidationError, "YYYY-MM-DD"):
+				normalize_revision_date(value, "items[].delivery_date")
+
+	def test_add_item_normalizes_default_delivery_date_when_request_omits_it(self):
+		order = frappe.get_doc({
+			"doctype": "Sales Order", "order_type": "Sales", "skip_delivery_note": 0,
+			"transaction_date": date(2026, 10, 20),
+			"items": [{"item_code": "ITEM-1", "delivery_date": date(2026, 10, 20),
+				"custom_crm_order_item_id": "LINE-1"}],
+		})
+		order.name = "SO-001"
+		order.custom_process_status = "Pending Deposit Confirmation"
+		facts = {"workOrders": [], "productionPlans": [], "stockEntries": [], "stockReservations": []}
+		with patch("erpnext.controllers.accounts_controller.set_order_defaults",
+			return_value=frappe._dict(item_code="ITEM-2", delivery_date="2026-10-21")):
+			apply_items(order, [{"action": "ADD", "crmOrderItemId": "LINE-2",
+				"item_code": "ITEM-2", "qty": 1, "rate": 0}], facts)
+		self.assertEqual(order.items[-1].delivery_date, date(2026, 10, 21))
+		order.validate_delivery_date()
+
+	def test_header_delivery_date_updates_existing_and_defaulted_new_items(self):
+		order = frappe.get_doc({
+			"doctype": "Sales Order", "order_type": "Sales", "skip_delivery_note": 0,
+			"transaction_date": date(2026, 10, 20), "delivery_date": date(2026, 10, 20),
+			"custom_process_status": "Pending Deposit Confirmation",
+			"items": [{"item_code": "ITEM-1", "delivery_date": date(2026, 10, 20),
+				"custom_crm_order_item_id": "LINE-1"}],
+		})
+		order.name = "SO-001"
+		old_date = order.delivery_date
+		order.delivery_date = date(2026, 10, 30)
+		changes = [{"action": "ADD", "crmOrderItemId": "LINE-2", "item_code": "ITEM-2", "qty": 1, "rate": 0}]
+		facts = {"workOrders": [], "productionPlans": [], "stockEntries": [], "stockReservations": []}
+		with patch("erpnext.controllers.accounts_controller.set_order_defaults",
+			return_value=frappe._dict(item_code="ITEM-2", delivery_date="2026-10-20")):
+			apply_items(order, changes, facts)
+		sync_header_delivery_date(order, {"delivery_date": date(2026, 10, 30)}, changes, old_date)
+		order.validate_delivery_date()
+		self.assertEqual(order.delivery_date, date(2026, 10, 30))
+		self.assertEqual([row.delivery_date for row in order.items], [date(2026, 10, 30)] * 2)
+
+	def test_header_only_delivery_date_updates_existing_items(self):
+		order = frappe.get_doc({
+			"doctype": "Sales Order", "order_type": "Sales", "skip_delivery_note": 0,
+			"transaction_date": date(2026, 10, 20), "delivery_date": date(2026, 10, 20),
+			"items": [{"item_code": "ITEM-1", "delivery_date": date(2026, 10, 20)}],
+		})
+		old_date = order.delivery_date
+		order.delivery_date = date(2026, 10, 30)
+		sync_header_delivery_date(order, {"delivery_date": order.delivery_date}, None, old_date)
+		order.validate_delivery_date()
+		self.assertEqual(order.delivery_date, date(2026, 10, 30))
+		self.assertEqual(order.items[0].delivery_date, date(2026, 10, 30))
+
+	def test_header_delivery_date_rejects_conflicting_explicit_item_date(self):
+		order = frappe.get_doc({
+			"doctype": "Sales Order", "order_type": "Sales", "skip_delivery_note": 0,
+			"delivery_date": date(2026, 10, 20),
+			"items": [{"item_code": "ITEM-1", "delivery_date": date(2026, 10, 20),
+				"custom_crm_order_item_id": "LINE-1"}],
+		})
+		order.delivery_date = date(2026, 10, 30)
+		order.items[0].delivery_date = date(2026, 11, 1)
+		changes = [{"action": "UPDATE", "crmOrderItemId": "LINE-1", "delivery_date": "2026-11-01"}]
+		with self.assertRaisesRegex(CRMOrderConflict, "必须等于修订后明细的最晚交期"):
+			sync_header_delivery_date(order, {"delivery_date": date(2026, 10, 30)}, changes,
+				date(2026, 10, 20))
+
+	def test_header_dates_are_normalized_before_saving(self):
+		doc = MagicMock(items=[], custom_crm_revision=1, order_type="Sales", skip_delivery_note=0,
+			delivery_date=date(2026, 10, 20),
+			custom_process_status="Pending Deposit Confirmation", flags=frappe._dict(),
+			payment_terms_template=None, payment_schedule=[],
+			currency="USD", conversion_rate=1, grand_total=100, base_grand_total=100)
+		doc.get.side_effect = lambda field: getattr(doc, field, None)
+		doc.set.side_effect = lambda field, value: setattr(doc, field, value)
+		payload = {"crmOrderNo": "CRM-001", "erpOrderId": "SO-001", "crmOrderId": "CRM-ID",
+			"expectedCrmRevision": 1, "targetCrmRevision": 2, "crmApprovalRound": 1,
+			"header": {"delivery_date": "2026-10-21", "po_date": "2026-10-20"}}
+		facts = {"purchaseOrders": [], "workOrders": [], "productionPlans": [],
+			"stockEntries": [], "stockReservations": [], "advancePaid": 0,
+			"paymentEntries": [], "salesInvoices": [], "mesPush": {}}
+		with (
+			patch("crm_integration.crm_integration.order_revision.lock_expected_order"),
+			patch("crm_integration.crm_integration.order_revision.current_order", return_value=(doc, [])),
+			patch("crm_integration.crm_integration.order_revision.check_version"),
+			patch("crm_integration.crm_integration.order_revision.linked_facts", return_value=facts),
+			patch("crm_integration.crm_integration.order_revision.assert_editable"),
+			patch("crm_integration.crm_integration.order_revision.describe_order", return_value={}),
+		):
+			execute_update(payload)
+		self.assertEqual(doc.delivery_date, date(2026, 10, 21))
+		self.assertEqual(doc.po_date, date(2026, 10, 20))
+
+	def test_header_delivery_date_rejects_saved_date_mismatch(self):
+		doc = MagicMock(items=[], custom_crm_revision=1, order_type="Sales", skip_delivery_note=0,
+			delivery_date=date(2026, 10, 20), custom_process_status="Pending Deposit Confirmation",
+			flags=frappe._dict(), payment_terms_template=None, payment_schedule=[],
+			currency="USD", conversion_rate=1, grand_total=100, base_grand_total=100)
+		doc.get.side_effect = lambda field: getattr(doc, field, None)
+		doc.set.side_effect = lambda field, value: setattr(doc, field, value)
+		doc.reload.side_effect = lambda: setattr(doc, "delivery_date", date(2026, 10, 20))
+		payload = {"crmOrderNo": "CRM-001", "erpOrderId": "SO-001", "crmOrderId": "CRM-ID",
+			"expectedCrmRevision": 1, "targetCrmRevision": 2, "crmApprovalRound": 1,
+			"header": {"delivery_date": "2026-10-30"}}
+		facts = {"purchaseOrders": [], "workOrders": [], "productionPlans": [],
+			"stockEntries": [], "stockReservations": [], "advancePaid": 0,
+			"paymentEntries": [], "salesInvoices": [], "mesPush": {}}
+		with (
+			patch("crm_integration.crm_integration.order_revision.lock_expected_order"),
+			patch("crm_integration.crm_integration.order_revision.current_order", return_value=(doc, [])),
+			patch("crm_integration.crm_integration.order_revision.check_version"),
+			patch("crm_integration.crm_integration.order_revision.linked_facts", return_value=facts),
+			patch("crm_integration.crm_integration.order_revision.assert_editable"),
+			self.assertRaisesRegex(CRMOrderConflict, "保存后的表头交期与请求不一致"),
+		):
+			execute_update(payload)
 
 	def test_sales_team_revision_validates_members_and_percentage(self):
 		rows = [{"sales_person": "Alice", "allocated_percentage": 60},

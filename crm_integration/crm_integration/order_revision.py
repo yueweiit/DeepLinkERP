@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
 import frappe
@@ -58,6 +59,21 @@ def parse_payload(value=None):
 	if not isinstance(value, dict):
 		frappe.throw(_("请求体必须是 JSON 对象。"))
 	return value
+
+
+def normalize_revision_date(value, fieldname):
+	if value is None or value == "":
+		return value
+	if isinstance(value, datetime):
+		return value.date()
+	if isinstance(value, date):
+		return value
+	if isinstance(value, str) and len(value) == 10 and value[4] == "-" and value[7] == "-":
+		try:
+			return date.fromisoformat(value)
+		except ValueError:
+			pass
+	frappe.throw(_("{0} 必须是有效的 YYYY-MM-DD 日期。").format(fieldname))
 
 
 def order_names(crm_order_no):
@@ -386,6 +402,8 @@ def apply_items(doc, changes, facts):
 		if fields - ITEM_FIELDS - {"item_code"}:
 			frappe.throw(_("存在不支持的明细字段：{0}。").format(", ".join(sorted(fields - ITEM_FIELDS - {"item_code"}))))
 		validate_crm_item_extra_fields(change)
+		if "delivery_date" in fields:
+			change = {**change, "delivery_date": normalize_revision_date(change["delivery_date"], "items[].delivery_date")}
 		if action == "ADD":
 			if erp_id or crm_id in by_crm_id or not change.get("item_code") or flt(change.get("qty")) <= 0:
 				raise CRMOrderConflict(_("新增明细的身份、物料或数量无效。"))
@@ -402,6 +420,7 @@ def apply_items(doc, changes, facts):
 				"item_code", "item_name", "description", "item_group", "delivery_date",
 				"stock_uom", "uom", "warehouse", "conversion_factor", "item_tax_template", "item_tax_rate",
 			)}
+			defaults["delivery_date"] = normalize_revision_date(defaults["delivery_date"], "items[].delivery_date")
 			row = doc.append("items", {**defaults, "custom_crm_order_item_id": crm_id})
 			for field in fields:
 				row.set(field, change[field])
@@ -451,6 +470,29 @@ def apply_items(doc, changes, facts):
 		or (facts.get("mesPush") or {}).get("lastPushStatus")):
 		raise CRMOrderConflict(_("STRUCTURAL_CHANGE_BLOCKED: 已推送 MES 或已有生产/库存预留关联，不能更改订单结构。"))
 	return structural, stock_structural
+
+
+def sync_header_delivery_date(doc, header, changes, previous_delivery_date):
+	if "delivery_date" not in header or doc.order_type != "Sales" or doc.skip_delivery_note:
+		return
+	requested = header["delivery_date"]
+	if not requested:
+		frappe.throw(_("header.delivery_date 不能为空。"))
+	if requested != previous_delivery_date:
+		explicit_item_dates = {
+			change["crmOrderItemId"] for change in changes or []
+			if change["action"] != "DELETE" and "delivery_date" in change
+		}
+		for row in doc.items:
+			if row.get("custom_crm_order_item_id") not in explicit_item_dates:
+				row.delivery_date = requested
+	dates = []
+	for row in doc.items:
+		if row.delivery_date:
+			row.delivery_date = normalize_revision_date(row.delivery_date, "items[].delivery_date")
+			dates.append(row.delivery_date)
+	if dates and max(dates) != requested:
+		raise CRMOrderConflict(_("header.delivery_date 必须等于修订后明细的最晚交期。"))
 
 
 def validate_financial_revision(doc, header, taxes, facts):
@@ -506,6 +548,10 @@ def execute_update(payload):
 		frappe.throw(_("header 必须是对象。"))
 	if set(header) - HEADER_FIELDS:
 		frappe.throw(_("header 含有不支持的字段：{0}。").format(", ".join(sorted(set(header) - HEADER_FIELDS))))
+	header = dict(header)
+	for field in ("delivery_date", "po_date"):
+		if field in header:
+			header[field] = normalize_revision_date(header[field], f"header.{field}")
 	if "taxes" in payload and payload["taxes"] is None:
 		frappe.throw(_("taxes 必须是数组。"))
 	taxes = payload.get("taxes") if "taxes" in payload else None
@@ -524,6 +570,8 @@ def execute_update(payload):
 	if "set_warehouse" in header and (facts.get("mesPush") or {}).get("lastPushStatus"):
 		raise CRMOrderConflict(_("MES 下推存在结果或结果未知，不能更改仓库。"))
 	old_item_warehouses = {(row.item_code, row.warehouse) for row in doc.items if row.warehouse}
+	old_delivery_date = (normalize_revision_date(doc.get("delivery_date"), "当前订单交期")
+		if "delivery_date" in header else None)
 	has_ordered_items = any(flt(row.get("ordered_qty")) for row in doc.items)
 	old_item_amounts = {row.name: flt(row.get("amount")) for row in doc.items}
 	old_payment_totals = (flt(doc.get("rounded_total") or doc.grand_total),
@@ -537,6 +585,7 @@ def execute_update(payload):
 		doc.set("taxes_and_charges", None)
 		doc.set("taxes", taxes)
 	structural, stock_structural = apply_items(doc, payload["items"], facts) if payload.get("items") is not None else (False, False)
+	sync_header_delivery_date(doc, header, payload.get("items"), old_delivery_date)
 	if "set_warehouse" in header:
 		for row in doc.items:
 			row.warehouse = header["set_warehouse"]
@@ -586,6 +635,9 @@ def execute_update(payload):
 	doc.update_billing_percentage()
 	doc.set_status()
 	doc.reload()
+	if ("delivery_date" in header and doc.order_type == "Sales" and not doc.skip_delivery_note
+		and normalize_revision_date(doc.delivery_date, "订单交期") != header["delivery_date"]):
+		raise CRMOrderConflict(_("ERP 保存后的表头交期与请求不一致，请核对明细交期。"))
 	result = describe_order(doc, rows)
 	result.update({"operationStatus": "SUCCEEDED", "mesAction": "NOT_REQUESTED",
 		"itemMappings": [{"crmOrderItemId": row.get("custom_crm_order_item_id"), "erpOrderItemId": row.name} for row in doc.items],
