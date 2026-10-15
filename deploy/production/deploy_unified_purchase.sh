@@ -117,6 +117,45 @@ release_is_current() {
   image_id=$(docker inspect frappe_docker-backend-1 --format '{{.Image}}') || return 1
   verify_running_release "$image_id" "$branding_sha" "$crm_sha" "$finance_sha" "$oa_sha"
 }
+record_crm_source_timer_state() {
+  python3 - "$1" "$2" "$3" "$release_identity" "$timer_guard_image" "$current_revision" "$current_crm" "$current_finance" "$current_oa" <<'PYTIMER'
+import hashlib,json,os,sys
+from pathlib import Path
+receipt,config=map(Path,sys.argv[1:3]);observed=int(sys.argv[3])
+identity=dict(zip(('release','image','branding','crm','finance','oa'),sys.argv[4:],strict=True))
+config_sha=hashlib.sha256(config.read_bytes()).hexdigest() if config.exists() else None
+if receipt.exists():
+ state=json.loads(receipt.read_bytes())
+ assert state['identity']==identity and state['config_sha256']==config_sha, 'Original source timer configuration/serving identity drift; HOLD'
+ assert state['original_active'] in (0,1) and not (state['original_active']==0 and observed==1), 'Source timer state changed outside this release; HOLD'
+else:
+ state=dict(identity=identity,config_sha256=config_sha,original_active=observed)
+ fd=os.open(receipt,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+ with os.fdopen(fd,'w') as output:
+  json.dump(state,output,sort_keys=True);output.flush();os.fsync(output.fileno())
+ directory=os.open(receipt.parent,os.O_RDONLY)
+ try: os.fsync(directory)
+ finally: os.close(directory)
+print(state['original_active'])
+PYTIMER
+}
+recover_crm_pre_cutover() {
+  local code=$? actual
+  trap - EXIT
+  if (( code == 0 || ! ${source_sync_timer_active:-0} )); then exit "$code"; fi
+  actual=$(sha256sum "$timer_guard_config") || { echo 'Original source timer config unreadable; HOLD.' >&2; exit "$code"; }
+  actual=${actual%% *}
+  if [[ "$actual" != "$timer_guard_config_sha" ]] || ! verify_running_release "$timer_guard_image" "$current_revision" "$current_crm" "$current_finance" "$current_oa"; then
+    echo 'Pre-cutover timer recovery cannot prove unchanged serving/config; HOLD.' >&2
+    exit "$code"
+  fi
+  flock -u 8
+  flock -u 9
+  if ! systemctl --user start deeplinkerp-source-sync.timer || ! systemctl --user is-active --quiet deeplinkerp-source-sync.timer; then
+    echo 'Original source timer restart unconfirmed; HOLD.' >&2
+  fi
+  exit "$code"
+}
 retarget_existing_source_sync() {
   # Never enable a timer that was absent or stopped before this release.
   (( source_sync_timer_active )) || return 0
@@ -705,6 +744,18 @@ case "$source_sync_state:$source_sync_status" in
   unknown:4) test ! -e /home/yuewei/.local/state/deeplinkerp-source-sync/config.json ;;
   *) echo 'Existing source timer state is unconfirmed; HOLD.' >&2; exit 1 ;;
 esac
+if (( crm_only )); then
+  timer_guard_image=$(docker inspect frappe_docker-backend-1 --format '{{.Image}}')
+  verify_running_release "$timer_guard_image" "$current_revision" "$current_crm" "$current_finance" "$current_oa"
+  timer_guard_config=/home/yuewei/.local/state/deeplinkerp-source-sync/config.json
+  source_sync_timer_active=$(record_crm_source_timer_state "$release_dir/source-timer-${timer_guard_image#sha256:}.json" "$timer_guard_config" "$source_sync_timer_active")
+  timer_guard_config_sha=
+  if (( source_sync_timer_active )); then
+    timer_guard_config_sha=$(sha256sum "$timer_guard_config")
+    timer_guard_config_sha=${timer_guard_config_sha%% *}
+  fi
+  trap recover_crm_pre_cutover EXIT
+fi
 if (( source_sync_timer_active )); then systemctl --user stop deeplinkerp-source-sync.timer; fi
 python3 "$build_dir/deploy/production/joint_release_guards.py" --source-host-proof > "$release_dir/source-host.json"
 if release_is_current; then

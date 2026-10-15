@@ -256,6 +256,45 @@ retarget_existing_source_sync sha256:ccccccccccccccccccccccccccccccccccccccccccc
 				else:
 					self.assertEqual(result.stdout, "")
 
+	def test_crm_timer_guard_is_armed_before_stop_and_restores_only_proven_original_state(self):
+		source = self.release_source()
+		self.assertLess(source.index("trap recover_crm_pre_cutover EXIT"), source.index("if (( source_sync_timer_active )); then systemctl --user stop"))
+		function = self.shell_function("recover_crm_pre_cutover")
+		for active, runtime, config in ((1, 0, "same"), (0, 0, "same"), (1, 1, "same"), (1, 0, "changed")):
+			with self.subTest(active=active,runtime=runtime,config=config):
+				script = function + f"""
+set -euo pipefail
+source_sync_timer_active={active};timer_guard_image=old;current_revision=branding;current_crm=crm;current_finance=finance;current_oa=oa
+timer_guard_config=/test/config;timer_guard_config_sha=same
+verify_running_release() {{ return {runtime}; }}
+sha256sum() {{ printf '%s  config\n' '{config}'; }}
+flock() {{ :; }}
+systemctl() {{ printf 'TIMER %s\n' "$*"; }}
+trap recover_crm_pre_cutover EXIT
+false
+"""
+				result=subprocess.run(["bash","-c",script],capture_output=True,text=True)
+				self.assertNotEqual(result.returncode,0)
+				self.assertEqual("start deeplinkerp-source-sync.timer" in result.stdout, bool(active and runtime==0 and config=="same"),result.stderr)
+
+	def test_crm_timer_original_state_survives_retry_and_rejects_config_drift(self):
+		function=self.shell_function("record_crm_source_timer_state")
+		with tempfile.TemporaryDirectory() as tmp:
+			root=Path(tmp);config=root/"config.json";config.write_text('{"pins":"original"}')
+			script=function+f'\npython3() {{ {shlex.quote(sys.executable)} "$@"; }}\n'+"""
+set -euo pipefail
+release_identity=release;timer_guard_image=image;current_revision=branding;current_crm=crm;current_finance=finance;current_oa=oa
+record_crm_source_timer_state "$1" "$2" "$3"
+"""
+			args=["bash","-c",script,"test",str(root/"timer.json"),str(config)]
+			first=subprocess.run(args+["1"],capture_output=True,text=True)
+			self.assertEqual(first.returncode,0,first.stderr);self.assertEqual(first.stdout.strip(),"1")
+			retry=subprocess.run(args+["0"],capture_output=True,text=True)
+			self.assertEqual(retry.returncode,0,retry.stderr);self.assertEqual(retry.stdout.strip(),"1")
+			config.write_text('{"pins":"different"}')
+			drift=subprocess.run(args+["0"],capture_output=True,text=True)
+			self.assertNotEqual(drift.returncode,0)
+
 	def audit_module(self, fake_frappe):
 		metadata = types.ModuleType("procurement_release_metadata")
 		metadata.__dict__.update(
