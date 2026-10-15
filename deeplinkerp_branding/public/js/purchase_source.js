@@ -41,12 +41,12 @@
 	}
 	const blockers = plan => [...new Set((plan?.blocking_reasons || []).filter(Boolean))];
 	const newItemsHTML = items => (items || []).map(item => `<p>${text(item.item_code)} · ${text(item.item_name)} · ${text(item.item_group)} · ${text(item.uom)} · ${esc(t(({ 0: "非库存物料", 1: "库存物料" })[item.is_stock_item] || "库存属性待确认"))}</p>`).join("");
-	function adaptationHTML(plan) {
+	function adaptationHTML(plan, historical = false) {
 		if (!plan) return "";
 		const columns = [["item_code", "物料编码"], ["item_name", "物料名称"], ["qty", "数量"], ["uom", "单位"], ["rate", "单价"], ["amount", "金额"], ["processor_name", "加工商"], ["processing_materials", "加工材料"], ["odt", "ODT"], ["sales_order_no", "销售订单"]];
 		const table = root.DeepLinkERPCompactList.detailTable({ columns, items: plan.items || [], escape: esc, translate: t, format: (field, item) => field === "qty" ? quantity(item.qty) : ["rate", "amount"].includes(field) ? money(item[field], plan.currency) : undefined, wrapperClass: "dlp-document-items", tableClass: "table-bordered" });
 		const proposed = newItemsHTML(plan.new_items);
-		return `<section class="dlp-source-adaptation"><h5>${esc(t("适配采购明细（只读）"))}</h5><p>${esc(t("适配明细合计"))}：${money(plan.total_amount, plan.currency)}</p>${plan.date_adjustment ? `<p class="text-muted">${esc(plan.date_adjustment)}</p>` : ""}${table}${proposed ? `<h5>${esc(t("拟新增物料"))}</h5>${proposed}` : ""}</section>`;
+		return `<section class="dlp-source-adaptation"><h5>${esc(t(historical ? "建单时适配明细（只读）" : "适配采购明细（只读）"))}</h5><p>${esc(t("适配明细合计"))}：${money(plan.total_amount, plan.currency)}</p>${plan.date_adjustment ? `<p class="text-muted">${esc(plan.date_adjustment)}</p>` : ""}${table}${proposed ? `<h5>${esc(t(historical ? "建单时拟新增物料" : "拟新增物料"))}</h5>${proposed}` : ""}</section>`;
 	}
 	function evidenceHTML(detail) {
 		const source = detail.source, proof = detail.cashier || {};
@@ -61,11 +61,11 @@
 			return `<p>${available ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${text(file.filename || id)}</a>` : text(file.filename || id)} · ${esc(t(available ? "可下载证据" : "附件暂不可下载，请在原单核对"))}</p>`;
 		}).join("") || `<p>${esc(t("暂无已归档附件，请在原单核对。"))}</p>`;
 		const payments = (cashier.payments || []).map(payment => `<p>${text(payment.source_id)} · ${text(payment.payment_date)} · ${money(payment.amount, payment.currency)} · ${text(payment.payer)} · ${text(payment.evidence_status)}<br>${text(payment.remark)} · ${text(payment.bank_reference)}</p>`).join("") || `<p>${esc(t("尚无可核实的实际付款证据。"))}</p>`;
-		const plan = !detail.purchase_order && detail.adaptation, reasons = blockers(plan);
+		const plan = detail.purchase_order ? detail.adopted_adaptation : detail.adaptation, reasons = detail.purchase_order ? [] : blockers(plan);
 		const replacesLegacy = Array.isArray(plan?.items) && Array.isArray(plan?.blocking_reasons);
 		const legacyIssues = [detail.pending_reason, ...(source.issues || [])].filter(issue => issue && !(replacesLegacy && ["采购明细待完善", "采购明细与申请金额不一致，请核对原单"].includes(issue)));
 		const issues = [...new Set([...legacyIssues, ...reasons, ...(cashier.issues || [])].filter(Boolean))];
-		return `<section class="dlp-source-evidence"><h4>${esc(t("采购来源"))} · ${text(source.business_id || detail.name)}</h4><p>${originalLink(source)} · <a href="/desk/oa-purchase-request/${encodeURIComponent(detail.name)}">${esc(t("OA 来源记录"))}</a></p><div class="dlp-source-facts">${facts.map(([label, value]) => `<div><strong>${esc(t(label))}</strong><span>${value}</span></div>`).join("")}</div><p class="text-muted">${esc(t("出纳实付是原付款证据；ERP 登记付款和核销在订单中另列。"))}</p>${issues.map(issue => `<p class="text-warning">${esc(issue)}</p>`).join("")}${adaptationHTML(plan)}${detail.scope_review ? `<h5>${esc(t("来源范围复核"))}</h5><p>${esc(t("原采用范围"))}：${readable(detail.scope_review.adopted_scope)}</p><p>${esc(t("本次核对范围"))}：${readable(detail.scope_review.current_scope)}</p>` : ""}<h5>${esc(t("原始采购明细（只读）"))}</h5>${table}<details><summary>${esc(t("原始申请内容"))}</summary>${readable(source.original_fields || {})}</details><details><summary>${esc(t("出纳付款证据"))}</summary>${payments}${attachments}</details></section>`;
+		return `<section class="dlp-source-evidence"><h4>${esc(t("采购来源"))} · ${text(source.business_id || detail.name)}</h4><p>${originalLink(source)} · <a href="/desk/oa-purchase-request/${encodeURIComponent(detail.name)}">${esc(t("OA 来源记录"))}</a></p><div class="dlp-source-facts">${facts.map(([label, value]) => `<div><strong>${esc(t(label))}</strong><span>${value}</span></div>`).join("")}</div><p class="text-muted">${esc(t("出纳实付是原付款证据；ERP 登记付款和核销在订单中另列。"))}</p>${issues.map(issue => `<p class="text-warning">${esc(issue)}</p>`).join("")}${adaptationHTML(plan, Boolean(detail.purchase_order))}${detail.scope_review ? `<h5>${esc(t("来源范围复核"))}</h5><p>${esc(t("原采用范围"))}：${readable(detail.scope_review.adopted_scope)}</p><p>${esc(t("本次核对范围"))}：${readable(detail.scope_review.current_scope)}</p>` : ""}<h5>${esc(t("原始采购明细（只读）"))}</h5>${table}<details><summary>${esc(t("原始申请内容"))}</summary>${readable(source.original_fields || {})}</details><details><summary>${esc(t("出纳付款证据"))}</summary>${payments}${attachments}</details></section>`;
 	}
 	function value(control) {
 		const raw = control?.$input?.val?.();

@@ -405,6 +405,15 @@ test("six adapted processing rows show exact references and shared numeric forma
 	assert.equal(JSON.stringify(detail), original);
 });
 
+test("linked sources show the adopted processing snapshot without enabling rule or create controls", async () => {
+	const detail = adaptedProjection(); detail.purchase_order = "PO-EXISTING";
+	detail.adopted_adaptation = detail.adaptation; detail.adaptation = null;
+	const h = host(detail); await h.api.open("OA/1");
+	assert.match(h.html(), /适配明细合计/); assert.match(h.html(), /4,788\.00 CNY/);
+	assert.match(h.html(), /加工材料/); assert.match(h.html(), /ODT/);
+	assert.doesNotMatch(h.html(), /class='[^']*dlp-source-create|class='[^']*dlp-source-rule-confirm/);
+});
+
 test("draft delivery date uses the adopted date while original date remains visible", async () => {
 	const detail = adaptedProjection(); detail.source.schedule_date = "2026-10-08";
 	detail.adaptation.schedule_date = "2026-10-09";

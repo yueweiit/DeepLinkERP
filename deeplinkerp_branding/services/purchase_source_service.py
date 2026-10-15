@@ -803,7 +803,8 @@ def get_purchase_source_detail(name, fresh=0):
     notice="已核对对应 ERP 付款记录；再次付款仍会复查有效状态" if reconciled else "历史付款尚未核对为 ERP 入账；不会自动补记付款"
     roles = _role_projection(doc,source)
     return {"name":doc.name,"version":version,"creation_version":creation_version,
-            "adaptation":adaptation,"can_manage_rules":bool(frappe.session.user == "Administrator" or "System Manager" in frappe.get_roles()),
+            "adaptation":adaptation,"adopted_adaptation":_json(doc.get(source_rules.ADOPTION_FIELD)).get("plan") if doc.purchase_order else None,
+            "can_manage_rules":bool(frappe.session.user == "Administrator" or "System Manager" in frappe.get_roles()),
             "scope_review":scope_review,"recheck_version":recheck_version,
             "source":source,"cashier":evidence,"purchase_order":doc.purchase_order,"pending_reason":doc.get(PENDING_FIELD),
             "target_company":roles["purchasing_company"] or roles["buyer_company_proposal"], **roles,
