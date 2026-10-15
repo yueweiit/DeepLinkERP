@@ -3,8 +3,8 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests import UnitTestCase
-from crm_integration.crm_integration import api
 
+from crm_integration.crm_integration import api
 from crm_integration.crm_integration.api import (
 	create_and_submit_sales_order,
 	get_existing_sales_order_response,
@@ -22,7 +22,8 @@ class TestCRMAPI(UnitTestCase):
 			patch.object(api, "get_shipment_request_payload", return_value=payload),
 			patch.object(api, "preview_delivery_note_from_crm", return_value={"can_execute": False}) as preview):
 			result = api.preview_delivery_note("wrapped")
-		auth.assert_called_once(); preview.assert_called_once_with(payload)
+		auth.assert_called_once()
+		preview.assert_called_once_with(payload)
 		self.assertFalse(result["can_execute"])
 
 	def test_sales_order_create_requires_crm_order_no(self):

@@ -1,7 +1,6 @@
 import frappe
 from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 
-
 PROCESS_STATUS_OPTIONS = "\n".join(
 	[
 		"Pending Confirmation",

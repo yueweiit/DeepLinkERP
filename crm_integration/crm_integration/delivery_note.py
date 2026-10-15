@@ -7,7 +7,7 @@ from datetime import timedelta
 import frappe
 from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note
 from frappe import _
-from frappe.utils import cint, flt, getdate, get_datetime, get_time, now, nowdate, nowtime
+from frappe.utils import cint, flt, get_datetime, get_time, getdate, now, nowdate, nowtime
 
 from crm_integration.crm_integration.integration_log import create_crm_log, update_crm_log
 from crm_integration.crm_integration.sales_order import (

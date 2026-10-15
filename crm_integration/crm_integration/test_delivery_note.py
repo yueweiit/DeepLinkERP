@@ -4,8 +4,8 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests import UnitTestCase
-from crm_integration.crm_integration import delivery_note as shipment
 
+from crm_integration.crm_integration import delivery_note as shipment
 from crm_integration.crm_integration.delivery_note import (
 	allocate_crm_shipment_items,
 	apply_sales_order_item_pricing,
@@ -354,31 +354,38 @@ class TestCRMNativeShipment(UnitTestCase):
 
 	def test_event_identity_is_organization_scoped_and_independent_of_human_batch(self):
 		one = shipment.normalize_crm_shipment_payload(self.source())
-		two_source = self.source(); two_source["batch_no"] = "不同批号"
+		two_source = self.source()
+		two_source["batch_no"] = "不同批号"
 		two = shipment.normalize_crm_shipment_payload(two_source)
-		three_source = self.source(); three_source["source_organization"] = "OTHER"
+		three_source = self.source()
+		three_source["source_organization"] = "OTHER"
 		three = shipment.normalize_crm_shipment_payload(three_source)
 		self.assertTrue(one[shipment.CRM_SHIPMENT_FIELD].startswith("crm-event-"))
 		self.assertEqual(one[shipment.CRM_SHIPMENT_FIELD], two[shipment.CRM_SHIPMENT_FIELD])
 		self.assertNotEqual(one[shipment.CRM_SHIPMENT_FIELD], three[shipment.CRM_SHIPMENT_FIELD])
 
 	def test_historical_shipment_requires_true_posting_timestamp(self):
-		payload = self.source(); del payload["posting_time"]
+		payload = self.source()
+		del payload["posting_time"]
 		with self.assertRaisesRegex(frappe.ValidationError, "posting_date.*posting_time"):
 			shipment.validate_crm_shipment_payload(shipment.normalize_crm_shipment_payload(payload))
 
 	def test_exact_crm_row_identity_rejects_wrong_native_row(self):
-		payload = self.source(); payload["items"][0]["crm_order_item_id"] = "WRONG"
+		payload = self.source()
+		payload["items"][0]["crm_order_item_id"] = "WRONG"
 		with self.assertRaisesRegex(frappe.ValidationError, "crm_order_item_id"):
 			shipment.allocate_crm_shipment_items(self.order(), payload["items"])
 
 	def test_uom_must_match_native_order_row(self):
-		payload = self.source(); payload["items"][0]["uom"] = "Nos"
+		payload = self.source()
+		payload["items"][0]["uom"] = "Nos"
 		with self.assertRaisesRegex(frappe.ValidationError, "uom"):
 			shipment.allocate_crm_shipment_items(self.order(), payload["items"])
 
 	def test_ambiguous_same_code_rows_require_exact_identity(self):
-		order = self.order(); other = frappe._dict(order["items"][0]); other.name = "SOI-2"
+		order = self.order()
+		other = frappe._dict(order["items"][0])
+		other.name = "SOI-2"
 		order["items"].append(other)
 		with self.assertRaisesRegex(frappe.ValidationError, "sales_order_item|crm_order_item_id"):
 			shipment.allocate_crm_shipment_items(order, [dict(item_code="ITEM-1", qty=1)])
@@ -395,20 +402,25 @@ class TestCRMNativeShipment(UnitTestCase):
 		self.assertFalse(plan["blockers"])
 
 	def test_duplicate_item_warehouse_rows_share_existing_stock_in_source_order(self):
-		payload = self.source(); payload["items"] = [dict(payload["items"][0], qty=2), dict(payload["items"][0], qty=2)]
+		payload = self.source()
+		payload["items"] = [dict(payload["items"][0], qty=2), dict(payload["items"][0], qty=2)]
 		plan, balance = self.plan(payload, stock=5)
 		self.assertEqual([row["shortage_qty"] for row in plan["items"]], [0, 3])
 		self.assertEqual(balance.call_count, 1)
 
 	def test_no_shortage_needs_no_supplement_price(self):
-		payload = self.source(); del payload["items"][0]["source_unit_price"]
+		payload = self.source()
+		del payload["items"][0]["source_unit_price"]
 		plan, _ = self.plan(payload, stock=10)
 		self.assertFalse(plan["blockers"])
 		self.assertEqual(plan["items"][0]["shortage_qty"], 0)
 
 	def test_explicit_zero_is_preserved_and_missing_supplement_price_blocks(self):
-		payload = self.source(); payload["items"][0]["source_unit_price"] = 0
-		order = self.order(); order["items"][0].net_rate = 0; order["items"][0].base_net_rate = 0
+		payload = self.source()
+		payload["items"][0]["source_unit_price"] = 0
+		order = self.order()
+		order["items"][0].net_rate = 0
+		order["items"][0].base_net_rate = 0
 		plan, _ = self.plan(payload, order, stock=0)
 		self.assertEqual(plan["items"][0]["temporary_valuation_rate"], 0)
 		self.assertFalse(plan["blockers"])
@@ -417,21 +429,25 @@ class TestCRMNativeShipment(UnitTestCase):
 		self.assertIn("source_unit_price", " ".join(plan["blockers"]))
 
 	def test_source_price_and_currency_must_agree_with_native_net_rate(self):
-		payload = self.source(); payload["items"][0]["source_unit_price"] = 22
+		payload = self.source()
+		payload["items"][0]["source_unit_price"] = 22
 		plan, _ = self.plan(payload, stock=0)
 		self.assertIn("source_unit_price", " ".join(plan["blockers"]))
-		payload["items"][0]["source_unit_price"] = 20; payload["items"][0]["source_currency"] = "CNY"
+		payload["items"][0]["source_unit_price"] = 20
+		payload["items"][0]["source_currency"] = "CNY"
 		plan, _ = self.plan(payload, stock=0)
 		self.assertIn("source_currency", " ".join(plan["blockers"]))
 
 	def test_explicit_warehouse_conflict_blocks_instead_of_replacing_native_row(self):
-		payload = self.source(); payload["items"][0]["warehouse"] = "成品 - YC"
+		payload = self.source()
+		payload["items"][0]["warehouse"] = "成品 - YC"
 		plan, _ = self.plan(payload)
 		self.assertIn("warehouse", " ".join(plan["blockers"]))
 		self.assertEqual(plan["items"][0]["warehouse"], "FG-WH")
 
 	def test_disabled_or_other_company_warehouse_blocks(self):
-		payload = shipment.normalize_crm_shipment_payload(self.source()); order = self.order()
+		payload = shipment.normalize_crm_shipment_payload(self.source())
+		order = self.order()
 		allocations = shipment.allocate_crm_shipment_items(order, payload["items"])
 		with patch.object(frappe.db, "get_value", return_value=frappe._dict(company="OTHER", disabled=1)):
 			with patch.object(frappe, "get_cached_value", return_value="CNY"):
@@ -439,7 +455,8 @@ class TestCRMNativeShipment(UnitTestCase):
 		self.assertTrue(plan["blockers"])
 
 	def test_unreleased_order_is_blocked_without_status_mutation(self):
-		order = self.order(); order.custom_process_status = "Pending Final Payment"
+		order = self.order()
+		order.custom_process_status = "Pending Final Payment"
 		with patch.object(shipment, "set_process_status") as mutate:
 			with self.assertRaisesRegex(frappe.ValidationError, "不允许|未放行"):
 				shipment.release_sales_order_for_crm_shipment(order)
@@ -457,10 +474,12 @@ class TestCRMNativeShipment(UnitTestCase):
 			patch.object(shipment, "enqueue_mes_delivery_note_status_callback") as mes,
 		):
 			shipment.update_sales_orders_delivery_process_status(doc)
-		crm.assert_not_called(); mes.assert_not_called()
+		crm.assert_not_called()
+		mes.assert_not_called()
 
 	def test_existing_blank_crm_row_mapping_is_previewed_without_writes(self):
-		order = self.order(); order["items"][0].custom_crm_order_item_id = None
+		order = self.order()
+		order["items"][0].custom_crm_order_item_id = None
 		allocations = shipment.allocate_crm_shipment_items(order, self.source()["items"])
 		self.assertEqual(allocations[0].crm_order_item_id, "CRM-ROW-1")
 		self.assertIsNone(order["items"][0].custom_crm_order_item_id)
@@ -481,7 +500,9 @@ class TestCRMNativeShipment(UnitTestCase):
 		self.assertEqual(result["sales_order"], "SO-1")
 		self.assertEqual(len(result["source_fingerprint"]), 64)
 		self.assertEqual(len(result["preview_fingerprint"]), 64)
-		write_doc.assert_not_called(); commit.assert_not_called(); log.assert_not_called()
+		write_doc.assert_not_called()
+		commit.assert_not_called()
+		log.assert_not_called()
 
 	def test_preview_fingerprint_detects_stock_change_and_source_fingerprint_is_stable(self):
 		payload = shipment.normalize_crm_shipment_payload(self.source())
@@ -498,7 +519,8 @@ class TestCRMNativeShipment(UnitTestCase):
 	def test_native_supplement_only_receives_shortfall_before_shipment_timestamp(self):
 		plan, _ = self.plan(stock=4)
 		payload = shipment.normalize_crm_shipment_payload(self.source())
-		entry = MagicMock(); entry.name = "STE-1"
+		entry = MagicMock()
+		entry.name = "STE-1"
 		with patch.object(frappe, "get_doc", return_value=entry) as native_doc, patch.object(frappe.db, "commit") as commit:
 			result = shipment.make_crm_stock_supplement(self.order(), payload, plan)
 		data = native_doc.call_args.args[0]
@@ -511,8 +533,10 @@ class TestCRMNativeShipment(UnitTestCase):
 		self.assertEqual(data["items"][0]["basic_rate"], 70)
 		self.assertEqual(data["items"][0]["set_basic_rate_manually"], 1)
 		self.assertIn("临时", data["remarks"])
-		entry.insert.assert_called_once_with(ignore_permissions=True); entry.submit.assert_called_once()
-		commit.assert_not_called(); self.assertIs(result, entry)
+		entry.insert.assert_called_once_with(ignore_permissions=True)
+		entry.submit.assert_called_once()
+		commit.assert_not_called()
+		self.assertIs(result, entry)
 
 	def test_no_shortage_creates_no_stock_entry(self):
 		plan, _ = self.plan(stock=10)
@@ -521,7 +545,8 @@ class TestCRMNativeShipment(UnitTestCase):
 		native_doc.assert_not_called()
 
 	def test_supplement_at_midnight_sorts_on_previous_day(self):
-		payload = self.source(); payload["posting_time"] = "00:00:00"
+		payload = self.source()
+		payload["posting_time"] = "00:00:00"
 		plan, _ = self.plan(payload, stock=0)
 		with patch.object(frappe, "get_doc", return_value=MagicMock()) as native_doc:
 			shipment.make_crm_stock_supplement(self.order(), shipment.normalize_crm_shipment_payload(payload), plan)
@@ -530,7 +555,8 @@ class TestCRMNativeShipment(UnitTestCase):
 		self.assertEqual(data["posting_time"], "23:59:59")
 
 	def test_supplement_explicit_zero_disables_valuation_fallback(self):
-		plan, _ = self.plan(stock=0); plan["items"][0]["temporary_valuation_rate"] = 0
+		plan, _ = self.plan(stock=0)
+		plan["items"][0]["temporary_valuation_rate"] = 0
 		with patch.object(frappe, "get_doc", return_value=MagicMock()) as native_doc:
 			shipment.make_crm_stock_supplement(self.order(), shipment.normalize_crm_shipment_payload(self.source()), plan)
 		self.assertEqual(native_doc.call_args.args[0]["items"][0]["allow_zero_valuation_rate"], 1)
@@ -553,7 +579,8 @@ class TestCRMNativeShipment(UnitTestCase):
 		):
 			result = shipment.create_and_submit_delivery_note_from_crm(payload)
 		self.assertTrue(result["idempotent_replay"])
-		plan.assert_not_called(); supplement.assert_not_called()
+		plan.assert_not_called()
+		supplement.assert_not_called()
 
 	def test_exception_keeps_shipment_lock_until_database_rollback(self):
 		after_commit, after_rollback = MagicMock(), MagicMock()
@@ -578,10 +605,13 @@ class TestCRMNativeShipment(UnitTestCase):
 		self.assertEqual([call.args[0] for call in lock.call_args_list], ["stock:A:W", "stock:Z:W"])
 
 	def test_native_submit_failure_rolls_back_supplement_mapping_and_delivery_savepoint(self):
-		payload = shipment.normalize_crm_shipment_payload(self.source()); plan, _ = self.plan()
+		payload = shipment.normalize_crm_shipment_payload(self.source())
+		plan, _ = self.plan()
 		preview = shipment.get_crm_preview_response(self.order(), payload, plan)
 		payload.update(source_fingerprint=preview["source_fingerprint"], preview_fingerprint=preview["preview_fingerprint"])
-		doc = MagicMock(); doc.name = "DN-1"; doc.docstatus = 0
+		doc = MagicMock()
+		doc.name = "DN-1"
+		doc.docstatus = 0
 		doc.submit.side_effect = RuntimeError("native accounting period closed")
 		with (
 			patch.object(shipment, "get_crm_shipment_sales_order", return_value=self.order()),
@@ -604,8 +634,10 @@ class TestCRMNativeShipment(UnitTestCase):
 		):
 			with self.assertRaisesRegex(RuntimeError, "native accounting period closed"):
 				shipment.create_and_submit_delivery_note_from_crm(payload)
-		mapping.assert_called_once(); supplement.assert_called_once()
-		rollback.assert_called_once_with(save_point=savepoint.call_args.args[0]); commit.assert_not_called()
+		mapping.assert_called_once()
+		supplement.assert_called_once()
+		rollback.assert_called_once_with(save_point=savepoint.call_args.args[0])
+		commit.assert_not_called()
 
 	def test_response_reports_native_repost_pending_and_supplement_ids(self):
 		doc = frappe._dict(name="DN-1", docstatus=1, custom_crm_stock_supplement="STE-1")
@@ -633,7 +665,8 @@ class TestCRMNativeShipment(UnitTestCase):
 				self.assertEqual(mapped[name]["read_only"], 1)
 
 	def test_execute_reads_native_historical_balance_with_current_row_lock(self):
-		payload = shipment.normalize_crm_shipment_payload(self.source()); order = self.order()
+		payload = shipment.normalize_crm_shipment_payload(self.source())
+		order = self.order()
 		allocations = shipment.allocate_crm_shipment_items(order, payload["items"])
 		with (
 			patch.object(frappe.db, "get_value", return_value=frappe._dict(company="Company", disabled=0, is_group=0)),
@@ -648,25 +681,31 @@ class TestCRMNativeShipment(UnitTestCase):
 		stale_snapshot.assert_not_called()
 
 	def test_invalid_text_price_is_not_accepted_as_explicit_zero(self):
-		payload = self.source(); payload["items"][0]["source_unit_price"] = "invalid"
-		order = self.order(); order["items"][0].net_rate = 0; order["items"][0].base_net_rate = 0
+		payload = self.source()
+		payload["items"][0]["source_unit_price"] = "invalid"
+		order = self.order()
+		order["items"][0].net_rate = 0
+		order["items"][0].base_net_rate = 0
 		plan, _ = self.plan(payload, order, stock=0)
 		self.assertIn("source_unit_price", " ".join(plan["blockers"]))
 
 	def test_legacy_release_policy_remains_scoped_to_legacy_callers(self):
-		order = self.order(); order.custom_process_status = "Pending Production"
+		order = self.order()
+		order.custom_process_status = "Pending Production"
 		with patch.object(shipment, "set_process_status") as release:
 			shipment.release_sales_order_for_crm_shipment(order, legacy_release=True)
 		release.assert_called_once_with(order, "Deliverable")
 
 	def test_preview_rejects_two_crm_rows_binding_one_blank_native_row(self):
-		order = self.order(); order["items"][0].custom_crm_order_item_id = None
+		order = self.order()
+		order["items"][0].custom_crm_order_item_id = None
 		items = [dict(self.source()["items"][0], qty=1), dict(self.source()["items"][0], qty=1, crm_order_item_id="CRM-ROW-2")]
 		with self.assertRaisesRegex(frappe.ValidationError, "crm_order_item_id"):
 			shipment.allocate_crm_shipment_items(order, items)
 
 	def test_missing_native_uom_conversion_blocks_supplement(self):
-		order = self.order(); order["items"][0].conversion_factor = 0
+		order = self.order()
+		order["items"][0].conversion_factor = 0
 		plan, _ = self.plan(sales_order=order, stock=0)
 		self.assertTrue(plan["blockers"])
 
@@ -676,7 +715,8 @@ class TestCRMNativeShipment(UnitTestCase):
 		self.assertEqual(preview["blocker_code"], "ERP_CRM_SHIPMENT_IDENTITY_CONFLICT")
 
 	def test_empty_native_ledger_has_identical_preview_and_locked_execution_fingerprint(self):
-		payload = shipment.normalize_crm_shipment_payload(self.source()); order = self.order()
+		payload = shipment.normalize_crm_shipment_payload(self.source())
+		order = self.order()
 		with (
 			patch.object(frappe.db, "get_value", return_value=frappe._dict(company="Company", disabled=0, is_group=0)),
 			patch.object(frappe, "get_cached_value", return_value="CNY"),
@@ -698,7 +738,8 @@ class TestCRMNativeShipment(UnitTestCase):
 			shipment.validate_crm_strict_execution_payload(payload)
 		payload.update(source_fingerprint="source", preview_fingerprint="preview")
 		for field in ("crm_order_item_id", "item_code", "custom_version", "uom"):
-			missing = dict(payload, items=[dict(payload["items"][0])]); del missing["items"][0][field]
+			missing = dict(payload, items=[dict(payload["items"][0])])
+			del missing["items"][0][field]
 			with self.assertRaisesRegex(frappe.ValidationError, field):
 				shipment.validate_crm_strict_execution_payload(missing)
 
@@ -733,12 +774,15 @@ class TestCRMNativeShipment(UnitTestCase):
 		delivery = frappe.get_doc(dict(doctype="Delivery Note", company="OLD", currency="USD", conversion_rate=1,
 			taxes_and_charges="STALE", taxes=[dict(charge_type="Actual", tax_amount=5)], sales_team=[]))
 		shipment.apply_locked_sales_order_header(delivery, order)
-		self.assertEqual(delivery.company, "Company"); self.assertEqual(delivery.currency, "MXN")
+		self.assertEqual(delivery.company, "Company")
+		self.assertEqual(delivery.currency, "MXN")
 		self.assertEqual(delivery.conversion_rate, 7)
-		self.assertIsNone(delivery.taxes_and_charges); self.assertEqual(delivery.taxes, [])
+		self.assertIsNone(delivery.taxes_and_charges)
+		self.assertEqual(delivery.taxes, [])
 
 	def test_incomplete_strict_preview_returns_native_mapping_and_contract_blockers(self):
-		payload = self.source(); del payload["items"][0]["uom"]
+		payload = self.source()
+		del payload["items"][0]["uom"]
 		plan, _ = self.plan(payload)
 		with (patch.object(shipment, "get_crm_shipment_sales_order", return_value=self.order()),
 			patch.object(shipment, "is_crm_integration_enabled", return_value=True),
@@ -750,7 +794,9 @@ class TestCRMNativeShipment(UnitTestCase):
 		self.assertEqual(preview["sales_order_items"][0]["uom"], "Box")
 
 	def test_strict_event_cannot_execute_using_only_a_human_shipment_number(self):
-		payload = self.source(); del payload["source_organization"]; del payload["event_id"]
+		payload = self.source()
+		del payload["source_organization"]
+		del payload["event_id"]
 		payload.update(custom_crm_shipment_no="HUMAN-BATCH", source_fingerprint="source", preview_fingerprint="preview")
 		with self.assertRaisesRegex(frappe.ValidationError, "source_organization|event_id"):
 			shipment.validate_crm_strict_execution_payload(payload)
@@ -766,8 +812,11 @@ class TestCRMNativeShipment(UnitTestCase):
 		enqueue.assert_not_called()
 
 	def test_strict_shipment_never_fills_blank_native_warehouse_from_request(self):
-		order = self.order(); order["items"][0].warehouse = None; order.set_warehouse = None
-		payload = self.source(); payload["items"][0]["warehouse"] = "EXPLICIT-REQUEST-WH"
+		order = self.order()
+		order["items"][0].warehouse = None
+		order.set_warehouse = None
+		payload = self.source()
+		payload["items"][0]["warehouse"] = "EXPLICIT-REQUEST-WH"
 		plan, balance = self.plan(payload, order)
 		self.assertTrue(plan["blockers"])
 		self.assertIsNone(plan["items"][0]["warehouse"])
