@@ -892,6 +892,85 @@ def test_private_projection_does_not_reveal_denied_approval_or_financial_fields(
 	assert "不一致" not in (row["oa_warning"] or "")
 
 
+@pytest.mark.parametrize("pending", ["加工服务采购单位待确认", "采购明细与申请金额不一致，请核对原单"])
+def test_unbound_managed_list_uses_current_pending_reason_and_preserves_real_source_warnings(monkeypatch, pending):
+	source = json.dumps({"version": "unchanged-source-version", "currency": "CNY", "detail_total_amount": "0",
+		"issues": ["采购明细待完善", "采购明细与申请金额不一致，请核对原单", "原单交付日期需要核对"]})
+	request = oa(items_json="[]", custom_purchase_source_id="source", custom_purchase_source_json=source,
+		custom_purchase_pending_reason=pending)
+	original = json.dumps(request, default=str, ensure_ascii=False)
+	b = ReadBoundary([], [request], fields={"Purchase Order": {"name"}, "OA Purchase Request": set(request)})
+	row = connect(monkeypatch, b).get_unified_purchase_list()["rows"][0]
+	assert row["oa_warning"] == "原单交付日期需要核对；" + pending
+	assert row["oa_references"][0]["warning"] == row["oa_warning"]
+	assert row["source_version"] == "unchanged-source-version" and row["oa_amount"] == "0"
+	assert json.dumps(request, default=str, ensure_ascii=False) == original
+	assert len(b.private_reads) == 1
+
+
+@pytest.mark.parametrize("link_direction", ["oa", "order"])
+@pytest.mark.parametrize("pending", ["", "采购明细与申请金额不一致，请核对原单"])
+def test_linked_adoption_only_removes_recomputed_generic_hints_and_never_projects_private_plan(monkeypatch, link_direction, pending):
+	source = json.dumps({"version": "source-v1", "currency": "CNY", "detail_total_amount": "0",
+		"issues": ["采购明细待完善", "采购明细与申请金额不一致，请核对原单", "原始附件需要核对"]})
+	adoption = json.dumps({"source_version": "source-v1", "plan": {"items": [{"processor_phone": "PRIVATE-PHONE", "description": "PRIVATE-ADOPTION-DETAIL"}]}})
+	request = oa(items_json="[]", purchase_order="PO-1" if link_direction == "oa" else None, custom_purchase_source_id="source", custom_purchase_source_json=source,
+		custom_purchase_adaptation_json=adoption, custom_purchase_pending_reason=pending)
+	b = ReadBoundary([po(custom_oa_purchase_expense="OA-1")], [request],
+		fields={"Purchase Order": set(po()), "OA Purchase Request": set(request) - {"custom_purchase_adaptation_json"}})
+	s = connect(monkeypatch, b)
+	parsed = []; original_loads = json.loads
+	def loads(value, *args, **kwargs):
+		parsed.append(value); return original_loads(value, *args, **kwargs)
+	monkeypatch.setattr(s.json, "loads", loads)
+	result = s.get_unified_purchase_list(); row = result["rows"][0]
+	assert row["oa_warning"] == "原始附件需要核对" + ("；" + pending if pending else "")
+	assert row["source_version"] == "source-v1" and row["oa_amount"] == "0"
+	assert request["custom_purchase_source_json"] == source and request["custom_purchase_adaptation_json"] == adoption
+	assert "PRIVATE-" not in str(result) and "custom_purchase_adaptation_json" not in str(result) and "_adaptation_adopted" not in str(result)
+	assert parsed.count(adoption) == 1 and len(b.private_reads) == 1
+	assert "custom_purchase_adaptation_json" in b.private_reads[0][2]
+	assert all("custom_purchase_adaptation_json" not in args["fields"] for _, args in b.calls)
+
+
+@pytest.mark.parametrize("linked,adoption", [
+	(False, '{"source_version":"v1","plan":{"items":[{}]}}'), (True, None), (True, "{}"), (True, '{"plan":null}'), (True, "invalid-json"),
+])
+def test_adoption_without_confirmed_link_and_legacy_or_invalid_adoption_do_not_hide_source_problems(monkeypatch, linked, adoption):
+	request = oa(items_json="[]", purchase_order="PO-1" if linked else None, custom_purchase_source_id="source",
+		custom_purchase_source_json=json.dumps({"version": "v1", "currency": "CNY", "issues": ["采购明细待完善"]}),
+		custom_purchase_adaptation_json=adoption, custom_purchase_pending_reason="")
+	orders = [po(custom_oa_purchase_expense="OA-1")] if linked else []
+	b = ReadBoundary(orders, [request], fields={"Purchase Order": set(po()), "OA Purchase Request": set(request)})
+	row = connect(monkeypatch, b).get_unified_purchase_list()["rows"][0]
+	assert "采购明细待完善" in row["oa_warning"]
+
+
+@pytest.mark.parametrize("version,adoption", [
+	("v2", {"source_version": "v1", "plan": {"items": [{}]}}),
+	("v2", {"plan": {"version": "v2", "items": [{}]}}),
+	(None, {"plan": {"items": [{}]}}),
+])
+def test_stale_or_unversioned_linked_adoption_keeps_current_source_review_reasons(monkeypatch, version, adoption):
+	source = json.dumps({"version": version, "currency": "CNY", "issues": ["采购明细待完善", "采购明细与申请金额不一致，请核对原单"]})
+	request = oa(items_json="[]", purchase_order="PO-1", custom_purchase_source_id="source", custom_purchase_source_json=source,
+		custom_purchase_adaptation_json=json.dumps(adoption), custom_purchase_pending_reason="原单已变更，请重新核对")
+	b = ReadBoundary([po(custom_oa_purchase_expense="OA-1")], [request])
+	row = connect(monkeypatch, b).get_unified_purchase_list()["rows"][0]
+	assert row["oa_warning"] == "采购明细待完善；采购明细与申请金额不一致，请核对原单；原单已变更，请重新核对"
+	assert row["source_version"] == version and request["custom_purchase_source_json"] == source
+
+
+def test_denied_current_pending_reason_does_not_replace_visible_source_warnings_or_leak_adoption(monkeypatch):
+	request = oa(items_json="[]", custom_purchase_source_id="source", custom_purchase_pending_reason="PRIVATE-PENDING",
+		custom_purchase_source_json=json.dumps({"version": "v1", "currency": "CNY", "issues": ["采购明细待完善"]}),
+		custom_purchase_adaptation_json='{"plan":{"items":[{"description":"PRIVATE-PLAN"}]}}')
+	b = ReadBoundary([], [request], fields={"Purchase Order": {"name"}, "OA Purchase Request": set(request) - {"custom_purchase_pending_reason", "custom_purchase_adaptation_json"}})
+	result = connect(monkeypatch, b).get_unified_purchase_list()
+	assert "采购明细待完善" in result["rows"][0]["oa_warning"]
+	assert "PRIVATE-" not in str(result)
+
+
 def test_source_original_number_is_preserved_independently_of_native_field_autoname(monkeypatch):
 	request=oa(oa_code="DT-PUR-internal-identity",custom_purchase_source_id="source",custom_purchase_source_json=json.dumps({"business_id":"DT-ORIGINAL","eligible":True,"currency":"CNY","detail_total_amount":"0","requested_amount":"0"}))
 	b=ReadBoundary([], [request],fields={"Purchase Order":{"name"},"OA Purchase Request":set(request)}); b.db.get_value=lambda *args,**kwargs: request

@@ -304,7 +304,13 @@ def _oa_metadata(request: dict, currency_codes: set[str]) -> dict:
 	amount, basis, amount_warning = _oa_amount(request)
 	managed = request["_source"]
 	if managed:
-		amount, basis, amount_warning = managed.get("detail_total_amount"), "钉钉采购明细合计", "；".join(managed.get("issues") or [])
+		issues = managed.get("issues") or []
+		linked = bool(request.get("_has_order_link") or request.get("purchase_order"))
+		# These original parser hints are recomputed by the existing adaptation.
+		# Current pending reasons and unrelated source evidence remain authoritative.
+		if (not linked and _text(request.get("custom_purchase_pending_reason"))) or (linked and request.get("_adaptation_adopted")):
+			issues = [issue for issue in issues if issue not in {"采购明细待完善", "采购明细与申请金额不一致，请核对原单"}]
+		amount, basis, amount_warning = managed.get("detail_total_amount"), "钉钉采购明细合计", "；".join(issues)
 	proof = request["_proof"]
 	currency = _currency(managed.get("currency") if managed else request.get("currency"), currency_codes)
 	warnings = [amount_warning] if amount_warning else []
@@ -413,6 +419,7 @@ def _canonical_rows(purchase_orders, oa_requests, currency_codes: set[str], oa_r
 			targets[name].add(linked)
 			if linked in orders:
 				associations[linked].add(name)
+		request["_has_order_link"] = bool(targets[name])
 	rows, suppressed = [], set()
 	for name, order in orders.items():
 		row = _base_row(order, PURCHASE_ORDER, native_fields)
@@ -896,7 +903,7 @@ def _read_records(native_filters=None, native_or_filters=None, order_by="transac
 	if requests:
 		permitted = permissions[OA_REQUEST]
 		meta = frappe.get_meta(OA_REQUEST)
-		private_fields = ["name", *[field for field in ("custom_purchase_source_json", "custom_cashier_payment_evidence", "custom_purchase_payment_reconciliation") if meta.has_field(field)]]
+		private_fields = ["name", *[field for field in ("custom_purchase_source_json", "custom_cashier_payment_evidence", "custom_purchase_payment_reconciliation", "custom_purchase_adaptation_json") if meta.has_field(field)]]
 		# Authorized OA names, not a denied source-ID field, define this private
 		# read scope. This also preserves unmanaged legacy rows and older schemas.
 		private = {row["name"]: row for row in frappe.db.get_values(OA_REQUEST,
@@ -906,6 +913,13 @@ def _read_records(native_filters=None, native_or_filters=None, order_by="transac
 		for row in requests:
 			data = private.get(row["name"], {})
 			source = json.loads(data["custom_purchase_source_json"]) if data.get("custom_purchase_source_json") else {}
+			try:
+				adoption = json.loads(data["custom_purchase_adaptation_json"]) if data.get("custom_purchase_adaptation_json") else {}
+			except (TypeError, ValueError):
+				adoption = {}
+			# Only a private boolean leaves this read boundary, never adopted rows.
+			row["_adaptation_adopted"] = bool(isinstance(adoption, dict) and source.get("version")
+				and adoption.get("source_version") == source["version"] and isinstance(adoption.get("plan"), dict) and adoption["plan"])
 			proof = json.loads(data["custom_cashier_payment_evidence"]) if data.get("custom_cashier_payment_evidence") else {}
 			reconciliation = json.loads(data["custom_purchase_payment_reconciliation"]) if data.get("custom_purchase_payment_reconciliation") else {}
 			projected = {"version": source.get("version"), "issues": source.get("issues") if {"payment_amount", "detail_total_amount", "items_json"} <= permitted else []} if source else {}

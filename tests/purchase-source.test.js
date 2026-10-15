@@ -536,3 +536,18 @@ test("OA legacy form removes unsafe generate action before adding the safe manua
 	assert.ok(removed.includes("生成采购订单")); assert.ok(removed.includes("Generate Purchase Order"));
 	action(); assert.equal(opened, "OA-1");
 });
+
+test("custom OA doctypes receive the same drawer entry through desk assets with one registration", () => {
+	const hooks = fs.readFileSync(path.join(__dirname, "../deeplinkerp_branding/hooks.py"), "utf8");
+	const deskAssets = hooks.split("app_include_js = [")[1].split("]")[0];
+	assert.match(deskAssets, /\/js\/oa_purchase_request\.js\?v=/);
+	const script = fs.readFileSync(path.join(__dirname, "../deeplinkerp_branding/public/js/oa_purchase_request.js"), "utf8");
+	let registrations = 0, settings;
+	const context = vm.createContext({ frappe: { ui: { form: { on: (_doctype, value) => { registrations++; settings = value; } } } }, deeplinkerp: { purchaseSource: { open() {} } }, __: value => value });
+	vm.runInContext(script, context); // Global desk asset also supports custom=1 doctypes.
+	vm.runInContext(script, context); // Native doctype hook can load the same file again.
+	assert.equal(registrations, 1);
+	let buttons = 0;
+	settings.refresh({ doc: {}, is_new: () => true, remove_custom_button() {}, add_custom_button() { buttons++; } });
+	assert.equal(buttons, 0);
+});
