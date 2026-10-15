@@ -5,7 +5,9 @@
 	"use strict";
 	const API = "deeplinkerp_branding.services.operating_expenses.",
 		route = "operating-expenses";
-	const t = (value) => (root.__ || ((text) => text))(value);
+	const t = (value, args) => root.__
+		? root.__(value, args)
+		: (args || []).reduce((text, arg, index) => text.replaceAll(`{${index}}`, String(arg)), value);
 	const esc = (value) =>
 		String(value ?? "").replace(
 			/[&<>"']/g,
@@ -31,7 +33,7 @@
 		["summary", "摘要", 250],
 		["currency", "币种", 75],
 		["finance_status", "凭证状态", 135],
-	].map(([fieldname, label, width]) => ({ fieldname, label, width }));
+	].map(([fieldname, label, width]) => ({ fieldname, label: t(label), width }));
 	const defaultColumns = ["request_date","source_id","effective_application_type","applicant","payee_name","approval_state","current_approver","amount","paid_amount","pending_amount","source_status","actions"];
 	const quickTabs = [["all","全部申请"],["pending_payment","待付款"],["approvals_running","审批中"],["paid","已付清"],["reconciliation","待核对"]];
 	const approvalLabels = {pending:"审批中",approved:"已通过",rejected:"已拒绝",terminated:"已终止",withdrawn:"已撤回",unknown:"待核对",eligible:"来源审批通过",blocked:"需复核"};
@@ -83,7 +85,7 @@
 			["quick_tab", quickTabs.map(row=>row[0]), "快捷筛选"],
 		]) {
 			if (result[field] && !allowed.includes(result[field]))
-				throw new Error(t(`${label}无效`));
+				throw new Error(t("{0}无效", [t(label)]));
 		}
 		return result;
 	}
@@ -273,7 +275,7 @@
 			fieldname,
 			fieldtype,
 			options,
-			label,
+			label: t(label),
 			permission_field: pageFieldMap[fieldname] || fieldname,
 		}));
 		return root.DeepLinkERPCompactList.create({
@@ -289,12 +291,13 @@
 			dates: ["request_date"],
 			dismissInitialOnboarding: true,
 			optionLabels: {
+				source_status: Object.fromEntries(["未付款", "部分付款", "已付款", "付款待核对"].map(value=>[value,t(value)])),
 				application_type: {
-					payment: "付款申请",
-					reimbursement: "费用报销",
-					unclassified: "待分类",
+					payment: t("付款申请"),
+					reimbursement: t("费用报销"),
+					unclassified: t("待分类"),
 				},
-				approval_state: approvalLabels,
+				approval_state: Object.fromEntries(Object.entries(approvalLabels).map(([key,label])=>[key,t(label)])),
 			},
 			provider: {
 				columns,
@@ -309,7 +312,7 @@
 				onPayload: (c) => {c.updateOperatingTabs?.();fit(c);},
 			},
 			afterRender: (c) => fit(c),
-			emptyLabel: "没有符合条件的运营支出来源",
+			emptyLabel: t("没有符合条件的运营支出来源"),
 		});
 	}
 	const api = {

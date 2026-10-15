@@ -527,3 +527,291 @@ Excel 共享文本索引不符合预期。,El índice de texto compartido de Exc
 当前审批节点尚未同步，请查看钉钉原单,El paso actual aún no está sincronizado. Consulta la solicitud en DingTalk.
 后续节点尚未同步，请在钉钉查看完整流程。,Los pasos siguientes aún no están sincronizados. Consulta el flujo completo en DingTalk.
 必要审批已通过，待出纳办理。,Aprobaciones requeridas completadas; pendiente de gestión de caja.
+该类型需要在标准物料移动表单中补充工单、BOM、批次、序列号或物料角色等字段。,"Este tipo requiere completar la orden de trabajo, la BOM, el lote, el número de serie o la función del artículo en el formulario estándar de movimiento de inventario."
+每页行数必须是 {0} 到 {1} 的整数。,El número de filas por página debe ser un entero entre {0} y {1}.
+无仓库占位行不可移动,No se puede mover una fila sin almacén.
+选择 {0},Seleccionar {0}
+没有符合条件的库存库位记录。,No hay registros de ubicación de inventario que coincidan con los filtros.
+没有符合条件的库存记录。,No hay registros de inventario que coincidan con los filtros.
+库位待维护,Ubicación pendiente de actualizar
+库存差异,Diferencia de inventario
+库存一致,Inventario conciliado
+物料库存明细表,Tabla de detalle de inventario por artículo
+全选当前页,Seleccionar toda la página
+正式物料编码,Código oficial del artículo
+物料名称（双语）,Nombre del artículo (bilingüe)
+原始库位,Ubicación original
+库位数量,Cantidad en la ubicación
+总库存,Existencias totales
+库存单位,Unidad de inventario
+物料组,Grupo de artículos
+外部编码,Código externo
+原始标识/别名,Identificador original / alias
+{0}表,Tabla de {0}
+参考库位,Ubicación de referencia
+快照库位数量,Cantidad de la ubicación en la instantánea
+实时库存,Inventario en tiempo real
+库存状态,Estado del inventario
+快照日期,Fecha de la instantánea
+盘点快照,Instantánea del recuento
+下级物料组,Subgrupo de artículos
+物料编码/名称,Código / nombre del artículo
+只看有库存,Solo con existencias
+每页行数,Filas por página
+筛选,Filtrar
+清除筛选,Limpiar filtros
+切换公司将清空已选物料，是否继续？,Cambiar de empresa borrará los artículos seleccionados. ¿Desea continuar?
+已选物料 ({0}),Artículos seleccionados ({0})
+物料移动 ({0}),Movimiento de inventario ({0})
+正在读取库存…,Cargando inventario…
+第 {0} 页,Página {0}
+公司信息已变化，请重新选择公司后读取库存。,La empresa ha cambiado. Selecciónela de nuevo antes de consultar el inventario.
+暂无库位快照,Sin instantánea de ubicaciones
+盘点快照 {0} · {1} 个物料仓库组 · 当前 {2} 条,Instantánea del recuento {0} · {1} grupos de artículo y almacén · {2} registros en esta página
+ERP 实时库存 · {0} 个物料仓库组 · 当前 {1} 条 · 参考快照 {2},Inventario ERP en tiempo real · {0} grupos de artículo y almacén · {1} registros en esta página · instantánea de referencia {2}
+库存明细读取失败。,No se pudo cargar el detalle de inventario.
+第 {0} / {1} 页,Página {0} de {1}
+正在生成 Excel…,Generando el archivo Excel…
+已选物料,Artículos seleccionados
+清空已选,Borrar selección
+来源仓库,Almacén de origen
+暂无已选物料,No hay artículos seleccionados
+正在重新核对实时库存…,Verificando de nuevo el inventario en tiempo real…
+实时库存核对失败，请刷新库存后重试。,No se pudo verificar el inventario en tiempo real. Actualice el inventario e inténtelo de nuevo.
+物料移动（{0} 项）,Movimiento de inventario ({0} artículos)
+移动类型,Tipo de movimiento
+统一目标仓库,Almacén de destino para todos
+移动物料,Artículos a mover
+名称,Nombre
+实时可用量,Cantidad disponible en tiempo real
+移动数量,Cantidad a mover
+打开未保存物料移动单,Abrir movimiento de inventario sin guardar
+库存列表或已选物料已变化，请重新打开物料移动。,El inventario o la selección han cambiado. Vuelva a abrir el movimiento de inventario.
+每个物料的移动数量都必须大于零。,La cantidad a mover de cada artículo debe ser mayor que cero.
+正在准备标准物料移动单…,Preparando el movimiento de inventario estándar…
+入库日期,Fecha de recepción
+采购入库单号,Número de recepción de compra
+入库金额,Importe recibido
+入库状态,Estado de recepción
+付款状态,Estado de pago
+此高级关联筛选请切换“原生筛选 / 批量操作”；当前条件不会被丢弃。,"Para este filtro avanzado de documentos vinculados, cambie a «Filtros nativos / acciones por lote». Se conservarán los filtros actuales."
+导出组件加载失败，请刷新重试。,No se pudo cargar el componente de exportación. Actualice la página e inténtelo de nuevo.
+入库金额：{0} ｜ 余额按关联应付币种；共享整单余额不作入库合计,Importe recibido: {0} ｜ Los saldos usan la moneda de la factura vinculada; el saldo compartido de la factura completa no se suma a las recepciones.
+退货入库,Devolución de recepción
+已入库,Recibido
+共享整单,Factura completa compartida
+共享应付整单余额,Saldo de la factura completa compartida
+关联应付余额,Saldo de la factura vinculada
+继续应付草稿,Continuar factura por pagar en borrador
+确认应付,Confirmar cuenta por pagar
+入库视图,Vista de recepciones
+关联付款视图,Vista de pagos vinculados
+原生筛选 / 批量操作,Filtros nativos / acciones por lote
+视图,Vista
+入库 → 确认应付 → 部分 / 全额付款。提交付款才计已付；高级关联筛选和批量操作可切换原生视图。,Recepción → confirmar cuenta por pagar → pago parcial o total. Solo los pagos confirmados cuentan como pagados; cambie a la vista nativa para filtros avanzados y acciones por lote.
+入库单号 / 供应商名称,Número de recepción / nombre del proveedor
+入库开始日期,Fecha inicial de recepción
+入库结束日期,Fecha final de recepción
+订单,Pedido
+已入,Recibido
+待入,Pendiente de recibir
+待入货品金额,Importe de artículos pendientes de recibir
+（不含税）,(sin impuestos)
+采购关联与付款,Compras vinculadas y pagos
+关联付款与凭证（最多 100 条）,Pagos y asientos vinculados (máximo 100)
+运营支出筛选,Filtros de gastos operativos
+恢复推荐列,Restaurar columnas recomendadas
+仅登记已发生的付款，不向银行转账；凭证另行保存草稿。,Solo se registran pagos ya realizados; no se transfieren fondos al banco. El asiento se guarda por separado como borrador.
+申请编号 / 摘要,Número de solicitud / resumen
+来源,Origen
+凭证状态,Estado del asiento
+快捷筛选,Filtro rápido
+完善/关联采购订单,Completar / vincular pedido de compra
+生成采购订单,Generar pedido de compra
+原值,Valor original
+采购来源同步需要管理员权限。,Se requiere permiso de administrador para sincronizar el origen de compras.
+采购来源已同步,Origen de compra sincronizado
+钉钉原单,Solicitud original en DingTalk
+钉钉原单链接暂不可用,El enlace a la solicitud original de DingTalk no está disponible por ahora.
+暂无已归档附件，请在原单核对。,No hay archivos adjuntos archivados. Compruébelos en la solicitud original.
+尚无可核实的实际付款证据。,Aún no hay justificantes verificables de pagos realizados.
+采购来源,Origen de compra
+OA 来源记录,Registro de origen OA
+出纳实付是原付款证据；ERP 登记付款和核销在订单中另列。,El pago realizado por tesorería es el justificante original; el pago y la conciliación registrados en ERP se muestran por separado en el pedido.
+原始采购明细（只读）,Detalle original de compra (solo lectura)
+原始申请内容,Contenido de la solicitud original
+出纳付款证据,Justificantes de pago de tesorería
+采购抽屉组件版本不完整，请整页刷新后重试。,El componente de compras está incompleto. Actualice toda la página e inténtelo de nuevo.
+正在读取采购来源…,Cargando el origen de compra…
+采购订单字段元数据不完整，请核对安装状态后刷新。,Faltan metadatos del pedido de compra. Compruebe la instalación y actualice la página.
+已关联采购订单,Pedido de compra vinculado
+来源未满足当前审批条件，只可查看证据。,El origen no cumple las condiciones de aprobación actuales; solo se pueden consultar los justificantes.
+当前没有办理权限，或公司归属待核对，请核对系统提示。,No tiene permiso para tramitarlo o la empresa está pendiente de revisión. Consulte el mensaje del sistema.
+当前没有新建采购订单权限，可以核对并关联已有订单。,No tiene permiso para crear pedidos de compra; puede revisar y vincular uno existente.
+请确认已有公司、供应商和物料，再创建采购订单草稿。,"Confirme que la empresa, el proveedor y los artículos ya existen antes de crear el borrador del pedido."
+复核现有关联,Revisar vínculo existente
+当前采购订单,Pedido de compra actual
+仅复核，不替换关联或创建订单。,Solo revisar; no sustituir el vínculo ni crear un pedido.
+采购订单字段元数据读取失败，请核对安装状态和权限后刷新。,No se pudieron cargar los metadatos del pedido de compra. Compruebe la instalación y los permisos y actualice la página.
+付款单字段元数据读取失败，请核对安装状态和权限。,No se pudieron cargar los metadatos del pago. Compruebe la instalación y los permisos.
+数量和单价须明确填写；缺失值保持空白。,Indique expresamente la cantidad y el precio unitario; deje en blanco los datos desconocidos.
+请填写公司、已有供应商、币种、需求日期，以及每行物料、正数数量、单位和明确单价。,"Indique empresa, proveedor existente, moneda y fecha requerida; en cada línea, artículo, cantidad positiva, unidad y precio unitario definido."
+请选择要关联的已有采购订单。,Seleccione el pedido de compra existente que desea vincular.
+请明确选择历史原生付款单。,Seleccione expresamente el documento de pago histórico nativo.
+历史付款已核对,Pago histórico revisado
+操作结果未确认，请刷新来源核对。,El resultado de la operación no está confirmado. Actualice el origen y revíselo.
+操作未确认,Operación sin confirmar
+请先刷新来源或核对采购订单，再继续办理。,Actualice primero el origen o revise el pedido de compra antes de continuar.
+采购来源详情不完整，请核对同步和权限后刷新。,El detalle del origen de compra está incompleto. Compruebe la sincronización y los permisos y actualice.
+采购来源读取未完成，请核对同步状态或权限。,No se terminó de cargar el origen de compra. Compruebe el estado de sincronización o los permisos.
+采购来源不可用或无权查看，请核对系统提示。,El origen de compra no está disponible o no tiene permiso para verlo. Consulte el mensaje del sistema.
+采购来源读取失败，请刷新重试。,No se pudo cargar el origen de compra. Actualice la página e inténtelo de nuevo.
+共享应付整单余额，不是本张入库的已付金额,Saldo compartido de la factura completa; no representa el importe pagado de esta recepción.
+尚未形成应付 / 余额不可见,Aún no existe una cuenta por pagar o el saldo no está disponible.
+分配,Asignado
+（不是采购核销合计）,(no es el total conciliado de compras)
+此字段不在当前付款记录的可读筛选范围内。,Este campo está fuera del alcance de filtros de los pagos que puede consultar.
+凭证待同步,Asiento pendiente de sincronización
+付款元数据读取失败，请刷新或核对权限。,No se pudieron cargar los metadatos del pago. Actualice la página o compruebe los permisos.
+采购入库明细,Detalle de recepciones de compra
+付款单号,Número de pago
+类型,Tipo
+整单金额,Importe total del pago
+记账账户,Cuenta contable
+采购关联 / 分配币种,Compras vinculadas / moneda de asignación
+财务凭证 / 状态,Asiento contable / estado
+同步提示,Avisos de sincronización
+全部条件（AND）,Todas las condiciones (Y)
+任一条件（OR）,Cualquiera de las condiciones (O)
+付款单号 / 供应商,Número de pago / proveedor
+付款开始日期,Fecha inicial de pago
+付款结束日期,Fecha final de pago
+单据状态,Estado del documento
+已记账,Contabilizado
+已冲销,Revertido
+待同步,Pendiente de sincronización
+记账,Contabilización
+冲销,Reversión
+整张付款单银行币种金额,Importe total del pago en la moneda bancaria
+退款,Reembolso
+编辑草稿,Editar borrador
+预览 / 提交,Vista previa / confirmar
+预览,Vista previa
+金额须明确且最多两位小数,Indique un importe con un máximo de dos decimales.
+本次抵扣金额须大于零且不超过待付金额,El importe aplicado debe ser mayor que cero y no superar el saldo pendiente.
+当前权限不能办理付款登记。,No tiene permiso para registrar este pago.
+法律公司未确认，请先核对财务映射。,La entidad legal no está confirmada. Revise primero la correspondencia contable.
+请先在财务映射中明确付款申请或费用报销，不能默认按供应商付款。,Defina en la correspondencia contable si se trata de una solicitud de pago o un reembolso de gastos; no se puede asumir un pago al proveedor.
+来源或币种存在冲突，请先核对原单。,Hay un conflicto de origen o moneda. Revise primero la solicitud original.
+审批尚未通过，暂不能启用付款登记。,La aprobación aún no se ha concedido; no se puede habilitar el registro de pagos.
+尚未匹配到唯一出纳申请或钉钉原单，请先同步并核对历史付款。,No se encontró una solicitud de tesorería o de DingTalk única. Sincronice y revise primero los pagos históricos.
+审批身份冲突，请在钉钉原单核对,Conflicto de identidad en la aprobación; compruébelo en la solicitud original de DingTalk.
+请查看钉钉原单,Consulte la solicitud original de DingTalk.
+抄送,Con copia a
+暂无可核对的审批节点，请查看钉钉原单,No hay pasos de aprobación disponibles para revisar. Consulte la solicitud original de DingTalk.
+展开全部审批节点,Mostrar todos los pasos de aprobación
+读取审批缓存…,Cargando la caché de aprobaciones…
+已核对完整历史，确认这笔申请此前没有实际付款,He revisado todo el historial y confirmo que esta solicitud no tiene pagos realizados anteriormente.
+历史付款,Pagos históricos
+笔,operaciones
+已付,Pagado
+待付,Pendiente de pago
+已核对历史,Historial revisado
+笔，待付,"operaciones, pendiente de pago"
+启用后，对应申请在请款网站不能再登记付款。确认接管？,"Una vez habilitado, no se podrán registrar pagos de esta solicitud en el sitio de solicitudes de pago. ¿Confirmar el traspaso?"
+申请币种,Moneda de la solicitud
+银行币种,Moneda bancaria
+最多可付,Máximo pagable
+付款账户尚未配置，请先维护当前公司的银行或现金账户。,Aún no se ha configurado una cuenta de pago. Configure una cuenta bancaria o de caja de la empresa actual.
+确认已经实际支付并登记本笔付款？此操作不向银行转账，不自动记账。,¿Confirma que este pago ya se realizó y desea registrarlo? Esta operación no transfiere fondos ni contabiliza automáticamente.
+仅登记已发生的付款，不向银行转账，不自动记账。回单可稍后补传。,Solo se registran pagos ya realizados; no se transfieren fondos ni se contabiliza automáticamente. El comprobante se puede adjuntar después.
+已付清或当前审批／权限待核对，不能登记新付款。,Ya está pagado o la aprobación y los permisos requieren revisión. No se puede registrar otro pago.
+银行实际支付,Pago bancario realizado
+撤销原因,Motivo de anulación
+此付款有未记账凭证草稿。确认弃用该草稿并撤销付款登记？草稿保留恢复记录和事件审计，不会提交、记账或转账。,"Este pago tiene un asiento en borrador sin contabilizar. ¿Desea descartar ese borrador y anular el registro del pago? Se conservarán el historial de recuperación y la auditoría; no se confirmará, contabilizará ni transferirá dinero."
+撤销付款登记,Anular registro de pago
+预付款,Anticipo
+仅预付／往来，不确认费用；凭证保持草稿，未核销。,Solo anticipo o cuenta corriente; no se reconoce un gasto. El asiento sigue en borrador y sin conciliar.
+对应凭证,Asiento correspondiente
+确认保存预付款凭证草稿？不确认费用、不自动记账。,¿Guardar el borrador del asiento de anticipo? No se reconoce el gasto ni se contabiliza automáticamente.
+运营支出详情,Detalle de gastos operativos
+需安装并登录钉钉，原单权限由钉钉校验。,Debe instalar e iniciar sesión en DingTalk; DingTalk verifica el acceso a la solicitud original.
+原单链接待核对,Enlace a la solicitud original pendiente de revisión
+金额待核对,Importe pendiente de revisión
+原始来源信息,Información de origen original
+网页原单链接,Enlace web a la solicitud original
+第,N.º
+来源：历史付款,Origen: pago histórico
+实际付款证据,Justificante de pago realizado
+尚无历史付款证据,No hay justificantes de pagos históricos.
+会计与高级设置,Contabilidad y opciones avanzadas
+按实际付款生成结算草稿,Crear borrador de liquidación según el pago realizado
+{0}无效,{0} no es válido
+上次响应不确定，内容已改变。请先核对记录并刷新，不要重复建单。,La respuesta anterior es incierta y el contenido ha cambiado. Revise el registro y actualice antes de crear otro documento.
+付款已提交，页面刷新失败。请查看付款记录，勿重复提交。,"El pago se confirmó, pero la página no se actualizó. Consulte el registro de pagos y no vuelva a confirmarlo."
+操作未确认：相同内容可重试；响应不确定时先核对付款记录。,"La operación no está confirmada: puede reintentar con el mismo contenido; si la respuesta es incierta, consulte primero el registro de pagos."
+复杂税费、共享来源、跨币种、退款和付款计划沿用原生单据；此处不改变业务规则。,"Los impuestos complejos, orígenes compartidos, varias monedas, reembolsos y calendarios de pago se gestionan en el documento estándar; aquí no cambian las reglas de negocio."
+单据字段元数据读取失败，请刷新或在原生单据核对。,No se pudieron cargar los metadatos de los campos. Actualice la página o compruébelos en el documento estándar.
+抽屉已关闭,El panel ya está cerrado.
+输入控件不可用，请在原生单据核对。,El campo de entrada no está disponible. Compruébelo en el documento estándar.
+请先明确保存草稿，再提交。,Guarde expresamente el borrador antes de confirmarlo.
+确认对 {0} 执行“{1}”？此操作沿用原生权限及工作流，提交后会记账。,¿Confirma que desea aplicar «{1}» al documento {0}? Se aplicarán los permisos y el flujo estándar; al confirmar se contabilizará.
+原生操作已完成,Se completó la operación estándar.
+原生操作已完成，但页面刷新失败。请刷新抽屉或核对原生单据，不要重复提交。,"La operación estándar se completó, pero la página no se actualizó. Actualice el panel o consulte el documento estándar; no repita la operación."
+提交未完成：请核对系统提示；版本改变时先刷新抽屉。,"No se completó la confirmación. Consulte el mensaje del sistema; si cambió la versión, actualice primero el panel."
+刷新未完成，请核对权限或原生单据后重试。,No se completó la actualización. Revise los permisos o el documento estándar e inténtelo de nuevo.
+刷新会丢弃尚未保存的输入，继续？,La actualización descartará los cambios sin guardar. ¿Desea continuar?
+应付草稿已变化或不可见，请刷新来源并重新选择。,El borrador de la cuenta por pagar ha cambiado o ya no está disponible. Actualice el origen y selecciónelo de nuevo.
+张可见应付草稿。请选择继续编辑。,borradores de cuentas por pagar visibles. Seleccione uno para continuar la edición.
+先核对数量与金额并保存草稿，再明确提交确认应付；不会自动付款。,Revise primero la cantidad y el importe y guarde el borrador; después confirme expresamente la cuenta por pagar. El pago no se realiza automáticamente.
+来源订单版本不可见，请刷新后核对。,No se puede comprobar la versión del pedido de origen. Actualice la página y revísela.
+保存失败：相同内容可重试；若响应不确定请核对记录。版本改变时刷新抽屉。,"No se pudo guardar. Puede reintentar con el mismo contenido; si la respuesta es incierta, consulte el registro. Si cambió la versión, actualice el panel."
+无法预览，请核对权限、剩余数量或关联单据。已有草稿请在列表继续编辑。,"No se puede mostrar la vista previa. Revise los permisos, la cantidad restante o los documentos vinculados. Continúe los borradores existentes desde la lista."
+已有付款草稿，请核对金额、账户与采购引用后选择继续处理。,"Ya existen borradores de pago. Revise el importe, la cuenta y la referencia de compra antes de elegir uno para continuar."
+当前没有可快捷付款的应付余额，请打开原生应付单处理。,No hay saldo por pagar disponible para el pago rápido. Abra la cuenta por pagar estándar.
+请填写账户、日期，以及不超过未付余额的正数金额。,"Indique cuenta, fecha y un importe positivo que no supere el saldo pendiente."
+无法读取付款信息，请核对系统提示。,No se pudo cargar la información de pago. Consulte el mensaje del sistema.
+付款已提交，余额刷新失败。请刷新来源或查看本次付款，勿重复提交。,"El pago se confirmó, pero no se pudo actualizar el saldo. Actualice el origen o consulte este pago; no vuelva a confirmarlo."
+付款已提交，页面刷新失败。请查看本次付款，勿重复提交。,"El pago se confirmó, pero la página no se actualizó. Consulte este pago; no vuelva a confirmarlo."
+付款未确认：请核对系统提示；相同内容可重试，响应不确定时先查看本次付款。,"El pago no está confirmado. Consulte el mensaje del sistema; puede reintentar con el mismo contenido. Si la respuesta es incierta, consulte primero este pago."
+账户或单据不可用 / 无权读取，请在原生单据核对。,"La cuenta o el documento no está disponible, o no tiene permiso para consultarlo. Compruébelo en el documento estándar."
+原凭证,Asiento original
+冲销凭证,Asiento de reversión
+借方,Debe
+贷方,Haber
+无权读取或凭证不可用，请核对系统提示。,No tiene permiso para consultar el asiento o no está disponible. Consulte el mensaje del sistema.
+打开来源单据,Abrir documento de origen
+提交并记账,Confirmar y contabilizar
+采购订单→确认应付（不更新库存）,Pedido de compra → confirmar cuenta por pagar (sin actualizar inventario)
+采购入库 → 确认应付,Recepción de compra → confirmar cuenta por pagar
+原生详情,Detalle estándar
+当前不能确认应付，请核对原生订单。,No se puede confirmar la cuenta por pagar ahora. Revise el pedido estándar.
+打开原生来源,Abrir origen estándar
+供应商票据号,Número de factura del proveedor
+票据日期,Fecha de factura
+账户不可见,Cuenta no disponible
+打开原生付款单,Abrir pago estándar
+财务凭证（只读）,Asiento contable (solo lectura)
+该移动类型还需要在标准物料移动表单中补充工单、BOM、批次、序列号或物料角色等字段。,"Este tipo de movimiento requiere completar la orden de trabajo, la BOM, el lote, el número de serie o la función del artículo en el formulario estándar de movimiento de inventario."
+整张付款单银行币种金额（按付款类型、单据状态、币种分组）,"Importe total del documento de pago en la moneda bancaria (agrupado por tipo de pago, estado y moneda)"
+关联缺失或无权读取的单据不会作为可用链接；请在原生单据核对。仅显示有权查看的订单预付款或关联采购应付付款；草稿、取消不计已付。金额为整张付款单银行币种金额，核销见引用。关联订单预付款尚未核销时不计本入库已付。,Los documentos sin vínculo o sin permiso de lectura no se muestran como enlaces disponibles; revíselos en el documento estándar. Solo se muestran los anticipos de pedidos y los pagos de facturas de compra relacionados que puede consultar. Los borradores y documentos cancelados no cuentan como pagados. El importe corresponde al documento de pago completo en la moneda bancaria; las aplicaciones figuran en las referencias. Un anticipo del pedido sin aplicar aún no cuenta como pago de esta recepción.
+余额不可见,Saldo no disponible
+未形成应付,Aún no existe una cuenta por pagar
+关联缺失或无权读取,Vínculo ausente o sin permiso de lectura
+共享应付,Cuenta por pagar compartida
+部分付款/核销,Pago / aplicación parcial
+关联缺失或无权读取，请在原生单据核对；快捷付款/确认应付已禁用,Falta el vínculo o no tiene permiso para consultarlo. Revise el documento estándar; el pago rápido y la confirmación de la cuenta por pagar están desactivados.
+银行或现金账户不可用或无权读取，请在原生单据核对,La cuenta bancaria o de caja no está disponible o no tiene permiso para consultarla. Revise el documento estándar.
+无采购应付读取权限，余额不可见,No tiene permiso para consultar las cuentas por pagar de compras; el saldo no está disponible.
+关联应付包含其他订单/入库；金额为共享应付整单余额，不分摊冒充本入库已付,La cuenta por pagar vinculada incluye otros pedidos o recepciones; el importe es el saldo de la factura completa compartida y no se asigna como pago de esta recepción.
+来源未提交、已退货，或没有创建付款权限,"El documento de origen no está confirmado, corresponde a una devolución o no tiene permiso para crear pagos."
+有关联应付草稿，请核对并提交；草稿不计应付,Existe un borrador de cuenta por pagar vinculada. Revíselo y confírmelo; los borradores no cuentan como saldo por pagar.
+关联应付已结清、暂停或取消，请打开关联单据核对,"La cuenta por pagar vinculada está saldada, suspendida o cancelada. Abra el documento vinculado para comprobarlo."
+尚无可付款的已提交应付单，请先确认应付,Aún no hay una cuenta por pagar confirmada que admita pagos. Confirme primero la cuenta por pagar.
+已有应付草稿，请选择继续编辑,Ya existe un borrador de cuenta por pagar. Selecciónelo para seguir editándolo.
+来源未提交、已退货或没有创建应付权限,"El documento de origen no está confirmado, corresponde a una devolución o no tiene permiso para crear cuentas por pagar."
+原生开票条件或字段权限不足，请打开原生单据核对,No se cumplen las condiciones de facturación estándar o faltan permisos de campo. Abra el documento estándar para comprobarlo.
+已有已提交采购应付，请按应付余额付款,Ya existe una factura de compra confirmada. Pague según el saldo pendiente de la cuenta por pagar.
+订单无可预付余额，请核对金额与已预付记录,El pedido no tiene saldo disponible para anticipos. Revise el importe y los anticipos registrados.
+没有创建物料移动单的权限。,No tiene permiso para crear movimientos de inventario.
+ERP 未维护分类物料组：{0},ERP no tiene configurado el grupo de artículos de la categoría: {0}

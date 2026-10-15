@@ -189,6 +189,17 @@ test('late refresh metadata rejection after close cannot re-enable or append to 
  const pending=h.click('dlp-reload');await new Promise(r=>setImmediate(r));assert.equal(typeof reject,'function');h.routeClose();const closedHTML=h.html();reject(new Error('network'));
  await assert.doesNotReject(()=>pending);assert.equal(h.controls.length,before);assert.equal(h.surfaces[0].removed,true);assert.equal(h.html(),closedHTML);assert.ok(h.controls.every(c=>c.$input.capture.length===0));
 });
+test('translated native submit confirmation escapes document names and action labels',async()=>{
+ const document=projection();document.document.name='<img src=x onerror=alert(1)>';document.allowed_actions=['Submit'];
+ const h=harness({document});let message;
+ h.host.__=(value,args=[]) => (value==='提交并记账'?'<b>Confirmar</b>':value).replace(/\{(\d+)\}/g,(_,index)=>args[index] ?? `{${index}}`);
+ h.host.frappe.confirm=value=>{message=value;};
+ await h.api.documentDrawer('Purchase Receipt','PR','Purchase Invoice',document.document.name);await h.click('dlp-submit');
+ assert.match(message,/&lt;img src=x onerror=alert\(1\)&gt;/);
+ assert.match(message,/&lt;b&gt;Confirmar&lt;\/b&gt;/);
+ assert.doesNotMatch(message,/<img|<b>/);
+ assert.ok(!h.requests.some(request=>request.method.endsWith('.submit_document')));
+});
 test('invoice submit success followed by metadata refresh failure reports completed operation',async()=>{
  let loads=0;const document=projection();document.document.name='DRAFT';document.allowed_actions=['Submit'];
  const h=harness({document,metadata:async()=>{if(++loads>1)throw new Error('private network failure');}});

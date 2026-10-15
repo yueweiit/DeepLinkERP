@@ -51,6 +51,25 @@ console.log(JSON.stringify({html}));
 	assert "disabled" in result["html"]
 
 
+def test_translation_keeps_actual_reference_location_name() -> None:
+	result = run_js(
+		"""
+global.__=value=>({'仓库':'Almacén','库位待维护':'Ubicación pendiente de actualizar'}[value] || value);
+const html=inventory.renderCategorizedRows([{
+ item_code:'A',item_name:'Artículo A',warehouse:'W1',actual_qty:2,stock_uom:'pieza',item_group:'Grupo',
+ inventory_status:'库存一致',locations:[
+  {reference_location:'仓库',snapshot_location_qty:1,snapshot_date:''},
+  {reference_location:'库位待维护',snapshot_location_qty:1,snapshot_date:''}
+ ]
+}]);
+console.log(JSON.stringify({html}));
+"""
+	)
+	assert "<td>仓库</td>" in result["html"]
+	assert "<td>Ubicación pendiente de actualizar</td>" in result["html"]
+	assert "<td>Almacén</td>" not in result["html"]
+
+
 def test_current_page_select_all_ignores_placeholder_rows_and_can_clear_again() -> None:
 	result = run_js(
 		"""
@@ -88,7 +107,7 @@ def test_shared_page_uses_integer_page_size_and_only_opens_an_unsaved_stock_entr
 	assert 'frappe.set_route("Form", "Stock Entry"' in source
 	assert "overseas_costing.services.inventory_location_service" not in source
 	assert "this.resetSelection();" not in source.split("async refresh(", 1)[1].split("renderPager(payload)", 1)[0]
-	assert "物料移动 (${this.selected.size})" in source
+	assert 't("物料移动 ({0})", [this.selected.size])' in source
 	assert "this.movementActionDataLabel" not in source
 	assert ".menu-item-label" not in source
 	assert 'aria-disabled' in source
