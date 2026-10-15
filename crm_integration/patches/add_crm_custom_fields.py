@@ -104,6 +104,7 @@ def create_crm_custom_fields():
 					("custom_crm_source_fingerprint", "CRM Source Fingerprint", "Data", None),
 					("custom_crm_stock_supplement", "CRM Stock Supplement", "Link", "Stock Entry"),
 					("custom_crm_valuation_policy", "CRM Temporary Valuation Policy", "Data", None),
+					("custom_crm_repost_ids", "CRM Native Repost IDs", "Small Text", None),
 				], "custom_crm_shipment_no"),
 			],
 			"Sales Order Item": [

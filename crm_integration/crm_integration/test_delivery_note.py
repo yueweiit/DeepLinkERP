@@ -325,6 +325,14 @@ class TestDeliveryNoteCRMEvents(UnitTestCase):
 
 
 class TestCRMNativeShipment(UnitTestCase):
+	def warehouse_lookup(self, **values):
+		get_value = frappe.db.get_value
+		warehouse = frappe._dict(company="Company", disabled=0, is_group=0)
+		warehouse.update(values)
+		def lookup(doctype, *args, **kwargs):
+			return warehouse if doctype == "Warehouse" else get_value(doctype, *args, **kwargs)
+		return lookup
+
 	def source(self, **values):
 		return dict(source_organization="CRM-YW", event_id="EVENT-1", batch_no="七月第一批",
 			sales_order="SO-1", posting_date="2026-07-31", posting_time="10:00:00",
@@ -345,7 +353,7 @@ class TestCRMNativeShipment(UnitTestCase):
 		order = sales_order or self.order()
 		allocations = shipment.allocate_crm_shipment_items(order, payload["items"])
 		with (
-			patch.object(frappe.db, "get_value", return_value=frappe._dict(company="Company", disabled=0, is_group=0)),
+			patch.object(frappe.db, "get_value", side_effect=self.warehouse_lookup()),
 			patch.object(frappe, "get_cached_value", return_value="CNY"),
 			patch("erpnext.stock.utils.get_stock_balance", return_value=stock) as balance,
 		):
@@ -388,7 +396,7 @@ class TestCRMNativeShipment(UnitTestCase):
 		other.name = "SOI-2"
 		order["items"].append(other)
 		with self.assertRaisesRegex(frappe.ValidationError, "sales_order_item|crm_order_item_id"):
-			shipment.allocate_crm_shipment_items(order, [dict(item_code="ITEM-1", qty=1)])
+			shipment.allocate_crm_shipment_items(order, [dict(item_code="ITEM-1", qty=1)], strict=True)
 
 	def test_historical_native_balance_and_stock_uom_base_currency_shortfall(self):
 		plan, balance = self.plan()
@@ -449,7 +457,7 @@ class TestCRMNativeShipment(UnitTestCase):
 		payload = shipment.normalize_crm_shipment_payload(self.source())
 		order = self.order()
 		allocations = shipment.allocate_crm_shipment_items(order, payload["items"])
-		with patch.object(frappe.db, "get_value", return_value=frappe._dict(company="OTHER", disabled=1)):
+		with patch.object(frappe.db, "get_value", side_effect=self.warehouse_lookup(company="OTHER", disabled=1)):
 			with patch.object(frappe, "get_cached_value", return_value="CNY"):
 				plan = shipment.build_crm_stock_plan(order, payload, allocations)
 		self.assertTrue(plan["blockers"])
@@ -621,7 +629,7 @@ class TestCRMNativeShipment(UnitTestCase):
 			patch.object(shipment, "crm_stock_pool_locks", return_value=nullcontext()),
 			patch.object(shipment, "lock_sales_order_for_crm_shipment"),
 			patch.object(frappe, "get_doc", return_value=self.order()),
-			patch.object(frappe.db, "get_value", return_value=frappe._dict(company="Company", disabled=0)),
+			patch.object(frappe.db, "get_value", side_effect=self.warehouse_lookup()),
 			patch.object(shipment, "get_delivery_note_by_crm_shipment_no", return_value=None),
 			patch.object(shipment, "build_crm_stock_plan", return_value=plan),
 			patch.object(shipment, "persist_crm_order_item_mappings") as mapping,
@@ -641,7 +649,7 @@ class TestCRMNativeShipment(UnitTestCase):
 
 	def test_response_reports_native_repost_pending_and_supplement_ids(self):
 		doc = frappe._dict(name="DN-1", docstatus=1, custom_crm_stock_supplement="STE-1")
-		with patch.object(frappe, "get_all", return_value=[frappe._dict(name="RIV-1", status="Queued")]):
+		with patch.object(shipment, "get_crm_repost_dependencies", return_value=[frappe._dict(name="RIV-1", status="Queued")]):
 			result = shipment.get_crm_shipment_response(doc, "EVENT")
 		self.assertEqual(result["supplement_ids"], ["STE-1"])
 		self.assertTrue(result["stock_updated"])
@@ -669,7 +677,7 @@ class TestCRMNativeShipment(UnitTestCase):
 		order = self.order()
 		allocations = shipment.allocate_crm_shipment_items(order, payload["items"])
 		with (
-			patch.object(frappe.db, "get_value", return_value=frappe._dict(company="Company", disabled=0, is_group=0)),
+			patch.object(frappe.db, "get_value", side_effect=self.warehouse_lookup()),
 			patch.object(frappe, "get_cached_value", return_value="CNY"),
 			patch("erpnext.stock.stock_ledger.get_previous_sle", return_value=frappe._dict(qty_after_transaction=5)) as current,
 			patch("erpnext.stock.utils.get_stock_balance") as stale_snapshot,
@@ -718,7 +726,7 @@ class TestCRMNativeShipment(UnitTestCase):
 		payload = shipment.normalize_crm_shipment_payload(self.source())
 		order = self.order()
 		with (
-			patch.object(frappe.db, "get_value", return_value=frappe._dict(company="Company", disabled=0, is_group=0)),
+			patch.object(frappe.db, "get_value", side_effect=self.warehouse_lookup()),
 			patch.object(frappe, "get_cached_value", return_value="CNY"),
 			patch("erpnext.stock.stock_ledger.get_previous_sle", return_value=None),
 			patch("erpnext.stock.utils.get_stock_balance", return_value=0.0),
@@ -821,3 +829,69 @@ class TestCRMNativeShipment(UnitTestCase):
 		self.assertTrue(plan["blockers"])
 		self.assertIsNone(plan["items"][0]["warehouse"])
 		balance.assert_not_called()
+
+	def test_legacy_stock_shortage_is_left_to_native_negative_stock_validation(self):
+		payload = dict(custom_crm_shipment_no="LEGACY", sales_order="SO-1", items=[dict(sales_order_item="SOI-1", item_code="ITEM-1", qty=3)])
+		plan, _ = self.plan(payload, stock=-2)
+		self.assertFalse(plan["blockers"])
+		self.assertEqual(plan["items"][0]["shortage_qty"], 6)
+
+	def test_legacy_explicit_warehouse_retains_existing_native_request_priority(self):
+		payload = dict(custom_crm_shipment_no="LEGACY", sales_order="SO-1", items=[dict(sales_order_item="SOI-1", item_code="ITEM-1", qty=1, warehouse="REQUEST-WH")])
+		plan, _ = self.plan(payload, stock=10)
+		self.assertFalse(plan["blockers"])
+		self.assertEqual(plan["items"][0]["warehouse"], "REQUEST-WH")
+
+	def test_legacy_same_code_version_quantity_can_split_across_existing_order_rows(self):
+		order = self.order()
+		second = frappe._dict(order["items"][0])
+		second.name = "SOI-2"
+		second.custom_crm_order_item_id = "CRM-ROW-2"
+		order["items"].append(second)
+		allocations = shipment.allocate_crm_shipment_items(order, [dict(item_code="ITEM-1", qty=12, uom="LEGACY-IGNORED")])
+		self.assertEqual([row.qty for row in allocations], [10, 2])
+
+	def test_native_base_rate_rounding_respects_currency_field_precision(self):
+		order = self.order()
+		order.conversion_rate = 17.123456
+		order["items"][0].net_rate = 18.75
+		order["items"][0].base_net_rate = 321.06
+		payload = self.source()
+		payload["items"][0]["source_unit_price"] = 18.75
+		plan, _ = self.plan(payload, order, stock=0)
+		self.assertFalse(plan["blockers"])
+		self.assertEqual(plan["items"][0]["temporary_valuation_rate"], 160.53)
+
+	def test_preview_fingerprint_includes_commercial_header_and_tax_changes(self):
+		payload = shipment.normalize_crm_shipment_payload(self.source())
+		plan, _ = self.plan()
+		order = self.order()
+		order.taxes = [dict(charge_type="On Net Total", rate=16)]
+		order.discount_amount = 0
+		first = shipment.get_crm_preview_response(order,payload,plan)
+		order.taxes[0]["rate"] = 8
+		order.discount_amount = 5
+		second = shipment.get_crm_preview_response(order,payload,plan)
+		self.assertNotEqual(first["preview_fingerprint"], second["preview_fingerprint"])
+
+	def test_receipt_reports_item_based_repost_without_any_voucher_reference(self):
+		doc = frappe._dict(name="DN-1", company="Company", docstatus=1, items=[frappe._dict(item_code="ITEM-1", warehouse="FG-WH")])
+		queued = frappe._dict(name="RPV-ITEM-1", status="Queued", based_on="Item and Warehouse", item_code="ITEM-1", warehouse="FG-WH", voucher_type=None, voucher_no=None)
+		with patch.object(frappe.db, "sql", return_value=[queued]) as native_query, patch.object(frappe, "get_all", return_value=[]):
+			result = shipment.get_crm_shipment_response(doc, "EVENT")
+		self.assertTrue(result["valuation_pending"])
+		self.assertEqual(result["repost_status"][0]["name"], "RPV-ITEM-1")
+		query, values = native_query.call_args.args
+		self.assertIn("item_code", query)
+		self.assertIn("warehouse", query)
+		self.assertIn("ITEM-1", values)
+		self.assertIn("FG-WH", values)
+
+	def test_actual_created_repost_ids_are_persisted_for_later_replay_status(self):
+		doc = MagicMock()
+		doc.name = "DN-1"
+		with patch.object(shipment, "get_crm_repost_dependencies", return_value=[frappe._dict(name="RPV-1", status="Queued")]) as dependencies:
+			shipment.record_crm_repost_dependencies(doc, "2026-10-15 12:00:00")
+		self.assertTrue(dependencies.call_args.kwargs["for_update"])
+		self.assertEqual(dependencies.call_args.kwargs["created_since"], "2026-10-15 12:00:00")
+		doc.db_set.assert_called_once_with("custom_crm_repost_ids", '["RPV-1"]', update_modified=False)

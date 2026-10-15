@@ -88,6 +88,7 @@ def create_and_submit_delivery_note_from_crm(payload):
 				sales_order,
 				payload["items"],
 				credit_delivery_note=credit_delivery_note,
+				strict=is_strict_crm_shipment(payload),
 			)
 			if credit_delivery_note and credit_delivery_note.docstatus == 1:
 				validate_crm_delivery_note_identity(credit_delivery_note, sales_order, allocations)
@@ -108,16 +109,18 @@ def create_and_submit_delivery_note_from_crm(payload):
 					savepoint = "crm_shipment_" + hashlib.sha256(payload[CRM_SHIPMENT_FIELD].encode()).hexdigest()[:16]
 					frappe.db.savepoint(savepoint)
 					try:
+						repost_started_at = now()
 						release_sales_order_for_crm_shipment(sales_order, legacy_release=not is_strict_crm_shipment(payload))
 						persist_crm_order_item_mappings(allocations)
 						delivery_note, _replay = get_or_create_crm_delivery_note(sales_order, payload, allocations)
-						supplement = make_crm_stock_supplement(sales_order, payload, plan, delivery_note.name)
+						supplement = make_crm_stock_supplement(sales_order, payload, plan, delivery_note.name) if payload.get("allow_stock_supplement") else None
 						if supplement:
 							delivery_note.set("custom_crm_stock_supplement", supplement.name)
 							delivery_note.set("custom_crm_valuation_policy", TEMPORARY_VALUATION_POLICY)
 						prepare_crm_delivery_note_for_submit(delivery_note, sales_order, payload)
 						delivery_note.flags.ignore_permissions = True
 						delivery_note.submit()
+						record_crm_repost_dependencies(delivery_note, repost_started_at)
 					except Exception:
 						frappe.db.rollback(save_point=savepoint)
 						raise
@@ -127,6 +130,7 @@ def create_and_submit_delivery_note_from_crm(payload):
 			delivery_note,
 			payload[CRM_SHIPMENT_FIELD],
 			idempotent_replay=idempotent_replay,
+			for_update=True,
 		)
 		update_crm_log(
 			crm_log,
@@ -280,7 +284,7 @@ def get_crm_delivery_note_for_allocation_credit(payload):
 	return get_delivery_note_by_crm_shipment_no(payload[CRM_SHIPMENT_FIELD], for_update=True)
 
 
-def allocate_crm_shipment_items(sales_order, requested_items, credit_delivery_note=None):
+def allocate_crm_shipment_items(sales_order, requested_items, credit_delivery_note=None, *, strict=False):
 	if sales_order.docstatus != 1:
 		frappe.throw(_("销售订单 {0} 必须已提交。").format(sales_order.name))
 
@@ -330,7 +334,7 @@ def allocate_crm_shipment_items(sales_order, requested_items, credit_delivery_no
 				throw_crm_shipment_identity_conflict(_("第 {0} 行 crm_order_item_id 与销售订单明细不匹配。").format(index))
 			if len(candidates) != 1:
 				throw_crm_shipment_identity_conflict(_("第 {0} 行 crm_order_item_id 未唯一对应销售订单明细。").format(index))
-		if not row_name and len(candidates) > 1:
+		if strict and not row_name and len(candidates) > 1:
 			frappe.throw(_("第 {0} 行对应多条订单明细，请传 sales_order_item 或 crm_order_item_id。").format(index))
 		if not candidates:
 			frappe.throw(_("销售出库第 {0} 行未找到可出库的销售订单明细。").format(index))
@@ -345,7 +349,7 @@ def allocate_crm_shipment_items(sales_order, requested_items, credit_delivery_no
 				throw_crm_shipment_identity_conflict(
 					_("销售出库第 {0} 行 custom_version 与销售订单明细不匹配。").format(index)
 				)
-		if request_row.get("uom") and any(row.doc.get("uom") != request_row.uom for row in candidates):
+		if (strict or crm_row_id) and request_row.get("uom") and any(row.doc.get("uom") != request_row.uom for row in candidates):
 			throw_crm_shipment_identity_conflict(_("第 {0} 行 uom 与销售订单明细不匹配。").format(index))
 
 		qty_to_allocate = flt(request_row.get("qty"))
@@ -415,7 +419,7 @@ def preview_delivery_note_from_crm(payload):
 			frappe.throw(_("订单公司未启用 CRM 集成。"))
 		existing = get_delivery_note_by_crm_shipment_no(payload[CRM_SHIPMENT_FIELD])
 		validate_crm_persisted_source(existing, payload)
-		allocations = allocate_crm_shipment_items(sales_order, payload["items"], credit_delivery_note=existing)
+		allocations = allocate_crm_shipment_items(sales_order, payload["items"], credit_delivery_note=existing, strict=is_strict_crm_shipment(payload))
 		if existing and existing.docstatus == 1:
 			validate_crm_delivery_note_identity(existing, sales_order, allocations)
 			response = get_crm_shipment_response(existing, payload[CRM_SHIPMENT_FIELD], idempotent_replay=True)
@@ -446,13 +450,14 @@ def get_crm_native_order_rows(sales_order):
 
 def get_crm_preview_response(sales_order, payload, plan):
 	source_fingerprint = get_crm_shipment_source_fingerprint(payload)
+	order_snapshot = sales_order.as_dict(no_private_properties=True) if callable(getattr(sales_order, "as_dict", None)) else dict(sales_order)
 	return dict(plan, status="blocked" if plan["blockers"] else "success", can_execute=not plan["blockers"],
 		sales_order=sales_order.name, sales_order_items=get_crm_native_order_rows(sales_order),
 		process_status=sales_order.get("custom_process_status"), source_fingerprint=source_fingerprint,
 		blocker_code="ERP_CRM_NATIVE_BLOCKERS" if plan["blockers"] else None,
 		preview_fingerprint=crm_shipment_fingerprint(dict(source_fingerprint=source_fingerprint,
 			plan=plan, process_status=sales_order.get("custom_process_status"), status=sales_order.get("status"),
-			order_rows=get_crm_native_order_rows(sales_order))))
+			order_snapshot=order_snapshot)))
 
 
 def validate_crm_preview_fingerprints(payload, preview):
@@ -489,9 +494,9 @@ def get_crm_shipment_source_fingerprint(payload):
 def resolve_crm_shipment_warehouse(sales_order, allocation, blockers, *, strict=False):
 	request = allocation.request_row
 	warehouse = allocation.sales_order_item.get("warehouse") or sales_order.get("set_warehouse")
-	if request.get("warehouse") and warehouse and request.warehouse != warehouse:
+	if strict and request.get("warehouse") and warehouse and request.warehouse != warehouse:
 		blockers.append(_("warehouse {0} 与销售订单行仓库 {1} 冲突。").format(request.warehouse, warehouse))
-	warehouse = warehouse or (None if strict else request.get("warehouse"))
+	warehouse = warehouse if strict else request.get("warehouse") or warehouse
 	if not warehouse:
 		blockers.append(_("销售订单明细 {0} 缺少 warehouse，须先维护原生仓库。").format(allocation.sales_order_item.name))
 		return None
@@ -541,16 +546,19 @@ def build_crm_stock_plan(sales_order, payload, allocations, *, for_update=False)
 			warehouse=warehouse, stock_qty=stock_qty, available_qty=available, shortage_qty=shortage,
 			source_unit_price=request.get("source_unit_price"), source_currency=request.get("source_currency"),
 			native_net_rate=source.get("net_rate"), temporary_valuation_rate=None, base_currency=base_currency)
-		if available < -0.000001:
+		if is_strict_crm_shipment(payload) and available < -0.000001:
 			blockers.append(_("{0} 在业务时点原生库存为负，须先核对库存账。").format(source.item_code))
 		if shortage > 0.000001:
 			if not payload.get("allow_stock_supplement"):
-				blockers.append(_("{0} 库存不足 {1}，未授权成品临时补入库。").format(source.item_code, shortage))
+				if is_strict_crm_shipment(payload):
+					blockers.append(_("{0} 库存不足 {1}，未授权成品临时补入库。").format(source.item_code, shortage))
 			else:
 				price = request.get("source_unit_price")
+				price_precision = get_crm_order_rate_precision(source, "net_rate", sales_order.get("currency"))
+				base_precision = get_crm_order_rate_precision(source, "base_net_rate", base_currency)
 				if price is None or price == "":
 					blockers.append(_("{0} 补入库缺少 source_unit_price；缺失不能按零处理。").format(source.item_code))
-				elif not is_valid_crm_price(price) or source.get("net_rate") is None or abs(flt(price) - flt(source.net_rate)) > 0.000001:
+				elif not is_valid_crm_price(price) or source.get("net_rate") is None or flt(price, price_precision) != flt(source.net_rate, price_precision):
 					blockers.append(_("{0} source_unit_price 与订单有效 net_rate 不一致。").format(source.item_code))
 				elif request.get("source_currency") != sales_order.get("currency"):
 					blockers.append(_("{0} source_currency 与订单币种不一致。").format(source.item_code))
@@ -558,7 +566,7 @@ def build_crm_stock_plan(sales_order, payload, allocations, *, for_update=False)
 					blockers.append(_("{0} 缺少有效的原生本币价格或单位换算。").format(source.item_code))
 				else:
 					row["temporary_valuation_rate"] = flt(source.base_net_rate) / factor
-					if abs(flt(source.base_net_rate) - flt(source.net_rate) * flt(sales_order.conversion_rate)) > 0.00001:
+					if flt(source.base_net_rate, base_precision) != flt(flt(source.net_rate) * flt(sales_order.conversion_rate), base_precision):
 						blockers.append(_("{0} 原生订单本币价格与汇率不一致。").format(source.item_code))
 		items.append(row)
 	return dict(items=items, blockers=list(dict.fromkeys(blockers)), posting_date=posting_date,
@@ -571,6 +579,14 @@ def is_valid_crm_price(value):
 		return not isinstance(value, bool) and math.isfinite(float(value)) and float(value) >= 0
 	except (TypeError, ValueError):
 		return False
+
+
+def get_crm_order_rate_precision(source, fieldname, currency):
+	if callable(getattr(source, "precision", None)):
+		return source.precision(fieldname)
+	from frappe.model.meta import get_field_precision
+
+	return get_field_precision(frappe.get_meta("Sales Order Item").get_field(fieldname), source, currency=currency)
 
 
 def make_crm_stock_supplement(sales_order, payload, plan, delivery_note_name=None):
@@ -914,13 +930,62 @@ def release_sales_order_for_crm_shipment(sales_order, legacy_release=False):
 		)
 
 
-def get_crm_shipment_response(delivery_note, shipment_no, idempotent_replay=False):
+def record_crm_repost_dependencies(delivery_note, created_since):
+	reposts = get_crm_repost_dependencies(delivery_note, created_since=created_since, for_update=True)
+	delivery_note.db_set("custom_crm_repost_ids", json.dumps(sorted({row.name for row in reposts})), update_modified=False)
+
+
+def get_crm_repost_dependencies(delivery_note, *, created_since=None, for_update=False):
+	"""Native item-based reposts have no voucher link; include the actual SLE pools."""
+	if not delivery_note.get("company"):
+		return []
+	raw_ids = delivery_note.get("custom_crm_repost_ids") or "[]"
+	tracked = frappe.parse_json(raw_ids) if isinstance(raw_ids, str) else raw_ids
+	tracked = tracked if isinstance(tracked, list) else []
+	vouchers = [("Delivery Note", delivery_note.name)]
+	if delivery_note.get("custom_crm_stock_supplement"):
+		vouchers.append(("Stock Entry", delivery_note.custom_crm_stock_supplement))
+	voucher_conditions = " OR ".join("(voucher_type = %s AND voucher_no = %s)" for _ in vouchers)
+	voucher_values = [value for voucher in vouchers for value in voucher]
+	ledger_rows = frappe.db.sql(
+		f"SELECT item_code, warehouse FROM `tabStock Ledger Entry` WHERE ({voucher_conditions})"
+		+ (" FOR UPDATE" if for_update else ""), tuple(voucher_values), as_dict=True)
+	pools = {(row.get("item_code"), row.get("warehouse")) for row in ledger_rows
+		if row.get("item_code") and row.get("warehouse")}
+	pools.update((row.get("item_code"), row.get("warehouse")) for row in delivery_note.get("items", [])
+		if row.get("item_code") and row.get("warehouse"))
+	scopes, scope_values = [f"({voucher_conditions})"], list(voucher_values)
+	if pools:
+		pair_conditions = " OR ".join("(item_code = %s AND warehouse = %s)" for _ in pools)
+		scopes.append(f"(based_on = %s AND ({pair_conditions}))")
+		scope_values.append("Item and Warehouse")
+		scope_values.extend(value for pair in sorted(pools) for value in pair)
+	statuses = "status IN ('Queued', 'In Progress', 'Failed')"
+	status_values = []
+	if created_since:
+		statuses = f"({statuses} OR creation >= %s)"
+		status_values.append(created_since)
+	conditions = [f"(docstatus = 1 AND ({' OR '.join(scopes)}) AND {statuses})"]
+	values = [delivery_note.company, *scope_values, *status_values]
+	if tracked:
+		conditions.append("name IN (" + ", ".join("%s" for _ in tracked) + ")")
+		values.extend(tracked)
+	rows = frappe.db.sql(
+		"SELECT name, status, based_on, item_code, warehouse, voucher_type, voucher_no "
+		"FROM `tabRepost Item Valuation` WHERE company = %s AND ("
+		+ " OR ".join(conditions) + ") ORDER BY creation, name" + (" FOR UPDATE" if for_update else ""),
+		tuple(values), as_dict=True)
+	# A deleted/cancelled recorded job cannot be treated as completed valuation.
+	found = {row.name for row in rows}
+	rows.extend(frappe._dict(name=name, status="Missing") for name in tracked if name not in found)
+	return rows
+
+
+def get_crm_shipment_response(delivery_note, shipment_no, idempotent_replay=False, *, for_update=False):
 	supplement_ids = [delivery_note.get("custom_crm_stock_supplement")] if delivery_note.get("custom_crm_stock_supplement") else []
-	reposts = []
-	for doctype, name in [("Delivery Note", delivery_note.name), *[("Stock Entry", name) for name in supplement_ids]]:
-		reposts.extend(frappe.get_all("Repost Item Valuation", filters={"voucher_type": doctype, "voucher_no": name,
-			"status": ["in", ["Queued", "In Progress", "Failed"]]}, fields=["name", "status"], limit_page_length=0))
-	valuation_failed = any(row.status == "Failed" for row in reposts)
+	reposts = get_crm_repost_dependencies(delivery_note, for_update=for_update)
+	valuation_failed = any(row.status in ("Failed", "Cancelled", "Missing") for row in reposts)
+	valuation_pending = valuation_failed or any(row.status in ("Queued", "In Progress") for row in reposts)
 	response = {
 		"status": "success",
 		"message": _("销售出库已在 ERP 提交并完成库存扣减。"),
@@ -930,8 +995,8 @@ def get_crm_shipment_response(delivery_note, shipment_no, idempotent_replay=Fals
 		"stock_updated": delivery_note.docstatus == 1,
 		"supplement_ids": supplement_ids,
 		"source_fingerprint": delivery_note.get("custom_crm_source_fingerprint"),
-		"valuation_pending": bool(reposts),
-		"valuation_status": "failed" if valuation_failed else "pending" if reposts else "complete",
+		"valuation_pending": valuation_pending,
+		"valuation_status": "failed" if valuation_failed else "pending" if valuation_pending else "complete",
 		"repost_status": reposts,
 		"valuation_policy": delivery_note.get("custom_crm_valuation_policy"),
 		"timestamp": now(),
