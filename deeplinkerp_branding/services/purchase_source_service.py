@@ -1069,6 +1069,16 @@ def _sync_replay(receipt):
     return {**receipt["result"], "documents":[{k:row[k] for k in ("doctype","name")} for row in receipt["documents"]], "reused":True}
 
 
+def _approval_pending_reason(source):
+    if source.get("deleted_at"):
+        label = "原申请已删除或撤销"
+    elif str(source.get("result") or "").lower() in {"refuse","reject","disagree"}:
+        label = "审批已拒绝"
+    else:
+        label = {"RUNNING":"审批中","TERMINATED":"审批已终止","CANCELED":"审批已撤销"}.get(source.get("status"),"审批未通过")
+    return label + "，不创建物料或采购订单"
+
+
 @frappe.whitelist(methods=["POST"])
 def sync_purchase_sources(request_id=None):
 	from . import purchase_operation as operation
@@ -1112,6 +1122,7 @@ def sync_purchase_sources(request_id=None):
 					result["already_linked"] += 1
 				elif not source.get("eligible"):
 					result["invalid"] += 1
+					reason = _approval_pending_reason(source)
 				elif adaptation is not None:
 					created, reason = _create_adapted_order(doc,source,evidence,adaptation)
 					if created:

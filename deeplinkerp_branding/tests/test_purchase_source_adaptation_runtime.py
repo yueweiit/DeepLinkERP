@@ -317,6 +317,18 @@ class PurchaseSourceAdaptationRuntimeTests(unittest.TestCase):
 			service._version(changed, {}, service._recheck_plan(doc, changed)),
 		)
 
+	def test_ineligible_sync_outcomes_name_the_actual_approval_blocker(self):
+		service = self.runtime._service()
+		for source, label in (
+			(dict(status="RUNNING"), "审批中"),
+			(dict(status="TERMINATED"), "终止"),
+			(dict(status="COMPLETED", result="refuse"), "拒绝"),
+			(dict(deleted_at="2026-10-15"), "撤销"),
+		):
+			with self.subTest(source=source):
+				self.assertIn(label, service._approval_pending_reason(source))
+				self.assertIn("不创建物料", service._approval_pending_reason(source))
+
 
 if __name__ == "__main__":
 	unittest.main()
