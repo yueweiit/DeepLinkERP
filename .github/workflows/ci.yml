@@ -5,6 +5,7 @@ on:
     branches:
       - deeplinkerp_branding
       - main
+      - codex/crm-outbound-release
   pull_request:
 
 concurrency:
