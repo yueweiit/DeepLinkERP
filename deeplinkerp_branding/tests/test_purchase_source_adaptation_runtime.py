@@ -78,6 +78,33 @@ class PurchaseSourceAdaptationRuntimeTests(unittest.TestCase):
 		self.assertEqual(created.is_stock_item, 0)
 		self.assertEqual(created.stock_uom, "Nos")
 
+	def test_missing_placeholder_codes_never_create_items_but_existing_codes_are_reused(self):
+		for code in ("/", "N/A", "s/c", "0000", "SIN CODIGO", "Sin código"):
+			with self.subTest(code=code):
+				spec = {**self.spec, "item_code": code, "is_stock_item": 1}
+				plan = dict(company="QA Company", items=[spec])
+				service = Mock()
+				service._native.return_value = {"is_group": 0}
+				with (
+					patch.object(self.runtime, "read_item", return_value=None),
+					patch.object(self.runtime, "_service", return_value=service),
+					patch.object(self.runtime.frappe, "has_permission", return_value=True),
+					patch.object(self.runtime.frappe, "new_doc") as new_doc,
+				):
+					with self.assertRaisesRegex(ValueError, "可靠.*编码"):
+						self.runtime.ensure_items(plan)
+					new_doc.assert_not_called()
+				with (
+					patch.object(
+						self.runtime,
+						"read_item",
+						return_value={**self.item, "name": code, "is_stock_item": 1},
+					),
+					patch.object(self.runtime.frappe, "new_doc") as new_doc,
+				):
+					self.assertEqual(self.runtime.ensure_items(plan), [])
+					new_doc.assert_not_called()
+
 	def test_existing_item_is_reused_without_insert_or_attribute_changes(self):
 		plan = dict(company="QA Company", items=[deepcopy(self.spec)])
 		with (

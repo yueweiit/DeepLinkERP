@@ -87,6 +87,11 @@ def item_specs(plan):
 
 
 def check_item_creation(spec):
+	code = "".join(str(spec.get("item_code") or "").casefold().split())
+	if code in {"/", "-", "--", "n/a", "s/c", "sincodigo", "sincódigo", "无", "暂无", "未填写"} or (
+		code and not code.strip("0")
+	):
+		raise ValueError(f"原单物料编码 {spec['item_code']} 是占位值，缺少可靠物料编码，不能自动创建物料")
 	service = _service()
 	if not all(spec.get(key) for key in ("item_code", "item_name", "item_group", "uom", "company")):
 		raise ValueError(f"新物料 {spec.get('item_code') or '—'} 的名称、物料组、单位或公司待确认")
