@@ -895,3 +895,23 @@ class TestCRMNativeShipment(UnitTestCase):
 		self.assertTrue(dependencies.call_args.kwargs["for_update"])
 		self.assertEqual(dependencies.call_args.kwargs["created_since"], "2026-10-15 12:00:00")
 		doc.db_set.assert_called_once_with("custom_crm_repost_ids", '["RPV-1"]', update_modified=False)
+
+	def test_commercial_order_version_ignores_delivery_progress_but_catches_tax_changes(self):
+		order = frappe._dict(name="SO-VERSION", company="QA", currency="MXN", conversion_rate=1,
+			taxes=[dict(rate=16)], items=[dict(name="ROW", item_code="SKU", qty=10, rate=18, delivered_qty=0)])
+		first = shipment.get_crm_commercial_order_fingerprint(order)
+		order.status = "Completed"
+		order.modified = "2026-10-15"
+		order.custom_process_status = "Delivered"
+		order["items"][0]["delivered_qty"] = 2
+		self.assertEqual(first, shipment.get_crm_commercial_order_fingerprint(order))
+		order.taxes[0]["rate"] = 8
+		self.assertNotEqual(first, shipment.get_crm_commercial_order_fingerprint(order))
+
+	def test_commercial_order_version_accepts_native_tax_child_documents(self):
+		order = frappe.new_doc("Sales Order")
+		order.company = "QA"
+		order.append("taxes", dict(charge_type="On Net Total", account_head="QA Tax", rate=16))
+		first = shipment.get_crm_commercial_order_fingerprint(order)
+		order.taxes[0].rate = 8
+		self.assertNotEqual(first, shipment.get_crm_commercial_order_fingerprint(order))

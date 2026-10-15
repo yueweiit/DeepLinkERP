@@ -423,7 +423,7 @@ def preview_delivery_note_from_crm(payload):
 		if existing and existing.docstatus == 1:
 			validate_crm_delivery_note_identity(existing, sales_order, allocations)
 			response = get_crm_shipment_response(existing, payload[CRM_SHIPMENT_FIELD], idempotent_replay=True)
-			response.update(can_execute=True, sales_order=sales_order.name, sales_order_items=get_crm_native_order_rows(sales_order),
+			response.update(can_execute=True, order_fingerprint=get_crm_commercial_order_fingerprint(sales_order), sales_order=sales_order.name, sales_order_items=get_crm_native_order_rows(sales_order),
 				company=sales_order.company, currency=sales_order.get("currency"), blockers=[], items=[dict(sales_order_item=a.sales_order_item.name,
 					crm_order_item_id=a.get("crm_order_item_id"), item_code=a.sales_order_item.item_code,
 					uom=a.sales_order_item.get("uom"), warehouse=a.sales_order_item.get("warehouse"), qty=a.qty)
@@ -438,6 +438,7 @@ def preview_delivery_note_from_crm(payload):
 	except frappe.ValidationError as exc:
 		return dict(status="blocked", can_execute=False, sales_order=sales_order.name,
 			company=sales_order.company, currency=sales_order.get("currency"), items=[],
+			order_fingerprint=get_crm_commercial_order_fingerprint(sales_order),
 			sales_order_items=get_crm_native_order_rows(sales_order), blockers=[str(exc)],
 			blocker_code="ERP_CRM_ORDER_ITEM_MAPPING_REQUIRED", source_fingerprint=get_crm_shipment_source_fingerprint(payload))
 
@@ -448,12 +449,32 @@ def get_crm_native_order_rows(sales_order):
 		for row in sales_order.get("items", [])]
 
 
+def get_crm_commercial_order_fingerprint(sales_order):
+	"""Version commercial evidence while allowing native delivery progress between batches."""
+	header_fields = ("name", "docstatus", "company", "customer", "currency", "conversion_rate", "transaction_date",
+		"selling_price_list", "price_list_currency", "plc_conversion_rate", "taxes_and_charges", "tax_category",
+		"tax_withholding_category", "apply_discount_on", "additional_discount_percentage", "discount_amount",
+		"base_discount_amount", "set_warehouse", "customer_address", "shipping_address_name", "company_address",
+		"cost_center", "project", "incoterm", "named_place", "custom_crm_order_no")
+	row_fields = ("name", "item_code", "custom_version", "qty", "uom", "stock_uom", "conversion_factor", "warehouse",
+		"rate", "net_rate", "base_rate", "base_net_rate", "price_list_rate", "discount_percentage", "discount_amount",
+		"item_tax_template", "item_tax_rate", "income_account", "expense_account", "cost_center", "project")
+	version = {field: sales_order.get(field) for field in header_fields}
+	version["items"] = [{field: row.get(field) for field in row_fields} for row in sales_order.get("items", [])]
+	# Tax row accounting and included-in-price flags affect native valuation as well as totals.
+	version["taxes"] = [{key: value for key, value in (row.as_dict(no_private_properties=True) if callable(getattr(row, "as_dict", None)) else dict(row)).items()
+		if key not in ("creation", "modified", "modified_by", "owner", "idx", "name", "parent", "parenttype", "parentfield")}
+		for row in sales_order.get("taxes", [])]
+	return crm_shipment_fingerprint(version)
+
+
 def get_crm_preview_response(sales_order, payload, plan):
 	source_fingerprint = get_crm_shipment_source_fingerprint(payload)
 	order_snapshot = sales_order.as_dict(no_private_properties=True) if callable(getattr(sales_order, "as_dict", None)) else dict(sales_order)
 	return dict(plan, status="blocked" if plan["blockers"] else "success", can_execute=not plan["blockers"],
 		sales_order=sales_order.name, sales_order_items=get_crm_native_order_rows(sales_order),
 		process_status=sales_order.get("custom_process_status"), source_fingerprint=source_fingerprint,
+		order_fingerprint=get_crm_commercial_order_fingerprint(sales_order),
 		blocker_code="ERP_CRM_NATIVE_BLOCKERS" if plan["blockers"] else None,
 		preview_fingerprint=crm_shipment_fingerprint(dict(source_fingerprint=source_fingerprint,
 			plan=plan, process_status=sales_order.get("custom_process_status"), status=sales_order.get("status"),
