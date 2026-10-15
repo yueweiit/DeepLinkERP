@@ -652,9 +652,15 @@ test "$(docker image inspect "$old_image" --format '{{.Id}}')" = "$old_image_id"
 cp compose.custom.yaml "$release_dir/compose.before.yaml"
 new_image="deeplinkerp-custom:unified-purchase-$release_key"
 frozen_base="deeplinkerp-custom:unified-base-$release_key"
-docker image tag "$build_base_id" "$frozen_base"
-test "$(docker image inspect "$frozen_base" --format '{{.Id}}')" = "$build_base_id"
-docker build --build-arg "BASE_IMAGE=$frozen_base" --build-arg "BASE_IMAGE_ID=$build_base_id" --build-arg "BRANDING_SHA=$branding_sha" --build-arg "CRM_SHA=$crm_sha" --build-arg "FINANCE_SHA=$finance_sha" --build-arg "OA_SHA=$oa_sha" \
+docker image tag "$old_image_id" "$frozen_base"
+test "$(docker image inspect "$frozen_base" --format '{{.Id}}')" = "$old_image_id"
+frozen_build_base=$frozen_base
+if [[ "$build_base_id" != "$old_image_id" ]]; then
+  frozen_build_base="deeplinkerp-custom:equivalent-build-base-$release_key"
+  docker image tag "$build_base_id" "$frozen_build_base"
+  test "$(docker image inspect "$frozen_build_base" --format '{{.Id}}')" = "$build_base_id"
+fi
+docker build --build-arg "BASE_IMAGE=$frozen_build_base" --build-arg "BASE_IMAGE_ID=$build_base_id" --build-arg "BRANDING_SHA=$branding_sha" --build-arg "CRM_SHA=$crm_sha" --build-arg "FINANCE_SHA=$finance_sha" --build-arg "OA_SHA=$oa_sha" \
   -f "$build_dockerfile" -t "$new_image" "$build_dir"
 new_image_id=$(docker image inspect "$new_image" --format '{{.Id}}')
 for app in branding crm finance oa; do
