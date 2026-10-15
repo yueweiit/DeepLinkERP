@@ -162,3 +162,20 @@
 "{0} {1}个","{0} {1} unidades"
 "入库数量（库存单位）","Cantidad recibida (unidad de stock)"
 "目标仓当前库存","Stock actual del almacén de destino"
+MES 系统,Sistema MES
+新窗口打开,Abrir en una ventana nueva
+正在加载 MES 系统,Cargando el sistema MES
+如果页面无法显示，请检查 MES 门户地址配置。,"Si la página no aparece, compruebe la configuración de la dirección del portal MES."
+MES 门户地址未配置,No se ha configurado la dirección del portal MES
+MES操作,Operaciones MES
+提交,Confirmar
+请先选择物料需求。,Seleccione primero una solicitud de materiales.
+操作失败,La operación falló
+无法读取选中的物料需求。,No se pudieron cargar las solicitudes de materiales seleccionadas.
+没有可发料的物料需求。,No hay solicitudes de materiales para emitir.
+确定,Aceptar
+正在批量发料并推送至 DLM，请稍候...,Emitiendo materiales en lote y enviando a DLM. Espere...
+批量处理完成（部分失败）,Procesamiento por lotes terminado (con algunos errores)
+批量处理完成,Procesamiento por lotes terminado
+Stopped,Detenido
+Pending,Pendiente
