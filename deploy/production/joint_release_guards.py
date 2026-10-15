@@ -45,7 +45,64 @@ def serialized(value):
 	return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str).encode()
 
 
-def verify_equivalent_build_base(current, base, branding, overlays):
+def immutable_release_identity(manifest):
+	"""Freeze the app tuple and command tools independently of retained labels."""
+	assert manifest["scope"] == "crm-only"
+	revisions = manifest["revisions"]
+	assert set(revisions) == {"deeplinkerp_branding", "crm_integration", "china_finance", "oa_purchase_request"}
+	assert all(re.fullmatch(r"[0-9a-f]{40}", value) for value in revisions.values())
+	assert re.fullmatch(r"[0-9a-f]{40}", manifest["release_tools_commit"])
+	assert re.fullmatch(r"sha256:[0-9a-f]{64}", manifest["base_image_id"])
+	assert manifest["release_tools"] and all(re.fullmatch(r"[0-9a-f]{64}", value) for value in manifest["release_tools"].values())
+	return hashlib.sha256(serialized({key: manifest[key] for key in ("scope", "base_image_id", "revisions", "release_tools_commit", "release_tools")})).hexdigest()[:40]
+
+
+def approved_release_sources(before, pinned, branding, manifest):
+	"""Exact full-map COPY contract; no deletion or unrelated application drift."""
+	assert before == {app: pinned[app] for app in before}, "Dirty server app source differs from immutable base; HOLD"
+	after = copy.deepcopy(before)
+	after["deeplinkerp_branding"] = merge_frozen_branding_sources(before["deeplinkerp_branding"], branding)
+	if manifest.get("scope") == "crm-only":
+		assert set(manifest["apps"]) == {"crm_integration"}, "CRM-only overlay escaped scope"
+		assert after["deeplinkerp_branding"] == before["deeplinkerp_branding"], "Retained Branding source differs"
+	else:
+		assert set(manifest["apps"]) == {"deeplinkerp_branding", "china_finance", "oa_purchase_request"}
+	for app, files in manifest["apps"].items():
+		if app == "deeplinkerp_branding": continue
+		assert app in after and files, "Required overlay package absent; no auto-install"
+		for name, versions in files.items():
+			assert versions["after"] is not None, "COPY cannot remove source; explicit removal contract required"
+			assert before[app].get(name) == versions["before"], "Unapproved app baseline"
+			after[app][name] = versions["after"]
+	if manifest.get("scope") == "crm-only":
+		assert after["crm_integration"] == manifest["crm_sources_after"], "CRM result differs from complete committed candidate package; deletion or unlisted drift"
+	return after
+
+
+def verify_runtime_source_delta(pinned, runtime, approved):
+	"""Generated files are exact evidence, never a general JSON/source exclusion."""
+	assert set(pinned) == set(runtime), "Runtime physical app inventory differs"
+	allowed = {
+		("ai_assistant", "workspace_sidebar/ai_assistant.json"),
+		("china_finance", "workspace_sidebar/china_finance.json"),
+		("deeplinkerp_branding", "workspace_sidebar/deeplinkerp_settings.json"),
+		("frappe", "desktop_icon/framework.json"),
+		("overseas_costing", "desktop_icon/海外成本核算.json"),
+		("overseas_costing", "workspace_sidebar/海外成本核算.json"),
+	}
+	expected = copy.deepcopy(pinned)
+	for app, files in approved.items():
+		assert app in pinned
+		for name, versions in files.items():
+			metadata_removal = app == "deeplinkerp_branding" and any(part.startswith("._") for part in PurePosixPath(name).parts) and versions["after"] is None
+			assert (app, name) in allowed or metadata_removal, "Unapproved generated source category"
+			assert expected[app].get(name) == versions["before"], "Generated baseline differs"
+			if versions["after"] is None: expected[app].pop(name)
+			else: expected[app][name] = versions["after"]
+	assert runtime == expected, "Runtime app source drift outside frozen generated deltas"
+
+
+def verify_equivalent_build_base(current, base, branding, overlays, *, scope=None):
 	"""Allow a shallower immutable base only when COPY yields the same sources."""
 	assert set(current) == set(base) and "deeplinkerp_branding" in current, "Build base app set differs"
 	for app in current:
@@ -57,7 +114,9 @@ def verify_equivalent_build_base(current, base, branding, overlays):
 		if app == "deeplinkerp_branding":
 			continue
 		for name, versions in files.items():
-			assert versions["before"] == versions["after"] == base[app].get(name), "Fixed-base release cannot change shared overlays"
+			assert versions["before"] == base[app].get(name), "Fixed-base overlay baseline differs"
+			assert versions["after"] is not None, "Fixed-base COPY cannot delete sources"
+			assert versions["before"] == versions["after"] or (scope == "crm-only" and app == "crm_integration"), "Fixed-base release cannot change shared overlays"
 
 
 def verify_branding_layer_member(member):

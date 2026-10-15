@@ -21,6 +21,44 @@ class ReleaseRecoveryTests(unittest.TestCase):
 	def release_source(self):
 		return (Path(__file__).parents[1] / "deploy/production/deploy_unified_purchase.sh").read_text()
 
+	def test_crm_scope_has_independent_receipts_budget_and_preserved_revision_labels(self):
+		source = self.release_source()
+		self.assertIn("--crm-only", source)
+		self.assertIn('"$crm_archive" "$finance_archive" "$oa_archive" "$old_image_id"', source)
+		self.assertIn('release_identity=', source)
+		self.assertNotIn('\ncrm_sha=$current_crm\n', source)
+		self.assertIn('joint-${release_identity:0:12}.json', source)
+		self.assertIn('--candidate-sha "${release_identity:-$branding_sha}"', source)
+		self.assertIn('CRM-only requires main scope', source)
+		self.assertLess(source.index("if (( crm_only )); then verify_crm_frozen_overlay; fi"), source.index("source_sync_timer_active=0"))
+		self.assertIn("Candidate differs from preflight-approved full sources", source)
+
+	def test_runtime_inventory_reads_physical_packages_independently_of_requested_baseline_list(self):
+		function = self.shell_function("verify_crm_runtime_sources")
+		code = function.split(" -c '\n", 1)[1].split("\n' ", 1)[0]
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			for app in ("crm_integration", "client_akivision"):
+				(root / app / app).mkdir(parents=True)
+				(root / app / app / "hooks.py").write_text(app)
+			with patch("pathlib.Path", side_effect=lambda value: root if value == "/home/frappe/frappe-bench/apps" else Path(value)), patch.object(sys, "argv", ["-c", json.dumps(["crm_integration"])]), contextlib.redirect_stdout(io.StringIO()) as output:
+				exec(code, {})
+			self.assertEqual(set(json.loads(output.getvalue())), {"crm_integration", "client_akivision"})
+
+	def test_crm_archive_must_match_exact_manifest_even_when_extra_source_is_safe_path(self):
+		function = self.shell_function("prepare_sources")
+		for extra in (False, True):
+			with self.subTest(extra=extra), tempfile.TemporaryDirectory() as tmp:
+				root = Path(tmp); (root / "build").mkdir()
+				manifest = {"scope": "crm-only", "apps": {"crm_integration": {"api.py": {"before": "old", "after": hashlib.sha256(b"new").hexdigest()}}}}
+				for kind, files in (("branding", {"deeplinkerp_branding/hooks.py": b"retained"}), ("crm", {"crm-overlay/crm_integration/api.py": b"new", **({"crm-overlay/crm_integration/unreviewed.py": b"bad"} if extra else {})})):
+					with tarfile.open(root / (kind + ".tar.gz"), "w:gz") as tar:
+						for name, data in dict(files, **{"release-source-manifest.json": json.dumps(manifest).encode()}).items():
+							member = tarfile.TarInfo(name); member.size = len(data); tar.addfile(member, io.BytesIO(data))
+				code = function + '\nbuild_dir="$1"; archive="$2"; crm_archive="$3"; finance_archive=""; oa_archive=""; prepare_sources\n'
+				result = subprocess.run(["bash", "-c", code, "test", str(root / "build"), str(root / "branding.tar.gz"), str(root / "crm.tar.gz")], capture_output=True, text=True)
+				self.assertEqual(result.returncode == 0, not extra, result.stderr)
+
 	def test_shared_cutover_preserves_immutable_assets_manifest(self):
 		source = self.release_source()
 		self.assertFalse('/usr/bin/touch /home/frappe/frappe-bench/sites/assets/assets.json' in source)
@@ -863,7 +901,7 @@ printf '%s|%s|%s|%s' "$crm_sha" "$finance_sha" "$current_finance" "$current_oa"
 			root = Path(tmp)
 			(root / "sites/assets").mkdir(parents=True)
 			(root / "sites/deeplinkerp.com").mkdir()
-			for app in ("deeplinkerp_branding", "china_finance", "crm_integration", "oa_purchase_request"):
+			for app in ("deeplinkerp_branding", "china_finance", "crm_integration", "oa_purchase_request", "client_akivision"):
 				(root / "apps" / app / app).mkdir(parents=True)
 			(root / "sites/assets/assets.json").write_text('{"bundle": "same"}')
 			(root / "sites/common_site_config.json").write_text('{"maintenance_mode": 1, "secret": "hidden"}')
@@ -1038,6 +1076,10 @@ printf '%s|%s|%s|%s' "$crm_sha" "$finance_sha" "$current_finance" "$current_oa"
 			self.assertEqual(before["configuration_sha256"], after["configuration_sha256"])
 			config.write_text('{"mes_callback_url": "overwritten", "maintenance_mode": 1}')
 			self.assertNotEqual(before["configuration_sha256"], capture()["configuration_sha256"])
+			self.assertIn("client_akivision", before["release_sources_all"])
+			self.assertIn("Delivery Note", before["tables"])
+			self.assertIn("Delivery Note Item", before["tables"])
+			self.assertIn("Stock Entry Type", before["tables"])
 
 	def test_overlay_archives_require_matching_manifest_and_precise_finance_files(self):
 		function = self.shell_function("prepare_sources")
