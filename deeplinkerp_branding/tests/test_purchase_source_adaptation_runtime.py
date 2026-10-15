@@ -178,10 +178,20 @@ class PurchaseSourceAdaptationRuntimeTests(unittest.TestCase):
 				service.validate_source_before_submit(order)
 
 	def test_original_department_enrichment_does_not_rewrite_bound_source_version(self):
-		from tests.test_purchase_source_contract import source
-
 		service = self.runtime._service()
-		raw = source()
+		raw = dict(
+			corp_id="QA",
+			process_instance_id="QA",
+			business_id="QA",
+			process_code=service.contract.PROCESS_CODES[0],
+			create_time=datetime(2026, 10, 9),
+			status="COMPLETED",
+			result="agree",
+			form_component_values=[
+				{"name": "执行地区", "value": "墨西哥Mexico"},
+				{"name": "币种", "value": "MXN"},
+			],
+		)
 		old = service._normalize(raw)
 		raw.update(originator_dept_id="original-dept", originator_dept_name=None)
 		current = service._normalize(raw)
@@ -285,9 +295,14 @@ class PurchaseSourceAdaptationRuntimeTests(unittest.TestCase):
 	def test_adopted_scope_change_requires_an_audited_explicit_human_recheck(self):
 		service = self.runtime._service()
 		self.assertTrue(callable(getattr(service, "_rechecked_adoption", None)))
-		from tests.test_purchase_source_contract import source as raw_source
-
-		source = service._normalize(raw_source())
+		source = dict(
+			corp_id="QA",
+			process_code=service.contract.PROCESS_CODES[0],
+			region="墨西哥",
+			version="original",
+			items=[dict(item_code="OLD")],
+			processors=[],
+		)
 		source["department"] = "QA original organization"
 		old_scope = dict(corp_id="old")
 		doc = service.frappe._dict(
@@ -324,6 +339,7 @@ class PurchaseSourceAdaptationRuntimeTests(unittest.TestCase):
 			(dict(status="TERMINATED"), "终止"),
 			(dict(status="COMPLETED", result="refuse"), "拒绝"),
 			(dict(deleted_at="2026-10-15"), "撤销"),
+			(dict(status="COMPLETED", result="agree"), "来源待核对"),
 		):
 			with self.subTest(source=source):
 				self.assertIn(label, service._approval_pending_reason(source))

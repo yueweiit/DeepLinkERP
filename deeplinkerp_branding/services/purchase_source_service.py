@@ -1075,7 +1075,7 @@ def _approval_pending_reason(source):
     elif str(source.get("result") or "").lower() in {"refuse","reject","disagree"}:
         label = "审批已拒绝"
     else:
-        label = {"RUNNING":"审批中","TERMINATED":"审批已终止","CANCELED":"审批已撤销"}.get(source.get("status"),"审批未通过")
+        label = {"RUNNING":"审批中","TERMINATED":"审批已终止","CANCELED":"审批已撤销"}.get(source.get("status"),"来源待核对")
     return label + "，不创建物料或采购订单"
 
 
