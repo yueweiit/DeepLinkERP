@@ -1,6 +1,7 @@
 """Test isolated recovery and native CLI parsing; never invoke a release."""
 
 import contextlib
+import fcntl
 import hashlib
 import io
 import json
@@ -294,6 +295,82 @@ record_crm_source_timer_state "$1" "$2" "$3"
 			config.write_text('{"pins":"different"}')
 			drift=subprocess.run(args+["0"],capture_output=True,text=True)
 			self.assertNotEqual(drift.returncode,0)
+
+	def test_crm_main_prepare_failure_before_seal_restores_timer_and_preserves_exit_code(self):
+		functions = "".join(self.shell_function(name) for name in (
+			"recover_crm_pre_cutover", "recover_main_only", "run_main_only_release",
+		))
+		for crm_only, active, runtime, config in ((1, 1, 0, "same"), (0, 1, 0, "same"), (1, 0, 0, "same"), (1, 1, 1, "same"), (1, 1, 0, "changed")):
+			with self.subTest(crm_only=crm_only, active=active, runtime=runtime, config=config), tempfile.TemporaryDirectory() as tmp:
+				script = functions + f"""
+set -euo pipefail
+release_dir=$1;crm_only={crm_only};source_sync_timer_active={active}
+new_image_id=new;old_image_id=old;python=python;guard=guard;expected_erpnext=16.23.0;branding_sha=branding
+timer_guard_image=old;current_revision=branding;current_crm=crm;current_finance=finance;current_oa=oa
+timer_guard_config=/test/config;timer_guard_config_sha=same
+command_runner() {{ :; }}
+main_lane() {{ printf 'LANE %s\\n' "$*" >&2; [[ "$1" != prepare ]] || return 17; return 99; }}
+capture_release_audit() {{ printf 'UNEXPECTED audit\\n' >&2; return 99; }}
+verify_running_release() {{ return {runtime}; }}
+sha256sum() {{ printf '%s  config\\n' '{config}'; }}
+flock() {{ :; }}
+systemctl() {{ printf 'TIMER %s\\n' "$*"; }}
+trap recover_crm_pre_cutover EXIT
+run_main_only_release
+"""
+				result = subprocess.run(["bash", "-c", script, "test", tmp], capture_output=True, text=True)
+				self.assertEqual(result.returncode, 17, result.stderr)
+				self.assertFalse((Path(tmp) / "main-seal.json").exists())
+				self.assertEqual("TIMER --user start deeplinkerp-source-sync.timer" in result.stdout, bool(crm_only and active and runtime == 0 and config == "same"), result.stderr)
+				self.assertEqual("TIMER --user is-active --quiet deeplinkerp-source-sync.timer" in result.stdout, bool(crm_only and active and runtime == 0 and config == "same"), result.stderr)
+				self.assertNotIn("UNEXPECTED", result.stderr)
+				self.assertEqual(result.stderr.count("LANE "), 1, result.stderr)
+
+	def test_crm_pre_cutover_timer_restart_and_verification_keep_both_release_locks(self):
+		with tempfile.TemporaryDirectory() as tmp:
+			root = Path(tmp)
+			probe = root / "lock_probe.py"
+			probe.write_text("""
+import fcntl, sys
+action, *args = sys.argv[1:]
+if action == 'acquire':
+    for fd in (8, 9):
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+elif action == 'unlock':
+    fcntl.flock(int(args[0]), fcntl.LOCK_UN)
+else:
+    for path in args[:2]:
+        with open(path, 'r+') as competitor:
+            try:
+                fcntl.flock(competitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass
+            else:
+                raise SystemExit('Competing release acquired ' + path)
+    print('LOCKED ' + ' '.join(args[2:]))
+""")
+			script = self.shell_function("recover_crm_pre_cutover") + f"""
+set -euo pipefail
+test_python={shlex.quote(sys.executable)};lock_probe={shlex.quote(str(probe))}
+lock8=$1/global.lock;lock9=$1/release.lock
+exec 8>"$lock8" 9>"$lock9"
+"$test_python" "$lock_probe" acquire
+source_sync_timer_active=1;timer_guard_image=old;current_revision=branding;current_crm=crm;current_finance=finance;current_oa=oa
+timer_guard_config=/test/config;timer_guard_config_sha=same
+verify_running_release() {{ return 0; }}
+sha256sum() {{ printf 'same  config\\n'; }}
+flock() {{ "$test_python" "$lock_probe" unlock "$2"; }}
+systemctl() {{ "$test_python" "$lock_probe" probe "$lock8" "$lock9" "$@"; }}
+trap recover_crm_pre_cutover EXIT
+(exit 23)
+"""
+			result = subprocess.run(["bash", "-c", script, "test", tmp], capture_output=True, text=True, timeout=10)
+			self.assertEqual(result.returncode, 23, result.stderr)
+			self.assertIn("LOCKED --user start deeplinkerp-source-sync.timer", result.stdout, result.stderr)
+			self.assertIn("LOCKED --user is-active --quiet deeplinkerp-source-sync.timer", result.stdout, result.stderr)
+			for path in (root / "global.lock", root / "release.lock"):
+				with path.open("r+") as released:
+					fcntl.flock(released, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 	def audit_module(self, fake_frappe):
 		metadata = types.ModuleType("procurement_release_metadata")

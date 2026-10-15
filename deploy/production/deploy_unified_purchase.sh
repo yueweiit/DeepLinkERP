@@ -140,7 +140,7 @@ print(state['original_active'])
 PYTIMER
 }
 recover_crm_pre_cutover() {
-  local code=$? actual
+  local code=${1:-$?} actual
   trap - EXIT
   if (( code == 0 || ! ${source_sync_timer_active:-0} )); then exit "$code"; fi
   actual=$(sha256sum "$timer_guard_config") || { echo 'Original source timer config unreadable; HOLD.' >&2; exit "$code"; }
@@ -149,8 +149,7 @@ recover_crm_pre_cutover() {
     echo 'Pre-cutover timer recovery cannot prove unchanged serving/config; HOLD.' >&2
     exit "$code"
   fi
-  flock -u 8
-  flock -u 9
+  # Keep both release locks until EXIT closes them after the restart is verified.
   if ! systemctl --user start deeplinkerp-source-sync.timer || ! systemctl --user is-active --quiet deeplinkerp-source-sync.timer; then
     echo 'Original source timer restart unconfirmed; HOLD.' >&2
   fi
@@ -488,6 +487,7 @@ recover_main_only() {
   trap - EXIT
   if [[ ! -f "$release_dir/main-seal.json" ]]; then
     echo 'Main preflight failed before boundary changes; inspect the private evidence.' >&2
+    if (( ${crm_only:-0} )); then recover_crm_pre_cutover "$code"; fi
     exit "$code"
   fi
   if ! main_lane boundary-pre-resume > /dev/null; then
