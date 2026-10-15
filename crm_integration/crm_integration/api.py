@@ -143,18 +143,13 @@ def _crm_source_matches_row(source, row):
 	return bool(factors.get(unit)) and factors.get(unit) == _crm_number(row.get("conversion_factor"))
 
 
-def plan_missing_crm_sales_order_items(doc, source_items):
+def plan_missing_crm_sales_order_items(doc, source_items, *, historical_replay=False):
 	"""Read-only proof that a full CRM manifest contains genuinely additional SO rows."""
 	blockers, added = [], []
 	fingerprint = crm_shipment_fingerprint(dict(order_fingerprint=get_crm_commercial_order_fingerprint(doc),
-		source_items=source_items, row_bindings=[(row.get("name"), row.get(CRM_ROW_FIELD)) for row in doc.get("items", [])]))
+		source_items=source_items, historical_replay=historical_replay,
+		row_bindings=[(row.get("name"), row.get(CRM_ROW_FIELD)) for row in doc.get("items", [])]))
 	result = dict(can_complete=False, blockers=blockers, added_items=added, completion_fingerprint=fingerprint)
-	if doc.get("docstatus") != 1 or doc.get("status") in {"Closed", "On Hold", "Cancelled", "Completed"}:
-		blockers.append(_("销售订单当前原生状态不允许补全明细。"))
-	try:
-		validate_sales_order_update_status(doc)
-	except frappe.ValidationError as exc:
-		blockers.append(str(exc))
 	if not isinstance(source_items, list) or not source_items:
 		blockers.append(_("补全必须提供完整的 CRM items manifest。"))
 		return result
@@ -174,8 +169,8 @@ def plan_missing_crm_sales_order_items(doc, source_items):
 			blockers.append(_("CRM manifest 第 {0} 行 quantity 必须为正数。").format(index))
 		if rate is None or rate < 0:
 			blockers.append(_("CRM manifest 第 {0} 行缺少有效 price；缺失价格不能视为零。").format(index))
-		if len(str(raw.get("version") or "")) > 64:
-			blockers.append(_("CRM manifest 第 {0} 行 version 不能超过 64 字符。").format(index))
+		if not isinstance(raw.get("version"), str) or len(raw["version"]) > 64:
+			blockers.append(_("CRM manifest 第 {0} 行 version 必须明确提供字符串（无版本用空字符串），且不能超过 64 字符。").format(index))
 		ids.add(identity)
 		source.update(identity=identity, qty=qty, rate=rate)
 		sources.append(source)
@@ -191,6 +186,9 @@ def plan_missing_crm_sales_order_items(doc, source_items):
 		elif identity not in ids or identity in used:
 			blockers.append(_("现有 ERP 明细 {0} 的 CRM 行绑定缺失或重复，禁止追加替代行。").format(row.get("name")))
 		else:
+			source = next(source for source in sources if source["identity"] == identity)
+			if not _crm_source_matches_row(source, row):
+				blockers.append(_("现有 ERP 明细 {0} 虽已绑定 CRM 行，但编码、版本、数量、价格或单位已冲突，禁止追加替代行。").format(row.get("name")))
 			used.add(identity)
 	for row in unbound:
 		matches = [source for source in sources if source["identity"] not in used and _crm_source_matches_row(source, row)]
@@ -199,6 +197,17 @@ def plan_missing_crm_sales_order_items(doc, source_items):
 		else:
 			used.add(matches[0]["identity"])
 	remaining = [source for source in sources if source["identity"] not in used]
+	if not remaining:
+		return result
+	if historical_replay:
+		from crm_integration.crm_integration.delivery_note import get_crm_historical_order_completion_blockers
+		blockers.extend(get_crm_historical_order_completion_blockers())
+	if doc.get("docstatus") != 1 or doc.get("status") in {"Closed", "On Hold", "Cancelled", "Completed"}:
+		blockers.append(_("销售订单当前原生状态不允许补全明细。"))
+	try:
+		validate_sales_order_update_status(doc)
+	except frappe.ValidationError as exc:
+		blockers.append(str(exc))
 	keys = [(s.get("itemCode"), s.get("version"), s.get("unit"), s["qty"], s["rate"]) for s in remaining]
 	if len(keys) != len(set(keys)):
 		blockers.append(_("CRM 待补明细存在重复、歧义行，须先建立唯一现有行绑定。"))
@@ -249,7 +258,7 @@ def plan_missing_crm_sales_order_items(doc, source_items):
 		for row in added]
 	if len(resolved_keys) != len(set(resolved_keys)):
 		blockers.append(_("CRM 待补明细换算为原生 UOM 后存在重复、歧义行。"))
-	result["can_complete"] = not blockers
+	result["can_complete"] = bool(added) and not blockers
 	result["completion_fingerprint"] = crm_shipment_fingerprint(dict(order_and_manifest=fingerprint, added_items=added))
 	return result
 
@@ -492,7 +501,7 @@ def complete_missing_crm_sales_order_items(payload):
 		if not is_crm_integration_enabled(doc.get("company")):
 			throw_crm_integration_disabled(doc.get("company"))
 		validate_sales_order_update_status(doc)
-		plan = plan_missing_crm_sales_order_items(doc, payload["items"])
+		plan = plan_missing_crm_sales_order_items(doc, payload["items"], historical_replay=bool(payload.get("historical_replay")))
 		if payload["completion_fingerprint"] != plan["completion_fingerprint"]:
 			frappe.throw(_("订单或完整 CRM manifest 已变化，请重新预览后补全。"))
 		if not plan["can_complete"]:
@@ -735,12 +744,14 @@ def validate_sales_order_update_payload(payload: Any):
 	if not payload.get("custom_crm_order_no"):
 		frappe.throw(_("缺少必填字段：custom_crm_order_no"))
 	if payload.get("mode") == "complete_missing_items":
-		allowed = {"doctype", "custom_crm_order_no", "mode", "completion_fingerprint", "items"}
+		allowed = {"doctype", "custom_crm_order_no", "mode", "completion_fingerprint", "items", "historical_replay"}
 		unsupported = set(payload) - allowed
 		if unsupported:
 			frappe.throw(_("补全明细不支持字段：{0}。").format(", ".join(sorted(unsupported))))
 		if not payload.get("completion_fingerprint"):
 			frappe.throw(_("补全必须提供 completion_fingerprint，请先预览。"))
+		if "historical_replay" in payload and not isinstance(payload["historical_replay"], bool):
+			frappe.throw(_("historical_replay 必须是布尔值。"))
 		if not isinstance(payload.get("items"), list) or not payload["items"]:
 			frappe.throw(_("补全必须提供完整 CRM items manifest。"))
 		for row in payload["items"]:

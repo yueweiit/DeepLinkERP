@@ -59,6 +59,9 @@ class CRMShipmentSalesOrderNotFound(frappe.ValidationError):
 def create_and_submit_delivery_note_from_crm(payload):
 	payload = normalize_crm_shipment_payload(payload)
 	validate_crm_shipment_payload(payload)
+	receipt = get_crm_frozen_committed_receipt(payload)
+	if receipt:
+		return receipt
 	sales_order = get_crm_shipment_sales_order(payload)
 
 	if not is_crm_integration_enabled(sales_order.get("company")):
@@ -404,21 +407,71 @@ def persist_crm_order_item_mappings(allocations):
 			row.db_set(CRM_ROW_FIELD, mappings[row.name], update_modified=False)
 
 
+def get_crm_historical_parent_creation_blockers(company=None):
+	"""Historical order creation must not send existing business notifications."""
+	blockers = []
+	for doctype, filters in (("Draft Notification Rule", dict(enabled=1, document_type="Sales Order")),
+		("Notification", dict(enabled=1, document_type="Sales Order"))):
+		if not frappe.db.exists("DocType", doctype):
+			continue
+		for rule in frappe.get_all(doctype, filters=filters, fields=["name", "company"] if doctype == "Draft Notification Rule" else ["name"]):
+			if not company or not rule.get("company") or rule.company == company:
+				blockers.append(_("历史补建 ERP 销售订单会触发已启用通知 {0}；须先确认无通知的订单完善方式。").format(rule.name))
+	return blockers
+
+
+def get_crm_historical_order_completion_blockers():
+	"""Submitted-order edits may invoke Frappe value/method notifications through on_change."""
+	if not frappe.db.exists("DocType", "Notification"):
+		return []
+	return [_("历史补全 ERP 销售订单可能触发已启用通知 {0}，须先确认无通知的完善方式。").format(rule.name)
+		for rule in frappe.get_all("Notification", filters=dict(enabled=1, document_type="Sales Order",
+			event=["in", ["Value Change", "Method"]]), fields=["name"])]
+
+
+def get_crm_frozen_committed_receipt(payload):
+	"""Recover an already committed fact without depending on mutable parent readiness."""
+	if not payload.get("source_fingerprint") or not payload.get("source_organization") or not payload.get("event_id"):
+		return None
+	delivery = get_delivery_note_by_crm_shipment_no(payload[CRM_SHIPMENT_FIELD])
+	if not delivery or delivery.docstatus != 1:
+		return None
+	stored = delivery.get("custom_crm_source_fingerprint")
+	# Legacy receipts without frozen evidence retain the original allocation checks.
+	if not isinstance(stored, str) or len(stored) != 64:
+		return None
+	validate_crm_persisted_source(delivery, payload)
+	response = get_crm_shipment_response(delivery, payload[CRM_SHIPMENT_FIELD], idempotent_replay=True)
+	response.update(can_execute=True, company=delivery.company, currency=delivery.get("currency"),
+		sales_order=payload.get("sales_order"), blockers=[], items=[dict(sales_order_item=row.get("so_detail"),
+			item_code=row.item_code, uom=row.get("uom"), qty=row.qty, warehouse=row.get("warehouse"))
+			for row in delivery.get("items", [])])
+	return response
+
+
 def preview_delivery_note_from_crm(payload):
 	"""Inspect the same native plan used by execution without logging, locks or writes."""
 	payload = normalize_crm_shipment_payload(payload)
 	validate_crm_shipment_payload(payload)
+	receipt = get_crm_frozen_committed_receipt(payload)
+	if receipt:
+		return receipt
 	try:
 		sales_order = get_crm_shipment_sales_order(payload)
 	except frappe.ValidationError as exc:
 		return dict(status="blocked", can_execute=False, sales_order=None, items=[], blockers=[str(exc)],
 			blocker_code="ERP_CRM_SALES_ORDER_NOT_FOUND" if isinstance(exc, CRMShipmentSalesOrderNotFound) else "ERP_CRM_SHIPMENT_IDENTITY_CONFLICT",
-			source_fingerprint=get_crm_shipment_source_fingerprint(payload))
+			source_fingerprint=get_crm_shipment_source_fingerprint(payload),
+			parent_creation_blockers=get_crm_historical_parent_creation_blockers(payload.get("parent_company"))
+				if isinstance(exc, CRMShipmentSalesOrderNotFound) and payload.get("historical_replay") else [])
 	try:
 		if not is_crm_integration_enabled(sales_order.get("company")):
 			frappe.throw(_("订单公司未启用 CRM 集成。"))
 		existing = get_delivery_note_by_crm_shipment_no(payload[CRM_SHIPMENT_FIELD])
 		validate_crm_persisted_source(existing, payload)
+		completion = get_crm_order_completion_preview(sales_order, payload)
+		if completion and (completion["blockers"] or completion["added_items"]):
+			frappe.throw(_("完整 CRM manifest 与 ERP 订单存在待核对或待补明细。"))
 		allocations = allocate_crm_shipment_items(sales_order, payload["items"], credit_delivery_note=existing, strict=is_strict_crm_shipment(payload))
 		if existing and existing.docstatus == 1:
 			validate_crm_delivery_note_identity(existing, sales_order, allocations)
@@ -436,11 +489,31 @@ def preview_delivery_note_from_crm(payload):
 			plan["blockers"].append(_("本 CRM 事件对应的销售出库已取消。"))
 		return get_crm_preview_response(sales_order, payload, plan)
 	except frappe.ValidationError as exc:
-		return dict(status="blocked", can_execute=False, sales_order=sales_order.name,
+		response = dict(status="blocked", can_execute=False, sales_order=sales_order.name,
 			company=sales_order.company, currency=sales_order.get("currency"), items=[],
 			order_fingerprint=get_crm_commercial_order_fingerprint(sales_order),
 			sales_order_items=get_crm_native_order_rows(sales_order), blockers=[str(exc)],
 			blocker_code="ERP_CRM_ORDER_ITEM_MAPPING_REQUIRED", source_fingerprint=get_crm_shipment_source_fingerprint(payload))
+		if isinstance(payload.get("_crm_order_items"), list):
+			response["order_completion"] = get_crm_order_completion_preview(sales_order, payload)
+			response["blockers"].extend(response["order_completion"]["blockers"])
+		return response
+
+
+def get_crm_order_completion_preview(sales_order, payload):
+	if not isinstance(payload.get("_crm_order_items"), list):
+		return None
+	from crm_integration.crm_integration.api import (
+		CRM_ORDER_SOURCE_ITEM_FIELDS,
+		plan_missing_crm_sales_order_items,
+	)
+	manifest = [{key: value for key, value in row.items() if key in CRM_ORDER_SOURCE_ITEM_FIELDS}
+		if isinstance(row, dict) else row for row in payload["_crm_order_items"]]
+	for row in manifest:
+		if isinstance(row, dict) and "version" in row and row["version"] is None:
+			row["version"] = ""
+	return plan_missing_crm_sales_order_items(sales_order, manifest,
+		historical_replay=bool(payload.get("historical_replay")))
 
 
 def get_crm_native_order_rows(sales_order):
@@ -451,14 +524,16 @@ def get_crm_native_order_rows(sales_order):
 
 def get_crm_commercial_order_fingerprint(sales_order):
 	"""Version commercial evidence while allowing native delivery progress between batches."""
-	header_fields = ("name", "docstatus", "company", "customer", "currency", "conversion_rate", "transaction_date",
+	header_fields = ("name", "docstatus", "company", "customer", "currency", "conversion_rate", "transaction_date", "delivery_date",
 		"selling_price_list", "price_list_currency", "plc_conversion_rate", "taxes_and_charges", "tax_category",
 		"tax_withholding_category", "apply_discount_on", "additional_discount_percentage", "discount_amount",
 		"base_discount_amount", "set_warehouse", "customer_address", "shipping_address_name", "company_address",
-		"cost_center", "project", "incoterm", "named_place", "custom_crm_order_no")
+		"cost_center", "project", "incoterm", "named_place", "custom_crm_order_no",
+		"custom_china_settlement_mode", "custom_china_settlement_rule", "custom_china_settlement_confirmation_method",
+		"custom_china_settlement_override", "custom_china_settlement_override_reason")
 	row_fields = ("name", "item_code", "custom_version", "qty", "uom", "stock_uom", "conversion_factor", "warehouse",
 		"rate", "net_rate", "base_rate", "base_net_rate", "price_list_rate", "discount_percentage", "discount_amount",
-		"item_tax_template", "item_tax_rate", "income_account", "expense_account", "cost_center", "project")
+		"delivery_date", "item_tax_template", "item_tax_rate", "income_account", "expense_account", "cost_center", "project")
 	version = {field: sales_order.get(field) for field in header_fields}
 	version["items"] = [{field: row.get(field) for field in row_fields} for row in sales_order.get("items", [])]
 	# Tax row accounting and included-in-price flags affect native valuation as well as totals.
@@ -506,10 +581,14 @@ def crm_shipment_fingerprint(value):
 
 def get_crm_shipment_source_fingerprint(payload):
 	# Transport aliases and preview tokens are not business source data.
-	return crm_shipment_fingerprint({key: payload.get(key) for key in (
+	source = {key: payload.get(key) for key in (
 		CRM_SHIPMENT_FIELD, "source_organization", "event_id", "batch_no", "sales_order",
 		"custom_crm_order_no", "posting_date", "posting_time", "historical_replay",
-		"allow_stock_supplement", "items")})
+		"allow_stock_supplement", "items")}
+	# Preserve frozen receipts from payloads predating optional parent-creation evidence.
+	if "parent_company" in payload:
+		source["parent_company"] = payload["parent_company"]
+	return crm_shipment_fingerprint(source)
 
 
 def resolve_crm_shipment_warehouse(sales_order, allocation, blockers, *, strict=False):
@@ -543,6 +622,10 @@ def build_crm_stock_plan(sales_order, payload, allocations, *, for_update=False)
 		source, request = allocation.sales_order_item, allocation.request_row
 		before = len(blockers)
 		warehouse = resolve_crm_shipment_warehouse(sales_order, allocation, blockers, strict=is_strict_crm_shipment(payload))
+		if is_strict_crm_shipment(payload):
+			master = frappe.db.get_value("Item", source.item_code, ["disabled", "is_stock_item", "is_sales_item", "has_variants"], as_dict=True)
+			if not master or cint(master.get("disabled")) or not cint(master.get("is_stock_item")) or not cint(master.get("is_sales_item")) or cint(master.get("has_variants")):
+				blockers.append(_("{0} 必须是启用的库存销售物料，不能为模板、非库存或停用物料。").format(source.item_code))
 		allocation.warehouse = warehouse
 		factor = flt(source.get("conversion_factor")) or 1
 		if is_strict_crm_shipment(payload) and (flt(source.get("conversion_factor")) <= 0 or not source.get("stock_uom") or not source.get("uom")):

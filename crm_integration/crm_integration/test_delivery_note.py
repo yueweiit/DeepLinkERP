@@ -325,12 +325,18 @@ class TestDeliveryNoteCRMEvents(UnitTestCase):
 
 
 class TestCRMNativeShipment(UnitTestCase):
-	def warehouse_lookup(self, **values):
+	def warehouse_lookup(self, item_values=None, **values):
 		get_value = frappe.db.get_value
 		warehouse = frappe._dict(company="Company", disabled=0, is_group=0)
 		warehouse.update(values)
 		def lookup(doctype, *args, **kwargs):
-			return warehouse if doctype == "Warehouse" else get_value(doctype, *args, **kwargs)
+			if doctype == "Warehouse":
+				return warehouse
+			if doctype == "Item":
+				item = frappe._dict(disabled=0, is_stock_item=1, is_sales_item=1, has_variants=0)
+				item.update(item_values or {})
+				return item
+			return get_value(doctype, *args, **kwargs)
 		return lookup
 
 	def source(self, **values):
@@ -915,3 +921,77 @@ class TestCRMNativeShipment(UnitTestCase):
 		first = shipment.get_crm_commercial_order_fingerprint(order)
 		order.taxes[0].rate = 8
 		self.assertNotEqual(first, shipment.get_crm_commercial_order_fingerprint(order))
+
+	def test_frozen_committed_receipt_is_read_before_mutable_sales_order(self):
+		payload = shipment.normalize_crm_shipment_payload(self.source())
+		payload["source_fingerprint"] = shipment.get_crm_shipment_source_fingerprint(payload)
+		delivery = frappe._dict(name="DN-COMMITTED", docstatus=1, company="Company", currency="USD",
+			custom_crm_source_fingerprint=payload["source_fingerprint"], items=[])
+		with (
+			patch.object(shipment, "get_delivery_note_by_crm_shipment_no", return_value=delivery),
+			patch.object(shipment, "is_crm_integration_enabled", return_value=True),
+			patch.object(shipment, "get_crm_shipment_response", return_value=dict(name="DN-COMMITTED", stock_updated=True, idempotent_replay=True)),
+			patch.object(shipment, "get_crm_shipment_sales_order", side_effect=frappe.ValidationError("order closed")) as current,
+		):
+			result = shipment.preview_delivery_note_from_crm(payload)
+			self.assertEqual(result.get("name"), "DN-COMMITTED")
+			self.assertTrue(result.get("stock_updated"))
+			current.assert_not_called()
+
+	def test_finished_goods_require_enabled_inventory_sales_item_even_with_stock(self):
+		payload = shipment.normalize_crm_shipment_payload(self.source())
+		order = self.order()
+		for conflict in (dict(is_stock_item=0), dict(disabled=1), dict(is_sales_item=0), dict(has_variants=1)):
+			with (
+				self.subTest(conflict=conflict),
+				patch.object(frappe.db, "get_value", side_effect=self.warehouse_lookup(item_values=conflict)),
+				patch.object(frappe, "get_cached_value", return_value="CNY"),
+				patch("erpnext.stock.utils.get_stock_balance", return_value=100),
+			):
+				plan = shipment.build_crm_stock_plan(order, payload, shipment.allocate_crm_shipment_items(order,payload["items"]))
+				self.assertTrue(any("库存销售物料" in reason for reason in plan["blockers"]))
+
+	def test_historical_parent_preview_names_notification_block_without_sending(self):
+		with (
+			patch.object(frappe.db,"exists",return_value=True),
+			patch.object(frappe,"get_all",return_value=[frappe._dict(name="SO通知",company=None)]),
+		):
+			blockers = shipment.get_crm_historical_parent_creation_blockers("Company")
+		self.assertTrue(any("通知" in reason for reason in blockers))
+
+	def test_mapping_preview_returns_read_only_full_manifest_completion_proof(self):
+		payload = self.source()
+		payload["_crm_order_items"] = [dict(id="CRM-ROW-1", itemCode="SKU", quantity=10, unit="件", internalEvidence="retained")]
+		proof = dict(can_complete=True, completion_fingerprint="proof", added_items=[dict(item_code="SKU")], blockers=[])
+		with (
+			patch.object(shipment, "get_crm_shipment_sales_order", return_value=self.order()),
+			patch.object(shipment, "is_crm_integration_enabled", return_value=True),
+			patch.object(shipment, "get_delivery_note_by_crm_shipment_no", return_value=None),
+			patch.object(shipment, "allocate_crm_shipment_items", side_effect=frappe.ValidationError("missing row")),
+			patch("crm_integration.crm_integration.api.plan_missing_crm_sales_order_items", return_value=proof) as planner,
+			patch.object(frappe.db, "commit") as commit,
+			patch.object(shipment, "create_crm_log") as log,
+		):
+			view = shipment.preview_delivery_note_from_crm(payload)
+		self.assertEqual(view["order_completion"], proof)
+		self.assertNotIn("internalEvidence", planner.call_args.args[1][0])
+		commit.assert_not_called()
+		log.assert_not_called()
+
+	def test_commercial_order_version_includes_settlement_decisions(self):
+		order = self.order()
+		first = shipment.get_crm_commercial_order_fingerprint(order)
+		order.custom_china_settlement_mode = "direct_receivable"
+		self.assertNotEqual(first, shipment.get_crm_commercial_order_fingerprint(order))
+		first = shipment.get_crm_commercial_order_fingerprint(order)
+		order.custom_china_settlement_confirmation_method = "external_customer_confirmation"
+		self.assertNotEqual(first, shipment.get_crm_commercial_order_fingerprint(order))
+
+	def test_optional_parent_company_does_not_change_preexisting_source_hash(self):
+		payload = shipment.normalize_crm_shipment_payload(self.source())
+		legacy = {key: payload.get(key) for key in (shipment.CRM_SHIPMENT_FIELD, "source_organization",
+			"event_id", "batch_no", "sales_order", "custom_crm_order_no", "posting_date", "posting_time",
+			"historical_replay", "allow_stock_supplement", "items")}
+		self.assertEqual(shipment.get_crm_shipment_source_fingerprint(payload),shipment.crm_shipment_fingerprint(legacy))
+		payload["parent_company"] = "Company"
+		self.assertNotEqual(shipment.get_crm_shipment_source_fingerprint(payload),shipment.crm_shipment_fingerprint(legacy))

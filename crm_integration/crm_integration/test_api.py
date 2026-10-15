@@ -273,6 +273,34 @@ class TestMissingCRMOrderItems(UnitTestCase):
 		self.assertFalse(plan["can_complete"])
 		self.assertTrue(any("SOI-001" in reason for reason in plan["blockers"]))
 
+	def test_bound_row_still_requires_unchanged_source_commercial_values(self):
+		for field, value in (("itemCode", "NEW-CODE"), ("version", "V2"), ("quantity", 20),
+			("unitPrice", 11), ("unit", "Box")):
+			with self.subTest(field=field):
+				source = deepcopy(self.source)
+				source[0][field] = value
+				self.doc["items"][0].custom_crm_order_item_id = "CRM-ROW-1"
+				plan = self.plan(source=source)
+				self.assertFalse(plan["can_complete"])
+				self.assertTrue(any("SOI-001" in reason for reason in plan["blockers"]))
+
+	def test_fully_mapped_manifest_does_not_offer_empty_completion(self):
+		self.doc.custom_process_status = "Released"
+		plan = self.plan(source=self.source[:1])
+		self.assertFalse(plan["can_complete"])
+		self.assertEqual(plan["blockers"], [])
+
+	def test_missing_version_is_not_an_explicit_blank_version(self):
+		del self.source[1]["version"]
+		self.assertFalse(self.plan()["can_complete"])
+
+	def test_historical_completion_blocks_value_change_notifications(self):
+		with (patch("crm_integration.crm_integration.delivery_note.get_crm_historical_order_completion_blockers",
+			return_value=["历史补行通知必须先核对"]), patch.object(frappe, "get_cached_doc", return_value=self.item)):
+			plan = api.plan_missing_crm_sales_order_items(self.doc, self.source, historical_replay=True)
+		self.assertFalse(plan["can_complete"])
+		self.assertIn("历史补行通知必须先核对", plan["blockers"])
+
 	def test_missing_price_is_blocked_while_explicit_zero_is_supported(self):
 		del self.source[1]["unitPrice"]
 		plan = self.plan()
@@ -362,7 +390,7 @@ class TestMissingCRMOrderItems(UnitTestCase):
 			patch.object(api, "update_child_qty_rate") as native):
 			with self.assertRaisesRegex(frappe.ValidationError, "重新预览"):
 				update_sales_order_by_crm_order_no(payload)
-			planner.assert_called_once_with(self.doc, self.source)
+			planner.assert_called_once_with(self.doc, self.source, historical_replay=False)
 			native.assert_not_called()
 
 	def test_completion_rechecks_crm_identity_after_parent_lock(self):
