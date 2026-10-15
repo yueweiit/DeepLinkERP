@@ -184,7 +184,7 @@ class PurchaseSourceAdaptationRuntimeTests(unittest.TestCase):
 			process_instance_id="QA",
 			business_id="QA",
 			process_code=service.contract.PROCESS_CODES[0],
-			create_time=datetime(2026, 10, 9),
+			create_time="2026-10-09T00:00:00+00:00",
 			status="COMPLETED",
 			result="agree",
 			form_component_values=[
