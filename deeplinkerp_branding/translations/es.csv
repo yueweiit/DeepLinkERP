@@ -537,6 +537,16 @@ Excel 共享文本索引不符合预期。,El índice de texto compartido de Exc
 库存差异,Diferencia de inventario
 库存一致,Inventario conciliado
 物料库存明细表,Tabla de detalle de inventario por artículo
+物料库存明细,Detalle de inventario por artículo
+半成品库存明细,Detalle de inventario de productos semielaborados
+成品库存明细,Detalle de inventario de productos terminados
+模具库存明细,Detalle de inventario de moldes
+库存库位明细,Detalle de inventario por ubicación
+储位,Ubicaciones de inventario
+主数据 & 报表,Datos maestros e informes
+主数据 &amp; 报表,Datos maestros e informes
+Masters & Reports,Datos maestros e informes
+Masters &amp; Reports,Datos maestros e informes
 全选当前页,Seleccionar toda la página
 正式物料编码,Código oficial del artículo
 物料名称（双语）,Nombre del artículo (bilingüe)
