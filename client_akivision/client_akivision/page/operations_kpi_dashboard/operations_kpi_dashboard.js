@@ -286,7 +286,7 @@ class OperationsKPIDashboard {
 		const title = metric.target_direction
 			? __("Status is based on the configured evaluation direction and thresholds.")
 			: __("Status is based on the KPI calculation rules.");
-		return `<span class='indicator-pill ${this.status_color(metric.status)}' title='${frappe.utils.escape_html(title)}'>${frappe.utils.escape_html(metric.status)}</span>`;
+		return `<span class='indicator-pill ${this.status_color(metric.status)}' title='${frappe.utils.escape_html(title)}'>${frappe.utils.escape_html(__(metric.status))}</span>`;
 	}
 
 	target_progress(metric) {
@@ -306,7 +306,7 @@ class OperationsKPIDashboard {
 			this.empty_state($(parent), __("No data matching the current filters."));
 			return;
 		}
-		new frappe.Chart(parent, { type, height: 230, data: { labels: rows.map((row) => row[label_field]), datasets }, colors: ["#2490ef", "#52ba8a"] });
+		new frappe.Chart(parent, { type, height: 230, data: { labels: rows.map((row) => typeof row[label_field] === "string" ? __(row[label_field]) : row[label_field]), datasets }, colors: ["#2490ef", "#52ba8a"] });
 	}
 
 	table($container, title, rows, fields, drilldown = null) {

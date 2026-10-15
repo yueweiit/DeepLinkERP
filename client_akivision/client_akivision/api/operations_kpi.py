@@ -781,14 +781,14 @@ def resolve_purchase_delay_risk_rule(days, rules):
 	for rule in rules:
 		if days >= flt(rule.from_days) and (not rule.to_days or days <= flt(rule.to_days)):
 			return rule.risk_level
-	return _("Low Risk")
+	return "Low Risk"
 
 
 def resolve_aging_rule(days, rules):
 	for rule in rules:
 		if days >= flt(rule.from_days) and (not rule.to_days or days <= flt(rule.to_days)):
 			return rule.label, rule.risk_level
-	return _("未分类"), _("低风险")
+	return "未分类", "低风险"
 
 
 def get_target(kpi_code, filters):

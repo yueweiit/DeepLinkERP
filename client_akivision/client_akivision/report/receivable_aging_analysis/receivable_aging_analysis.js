@@ -11,14 +11,18 @@ frappe.query_reports["Receivable Aging Analysis"] = {
 			return formatted;
 		}
 
+		if (column.fieldname === "aging_label") {
+			return frappe.utils.escape_html(__(data.aging_label || ""));
+		}
+
 		if (column.fieldname === "risk_level") {
 			const color = { "低风险": "green", "中风险": "orange", "高风险": "red" }[data.risk_level] || "gray";
-			return `<span class="indicator-pill ${color}">${frappe.utils.escape_html(data.risk_level || "")}</span>`;
+			return `<span class="indicator-pill ${color}">${frappe.utils.escape_html(__(data.risk_level || ""))}</span>`;
 		}
 
 		if (column.fieldname === "status") {
 			const color = data.status === "已结清" ? "green" : data.status === "未结清" ? "orange" : "gray";
-			return `<span class="indicator-pill ${color}">${frappe.utils.escape_html(data.status || "")}</span>`;
+			return `<span class="indicator-pill ${color}">${frappe.utils.escape_html(__(data.status || ""))}</span>`;
 		}
 
 		return formatted;

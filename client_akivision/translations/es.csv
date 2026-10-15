@@ -1,0 +1,128 @@
+内部机种,Modelo interno
+外部型号,Modelo externo
+预览图纸,Vista previa del plano
+图纸,Plano
+下载图纸,Descargar plano
+创建修订版,Crear revisión
+补充关联物料 / BOM,Vincular artículo / BOM
+创建采购物料请购,Crear solicitud de materiales para compra
+创建,Crear
+创建生产工单,Crear orden de trabajo
+图纸服务不可用。,El servicio de planos no está disponible.
+补充关联信息,Completar información vinculada
+Operations KPI Dashboard,Panel de indicadores operativos
+From Date,Desde la fecha
+To Date,Hasta la fecha
+Refresh,Actualizar
+Export Excel,Exportar a Excel
+"Please select Company, From Date and To Date.","Seleccione empresa, fecha inicial y fecha final."
+Sales Overview,Resumen de ventas
+Total Orders,Total de pedidos
+Total Sales Amount,Importe total de ventas
+High-tech Revenue Amount,Ingresos de alta tecnología
+High-tech Revenue Ratio,Porcentaje de ingresos de alta tecnología
+Order Fulfillment,Cumplimiento de pedidos
+Completed Orders,Pedidos completados
+Pending Orders,Pedidos pendientes
+Delivered Orders,Pedidos entregados
+Delivering Orders,Pedidos en entrega
+Undelivered Orders,Pedidos sin entregar
+Collection and Receivables,Cobros y cuentas por cobrar
+Collection Amount,Importe cobrado
+Receivable Amount,Importe por cobrar
+Settled Documents,Documentos saldados
+Unsettled Documents,Documentos pendientes de cobro
+Over 90 Days Overdue,Vencidos más de 90 días
+Monthly Collection Target Completion,Cumplimiento de la meta mensual de cobro
+Salesperson Performance,Rendimiento de vendedores
+Year-over-year Indicators,Indicadores interanuales
+Prior-period Sales Amount,Ventas del período anterior
+Sales Growth Rate,Tasa de crecimiento de ventas
+Receivable Growth Rate,Tasa de crecimiento de cuentas por cobrar
+Reconciliation Warning,Alertas de conciliación
+Unfinished Orders,Pedidos sin finalizar
+Status Mismatch Count,Número de estados discrepantes
+Unable to load KPI data.,No se pudieron cargar los indicadores.
+Target,Objetivo
+Sales Revenue Composition,Composición de los ingresos por ventas
+High-tech Revenue,Ingresos de alta tecnología
+Other Revenue,Otros ingresos
+Order Fulfillment Distribution,Distribución del cumplimiento de pedidos
+Collection and Receivable Composition,Composición de cobros y cuentas por cobrar
+Receivable Core Control Indicators,Indicadores principales de control de cobros
+Receivable Core Indicators,Indicadores principales de cuentas por cobrar
+Receivable Balance,Saldo por cobrar
+Due Within 30 Days,Vence en los próximos 30 días
+31-90 Days Overdue,Vencido de 31 a 90 días
+Ratio,Porcentaje
+Warning Status,Estado de alerta
+Receivable Aging Distribution,Distribución por antigüedad de saldos
+Top 10 Overdue Customers,Diez clientes con mayor saldo vencido
+Production and Purchasing Operations,Operaciones de producción y compras
+Operations Core Indicators,Indicadores principales de operaciones
+Production Completion Rate,Tasa de finalización de producción
+Purchase On-time Rate,Tasa de compras a tiempo
+Realtime Inventory Amount,Valor del inventario en tiempo real
+Safety Stock Warning Count,Alertas de existencias de seguridad
+Purchase In-transit Amount,Importe de compras en tránsito
+Material Over-consumption Rate,Tasa de sobreconsumo de materiales
+Value,Valor
+Target Value,Valor objetivo
+Achievement Rate,Tasa de cumplimiento
+Monthly Production Completion Trend,Tendencia mensual de finalización de producción
+Completion Rate,Tasa de finalización
+Top 10 Delayed Suppliers,Diez proveedores con mayor retraso
+High-tech Compliance,Cumplimiento de alta tecnología
+High-tech Core Indicators,Indicadores principales de alta tecnología
+RD Project Count,Número de proyectos de I+D
+RD Expense Amount,Gastos de I+D
+RD Expense Ratio,Porcentaje de gastos de I+D
+Year-to-date,Acumulado del año
+Annual Target,Objetivo anual
+Compliance Status,Estado de cumplimiento
+3-Year High-tech Trend,Tendencia de alta tecnología en tres años
+Top 10 RD Projects,Diez principales proyectos de I+D
+Metric,Indicador
+Click to view details,Haga clic para ver los detalles
+Status is based on the configured evaluation direction and thresholds.,El estado depende del sentido de evaluación y los umbrales configurados.
+Status is based on the KPI calculation rules.,El estado depende de las reglas de cálculo del indicador.
+Target Progress,Avance hacia el objetivo
+No data matching the current filters.,No hay datos que coincidan con los filtros actuales.
+Overdue Amount,Importe vencido
+Risk Level,Nivel de riesgo
+Delayed Orders,Pedidos retrasados
+Average Delay Days,Promedio de días de retraso
+Delivery Count,Número de entregas
+Delivery Amount,Importe entregado
+Personal Collection,Cobros del vendedor
+Personal Receivable,Saldo por cobrar del vendedor
+Delivery Rate,Tasa de entrega
+Collection Rate,Tasa de cobro
+Project,Proyecto
+操作,Acciones
+保存,Guardar
+正常,Normal
+达标,Objetivo cumplido
+合规,Conforme
+预警,Advertencia
+危险,Crítico
+未达标,Objetivo no cumplido
+不合规,No conforme
+未设置,Sin configurar
+低风险,Riesgo bajo
+中风险,Riesgo medio
+高风险,Riesgo alto
+Low Risk,Riesgo bajo
+Medium Risk,Riesgo medio
+High Risk,Riesgo alto
+已结清,Saldado
+未结清,Pendiente de cobro
+30天内到期,Vence dentro de 30 días
+31-60天逾期,Vencido entre 31 y 60 días
+61-90天逾期,Vencido entre 61 y 90 días
+91-180天逾期,Vencido entre 91 y 180 días
+180天以上逾期,Vencido más de 180 días
+0-30 Days,De 0 a 30 días
+31-90 Days,De 31 a 90 días
+91+ Days,91 días o más
+未分类,Sin clasificar
