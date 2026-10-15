@@ -6,7 +6,10 @@ from frappe import _
 from frappe.utils import flt
 
 from crm_integration.crm_integration.auth import validate_crm_api_user
-from crm_integration.crm_integration.delivery_note import create_and_submit_delivery_note_from_crm
+from crm_integration.crm_integration.delivery_note import (
+	create_and_submit_delivery_note_from_crm,
+	preview_delivery_note_from_crm,
+)
 from crm_integration.crm_integration.integration_log import create_crm_log, update_crm_log
 from crm_integration.crm_integration.sales_order import (
 	PENDING_CONFIRMATION,
@@ -488,6 +491,13 @@ def get_request_url():
 		return None
 
 	return getattr(frappe.request, "url", None)
+
+
+@frappe.whitelist(methods=["POST"])
+def preview_delivery_note(shipment=None):
+	"""Read-only native shipment mappings, shortages, blockers and fingerprints."""
+	validate_crm_api_user()
+	return preview_delivery_note_from_crm(get_shipment_request_payload(shipment))
 
 
 @frappe.whitelist(methods=["POST"])
