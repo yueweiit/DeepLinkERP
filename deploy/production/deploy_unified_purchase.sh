@@ -529,7 +529,7 @@ PY
   exit "$code"
 }
 run_main_only_release() {
-  command_runner "$new_image_id" "$python" "$guard" --tenant-preflight --main-only --erpnext-version "$expected_erpnext" > "$release_dir/tenants.json"
+  command_runner "$new_image_id" "$python" "$guard" --tenant-preflight --main-only --erpnext-version "$expected_erpnext" ${metadata_scope_args[@]+"${metadata_scope_args[@]}"} > "$release_dir/tenants.json"
   metadata_started=0
   trap recover_main_only EXIT
   main_lane prepare --base-image "$old_image_id" --image-id "$new_image_id" --candidate-sha "${release_identity:-$branding_sha}" > "$release_dir/main-prepare.json"
@@ -817,7 +817,7 @@ PY
 fi
 if (( main_only )); then run_main_only_release; exit; fi
 # Candidate preflight is read-only and command-only. No app is installed/global-migrated.
-command_runner "$new_image_id" "$python" "$guard" --tenant-preflight --erpnext-version "$expected_erpnext" > "$release_dir/tenants.json"
+command_runner "$new_image_id" "$python" "$guard" --tenant-preflight --erpnext-version "$expected_erpnext" ${metadata_scope_args[@]+"${metadata_scope_args[@]}"} > "$release_dir/tenants.json"
 python3 - "$old_image" "$new_image" "$release_dir" "$frozen_base" <<'PY'
 import sys
 from pathlib import Path

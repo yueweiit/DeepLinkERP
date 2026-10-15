@@ -4,6 +4,7 @@ import contextlib
 import copy
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import stat
@@ -13,7 +14,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 ROOT = Path(__file__).parents[1]
 
@@ -109,6 +110,84 @@ class JointReleaseGuardTests(unittest.TestCase):
 		module = importlib.util.module_from_spec(spec)
 		spec.loader.exec_module(module)
 		return module
+
+	@contextlib.contextmanager
+	def tenant_preflight_runtime(self, sites, *, crm_installed=True):
+		guard = self.module()
+		fields = self.metadata_module().CRM_FIELD_NAMES
+		crm_definitions = [dt + "-" + name for dt, names in fields.items() for name in names]
+		current = {"metadata": {"outside_rows": {"DocType": [{"name": "OperatingExpenseCompanyMap", "manual": "retained conflict"}]}}, "audit": {"all_business_tables": "frozen", "all_app_sources": "frozen"}}
+		def contract(**scope):
+			return dict(scope, definitions=crm_definitions if scope.get("crm_only") else ["OperatingExpenseCompanyMap"])
+		def plan(before, contract, **kwargs):
+			if not contract.get("crm_only") and not contract.get("native_only"):
+				raise AssertionError("OperatingExpenseCompanyMap definition conflict")
+			return {"new_definitions": contract["definitions"] if contract.get("crm_only") else []}
+		metadata = types.SimpleNamespace(
+			load_joint_contract=Mock(side_effect=contract), _capture_joint_state=Mock(side_effect=lambda **scope: copy.deepcopy(current)),
+			_joint_plan=Mock(side_effect=plan), _read_only_native_planning=Mock(side_effect=contextlib.nullcontext), verify_current_joint_contract=Mock(),
+		)
+		installed = ["deeplinkerp_branding", "china_finance", "oa_purchase_request"] + (["crm_integration"] if crm_installed else [])
+		frappe = types.SimpleNamespace(__version__="16.23.0", init=Mock(), connect=Mock(), destroy=Mock(), get_installed_apps=lambda: installed,
+			db=types.SimpleNamespace(sql=Mock(return_value=[("11.8.6-MariaDB",)]), get_single_value=Mock(return_value=0), exists=Mock(return_value=True), rollback=Mock(), commit=Mock(side_effect=AssertionError("Preflight must not write"))))
+		with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
+			root = Path(tmp)
+			for site in sites:
+				path = root / "sites" / site / "site_config.json"
+				path.parent.mkdir(parents=True)
+				path.write_text('{"maintenance_mode":0,"manual":"retained"}')
+			stack.enter_context(patch.dict(sys.modules, {"frappe": frappe, "erpnext": types.SimpleNamespace(__version__="16.23.0"), "rq": types.SimpleNamespace(__version__="2.6.1"), "gunicorn": types.SimpleNamespace(__version__="23.0.0"), "procurement_release_metadata": metadata}))
+			stack.enter_context(patch.object(guard, "Path", side_effect=lambda value: root if value == "/home/frappe/frappe-bench" else Path(value)))
+			stack.enter_context(patch.object(guard, "release_sites", return_value=sites))
+			yield guard, metadata, current, frappe
+			for site in sites:
+				self.assertEqual((root / "sites" / site / "site_config.json").read_text(), '{"maintenance_mode":0,"manual":"retained"}')
+			frappe.db.commit.assert_not_called()
+
+	def test_crm_tenant_preflight_uses_bounded_planner_and_preserves_unrelated_conflict(self):
+		for main_only in (True, False):
+			with self.subTest(main_only=main_only), self.tenant_preflight_runtime(("deeplinkerp.com",)) as (guard, metadata, current, frappe):
+				before = copy.deepcopy(current)
+				with self.assertRaisesRegex(AssertionError, "OperatingExpenseCompanyMap definition conflict"):
+					guard.tenant_preflight("16.23.0", main_only=main_only)
+				result = guard.tenant_preflight("16.23.0", main_only=main_only, crm_only=True)
+				metadata.load_joint_contract.assert_called_with(require_quiescent=False, native_only=False, crm_only=True)
+				metadata._capture_joint_state.assert_called_with(native_only=False, crm_only=True)
+				args, kwargs = metadata._joint_plan.call_args
+				self.assertEqual(args[0], before)
+				self.assertTrue(args[1]["crm_only"])
+				self.assertEqual(kwargs, {"when": "preflight", "seed": "preflight", "require_quiescent": False})
+				entry = result["sites"]["deeplinkerp.com"]
+				self.assertTrue(entry["crm_only"])
+				self.assertFalse(entry["native_only"])
+				self.assertEqual(len(entry["bounded_plan_definitions"]), 19)
+				self.assertTrue(all("-custom_crm_" in name for name in entry["bounded_plan_definitions"]))
+				self.assertEqual(entry["audit"], before)
+				self.assertEqual(current, before)
+				self.assertEqual(frappe.db.rollback.call_count, 2)
+				self.assertEqual(frappe.destroy.call_count, 2)
+
+	def test_crm_tenant_preflight_requires_installed_app_and_proven_main_site_scope(self):
+		for sites, crm_installed, error in ((("deeplinkerp.com",), False, "actual CRM installation"), (self.module().SHARED_SITES, True, "CRM metadata is main-only")):
+			with self.subTest(sites=sites, crm_installed=crm_installed), self.tenant_preflight_runtime(sites, crm_installed=crm_installed) as (guard, metadata, _, frappe):
+				with self.assertRaisesRegex(AssertionError, error):
+					guard.tenant_preflight("16.23.0", crm_only=True)
+				metadata.load_joint_contract.assert_not_called()
+				metadata._capture_joint_state.assert_not_called()
+				metadata._joint_plan.assert_not_called()
+		with self.tenant_preflight_runtime(self.module().SHARED_SITES) as (guard, metadata, _, frappe):
+			metadata._joint_plan.side_effect = lambda *args, **kwargs: {"new_definitions": []}
+			result = guard.tenant_preflight("16.23.0")
+			self.assertEqual(set(result["sites"]), set(guard.SHARED_SITES))
+			metadata.load_joint_contract.assert_has_calls([call(require_quiescent=False, native_only=native, crm_only=False) for native in (False, True, True, True)])
+			self.assertEqual([entry["native_only"] for entry in result["sites"].values()], [False, True, True, True])
+
+	def test_tenant_preflight_cli_propagates_explicit_crm_scope_and_legacy_default(self):
+		guard = self.module()
+		for flags in (("--crm-only",), ("--main-only", "--crm-only"), (), ("--main-only",)):
+			with self.subTest(flags=flags), patch.object(sys, "argv", ["guard", "--tenant-preflight", "--erpnext-version", "16.23.0", *flags]), patch.object(guard, "tenant_preflight", return_value={"sites": {}}) as preflight, contextlib.redirect_stdout(io.StringIO()):
+				guard.main()
+				preflight.assert_called_once_with("16.23.0", main_only="--main-only" in flags, crm_only="--crm-only" in flags)
 
 	def schema(self):
 		return {"columns": {"name": {"type": "varchar(140)", "default": "NULL"}}, "indexes": {"PRIMARY": [{"column": "name", "unique": 1, "prefix": None}]}, "table": {"engine": "InnoDB"}}

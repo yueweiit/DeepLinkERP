@@ -34,6 +34,27 @@ class ReleaseRecoveryTests(unittest.TestCase):
 		self.assertLess(source.index("if (( crm_only )); then verify_crm_frozen_overlay; fi"), source.index("source_sync_timer_active=0"))
 		self.assertIn("Candidate differs from preflight-approved full sources", source)
 
+	def test_both_entrypoint_preflights_pass_crm_scope_without_changing_legacy_commands(self):
+		commands = [line for line in self.release_source().splitlines() if line.lstrip().startswith('command_runner "$new_image_id" "$python" "$guard" --tenant-preflight')]
+		self.assertEqual(len(commands), 2)
+		for command in commands:
+			for crm_only in (True, False):
+				with self.subTest(command=command, crm_only=crm_only), tempfile.TemporaryDirectory() as tmp:
+					script = f"""
+set -euo pipefail
+release_dir=$1;new_image_id=new;python=python;guard=guard;expected_erpnext=16.23.0
+metadata_scope_args=({'--crm-only' if crm_only else ''})
+command_runner() {{ {shlex.quote(sys.executable)} -c 'import json,sys;print(json.dumps(sys.argv[1:]))' "$@"; }}
+""" + command
+					result = subprocess.run(["bash", "-c", script, "test", tmp], capture_output=True, text=True)
+					self.assertEqual(result.returncode, 0, result.stderr)
+					args = json.loads((Path(tmp) / "tenants.json").read_text())
+					expected = ["new", "python", "guard", "--tenant-preflight"]
+					if "--main-only" in command:
+						expected.append("--main-only")
+					expected += ["--erpnext-version", "16.23.0"] + (["--crm-only"] if crm_only else [])
+					self.assertEqual(args, expected)
+
 	def test_runtime_inventory_reads_physical_packages_independently_of_requested_baseline_list(self):
 		function = self.shell_function("verify_crm_runtime_sources")
 		code = function.split(" -c '\n", 1)[1].split("\n' ", 1)[0]

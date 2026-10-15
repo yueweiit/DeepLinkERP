@@ -1098,8 +1098,8 @@ def drain_release(path, tool, candidate_sha, *, timeout=360):
 	return {"quiescent": True, "receipt": str(path), "exit_protocol": 2}
 
 
-def tenant_preflight(expected_erpnext, *, main_only=False):
-	"""Read all tenants; plan only main full / secondary native-only metadata."""
+def tenant_preflight(expected_erpnext, *, main_only=False, crm_only=False):
+	"""Read proven active tenants; plan only their explicitly selected metadata."""
 	import erpnext
 	import frappe
 	import gunicorn
@@ -1116,6 +1116,7 @@ def tenant_preflight(expected_erpnext, *, main_only=False):
 	bench = Path("/home/frappe/frappe-bench")
 	result = {"versions": {"frappe": frappe.__version__, "erpnext": erpnext.__version__, "rq": rq.__version__, "gunicorn": gunicorn.__version__}, "sites": {}}
 	active_sites = release_sites(main_only=main_only, original_config=True)
+	assert not crm_only or active_sites == SHARED_SITES[:1], "CRM metadata is main-only; active-site proof required; HOLD"
 	for site in active_sites:
 		frappe.init(site=site, sites_path=str(bench / "sites"))
 		frappe.connect()
@@ -1131,15 +1132,19 @@ def tenant_preflight(expected_erpnext, *, main_only=False):
 				assert frappe.db.get_single_value("System Settings", "enable_scheduler") in (0, "0", False), (
 					"Main global scheduler must remain disabled; HOLD"
 				)
+			if crm_only:
+				assert "crm_integration" in installed, "Main requires actual CRM installation; no auto-install; HOLD"
 			if "deeplinkerp_branding" in installed:
 				with _read_only_native_planning():
 					native_only = site != "deeplinkerp.com"
 					if not native_only:
 						assert {"china_finance", "oa_purchase_request"} <= set(installed) and frappe.db.exists("DocType", "OA Purchase Request"), "Main requires actual Finance/OA installation; no auto-install; HOLD"
-					contract = load_joint_contract(require_quiescent=False, native_only=native_only)
-					current = _capture_joint_state(native_only=native_only)
+					contract = load_joint_contract(require_quiescent=False, native_only=native_only, crm_only=crm_only)
+					current = _capture_joint_state(native_only=native_only, crm_only=crm_only)
 					plan = _joint_plan(current, contract, when="preflight", seed="preflight", require_quiescent=False)
 					entry.update(native_only=native_only, bounded_plan_definitions=plan["new_definitions"], audit=current)
+					if crm_only:
+						entry["crm_only"] = True
 			else:
 				raise AssertionError(site + ": Branding not installed; no auto-install; HOLD")
 			result["sites"][site] = entry
@@ -1389,6 +1394,7 @@ def main():
 	parser.add_argument("--evidence")
 	parser.add_argument("--acceptance")
 	parser.add_argument("--main-only", action="store_true")
+	parser.add_argument("--crm-only", action="store_true")
 	parser.add_argument("--retirement-receipt")
 	parser.add_argument("--retirement-sha256")
 	parser.add_argument("--staged", action="store_true")
@@ -1412,7 +1418,7 @@ def main():
 	elif args.runtime_proof:
 		result = native_runtime_proof()
 	elif args.tenant_preflight:
-		result = tenant_preflight(args.erpnext_version, main_only=args.main_only)
+		result = tenant_preflight(args.erpnext_version, main_only=args.main_only, crm_only=args.crm_only)
 	elif args.source_host_proof:
 		result = source_host_proof()
 	elif args.host_drain:
