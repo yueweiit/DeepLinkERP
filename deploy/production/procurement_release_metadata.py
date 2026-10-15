@@ -18,7 +18,7 @@ from pathlib import Path
 PAGE = "purchase-payables"
 NAVIGATION = (("Workspace", "Buying"), ("Workspace Sidebar", "Buying"))
 FULFILMENT_MODEL = "Purchase Fulfilment Link"
-JOINT_MODELS = ("Operating Expense Company Map", "Operating Expense Source", "Operating Expense Mapping", "Operating Expense Event", "Operating Expense Sync Settings", FULFILMENT_MODEL,"Operating Expense Takeover","Operating Expense Payment")
+JOINT_MODELS = ("Operating Expense Company Map", "Operating Expense Source", "Operating Expense Mapping", "Operating Expense Event", "Operating Expense Sync Settings", FULFILMENT_MODEL,"Operating Expense Takeover","Operating Expense Payment","Purchase Source Mapping Rule")
 JOINT_PAGES = (PAGE, "operating-expenses")
 JOINT_NAVIGATION = tuple((dt, name) for name in ("Buying", "Accounting", "China Finance") for dt in ("Workspace", "Workspace Sidebar"))
 OPERATING_METHOD = "deeplinkerp_branding.services.operating_expenses.scheduled_sync"
@@ -27,7 +27,7 @@ REVERSAL_METHOD = "deeplinkerp_branding.services.purchase_reversal_progress.reco
 SCHEDULED_METHODS = (OPERATING_METHOD, PURCHASE_SOURCE_METHOD, REVERSAL_METHOD)
 CUSTOM_FIELD_ORDER = ("custom_operating_event_key", "custom_operating_source", "custom_operating_recognition", "custom_operating_fingerprint")
 OA_DOCTYPE = "OA Purchase Request"
-SOURCE_FIELD_ORDER = ("custom_purchase_source_id", "custom_purchase_source_json", "custom_cashier_payment_evidence", "custom_purchase_bound_version", "custom_purchase_payment_reconciliation", "custom_purchase_beneficiary_company", "custom_purchase_company_proposal", "custom_purchase_project", "custom_purchase_company_confirmed", "custom_purchase_company_confirmed_by", "custom_purchase_company_confirmed_on", "custom_purchase_pending_reason")
+SOURCE_FIELD_ORDER = ("custom_purchase_adaptation_json", "custom_purchase_source_id", "custom_purchase_source_json", "custom_cashier_payment_evidence", "custom_purchase_bound_version", "custom_purchase_payment_reconciliation", "custom_purchase_beneficiary_company", "custom_purchase_company_proposal", "custom_purchase_project", "custom_purchase_company_confirmed", "custom_purchase_company_confirmed_by", "custom_purchase_company_confirmed_on", "custom_purchase_pending_reason")
 FULFILMENT_INDEX_COLUMNS = {"fulfilment_external_active": ("external_order", "active"), "fulfilment_internal_active": ("internal_order", "active")}
 
 

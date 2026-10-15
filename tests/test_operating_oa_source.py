@@ -91,6 +91,18 @@ class OriginalOperatingSourceTest(unittest.TestCase):
         self.assertEqual(missing['company_mapping_source'], '目录组织')
         self.assertEqual(missing['company_resolution'], resolution)
 
+    def test_purchase_read_includes_original_department_identity(self):
+        from deeplinkerp_branding.services.purchase_source_contract import PROCESS_CODES
+        class Query:
+            def __enter__(self): return self
+            def __exit__(self,*args): pass
+            def cursor(self): return self
+            def execute(self,sql,params): self.sql=sql
+            def fetchall(self): return []
+        query=Query()
+        self.source.read_page(lambda:query,100,"2026-10-15T00:00:00+00:00",process_codes=PROCESS_CODES)
+        self.assertIn("originator_dept_id,originator_dept_name",query.sql)
+
     def test_projection_conflicts_do_not_choose_a_value_or_infer_account_nature(self):
         row = approval()
         row['form_component_values'].extend([{'name': n, 'value': v} for n, v in (

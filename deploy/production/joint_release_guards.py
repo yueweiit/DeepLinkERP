@@ -9,6 +9,7 @@ import os
 import re
 import stat
 import subprocess
+import tarfile
 import tempfile
 import time
 from datetime import datetime
@@ -42,6 +43,53 @@ def merge_frozen_branding_sources(base, candidate):
 
 def serialized(value):
 	return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str).encode()
+
+
+def verify_equivalent_build_base(current, base, branding, overlays):
+	"""Allow a shallower immutable base only when COPY yields the same sources."""
+	assert set(current) == set(base) and "deeplinkerp_branding" in current, "Build base app set differs"
+	for app in current:
+		if app == "deeplinkerp_branding":
+			assert merge_frozen_branding_sources(current[app],branding) == merge_frozen_branding_sources(base[app],branding), "Build base Branding leftovers differ"
+		else:
+			assert current[app] == base[app], "Build base shared app source differs: " + app
+	for app, files in overlays.items():
+		if app == "deeplinkerp_branding":
+			continue
+		for name, versions in files.items():
+			assert versions["before"] == versions["after"] == base[app].get(name), "Fixed-base release cannot change shared overlays"
+
+
+def verify_branding_layer_member(member):
+	root = PurePosixPath("home/frappe/frappe-bench/apps/deeplinkerp_branding/deeplinkerp_branding")
+	path = PurePosixPath(member.name)
+	assert not path.is_absolute() and ".." not in path.parts and "\\" not in member.name, "Unsafe image layer path"
+	assert not any(part.startswith(".wh.") for part in path.parts), "Image layer whiteout prevents rebase"
+	assert member.isfile() or member.isdir(), "Image layer links/special files prevent rebase"
+	assert path == root or root in path.parents or (member.isdir() and path in root.parents), "Image layer changes outside Branding package"
+
+
+def verify_branding_only_delta(archive, current_layers, base_layers):
+	"""Verify actual Docker layer bytes; no dependency/config changes can be lost."""
+	assert current_layers[:len(base_layers)] == base_layers and len(current_layers) > len(base_layers)
+	with tarfile.open(archive,"r") as image:
+		manifest = json.load(image.extractfile("manifest.json"))
+		assert len(manifest) == 1
+		entry = manifest[0]
+		config = json.load(image.extractfile(entry["Config"]))
+		assert config["rootfs"]["diff_ids"] == current_layers, "Image export identity drift"
+		assert len(entry["Layers"]) == len(current_layers)
+		count = 0
+		for index in range(len(base_layers),len(current_layers)):
+			layer = image.extractfile(entry["Layers"][index])
+			digest = hashlib.file_digest(layer,"sha256").hexdigest() if hasattr(hashlib,"file_digest") else hashlib.sha256(layer.read()).hexdigest()
+			assert "sha256:" + digest == current_layers[index], "Layer digest mismatch"
+			layer.seek(0)
+			with tarfile.open(fileobj=layer,mode="r|") as contents:
+				for member in contents:
+					verify_branding_layer_member(member)
+					count += 1
+	return {"layers_verified":len(current_layers)-len(base_layers),"members_verified":count}
 
 
 def semantic_row(row):

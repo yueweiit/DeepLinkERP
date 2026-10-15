@@ -41,6 +41,7 @@ function host(detail = projection(), overrides = {}) {
 	class Surface {
 		constructor(markup = "", selector = "") {
 			this.value = ""; this.markup = markup; this.selector = selector; this.handlers = new Map(); this.length = 1; surfaces.push(this);
+			this.properties = new Map();
 			this.inputEvents = new Map(); this.node = { addEventListener: (event, callback) => this.inputEvents.set(event, callback), removeEventListener: event => this.inputEvents.delete(event) };
 		}
 		find(selector) { return new Surface("", selector); }
@@ -50,12 +51,12 @@ function host(detail = projection(), overrides = {}) {
 		get() { return this.node; } dispatch(event) { this.inputEvents.get(event)?.(); }
 		append(value) { this.value += value; return this; }
 		appendTo() { return this; } prependTo() { return this; } remove() { return this; }
-		addClass() { return this; } attr() { return this; } prop() { return this; } off() { return this; }
+		addClass() { return this; } attr() { return this; } prop(name, value) { if (value === undefined) return this.properties.get(name); this.properties.set(name, value); return this; } off() { return this; }
 		on(event, handler) { this.handlers.set(event.split(".")[0], handler); return this; }
 	}
 	let alive = true;
 	const drawer = { panel: new Surface(), controls: [], busy: false, loadId: 0, alive: () => alive,
-		close() { alive = false; }, setBusy(value) { this.busy = value; }, error(error) { this.errorMessage = error.message; } };
+		close() { alive = false; }, setBusy(value) { this.busy = value; for (const surface of surfaces) if (surface.markup.startsWith("<button")) surface.prop("disabled", value); }, error(error) { this.errorMessage = error.message; } };
 	const root = {
 		crypto: require("node:crypto"),
 		$: markup => new Surface(markup), document: { addEventListener: (event, fn) => handlers.set(event, fn) },
@@ -85,6 +86,7 @@ function host(detail = projection(), overrides = {}) {
 		return surface.handlers.get("click")({ preventDefault() {}, stopPropagation() {} });
 	};
 	return { api, root, drawer, controls, calls, confirmations, routes, click, metadataReads,
+		action: className => surfaces.findLast(s => s.markup.includes(className) && s.handlers.has("click")),
 		html: () => surfaces.map(s => s.markup + s.value).join(""), input: async (field, value) => {
 			assert.ok(controls.has(field), field); const control = controls.get(field);
 			control.$input.val(value); control.$input.dispatch("input"); await control.set_value(value);
@@ -247,6 +249,18 @@ test("a fresh withdrawn or readonly linked source never offers association reche
 	}
 });
 
+test("adopted source recheck displays both scopes and submits the frozen recheck token", async () => {
+	const detail = projection(); detail.purchase_order = "PO-EXISTING";
+	detail.recheck_version = "frozen-scope-version";
+	detail.scope_review = { adopted_scope: { source_organization: "dept:OLD" }, current_scope: { source_organization: "dept:NEW" } };
+	const h = host(detail); await h.api.open("OA/1"); await h.click("dlp-source-reload");
+	assert.match(h.html(), /dept:OLD/); assert.match(h.html(), /dept:NEW/);
+	await h.input("correction_reason", "已核对原部门变化"); await h.click("dlp-source-review");
+	assert.match(h.confirmations[0].message, /dept:OLD/); assert.match(h.confirmations[0].message, /dept:NEW/);
+	await h.confirmations[0].yes();
+	assert.equal(h.calls[2].args.expected_version,"frozen-scope-version");
+});
+
 test("a failed fresh read blocks the previous linked-source recheck without losing the manual reason", async () => {
 	const detail = projection(); detail.purchase_order = "PO-EXISTING";
 	const h = host(detail); let fail = false;
@@ -349,6 +363,158 @@ test("unknown or hidden actual-payment evidence offers no reconciliation action 
 		const h = host(detail); await h.api.open("OA/1");
 		assert.doesNotMatch(h.html(), /class="[^"]*dlp-source-reconcile/);
 		assert.equal(h.controls.has("payment_entry_0"), false);
+	}
+});
+
+function adaptedProjection() {
+	const detail = projection(); detail.can_manage_rules = true; detail.creation_version = "creation-master-and-rule-version";
+	detail.source.items = []; detail.source.requested_amount = "4788.0000";
+	detail.adaptation = {
+		company: "Adapted Company", supplier: "统一结算供应商", currency: "CNY", total_amount: "4788.0000",
+		scope: { corp_id: "corp-a", process_code: "process-a", execution_region: "中国", source_organization: "采购组织", purchase_type: "加工" },
+		rule: null, preview_fingerprint: "adapted-preview", blocking_reasons: [],
+		new_items: [{ item_code: "DLP-SVC-PROCESSING", item_name: "加工服务", uom: "次", item_group: "服务", is_stock_item: 0 }],
+		items: ["1234.56789", "2", "3", "4", "5", "6"].map((qty, index) => ({ item_code: "DLP-SVC-PROCESSING", item_name: "加工服务", qty, uom: "次", rate: "0.123456789", amount: String((index + 1) * 228), processor_name: `加工商${index + 1}`, processing_materials: `材料${index + 1}`, odt: `ODT-${index + 1}`, sales_order_no: `SO-${index + 1}`, description: `加工商：加工商${index + 1}\n加工材料：材料${index + 1}`, source_row_key: `processors:${index + 1}` })),
+	};
+	return detail;
+}
+
+async function setupRuleHost(plan = null, detail = adaptedProjection()) {
+	const h = host(detail), preview = plan || { ...structuredClone(detail.adaptation), preview_fingerprint: "current-rule-preview" };
+	h.root.frappe.call = async request => { h.calls.push(request); return { message: request.method.endsWith("get_purchase_source_detail") ? detail : request.method.endsWith("preview_purchase_source_adaptation") ? preview : { name: "RULE-1", rule_version: "r1", scope: preview.scope } }; };
+	await h.api.open("OA/1");
+	return h;
+}
+
+async function fillRule(h) {
+	await h.input("rule_item_group", "服务"); await h.input("rule_purchase_uom", "次");
+}
+
+test("six adapted processing rows show exact references and shared numeric formatting while seeding manual controls", async () => {
+	const detail = adaptedProjection(), original = JSON.stringify(detail), h = host(detail); await h.api.open("OA/1");
+	for (let index = 1; index <= 6; index++) for (const value of [`加工商${index}`, `材料${index}`, `ODT-${index}`, `SO-${index}`]) assert.match(h.html(), new RegExp(value));
+	assert.match(h.html(), /title="原值 · 1234\.56789">1,234\.57<\/span>/);
+	assert.match(h.html(), /title="原值 · 4788\.0000">4,788\.00 CNY<\/span>/);
+	assert.equal(h.controls.get("company").get_value(), "Adapted Company"); assert.equal(h.controls.get("supplier").get_value(), "统一结算供应商");
+	assert.equal(h.controls.get("qty_0").$input.val(), "1234.57"); assert.equal(h.controls.get("rate_0").$input.val(), "0.12");
+	assert.equal(h.controls.get("item_code_5").get_value(), "DLP-SVC-PROCESSING");
+	assert.equal(h.controls.get("item_code_0").df.fieldtype, "Data"); assert.equal(h.controls.get("item_code_0").df.options, undefined);
+	await h.click("dlp-source-create"); await h.confirmations[0].yes();
+	assert.equal(h.calls[1].args.expected_version, "creation-master-and-rule-version"); assert.equal(h.calls[1].type, "POST");
+	assert.equal(JSON.parse(h.calls[1].args.items)[0].rate, "0.123456789"); assert.equal(JSON.parse(h.calls[1].args.items).length, 6);
+	assert.equal(JSON.stringify(detail), original);
+});
+
+test("draft delivery date uses the adopted date while original date remains visible", async () => {
+	const detail = adaptedProjection(); detail.source.schedule_date = "2026-10-08";
+	detail.adaptation.schedule_date = "2026-10-09";
+	const h = host(detail); await h.api.open("OA/1");
+	assert.equal(h.controls.get("schedule_date").get_value(),"2026-10-09");
+	assert.match(h.html(), /2026-10-08/);
+});
+
+test("adaptation blockers are deduplicated and replace generic legacy detail warnings without hiding payment evidence issues", async () => {
+	const detail = adaptedProjection(); detail.pending_reason = "采购明细待完善"; detail.source.issues = ["采购明细待完善"];
+	detail.adaptation.blocking_reasons = ["物料组待确认", "采购单位待确认", "物料组待确认"]; detail.cashier.issues = ["付款凭证需要核对"];
+	const h = host(detail); await h.api.open("OA/1");
+	assert.equal((h.html().match(/物料组待确认/g) || []).length, 1); assert.match(h.html(), /采购单位待确认|付款凭证需要核对/);
+	assert.doesNotMatch(h.html(), /采购明细待完善/);
+});
+
+test("a successful adaptation replaces only obsolete generic source warnings", async () => {
+	const detail = adaptedProjection(); detail.pending_reason = "采购明细待完善";
+	detail.source.issues = ["采购明细与申请金额不一致，请核对原单", "来源组织另需核对"]; detail.cashier.issues = ["付款证据另需核对"];
+	const h = host(detail); await h.api.open("OA/1");
+	assert.doesNotMatch(h.html(), /采购明细待完善|采购明细与申请金额不一致/); assert.match(h.html(), /来源组织另需核对/); assert.match(h.html(), /付款证据另需核对/);
+});
+
+test("manager rule controls use dialog metadata and preview only reads a readonly six-row plan", async () => {
+	const h = await setupRuleHost(); await fillRule(h);
+	assert.equal(h.controls.get("rule_item_group").df.options, "Item Group"); assert.equal(h.controls.get("rule_purchase_uom").df.options, "UOM");
+	assert.equal(h.controls.get("rule_service_item_code").get_value(), "DLP-SVC-PROCESSING"); assert.equal(h.controls.get("rule_service_item_name").get_value(), "加工服务");
+	assert.equal(h.metadataReads.some(([, field]) => field.startsWith("rule_")), false);
+	assert.equal(h.action("dlp-source-rule-confirm"), undefined);
+	await h.click("dlp-source-rule-preview");
+	assert.equal(h.calls.length, 2); assert.match(h.calls[1].method, /preview_purchase_source_adaptation$/); assert.equal(h.calls[1].type, "GET");
+	assert.deepEqual(JSON.parse(h.calls[1].args.rule), { company: "Adapted Company", supplier: "统一结算供应商", item_group: "服务", purchase_uom: "次", service_item_code: "DLP-SVC-PROCESSING", service_item_name: "加工服务" });
+	assert.match(h.html(), /拟新增物料/); assert.match(h.html(), /ODT-6/); assert.equal(h.confirmations.length, 0);
+	assert.equal(h.calls.some(request => /insert|create|confirm|sync/.test(request.method)), false);
+});
+
+test("existing rule settings seed the drawer without inventing missing item groups or units", async () => {
+	const detail = adaptedProjection(); detail.adaptation.rule = { item_group: "已确认服务组", purchase_uom: "件", service_item_code: "SVC-CUSTOM", service_item_name: "定制加工" };
+	const h = await setupRuleHost(null, detail);
+	assert.equal(h.controls.get("rule_item_group").get_value(), "已确认服务组"); assert.equal(h.controls.get("rule_purchase_uom").get_value(), "件");
+	assert.equal(h.controls.get("rule_service_item_code").get_value(), "SVC-CUSTOM");
+	const unset = await setupRuleHost(); assert.equal(unset.controls.get("rule_item_group").get_value(), ""); assert.equal(unset.controls.get("rule_purchase_uom").get_value(), "");
+});
+
+test("rule save requires an explicit scope confirmation then posts only the preview fingerprint and refreshes", async () => {
+	const alerts = [], h = await setupRuleHost(); h.root.frappe.show_alert = value => alerts.push(value); await fillRule(h);
+	await h.click("dlp-source-rule-preview"); await h.click("dlp-source-rule-confirm");
+	assert.equal(h.calls.length, 2); assert.equal(h.confirmations.length, 1);
+	for (const value of ["corp-a", "process-a", "中国", "采购组织", "加工", "Adapted Company", "统一结算供应商", "次", "DLP-SVC-PROCESSING", "仅限2026年9月25日至12月31日", "草稿", "定时"]) assert.ok(h.confirmations[0].message.includes(value), value);
+	assert.doesNotMatch(h.confirmations[0].message, /2026-09-25 起/);
+	await h.confirmations[0].yes();
+	assert.match(h.calls[2].method, /confirm_purchase_source_rule$/); assert.equal(h.calls[2].type, "POST"); assert.equal(h.calls[2].args.expected_preview_fingerprint, "current-rule-preview");
+	assert.equal(h.calls[2].args.rule, h.calls[1].args.rule); assert.match(h.calls[3].method, /get_purchase_source_detail$/); assert.equal(h.calls[3].args.fresh, 1);
+	assert.equal(h.calls.some(request => /create_purchase_order|sync_purchase/.test(request.method)), false); assert.equal(h.routes.length, 0);
+	assert.equal(alerts[0].message, "采购映射规则已确认");
+});
+
+test("planned new items and the rule confirmation state each item stock property", async () => {
+	const plan = structuredClone(adaptedProjection().adaptation);
+	plan.new_items.push({ item_code: "GOODS-NEW", item_name: "采购货物", uom: "件", item_group: "原材料", is_stock_item: 1 });
+	const h = await setupRuleHost(plan); await fillRule(h); await h.click("dlp-source-rule-preview");
+	assert.match(h.html(), /DLP-SVC-PROCESSING · 加工服务 · 服务 · 次 · 非库存物料/);
+	assert.match(h.html(), /GOODS-NEW · 采购货物 · 原材料 · 件 · 库存物料/);
+	await h.click("dlp-source-rule-confirm");
+	assert.match(h.confirmations[0].message, /DLP-SVC-PROCESSING · 加工服务 · 服务 · 次 · 非库存物料/);
+	assert.match(h.confirmations[0].message, /GOODS-NEW · 采购货物 · 原材料 · 件 · 库存物料/);
+});
+
+test("editing any rule input invalidates a successful preview and confirmation cannot use stale values", async () => {
+	for (const field of ["company", "supplier", "rule_item_group", "rule_purchase_uom", "rule_service_item_code", "rule_service_item_name"]) {
+		const h = await setupRuleHost(); await fillRule(h); await h.click("dlp-source-rule-preview");
+		await h.input(field, `changed-${field}`); await h.click("dlp-source-rule-confirm");
+		assert.equal(h.confirmations.length, 0, field); assert.equal(h.calls.length, 2, field); assert.equal(h.action("dlp-source-rule-confirm").prop("disabled"), true, field);
+	}
+	const h = await setupRuleHost(); await fillRule(h); await h.click("dlp-source-rule-preview"); await h.click("dlp-source-rule-confirm");
+	await h.input("supplier", "供应商发生变化"); await h.confirmations[0].yes();
+	assert.equal(h.calls.length, 2); assert.match(h.drawer.errorMessage, /重新预览|规则.*变化/);
+});
+
+test("blocked rule plans remain readable and cannot be confirmed", async () => {
+	const plan = structuredClone(adaptedProjection().adaptation); plan.blocking_reasons = ["单位不兼容", "供应商不可用"];
+	const h = await setupRuleHost(plan); await fillRule(h); await h.click("dlp-source-rule-preview"); await h.click("dlp-source-rule-confirm");
+	assert.match(h.html(), /单位不兼容/); assert.match(h.html(), /供应商不可用/); assert.match(h.html(), /ODT-6/);
+	assert.equal(h.action("dlp-source-rule-confirm").prop("disabled"), true); assert.equal(h.calls.length, 2); assert.equal(h.confirmations.length, 0);
+});
+
+test("manual mappings survive adaptation refreshes and association keeps the evidence version", async () => {
+	const detail = adaptedProjection(), h = host(detail); await h.api.open("OA/1");
+	await h.input("supplier", "人工供应商"); await h.input("rate_0", "0.12345678001"); await h.input("correction_reason", "手工差异说明");
+	await h.input("purchase_order", "PO-MANUAL"); detail.adaptation.supplier = "新适配供应商"; await h.click("dlp-source-reload");
+	assert.equal(h.controls.get("supplier").get_value(), "人工供应商"); assert.equal(h.controls.get("correction_reason").get_value(), "手工差异说明");
+	await h.click("dlp-source-associate"); await h.confirmations[0].yes();
+	assert.equal(h.calls[2].args.expected_version, "current-source-and-cashier"); assert.equal(h.calls[2].args.purchase_order, "PO-MANUAL");
+});
+
+test("failed and departed rule previews cannot retain a confirmable plan or clear manual values", async () => {
+	const h = await setupRuleHost(); await fillRule(h); await h.input("correction_reason", "保留说明"); await h.click("dlp-source-rule-preview");
+	h.root.frappe.call = async request => { h.calls.push(request); throw new Error("预览读取失败"); };
+	await h.click("dlp-source-rule-preview"); await h.click("dlp-source-rule-confirm");
+	assert.equal(h.confirmations.length, 0); assert.equal(h.action("dlp-source-rule-confirm").prop("disabled"), true); assert.equal(h.controls.get("correction_reason").get_value(), "保留说明");
+	const departed = await setupRuleHost(); await fillRule(departed); let resolve;
+	departed.root.frappe.call = request => { departed.calls.push(request); return new Promise(done => resolve = done); };
+	const previewing = departed.click("dlp-source-rule-preview"); departed.drawer.close(); resolve({ message: adaptedProjection().adaptation }); await previewing;
+	assert.equal(departed.action("dlp-source-rule-confirm"), undefined);
+});
+
+test("restricted, withdrawn and linked source drawers never expose rule management", async () => {
+	for (const change of [detail => detail.can_manage_rules = false, detail => detail.can_write = false, detail => detail.source.eligible = false, detail => detail.purchase_order = "PO-EXISTING"]) {
+		const detail = adaptedProjection(); change(detail); const h = host(detail); await h.api.open("OA/1");
+		assert.equal(h.controls.has("rule_item_group"), false); assert.equal(h.action("dlp-source-rule-preview"), undefined); assert.equal(h.calls.length, 1);
 	}
 });
 

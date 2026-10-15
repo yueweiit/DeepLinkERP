@@ -526,6 +526,85 @@ fi
 metadata=/release/deploy/production/procurement_release_metadata.py
 audit_args=(--purchase-payment-page-source /release/deeplinkerp_branding/deeplinkerp_branding/page/purchase_payment_records/purchase_payment_records.json --joint-metadata --release-manifest /release/release-source-manifest.json)
 expected_erpnext=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["native_versions"]["erpnext"])' "$build_dir/release-source-manifest.json")
+build_base_id=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("build_base_image_id",sys.argv[2]))' "$build_dir/release-source-manifest.json" "$old_image_id")
+build_dockerfile="$build_dir/deploy/local/Dockerfile.unified-purchase"
+if [[ "$build_base_id" != "$old_image_id" ]]; then
+  (( ! main_only )) || { echo 'Fixed build base is not supported by the main-only isolation lane' >&2; exit 1; }
+  [[ "$build_base_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+  # Reuse the audited ancestor instead of exceeding overlay2's layer limit.
+  # Runtime configuration, every shared app, and the resulting full Branding
+  # overlay must be identical before any producer or maintenance boundary moves.
+  python3 - "$old_image_id" "$build_base_id" > "$release_dir/build-base-proof.json" <<'PY'
+import json,subprocess,sys
+current,base=json.loads(subprocess.check_output(['docker','image','inspect',*sys.argv[1:]]))
+assert current['RootFS']['Layers'][:len(base['RootFS']['Layers'])]==base['RootFS']['Layers'], 'Build base is not an immutable filesystem ancestor'
+allowed={'org.deeplinkerp.'+name for name in ('branding.revision','crm.revision','finance.revision','oa.revision','base.image')}
+for value in (current,base):
+ value['Config']['Labels']={key:val for key,val in (value['Config'].get('Labels') or {}).items() if key not in allowed}
+assert current['Config']==base['Config'], 'Build base runtime configuration differs'
+assert len(base['RootFS']['Layers'])+1<128, 'Build base has insufficient layer capacity'
+print(json.dumps({'current':current['Id'],'build_base':base['Id'],'current_layers':current['RootFS']['Layers'],'base_layers':base['RootFS']['Layers']}))
+PY
+  docker image save --output "$release_dir/build-base-current.tar" "$old_image_id"
+  python3 - "$build_dir" "$release_dir" <<'PY'
+import json,sys
+from pathlib import Path
+build,evidence=map(Path,sys.argv[1:]);sys.path.insert(0,str(build/'deploy/production'))
+from joint_release_guards import verify_branding_only_delta
+proof=json.loads((evidence/'build-base-proof.json').read_bytes())
+proof.update(verify_branding_only_delta(evidence/'build-base-current.tar',proof['current_layers'],proof['base_layers']))
+(evidence/'build-base-proof.json').write_text(json.dumps(proof,sort_keys=True))
+PY
+  rm -- "$release_dir/build-base-current.tar"
+  build_apps=$(docker run --rm --read-only --network none --entrypoint "$python" "$old_image_id" -c 'import json;from pathlib import Path;print(json.dumps(sorted(p.name for p in Path("/home/frappe/frappe-bench/apps").iterdir() if p.is_dir() and (p/p.name).is_dir())))')
+  capture_pinned_sources "$old_image_id" "$release_dir/build-current-sources.json" "$build_apps"
+  capture_pinned_sources "$build_base_id" "$release_dir/build-base-sources.json" "$build_apps"
+  python3 - "$build_dir" "$release_dir" <<'PY'
+import hashlib,json,sys
+from pathlib import Path
+build,evidence=map(Path,sys.argv[1:]);sys.path.insert(0,str(build/'deploy/production'))
+from joint_release_guards import verify_equivalent_build_base
+root=build/'deeplinkerp_branding'
+branding={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in root.rglob('*') if p.is_file() and '__pycache__' not in p.parts and p.suffix not in {'.pyc','.pyo'}}
+verify_equivalent_build_base(json.loads((evidence/'build-current-sources.json').read_bytes()),json.loads((evidence/'build-base-sources.json').read_bytes()),branding,json.loads((build/'release-source-manifest.json').read_bytes())['apps'])
+from pathlib import PurePosixPath
+package=PurePosixPath('home/frappe/frappe-bench/apps/deeplinkerp_branding/deeplinkerp_branding')
+retained=set(json.loads((evidence/'build-current-sources.json').read_bytes())['deeplinkerp_branding'])-set(branding)
+paths={str(package),*(str(parent) for parent in package.parents),*(str(package/name) for name in retained)}
+for name in retained:
+ paths.update(str(parent) for parent in (package/name).parents)
+(evidence/'build-preserved-paths.json').write_text(json.dumps(sorted(paths)))
+source=(build/'deploy/local/Dockerfile.unified-purchase').read_text()
+lines=source.splitlines(keepends=True)
+removed=[line for line in lines if line.startswith('COPY --chown=frappe:frappe ') and any(' '+name+'/' in line for name in ('crm-overlay','finance-overlay','oa-overlay'))]
+assert len(removed)==3, 'Unexpected overlay Dockerfile contract'
+(build/'Dockerfile.equivalent-base').write_text(''.join(line for line in lines if line not in removed))
+PY
+  metadata_paths=$(cat "$release_dir/build-preserved-paths.json")
+  for kind in current base; do
+    metadata_image=$old_image_id
+    if [[ "$kind" == base ]]; then metadata_image=$build_base_id; fi
+    docker run --rm --read-only --network none --entrypoint "$python" "$metadata_image" -c '
+import base64,json,os,stat,sys
+result={}
+for name in json.loads(sys.argv[1]):
+ path="/"+name; info=os.lstat(path)
+ result[name]={"type":stat.S_IFMT(info.st_mode),"mode":stat.S_IMODE(info.st_mode),"uid":info.st_uid,"gid":info.st_gid,
+  "link":os.readlink(path) if stat.S_ISLNK(info.st_mode) else None,
+  "xattrs":{key:base64.b64encode(os.getxattr(path,key,follow_symlinks=False)).decode() for key in sorted(os.listxattr(path,follow_symlinks=False))}}
+print(json.dumps(result,sort_keys=True))
+' "$metadata_paths" > "$release_dir/build-$kind-metadata.json"
+  done
+  python3 - "$release_dir" <<'PY'
+import json,sys
+from pathlib import Path
+root=Path(sys.argv[1]);current=json.loads((root/'build-current-metadata.json').read_bytes());base=json.loads((root/'build-base-metadata.json').read_bytes())
+assert current==base, 'Build base parent/retained source metadata differs'
+proof=json.loads((root/'build-base-proof.json').read_bytes());proof['preserved_metadata_paths']=len(current)
+(root/'build-base-proof.json').write_text(json.dumps(proof,sort_keys=True))
+PY
+  build_dockerfile="$build_dir/Dockerfile.equivalent-base"
+fi
 current_revision=$(revision_label frappe_docker-backend-1 branding)
 current_crm=$(revision_label frappe_docker-backend-1 crm)
 current_finance=$(revision_label frappe_docker-backend-1 finance)
@@ -573,16 +652,16 @@ test "$(docker image inspect "$old_image" --format '{{.Id}}')" = "$old_image_id"
 cp compose.custom.yaml "$release_dir/compose.before.yaml"
 new_image="deeplinkerp-custom:unified-purchase-$release_key"
 frozen_base="deeplinkerp-custom:unified-base-$release_key"
-docker image tag "$old_image_id" "$frozen_base"
-test "$(docker image inspect "$frozen_base" --format '{{.Id}}')" = "$old_image_id"
-docker build --build-arg "BASE_IMAGE=$frozen_base" --build-arg "BASE_IMAGE_ID=$old_image_id" --build-arg "BRANDING_SHA=$branding_sha" --build-arg "CRM_SHA=$crm_sha" --build-arg "FINANCE_SHA=$finance_sha" --build-arg "OA_SHA=$oa_sha" \
-  -f "$build_dir/deploy/local/Dockerfile.unified-purchase" -t "$new_image" "$build_dir"
+docker image tag "$build_base_id" "$frozen_base"
+test "$(docker image inspect "$frozen_base" --format '{{.Id}}')" = "$build_base_id"
+docker build --build-arg "BASE_IMAGE=$frozen_base" --build-arg "BASE_IMAGE_ID=$build_base_id" --build-arg "BRANDING_SHA=$branding_sha" --build-arg "CRM_SHA=$crm_sha" --build-arg "FINANCE_SHA=$finance_sha" --build-arg "OA_SHA=$oa_sha" \
+  -f "$build_dockerfile" -t "$new_image" "$build_dir"
 new_image_id=$(docker image inspect "$new_image" --format '{{.Id}}')
 for app in branding crm finance oa; do
   case "$app" in branding) expected=$branding_sha;; crm) expected=$crm_sha;; finance) expected=$finance_sha;; oa) expected=$oa_sha;; esac
   test "$(revision_label "$new_image_id" "$app")" = "$expected"
 done
-test "$(docker image inspect "$new_image_id" --format '{{index .Config.Labels "org.deeplinkerp.base.image"}}')" = "$old_image_id"
+test "$(docker image inspect "$new_image_id" --format '{{index .Config.Labels "org.deeplinkerp.base.image"}}')" = "$build_base_id"
 if (( main_only )); then run_main_only_release; exit; fi
 # Candidate preflight is read-only and command-only. No app is installed/global-migrated.
 command_runner "$new_image_id" "$python" "$guard" --tenant-preflight --erpnext-version "$expected_erpnext" > "$release_dir/tenants.json"

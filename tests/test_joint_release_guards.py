@@ -19,6 +19,32 @@ ROOT = Path(__file__).parents[1]
 
 
 class JointReleaseGuardTests(unittest.TestCase):
+	def test_fixed_base_rejects_layer_changes_outside_branding_whiteouts_and_links(self):
+		guard = self.module()
+		root = "home/frappe/frappe-bench/apps/deeplinkerp_branding/deeplinkerp_branding"
+		guard.verify_branding_layer_member(tarfile.TarInfo(root + "/hooks.py"))
+		for path,kind in (("etc/nginx/nginx.conf",tarfile.REGTYPE), (root+"/.wh.old",tarfile.REGTYPE),
+			(root+"/link",tarfile.SYMTYPE),("home/frappe/frappe-bench/env/pyvenv.cfg",tarfile.REGTYPE)):
+			member = tarfile.TarInfo(path); member.type = kind
+			with self.subTest(path=path),self.assertRaises(AssertionError): guard.verify_branding_layer_member(member)
+
+	def test_fixed_build_base_requires_equivalent_complete_sources_and_no_shared_app_changes(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard,"verify_equivalent_build_base"))
+		current = {"frappe":{"app.py":"native"},"deeplinkerp_branding":{"a.py":"old"},"china_finance":{"x.py":"finance"}}
+		base = copy.deepcopy(current); base["deeplinkerp_branding"]["a.py"] = "older"
+		overlay = {"a.py":"new"}
+		manifest = {"china_finance":{"x.py":{"before":"finance","after":"finance"}}}
+		guard.verify_equivalent_build_base(current,base,overlay,manifest)
+		for kind in ("native","missing","branding-extra","shared-overlay"):
+			changed = copy.deepcopy(base); changes = copy.deepcopy(manifest)
+			if kind == "native": changed["frappe"]["app.py"] = "drift"
+			elif kind == "missing": changed.pop("frappe")
+			elif kind == "branding-extra": changed["deeplinkerp_branding"]["unknown.py"] = "extra"
+			else: changes["china_finance"]["x.py"]["after"] = "new-finance"
+			with self.subTest(kind=kind),self.assertRaises(AssertionError):
+				guard.verify_equivalent_build_base(current,changed,overlay,changes)
+
 	def module(self):
 		path = ROOT / "deploy/production/joint_release_guards.py"
 		self.assertTrue(path.exists(), "Durable joint release guards are missing")
@@ -909,7 +935,7 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 	def test_only_contract_oa_fields_are_in_scope_not_existing_po_or_native_oa_flags(self):
 		module = self.metadata_module()
 		fields = module.SOURCE_FIELD_ORDER
-		self.assertEqual(len(fields), 12)
+		self.assertEqual(len(fields), 13)
 		fake = types.SimpleNamespace(get_app_path=lambda app, filename: str(ROOT / app / filename))
 		with patch.dict(sys.modules, {"frappe": fake}):
 			for field in fields:
@@ -923,7 +949,7 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 		self.assertTrue(hasattr(module, "_source_custom_fields"))
 		fake = types.SimpleNamespace(get_app_path=lambda app, filename: str(ROOT / app / filename))
 		with patch.dict(sys.modules, {"frappe": fake}): fields = module._source_custom_fields()
-		self.assertEqual(len(fields), 12)
+		self.assertEqual(len(fields), 13)
 		for name, field in fields.items():
 			visible = name in {"custom_purchase_beneficiary_company", "custom_purchase_company_proposal", "custom_purchase_project", "custom_purchase_pending_reason"}
 			self.assertEqual((field.get("hidden", 0), field["read_only"], field["no_copy"]), (int(not visible), 1, 1))
@@ -1358,7 +1384,7 @@ class CombinedReleaseContractTests(unittest.TestCase):
 		fake = types.SimpleNamespace(get_app_path=lambda app, name: str(ROOT / app / name))
 		with patch.dict(sys.modules, {"frappe": fake}):
 			fields = module._source_custom_fields()
-		self.assertEqual(len(fields), 12)
+		self.assertEqual(len(fields), 13)
 		field = fields["custom_purchase_pending_reason"]
 		self.assertEqual((field["fieldtype"], field.get("hidden", 0), field["read_only"], field["no_copy"], field.get("permlevel", 0)), ("Small Text", 0, 1, 1, 0))
 		self.assertEqual(module._source_column(field, 20)["type"], "text")

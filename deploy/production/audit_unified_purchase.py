@@ -11,7 +11,7 @@ import frappe
 SITE = "deeplinkerp.com"
 BENCH = Path("/home/frappe/frappe-bench")
 REQUIRED_SOURCE_APPS = ("deeplinkerp_branding", "china_finance", "crm_integration", "oa_purchase_request")
-OPERATING_MODELS = ("Operating Expense Company Map", "Operating Expense Source", "Operating Expense Mapping", "Operating Expense Event", "Operating Expense Sync Settings", "Purchase Fulfilment Link","Operating Expense Takeover","Operating Expense Payment")
+OPERATING_MODELS = ("Operating Expense Company Map", "Operating Expense Source", "Operating Expense Mapping", "Operating Expense Event", "Operating Expense Sync Settings", "Purchase Fulfilment Link","Operating Expense Takeover","Operating Expense Payment","Purchase Source Mapping Rule")
 
 
 def source_files(app):

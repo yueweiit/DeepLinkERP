@@ -30,6 +30,9 @@
 .dlp-document-fields > :last-child:has(textarea) { grid-column: 1 / -1; }
 .dlp-document-items { max-width: 100%; overflow: auto; }
 .dlp-document-items table { min-width: 620px; font-size: 13px; }
+.dlp-source-adaptation .dlp-document-items table { min-width: 1320px; }
+.dlp-source-adaptation .dlp-document-items th,
+.dlp-source-adaptation .dlp-document-items td { white-space: nowrap; word-break: normal; }
 .dlp-document-items th { background: #f4f7fb; font-weight: 500; }
 .dlp-document-items td, .dlp-document-items th { padding: 5px 7px; vertical-align: middle; }
 .dlp-document-items [data-edit] { min-width: 110px; }

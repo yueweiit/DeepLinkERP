@@ -27,7 +27,7 @@ add_to_apps_screen = [
 # include js, css files in header of desk.html
 app_include_css = [
 	"/assets/deeplinkerp_branding/css/deeplinkerp_navigation.css?v=0.0.10",
-	"/assets/deeplinkerp_branding/css/purchase_payments.css?v=0.0.9",
+	"/assets/deeplinkerp_branding/css/purchase_payments.css?v=0.0.10",
 	"/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.27",
     "/assets/deeplinkerp_branding/css/operating_expenses.css?v=0.0.6",
 	"/assets/deeplinkerp_branding/css/sales_order_list.css?v=0.0.11",
@@ -37,7 +37,7 @@ app_include_js = [
 	"/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.31",
 	"/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.29",
 	"/assets/deeplinkerp_branding/js/crossborder_procurement.js?v=0.0.5",
-	"/assets/deeplinkerp_branding/js/purchase_source.js?v=0.0.2",
+	"/assets/deeplinkerp_branding/js/purchase_source.js?v=0.0.3",
     "/assets/deeplinkerp_branding/js/operating_payment_panel.js?v=0.0.8",
 	"/assets/deeplinkerp_branding/js/operating_expense_drawer.js?v=0.0.17",
 	"/assets/deeplinkerp_branding/js/operating_expenses.js?v=0.0.8",

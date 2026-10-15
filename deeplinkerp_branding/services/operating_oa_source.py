@@ -367,7 +367,9 @@ def read_page(connection_factory, limit, until, cursor=None, identity=None, *, p
     form_values = "form_component_values" if count_instances else _OPERATING_FORM_VALUES
     sql = (
         "WITH page AS MATERIALIZED (SELECT corp_id,process_instance_id,business_id,process_code,status,result,"
-        "originator_user_id,originator_user_name,create_time,updated_at,deleted_at,"
+        "originator_user_id,originator_user_name,"
+        + ("originator_dept_id,originator_dept_name," if count_instances else "")
+        + "create_time,updated_at,deleted_at,"
         + form_values + "::text AS form_component_values FROM costing_read.approval_instances_v2 WHERE "
         + " AND ".join(conditions)
         + " ORDER BY corp_id,process_instance_id LIMIT %s), "

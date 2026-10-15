@@ -50,7 +50,7 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		self.assertLess(scripts.index(engine), scripts.index(adapter))
 		payments = next(path for path in scripts if path.startswith("/assets/deeplinkerp_branding/js/purchase_payments.js?v="))
 		self.assertLess(scripts.index(engine), scripts.index(payments))
-		source = "/assets/deeplinkerp_branding/js/purchase_source.js?v=0.0.2"
+		source = "/assets/deeplinkerp_branding/js/purchase_source.js?v=0.0.3"
 		self.assertLess(scripts.index(payments), scripts.index(source))
 		self.assertLess(scripts.index(source), scripts.index(adapter))
 
@@ -63,7 +63,7 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		self.assertEqual(sum("/crossborder_procurement.js" in path for path in scripts), 1)
 		self.assertLess(scripts.index(payments), scripts.index(crossborder))
 		self.assertLess(scripts.index(crossborder), scripts.index("/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.13"))
-		self.assertIn("/assets/deeplinkerp_branding/css/purchase_payments.css?v=0.0.9", hooks.app_include_css)
+		self.assertIn("/assets/deeplinkerp_branding/css/purchase_payments.css?v=0.0.10", hooks.app_include_css)
 		self.assertNotIn("crossborder_procurement", str(getattr(hooks, "web_include_js", None)))
 
 	def test_desk_loads_compact_styles_without_changing_website_assets(self):
