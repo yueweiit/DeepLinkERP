@@ -1,0 +1,39 @@
+{
+ "app": "overseas_costing",
+ "docstatus": 0,
+ "doctype": "Workspace Sidebar",
+ "idx": 0,
+ "items": [
+  {
+   "child": 0,
+   "collapsible": 1,
+   "icon": "calculator",
+   "indent": 0,
+   "keep_closed": 0,
+   "label": "\u7efc\u5408\u6210\u672c\u5de5\u4f5c\u53f0",
+   "link_to": "overseas-cost-workbench",
+   "link_type": "Page",
+   "show_arrow": 0,
+   "type": "Link"
+  },
+  {
+   "child": 0,
+   "collapsible": 1,
+   "icon": "calculator",
+   "indent": 0,
+   "keep_closed": 0,
+   "label": "\u7a7a\u8fd0\u6d77\u8fd0\u6210\u672c\u5bf9\u6bd4",
+   "link_to": "air-sea-cost-comparison",
+   "link_type": "Page",
+   "show_arrow": 0,
+   "type": "Link"
+  }
+ ],
+ "modified": "2026-10-14 15:08:56.468056",
+ "modified_by": "Administrator",
+ "module": "Overseas Costing",
+ "name": "\u6d77\u5916\u6210\u672c\u6838\u7b97",
+ "owner": "Administrator",
+ "standard": 1,
+ "title": "\u6d77\u5916\u6210\u672c\u6838\u7b97"
+}

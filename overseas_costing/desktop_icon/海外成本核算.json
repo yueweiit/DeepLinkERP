@@ -1,0 +1,23 @@
+{
+ "app": "overseas_costing",
+ "bg_color": "blue",
+ "creation": "2026-10-14 15:08:56.483000",
+ "docstatus": 0,
+ "doctype": "Desktop Icon",
+ "hidden": 0,
+ "icon": "",
+ "icon_image": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20width%3D%2296%22%20height%3D%2296%22%20viewBox%3D%220%200%2096%2096%22%3E%3Crect%20width%3D%2296%22%20height%3D%2296%22%20rx%3D%2222%22%20fill%3D%22%230B8CF0%22/%3E%3Cpath%20d%3D%22M25%2026h46v44H25z%22%20fill%3D%22none%22%20stroke%3D%22white%22%20stroke-width%3D%226%22%20stroke-linejoin%3D%22round%22/%3E%3Cpath%20d%3D%22M34%2039h28M34%2052h12M56%2052h6M34%2064h28%22%20stroke%3D%22white%22%20stroke-width%3D%226%22%20stroke-linecap%3D%22round%22/%3E%3Cpath%20d%3D%22M63%2018v17h17%22%20fill%3D%22none%22%20stroke%3D%22white%22%20stroke-width%3D%226%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22/%3E%3C/svg%3E",
+ "icon_type": "Link",
+ "idx": 102,
+ "label": "\u6d77\u5916\u6210\u672c\u6838\u7b97",
+ "link_to": "\u6d77\u5916\u6210\u672c\u6838\u7b97",
+ "link_type": "Workspace Sidebar",
+ "modified": "2026-10-14 15:08:56.483000",
+ "modified_by": "Administrator",
+ "name": "\u6d77\u5916\u6210\u672c\u6838\u7b97",
+ "owner": "Administrator",
+ "parent_icon": "",
+ "restrict_removal": 0,
+ "roles": [],
+ "standard": 1
+}
