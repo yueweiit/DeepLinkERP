@@ -1,6 +1,7 @@
 """Test isolated recovery and native CLI parsing; never invoke a release."""
 
 import contextlib
+import fcntl
 import hashlib
 import io
 import json
@@ -21,6 +22,139 @@ class ReleaseRecoveryTests(unittest.TestCase):
 	def release_source(self):
 		return (Path(__file__).parents[1] / "deploy/production/deploy_unified_purchase.sh").read_text()
 
+	def test_crm_scope_has_independent_receipts_budget_and_preserved_revision_labels(self):
+		source = self.release_source()
+		self.assertIn("--crm-only", source)
+		self.assertIn('"$crm_archive" "$finance_archive" "$oa_archive" "$old_image_id"', source)
+		self.assertIn('release_identity=', source)
+		self.assertNotIn('\ncrm_sha=$current_crm\n', source)
+		self.assertIn('joint-${release_identity:0:12}.json', source)
+		self.assertIn('--candidate-sha "${release_identity:-$branding_sha}"', source)
+		self.assertIn('CRM-only requires main scope', source)
+		self.assertLess(source.index("if (( crm_only )); then verify_crm_frozen_overlay; fi"), source.index("source_sync_timer_active=0"))
+		self.assertIn("Candidate differs from preflight-approved full sources", source)
+
+	def test_both_entrypoint_preflights_pass_crm_scope_without_changing_legacy_commands(self):
+		commands = [line for line in self.release_source().splitlines() if line.lstrip().startswith('command_runner "$new_image_id" "$python" "$guard" --tenant-preflight')]
+		self.assertEqual(len(commands), 2)
+		for command in commands:
+			for crm_only in (True, False):
+				with self.subTest(command=command, crm_only=crm_only), tempfile.TemporaryDirectory() as tmp:
+					script = f"""
+set -euo pipefail
+release_dir=$1;new_image_id=new;python=python;guard=guard;expected_erpnext=16.23.0
+metadata_scope_args=({'--crm-only' if crm_only else ''})
+command_runner() {{ {shlex.quote(sys.executable)} -c 'import json,sys;print(json.dumps(sys.argv[1:]))' "$@"; }}
+""" + command
+					result = subprocess.run(["bash", "-c", script, "test", tmp], capture_output=True, text=True)
+					self.assertEqual(result.returncode, 0, result.stderr)
+					args = json.loads((Path(tmp) / "tenants.json").read_text())
+					expected = ["new", "python", "guard", "--tenant-preflight"]
+					if "--main-only" in command:
+						expected.append("--main-only")
+					expected += ["--erpnext-version", "16.23.0"] + (["--crm-only"] if crm_only else [])
+					self.assertEqual(args, expected)
+
+	def test_runtime_inventory_reads_physical_packages_independently_of_requested_baseline_list(self):
+		function = self.shell_function("verify_crm_runtime_sources")
+		code = function.split(" -c '\n", 1)[1].split("\n' ", 1)[0]
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			for app in ("crm_integration", "client_akivision"):
+				(root / app / app).mkdir(parents=True)
+				(root / app / app / "hooks.py").write_text(app)
+			with patch("pathlib.Path", side_effect=lambda value: root if value == "/home/frappe/frappe-bench/apps" else Path(value)), patch.object(sys, "argv", ["-c", json.dumps(["crm_integration"])]), contextlib.redirect_stdout(io.StringIO()) as output:
+				exec(code, {})
+			self.assertEqual(set(json.loads(output.getvalue())), {"crm_integration", "client_akivision"})
+
+	def test_crm_archive_must_match_exact_manifest_even_when_extra_source_is_safe_path(self):
+		function = self.shell_function("prepare_sources")
+		for extra in (False, True):
+			with self.subTest(extra=extra), tempfile.TemporaryDirectory() as tmp:
+				root = Path(tmp); (root / "build").mkdir()
+				manifest = {"scope": "crm-only", "apps": {"crm_integration": {"api.py": {"before": "old", "after": hashlib.sha256(b"new").hexdigest()}}}}
+				for kind, files in (("branding", {"deeplinkerp_branding/hooks.py": b"retained"}), ("crm", {"crm-overlay/crm_integration/api.py": b"new", **({"crm-overlay/crm_integration/unreviewed.py": b"bad"} if extra else {})})):
+					with tarfile.open(root / (kind + ".tar.gz"), "w:gz") as tar:
+						for name, data in dict(files, **{"release-source-manifest.json": json.dumps(manifest).encode()}).items():
+							member = tarfile.TarInfo(name); member.size = len(data); tar.addfile(member, io.BytesIO(data))
+				code = function + '\nbuild_dir="$1"; archive="$2"; crm_archive="$3"; finance_archive=""; oa_archive=""; prepare_sources\n'
+				result = subprocess.run(["bash", "-c", code, "test", str(root / "build"), str(root / "branding.tar.gz"), str(root / "crm.tar.gz")], capture_output=True, text=True)
+				self.assertEqual(result.returncode == 0, not extra, result.stderr)
+
+	def test_shared_cutover_preserves_immutable_assets_manifest(self):
+		source = self.release_source()
+		self.assertFalse('/usr/bin/touch /home/frappe/frappe-bench/sites/assets/assets.json' in source)
+
+	def test_retirement_proofs_are_not_tenant_database_audits(self):
+		source = self.release_source()
+		self.assertFalse("glob('*.before.json')" in source)
+		self.assertFalse('glob("*.before.json")' in source)
+		with tempfile.TemporaryDirectory() as tmp:
+			root = Path(tmp)
+			(root / 'tenants.json').write_text(json.dumps({'sites': {'deeplinkerp.com': {}, 'other.test': {}}}))
+			(root / 'retirement-routing.before.json').write_text('{}')
+			for name in ('before.json', 'other.test.before.json'):
+				(root / name).write_text('{}')
+			code = self.shell_function('tenant_audit_paths') + '\ntenant_audit_paths "$1"\n'
+			result = subprocess.run(['bash', '-c', code, 'test', tmp], capture_output=True, text=True)
+			self.assertEqual(result.returncode, 0, result.stderr)
+			self.assertEqual(json.loads(result.stdout), [str(root / 'before.json'), str(root / 'other.test.before.json')])
+
+	def test_release_backup_never_invokes_retention_cleanup(self):
+		source = self.release_source()
+		self.assertFalse('bench --site deeplinkerp.com backup --with-files --compress' in source)
+		backup = self.shell_function('capture_native_backup')
+		self.assertIn('BackupGenerator', backup)
+		self.assertIn('get_backup(force=True', backup)
+		self.assertNotIn('new_backup(', backup)
+		self.assertNotIn('delete_temp_backups', backup)
+		code = backup.split(" -c '\n", 1)[1].split("\n' \"release-$release_key\"", 1)[0]
+		with tempfile.TemporaryDirectory() as tmp:
+			root = Path(tmp)
+			(root / 'private/backups').mkdir(parents=True)
+			retained = root / 'private/backups/retained-directory'
+			retained.mkdir()
+			(retained / 'old-backup').write_bytes(b'keep')
+			calls = []
+			class NativeBackup:
+				def __init__(self, *args, **kwargs):
+					calls.append(('init', kwargs))
+					self.root = Path(kwargs['backup_path'])
+				def get_backup(self, **kwargs):
+					calls.append(('backup', kwargs))
+					for name in ('backup_path_db', 'backup_path_files', 'backup_path_private_files', 'backup_path_conf'):
+						path = self.root / name
+						path.write_bytes(b'nonempty')
+						setattr(self, name, str(path))
+			frappe = types.SimpleNamespace(
+				init=lambda **kwargs: calls.append(('site', kwargs)), connect=lambda: None,
+				destroy=lambda: calls.append(('destroy', {})), get_site_path=lambda *parts: str(root.joinpath(*parts)),
+				conf=types.SimpleNamespace(db_name='db', db_user='user', db_password='test-only', db_socket=None, db_host='db', db_port=3306, db_type='mariadb'),
+			)
+			with patch.dict(sys.modules, {'frappe': frappe, 'frappe.utils': types.ModuleType('frappe.utils'), 'frappe.utils.backups': types.SimpleNamespace(BackupGenerator=NativeBackup)}), patch.object(sys, 'argv', ['-c', 'release-test']), contextlib.redirect_stdout(io.StringIO()) as output:
+				exec(code, {})
+			self.assertTrue(calls[1][1]['ignore_conf'])
+			self.assertTrue(calls[1][1]['compress_files'])
+			self.assertEqual(calls[2], ('backup', {'force': True, 'ignore_files': False}))
+			self.assertEqual(calls[-1][0], 'destroy')
+			self.assertTrue(json.loads(output.getvalue())['full_backup'])
+			self.assertEqual((retained / 'old-backup').read_bytes(), b'keep')
+
+	def test_explicit_main_only_entrypoint_reuses_build_and_never_enters_shared_cutover(self):
+		source = self.release_source()
+		self.assertIn("--main-only", source, "Explicit authorized main-only lane is missing")
+		self.assertIn("run_main_only_release() {", source)
+		main = self.shell_function("run_main_only_release")
+		self.assertIn('--joint-apply --receipt "$native_receipt"', main)
+		self.assertIn('capture_release_audit before "$release_dir/before.json"', main)
+		self.assertIn('capture_release_audit after "$release_dir/after.json"', main)
+		self.assertNotIn("--native-only", main)
+		self.assertNotIn("--with-files", main)
+		self.assertNotIn('"${dc[@]}"', main)
+		self.assertNotIn("assets.json", main)
+		self.assertLess(main.index("--record-resume"), main.index("main_lane resume"))
+		self.assertIn("if (( main_only )); then run_main_only_release; exit; fi", source)
+
 	def worker_staging_commands(self):
 		return [
 			shlex.split(line.strip())[1:]
@@ -29,6 +163,41 @@ class ReleaseRecoveryTests(unittest.TestCase):
 			and "queue-long queue-short scheduler" in line
 			and shlex.split(line.strip())[1] in {"create", "up"}
 		]
+
+	def test_shared_single_site_approval_requires_retirement_pin_and_cannot_mix_isolated_lane(self):
+		prefix = self.release_source().split("# The final joint candidate", 1)[0]
+		for mode in ("legacy", "bare-main", "retired", "mixed-isolated", "missing-pin"):
+			with self.subTest(mode=mode):
+				flags = [] if mode in {"legacy", "bare-main"} else ["--retirement-receipt", "/home/frappe/frappe-bench/sites/.deeplinkerp-retired-sites/2026-10-10/retirement-receipt.json", "d" * 64 if mode != "missing-pin" else ""]
+				if mode == "mixed-isolated":
+					flags.insert(0, "--main-only")
+				approval = ("deeplinkerp.com,akivision.deeplinkerp.com,latingo.deeplinkerp.com,yuewei.deeplinkerp.com", "akivision.deeplinkerp.com,latingo.deeplinkerp.com,yuewei.deeplinkerp.com") if mode == "legacy" else ("deeplinkerp.com", "")
+				args = ["archive", "a" * 40, "old-image", "old-id", "", "", "finance", "b" * 40, "oa", "c" * 40, *approval]
+				result = subprocess.run(["bash", "-c", prefix, "release-test", *flags, *args], capture_output=True, text=True)
+				self.assertEqual(result.returncode == 0, mode in {"legacy", "retired"}, result.stderr)
+
+	def test_command_runner_passes_pinned_retirement_to_existing_shared_container(self):
+		script = self.shell_function("command_runner") + """
+set -eo pipefail
+main_prepared=0
+private_runtime_gid=1000
+release_network=shared-net
+build_dir=/frozen-source
+release_dir=/verified-evidence
+sites_spec=existing-sites
+branding_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+resume_receipt=/existing-resume
+retirement_receipt=/home/frappe/frappe-bench/sites/.deeplinkerp-retired-sites/2026-10-10/retirement-receipt.json
+retirement_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+main_lane() { return 0; }
+docker() { printf '%s\\n' "$@"; }
+command_runner old-image python guard --runtime-proof
+"""
+		result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+		self.assertEqual(result.returncode, 0, result.stderr)
+		self.assertIn("DEEPLINKERP_RETIREMENT_RECEIPT=/home/frappe/frappe-bench/sites/.deeplinkerp-retired-sites/2026-10-10/retirement-receipt.json", result.stdout)
+		self.assertIn("DEEPLINKERP_RETIREMENT_SHA256=" + "d" * 64, result.stdout)
+		self.assertNotIn("deeplinkerp_main", result.stdout)
 
 	def test_worker_staging_never_starts_jobs_and_checks_cli_before_maintenance(self):
 		commands = self.worker_staging_commands()
@@ -40,15 +209,30 @@ class ReleaseRecoveryTests(unittest.TestCase):
 		source = self.release_source()
 		preflight = '"${dc[@]}" up --no-start --force-recreate --no-deps --help > /dev/null'
 		self.assertIn(preflight, source)
-		self.assertLess(source.index(preflight), source.index("set-maintenance-mode on"))
+		self.assertLess(source.index(preflight), source.index("--maintenance-on --tenant-receipt"))
+
+	def test_secondary_native_scope_requires_separate_approval_and_all_audits_before_shared_resume(self):
+		source = self.release_source()
+		self.assertIn("approved_native_schema_sites=${12:-}", source)
+		self.assertLess(
+			source.index("approved_native_schema_sites=${12:-}"), source.index("systemctl --user stop")
+		)
+		self.assertIn('--site "$site" --native-only', source)
+		self.assertIn('metadata_started_sites+=("$site")', source)
+		legacy = source.split("# All six containers are staged stopped.", 1)[1]
+		self.assertLess(legacy.index('for site in "${sites[@]}"; do'), legacy.index("verify_audit_ownership"))
+		self.assertLess(source.index("for site in sites:"), source.index("--producer candidate-serving"))
+		self.assertIn("for ((i=${#metadata_started_sites[@]}-1; i>=0; i--)); do", source)
 
 	@unittest.skipUnless(shutil.which("docker"), "Docker CLI is unavailable; semantic guard still runs")
 	def test_worker_staging_flags_are_accepted_by_actual_compose_parser(self):
 		for command in self.worker_staging_commands():
 			with self.subTest(command=command):
 				# --help validates native flags but does not load a site or contact Docker's daemon.
-				args = command[:command.index("queue-long")]
-				result = subprocess.run(["docker", "compose", *args, "--help"], capture_output=True, text=True)
+				args = command[: command.index("queue-long")]
+				result = subprocess.run(
+					["docker", "compose", *args, "--help"], capture_output=True, text=True
+				)
 				self.assertEqual(result.returncode, 0, result.stderr)
 
 	def shell_function(self, name):
@@ -60,12 +244,18 @@ class ReleaseRecoveryTests(unittest.TestCase):
 		source = self.release_source()
 		self.assertIn("retarget_existing_source_sync() {", source)
 		tail = source.split("# Cutover is verified;", 1)[1]
-		self.assertLess(tail.index("trap - EXIT"), tail.index("flock -u 9"))
+		self.assertLess(
+			tail.index('retarget_existing_source_sync "$new_image_id"'),
+			tail.index("trap - EXIT"),
+			"Source handoff failure must retain the forward-only recovery trap",
+		)
 		self.assertLess(tail.index("flock -u 9"), tail.index('retarget_existing_source_sync "$new_image_id"'))
 		function = self.shell_function("retarget_existing_source_sync")
 		for active in (0, 1):
 			with self.subTest(active=active):
-				script = function + '''
+				script = (
+					function
+					+ """
 set -euo pipefail
 source_sync_timer_active=ACTIVE
 build_dir=/verified-build
@@ -74,21 +264,149 @@ sha256sum() { printf '%s  %s\\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 python3() { printf 'INSTALL %s\\n' "$*"; }
 systemctl() { printf 'TIMER %s\\n' "$*"; }
 retarget_existing_source_sync sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-'''.replace("ACTIVE", str(active))
+""".replace("ACTIVE", str(active))
+				)
 				result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
 				self.assertEqual(result.returncode, 0, result.stderr)
 				if active:
-					self.assertIn("dedicated_source_sync.py install --revision " + "a" * 40, result.stdout)
+					self.assertIn("dedicated_source_sync.py retarget --revision " + "a" * 40, result.stdout)
 					self.assertIn("--image-id sha256:" + "c" * 64, result.stdout)
 					self.assertIn("--runner-sha256 " + "b" * 64 + " --start-timer", result.stdout)
-					self.assertIn("TIMER --user is-active --quiet deeplinkerp-source-sync.timer", result.stdout)
+					self.assertIn(
+						"TIMER --user is-active --quiet deeplinkerp-source-sync.timer", result.stdout
+					)
 				else:
 					self.assertEqual(result.stdout, "")
 
+	def test_crm_timer_guard_is_armed_before_stop_and_restores_only_proven_original_state(self):
+		source = self.release_source()
+		self.assertLess(source.index("trap recover_crm_pre_cutover EXIT"), source.index("if (( source_sync_timer_active )); then systemctl --user stop"))
+		function = self.shell_function("recover_crm_pre_cutover")
+		for active, runtime, config in ((1, 0, "same"), (0, 0, "same"), (1, 1, "same"), (1, 0, "changed")):
+			with self.subTest(active=active,runtime=runtime,config=config):
+				script = function + f"""
+set -euo pipefail
+source_sync_timer_active={active};timer_guard_image=old;current_revision=branding;current_crm=crm;current_finance=finance;current_oa=oa
+timer_guard_config=/test/config;timer_guard_config_sha=same
+verify_running_release() {{ return {runtime}; }}
+sha256sum() {{ printf '%s  config\n' '{config}'; }}
+flock() {{ :; }}
+systemctl() {{ printf 'TIMER %s\n' "$*"; }}
+trap recover_crm_pre_cutover EXIT
+false
+"""
+				result=subprocess.run(["bash","-c",script],capture_output=True,text=True)
+				self.assertNotEqual(result.returncode,0)
+				self.assertEqual("start deeplinkerp-source-sync.timer" in result.stdout, bool(active and runtime==0 and config=="same"),result.stderr)
+
+	def test_crm_timer_original_state_survives_retry_and_rejects_config_drift(self):
+		function=self.shell_function("record_crm_source_timer_state")
+		with tempfile.TemporaryDirectory() as tmp:
+			root=Path(tmp);config=root/"config.json";config.write_text('{"pins":"original"}')
+			script=function+f'\npython3() {{ {shlex.quote(sys.executable)} "$@"; }}\n'+"""
+set -euo pipefail
+release_identity=release;timer_guard_image=image;current_revision=branding;current_crm=crm;current_finance=finance;current_oa=oa
+record_crm_source_timer_state "$1" "$2" "$3"
+"""
+			args=["bash","-c",script,"test",str(root/"timer.json"),str(config)]
+			first=subprocess.run(args+["1"],capture_output=True,text=True)
+			self.assertEqual(first.returncode,0,first.stderr);self.assertEqual(first.stdout.strip(),"1")
+			retry=subprocess.run(args+["0"],capture_output=True,text=True)
+			self.assertEqual(retry.returncode,0,retry.stderr);self.assertEqual(retry.stdout.strip(),"1")
+			config.write_text('{"pins":"different"}')
+			drift=subprocess.run(args+["0"],capture_output=True,text=True)
+			self.assertNotEqual(drift.returncode,0)
+
+	def test_crm_main_prepare_failure_before_seal_restores_timer_and_preserves_exit_code(self):
+		functions = "".join(self.shell_function(name) for name in (
+			"recover_crm_pre_cutover", "recover_main_only", "run_main_only_release",
+		))
+		for crm_only, active, runtime, config in ((1, 1, 0, "same"), (0, 1, 0, "same"), (1, 0, 0, "same"), (1, 1, 1, "same"), (1, 1, 0, "changed")):
+			with self.subTest(crm_only=crm_only, active=active, runtime=runtime, config=config), tempfile.TemporaryDirectory() as tmp:
+				script = functions + f"""
+set -euo pipefail
+release_dir=$1;crm_only={crm_only};source_sync_timer_active={active}
+new_image_id=new;old_image_id=old;python=python;guard=guard;expected_erpnext=16.23.0;branding_sha=branding
+timer_guard_image=old;current_revision=branding;current_crm=crm;current_finance=finance;current_oa=oa
+timer_guard_config=/test/config;timer_guard_config_sha=same
+command_runner() {{ :; }}
+main_lane() {{ printf 'LANE %s\\n' "$*" >&2; [[ "$1" != prepare ]] || return 17; return 99; }}
+capture_release_audit() {{ printf 'UNEXPECTED audit\\n' >&2; return 99; }}
+verify_running_release() {{ return {runtime}; }}
+sha256sum() {{ printf '%s  config\\n' '{config}'; }}
+flock() {{ :; }}
+systemctl() {{ printf 'TIMER %s\\n' "$*"; }}
+trap recover_crm_pre_cutover EXIT
+run_main_only_release
+"""
+				result = subprocess.run(["bash", "-c", script, "test", tmp], capture_output=True, text=True)
+				self.assertEqual(result.returncode, 17, result.stderr)
+				self.assertFalse((Path(tmp) / "main-seal.json").exists())
+				self.assertEqual("TIMER --user start deeplinkerp-source-sync.timer" in result.stdout, bool(crm_only and active and runtime == 0 and config == "same"), result.stderr)
+				self.assertEqual("TIMER --user is-active --quiet deeplinkerp-source-sync.timer" in result.stdout, bool(crm_only and active and runtime == 0 and config == "same"), result.stderr)
+				self.assertNotIn("UNEXPECTED", result.stderr)
+				self.assertEqual(result.stderr.count("LANE "), 1, result.stderr)
+
+	def test_crm_pre_cutover_timer_restart_and_verification_keep_both_release_locks(self):
+		with tempfile.TemporaryDirectory() as tmp:
+			root = Path(tmp)
+			probe = root / "lock_probe.py"
+			probe.write_text("""
+import fcntl, sys
+action, *args = sys.argv[1:]
+if action == 'acquire':
+    for fd in (8, 9):
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+elif action == 'unlock':
+    fcntl.flock(int(args[0]), fcntl.LOCK_UN)
+else:
+    for path in args[:2]:
+        with open(path, 'r+') as competitor:
+            try:
+                fcntl.flock(competitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass
+            else:
+                raise SystemExit('Competing release acquired ' + path)
+    print('LOCKED ' + ' '.join(args[2:]))
+""")
+			script = self.shell_function("recover_crm_pre_cutover") + f"""
+set -euo pipefail
+test_python={shlex.quote(sys.executable)};lock_probe={shlex.quote(str(probe))}
+lock8=$1/global.lock;lock9=$1/release.lock
+exec 8>"$lock8" 9>"$lock9"
+"$test_python" "$lock_probe" acquire
+source_sync_timer_active=1;timer_guard_image=old;current_revision=branding;current_crm=crm;current_finance=finance;current_oa=oa
+timer_guard_config=/test/config;timer_guard_config_sha=same
+verify_running_release() {{ return 0; }}
+sha256sum() {{ printf 'same  config\\n'; }}
+flock() {{ "$test_python" "$lock_probe" unlock "$2"; }}
+systemctl() {{ "$test_python" "$lock_probe" probe "$lock8" "$lock9" "$@"; }}
+trap recover_crm_pre_cutover EXIT
+(exit 23)
+"""
+			result = subprocess.run(["bash", "-c", script, "test", tmp], capture_output=True, text=True, timeout=10)
+			self.assertEqual(result.returncode, 23, result.stderr)
+			self.assertIn("LOCKED --user start deeplinkerp-source-sync.timer", result.stdout, result.stderr)
+			self.assertIn("LOCKED --user is-active --quiet deeplinkerp-source-sync.timer", result.stdout, result.stderr)
+			for path in (root / "global.lock", root / "release.lock"):
+				with path.open("r+") as released:
+					fcntl.flock(released, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
 	def audit_module(self, fake_frappe):
 		metadata = types.ModuleType("procurement_release_metadata")
-		metadata.__dict__.update(runpy.run_path(str(Path(__file__).parents[1] / "deploy/production/procurement_release_metadata.py")))
-		binding = patch.dict(sys.modules, {"procurement_release_metadata": metadata})
+		metadata.__dict__.update(
+			runpy.run_path(
+				str(Path(__file__).parents[1] / "deploy/production/procurement_release_metadata.py")
+			)
+		)
+		guard = types.ModuleType("joint_release_guards")
+		guard.__dict__.update(
+			runpy.run_path(str(Path(__file__).parents[1] / "deploy/production/joint_release_guards.py"))
+		)
+		binding = patch.dict(
+			sys.modules, {"procurement_release_metadata": metadata, "joint_release_guards": guard}
+		)
 		binding.start()
 		self.addCleanup(binding.stop)
 		with patch.dict(sys.modules, {"frappe": fake_frappe}):
@@ -212,27 +530,28 @@ retarget_existing_source_sync sha256:ccccccccccccccccccccccccccccccccccccccccccc
 			"Page reload recreates permission children",
 		)
 		self.assertNotIn("reload-doc crm_integration doctype sales_production_release_permission", source)
-		self.assertIn("Joint release forbids additional app overlays", source)
+		self.assertIn("CRM must remain the independently verified base package", source)
 		self.assertLess(
 			source.index('capture_release_audit before "$release_dir/before.json"'),
-			source.index("switched=1"),
+			source.index("# All six containers are staged stopped."),
 		)
 		self.assertLess(
 			source.index('capture_release_audit after "$release_dir/after.json"'),
-			source.index("maintenance=0", source.index("switched=1")),
+			source.index("--producer candidate-serving"),
 		)
 		page_path = "deeplinkerp_branding/deeplinkerp_branding/page/purchase_payment_records/purchase_payment_records.json"
-		self.assertIn(f'chmod 644 "$build_dir/{page_path}"', source)
-		args = source.rsplit("audit_args=", 1)[1].split("\n# The private release umask", 1)[0]
+		self.assertIn('chmod -R a+rX "$build_dir"', source)
+		args = source.rsplit("audit_args=", 1)[1].split("\n", 1)[0]
 		mock = (
 			self.shell_function("capture_release_audit")
 			+ f"""
 build_dir="$1"
 native_receipt=/private/joint-receipt.json
+old_image_id=old-image
 dc=(docker compose)
 audit_args={args}
 chmod() {{ return 0; }}
-docker() {{ printf '%s\\n' "$*"; }}
+command_runner() {{ printf '%s\\n' "$*"; }}
 capture_release_audit before "$build_dir/before.json"
 capture_release_audit after "$build_dir/after.json"
 """
@@ -244,26 +563,32 @@ capture_release_audit after "$build_dir/after.json"
 				["bash", "-c", mock, "page-release-test", tmp], capture_output=True, text=True
 			)
 			self.assertEqual(result.returncode, 0, result.stderr)
-			self.assertEqual(
-				result.stdout.count(
-					f"cp {tmp}/{page_path} frappe_docker-backend-1:/tmp/purchase-payment-records.json"
-				),
-				2,
-			)
+			self.assertEqual(result.stdout, "", "No live-backend file copy during command-only audit")
 			for phase in ("before", "after"):
 				output = (root / (phase + ".json")).read_text()
-				self.assertIn("--purchase-payment-page-source /tmp/purchase-payment-records.json", output)
-				self.assertIn("--release-manifest /tmp/release-source-manifest.json", output)
+				self.assertIn("--purchase-payment-page-source /release/" + page_path, output)
+				self.assertIn("--release-manifest /release/release-source-manifest.json", output)
 				self.assertIn("--phase " + phase, output)
 
-	def test_private_metadata_inputs_are_owned_by_frappe_before_apply_or_rollback(self):
+	def test_private_metadata_inputs_keep_host_ownership_with_scoped_runtime_group(self):
 		source = self.release_source()
-		owner = "docker exec --user root frappe_docker-backend-1 chown frappe:frappe /tmp/procurement-before-audit.json"
-		self.assertIn(owner, source)
-		self.assertLess(source.index(owner), source.index("--joint-apply"))
-		self.assertNotIn("chmod 644 /tmp/procurement-before-audit.json", source)
+		self.assertFalse(
+			'test "$(docker exec frappe_docker-backend-1 id -u)" = "$(id -u)"' in source,
+			"Host/runtime UID equality is not a private access contract",
+		)
+		self.assertIn("main_lane runtime-access", source)
+		runner = self.shell_function("command_runner")
+		self.assertIn('--group-add "$private_runtime_gid"', runner)
+		self.assertLess(runner.index("main_lane runtime-access"), runner.index("docker run"))
+		self.assertLess(
+			source.index('main_lane runtime-access > "$release_dir/private-access.json"'),
+			source.index("systemctl --user stop"),
+		)
+		self.assertIn("target=/release-evidence,readonly", source)
+		self.assertIn("--before-audit /release-evidence/before.json", source)
+		self.assertNotIn('chmod 644 "$release_dir/', source)
 		self.assertIn('--joint-rollback --receipt "$native_receipt"', source)
-		self.assertIn('exec -T backend mkdir -p /home/frappe/frappe-bench/sites/deeplinkerp.com/private/release-evidence', source)
+		self.assertIn('command_runner "$new_image_id" "$python" -c', source)
 		self.assertNotIn("chmod 644 /tmp/procurement-metadata-receipt.json", source)
 
 	def test_release_source_manifest_accepts_expected_new_file_and_version(self):
@@ -387,6 +712,7 @@ capture_release_audit after "$build_dir/after.json"
 branding_sha=branding-target
 crm_sha=crm-current
 finance_sha=finance-target
+oa_sha=oa-target
 services=(backend frontend queue-long queue-short scheduler websocket)
 docker() {{
   case "$*" in
@@ -395,6 +721,7 @@ docker() {{
     *branding.revision* ) if [[ "$*" == *frontend* && '{mixed_label}' == branding ]]; then printf 'other'; else printf 'branding-target'; fi ;;
     *crm.revision* ) if [[ "$*" == *frontend* && '{mixed_label}' == crm ]]; then printf 'other'; else printf 'crm-current'; fi ;;
     *finance.revision* ) if [[ "$*" == *frontend* && '{mixed_label}' == finance ]]; then printf 'other'; else printf '{finance}'; fi ;;
+    *oa.revision* ) if [[ "$*" == *frontend* && '{mixed_label}' == oa ]]; then printf 'other'; else printf 'oa-target'; fi ;;
   esac
 }}
 {functions}
@@ -406,27 +733,61 @@ release_is_current
 	def test_already_current_checks_live_native_contract_before_unlocking_or_retargeting_sync(self):
 		source = self.release_source()
 		branch = source.split("if release_is_current; then", 1)[1].split("\nfi", 1)[0]
-		self.assertIn('capture_release_audit current "$build_dir/current-contract.json"', branch)
+		self.assertIn('capture_release_audit current "$release_dir/current-contract.json"', branch)
 		self.assertLess(branch.index("capture_release_audit current"), branch.index("flock -u 9"))
-		self.assertLess(branch.index("current_contract_verified"), branch.index("retarget_existing_source_sync"))
-		self.assertLess(source.index("capture_release_audit() {"), source.index("if release_is_current; then"))
+		self.assertLess(
+			branch.index("current_contract_verified"), branch.index("retarget_existing_source_sync")
+		)
+		self.assertLess(
+			source.index("capture_release_audit() {"), source.index("if release_is_current; then")
+		)
 
-	def test_current_audit_checks_frozen_sources_before_read_only_native_contract_without_historical_rows(self):
+	def test_current_audit_checks_frozen_sources_before_read_only_native_contract_without_historical_rows(
+		self,
+	):
 		events = []
-		fake = types.SimpleNamespace(init=lambda **kw: events.append("init"), connect=lambda: events.append("connect"), destroy=lambda: events.append("destroy"), db=types.SimpleNamespace(rollback=lambda: events.append("rollback")))
+		fake = types.SimpleNamespace(
+			init=lambda **kw: events.append("init"),
+			connect=lambda: events.append("connect"),
+			destroy=lambda: events.append("destroy"),
+			db=types.SimpleNamespace(rollback=lambda: events.append("rollback")),
+		)
 		audit = self.audit_module(fake)
 		metadata = sys.modules["procurement_release_metadata"]
 		with tempfile.TemporaryDirectory() as directory:
 			manifest = Path(directory) / "manifest.json"
 			manifest.write_text('{"apps": {}}')
-			with patch.dict(audit["main"].__globals__, {"verify_sources": lambda frozen, phase: events.append(("source", phase)), "capture_audit": lambda **kw: self.fail("Current verification must not compare historical business rows")}), patch.object(metadata, "verify_current_joint_contract", lambda: events.append("native") or {"current_contract_verified": True}, create=True), patch.object(sys, "argv", ["audit", "--phase", "current", "--release-manifest", str(manifest)]), contextlib.redirect_stdout(io.StringIO()):
+			with (
+				patch.dict(
+					audit["main"].__globals__,
+					{
+						"verify_sources": lambda frozen, phase: events.append(("source", phase)),
+						"capture_audit": lambda **kw: self.fail(
+							"Current verification must not compare historical business rows"
+						),
+					},
+				),
+				patch.object(
+					metadata,
+					"verify_current_joint_contract",
+					lambda **kw: events.append("native") or {"current_contract_verified": True},
+					create=True,
+				),
+				patch.object(
+					sys, "argv", ["audit", "--phase", "current", "--release-manifest", str(manifest)]
+				),
+				contextlib.redirect_stdout(io.StringIO()),
+			):
 				audit["main"]()
 		self.assertEqual(events, ["init", "connect", ("source", "after"), "native", "rollback", "destroy"])
 
 	def test_capture_stages_the_same_importable_audit_filename_used_by_current_native_verification(self):
 		capture = self.shell_function("capture_release_audit")
-		self.assertIn("frappe_docker-backend-1:/tmp/audit_unified_purchase.py", capture)
-		self.assertIn("/env/bin/python /tmp/audit_unified_purchase.py", capture)
+		self.assertIn(
+			'command_runner "$image" /home/frappe/frappe-bench/env/bin/python /release/deploy/production/audit_unified_purchase.py',
+			capture,
+		)
+		self.assertNotIn("docker cp", capture)
 		self.assertNotIn("/tmp/audit-unified-purchase.py", capture)
 
 	def test_current_branch_rejects_complete_source_drift_before_timer_handoff(self):
@@ -434,10 +795,20 @@ release_is_current
 		self.assertIn("capture_pinned_sources", branch)
 		for drift in (False, True):
 			with self.subTest(drift=drift), tempfile.TemporaryDirectory() as directory:
-				current = {"current_contract_verified": True, "release_sources_all": {"deeplinkerp_branding": {"unchanged.py": "changed" if drift else "pinned"}}}
+				current = {
+					"current_contract_verified": True,
+					"release_sources_all": {
+						"deeplinkerp_branding": {"unchanged.py": "changed" if drift else "pinned"}
+					},
+				}
 				pinned = {"deeplinkerp_branding": {"unchanged.py": "pinned"}}
 				mock = f"""set -e
 build_dir="$1"
+release_dir="$1"
+resume_receipt=/private/resume.json
+private_runtime_gid=1001
+branding_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+python=/env/bin/python
 dc=(docker compose)
 curl() {{ return 0; }}
 docker() {{ printf 'image-current'; }}
@@ -446,27 +817,46 @@ capture_pinned_sources() {{ printf '%s' '{json.dumps(pinned)}' > "$2"; }}
 flock() {{ printf 'UNLOCK\\n'; }}
 retarget_existing_source_sync() {{ printf 'RETARGET\\n'; }}
 release_is_current() {{ return 0; }}
+command_runner() {{ printf 'CHECK RESUME\\n'; }}
 {branch}
 """
-				result = subprocess.run(["bash", "-c", mock, "current-contract-test", directory], capture_output=True, text=True)
+				result = subprocess.run(
+					["bash", "-c", mock, "current-contract-test", directory], capture_output=True, text=True
+				)
 				self.assertEqual(result.returncode, 1 if drift else 0, result.stderr)
 				self.assertEqual("UNLOCK" in result.stdout, not drift)
 				self.assertEqual("RETARGET" in result.stdout, not drift)
 
 	def test_current_audit_does_not_claim_cutover_quiescence(self):
-		mock = self.shell_function("capture_release_audit") + """
+		mock = (
+			self.shell_function("command_runner")
+			+ self.shell_function("capture_release_audit")
+			+ """
+set -eo pipefail
 build_dir="$1"
+release_dir="$1"
+release_network=verified
+sites_spec=sites-volume
+branding_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+resume_receipt=/private/resume.json
+private_runtime_gid=1001
+old_image_id=old-image
 dc=(docker compose)
 audit_args=()
 chmod() { return 0; }
 docker() { printf '%s\\n' "$*"; }
+main_lane() { return 0; }
 capture_release_audit current "$build_dir/current.json"
 """
+		)
 		with tempfile.TemporaryDirectory() as directory:
-			result = subprocess.run(["bash", "-c", mock, "current-audit-proof", directory], capture_output=True, text=True)
+			result = subprocess.run(
+				["bash", "-c", mock, "current-audit-proof", directory], capture_output=True, text=True
+			)
 			self.assertEqual(result.returncode, 0, result.stderr)
 			output = (Path(directory) / "current.json").read_text()
-			self.assertIn("DEEPLINKERP_RELEASE_QUIESCENT=0", output)
+			self.assertIn("--group-add 1001", output)
+			self.assertNotIn("DEEPLINKERP_RELEASE_DRAIN_RECEIPT", output)
 			self.assertNotIn("DEEPLINKERP_RELEASE_QUIESCENT=1", output)
 
 	def test_failed_label_inspection_is_not_an_empty_legacy_revision(self):
@@ -481,42 +871,52 @@ verify_running_release image branding crm ''
 		)
 		result = subprocess.run(["bash", "-c", mock], capture_output=True, text=True)
 		self.assertEqual(result.returncode, 1)
-		staged = self.shell_function("revision_label") + self.shell_function("verify_staged_release") + """
+		staged = (
+			self.shell_function("revision_label")
+			+ self.shell_function("verify_staged_release")
+			+ """
 services=(backend frontend queue-long queue-short scheduler websocket)
 docker() { case "$*" in *'.Image'*) printf 'image';; *'.State.Running'*) case "$*" in *queue-long*|*queue-short*|*scheduler*) printf 'false';; *) printf 'true';; esac;; *branding.revision*) printf 'branding';; *crm.revision*) printf 'crm';; *finance.revision*) return 1;; esac; }
 verify_staged_release image branding crm ''
 """
+		)
 		result = subprocess.run(["bash", "-c", staged], capture_output=True, text=True)
 		self.assertEqual(result.returncode, 1)
 
-	def test_empty_overlays_preserve_current_labels_including_legacy_finance(self):
+	def test_joint_overlays_preserve_crm_and_capture_legacy_finance_and_oa_labels(self):
 		source = self.release_source()
-		block = source.split("current_revision=$(", 1)[1].split("\nif release_is_current", 1)[0]
+		block = source.split("current_revision=$(", 1)[1].split("\nsource_sync_timer_active=", 1)[0]
 		for finance in ("finance-current", "<no value>"):
 			with self.subTest(finance=finance):
 				mock = (
 					self.shell_function("revision_label")
 					+ f"""
-docker() {{ case "$*" in *branding.revision*) printf 'branding-current';; *crm.revision*) printf 'crm-current';; *finance.revision*) printf '{finance}';; esac; }}
+docker() {{ case "$*" in *branding.revision*) printf 'branding-current';; *crm.revision*) printf 'crm-current';; *finance.revision*) printf '{finance}';; *oa.revision*) printf '<no value>';; esac; }}
 crm_archive=''
 finance_archive=''
 crm_sha=preserved
 finance_sha=preserved
 current_revision=$({block}
-printf '%s|%s' "$crm_sha" "$finance_sha"
+printf '%s|%s|%s|%s' "$crm_sha" "$finance_sha" "$current_finance" "$current_oa"
 """
 				)
 				result = subprocess.run(["bash", "-c", mock], capture_output=True, text=True)
 				self.assertEqual(result.returncode, 0, result.stderr)
-				self.assertEqual(result.stdout, "crm-current|" + ("" if finance == "<no value>" else finance))
+				self.assertEqual(
+					result.stdout,
+					"crm-current|preserved|" + ("" if finance == "<no value>" else finance) + "|",
+				)
 
-	def compare_audits(self, before, after, manifest):
-		source = self.release_source()
-		code = source.rsplit('python3 - "$release_dir" "$build_dir" <<\'PY\'\n', 1)[1].split("\nPY", 1)[0]
+	def compare_audits(self, before, after, manifest, active_sites=None):
+		active_sites = active_sites or ["deeplinkerp.com", "akivision.deeplinkerp.com", "latingo.deeplinkerp.com", "yuewei.deeplinkerp.com"]
+		_source = self.release_source()
+		code = self.shell_function("verify_audit_ownership").split("<<'PY'\n", 1)[1].split("\nstats=", 1)[0]
 		with tempfile.TemporaryDirectory() as tmp:
 			root = Path(tmp)
 			roles = [{"name": "original-child-" + str(index)} for index in range(5)]
-			digest = runpy.run_path(str(Path(__file__).parents[1] / "deploy/production/procurement_release_metadata.py"))["digest"]
+			digest = runpy.run_path(
+				str(Path(__file__).parents[1] / "deploy/production/procurement_release_metadata.py")
+			)["digest"]
 			metadata = {
 				"scope": {"Page": [{"name": "purchase-payables"}], "Has Role": []},
 				"outside": {"Has Role": digest(roles)},
@@ -524,36 +924,78 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 			}
 			before = dict(before, joint_metadata=metadata)
 			after = dict(after, joint_metadata=metadata)
-			before["release_sources_all"] = dict(before["release_sources"], crm_integration={"original.py": "crm"})
+			before["release_sources_all"] = dict(
+				before["release_sources"], crm_integration={"original.py": "crm"}
+			)
 			before["approved_sources_after"] = json.loads(json.dumps(before["release_sources_all"]))
 			for app, files in manifest["apps"].items():
 				for name, version in files.items():
 					before["approved_sources_after"][app][name] = version["after"]
-			after["release_sources_all"] = dict(after["release_sources"], crm_integration={"original.py": "crm"})
-			old_schema = {"columns": {"name": {"type": "varchar(140)"}}, "indexes": {"PRIMARY": [{"column": "name", "unique": 1}]}, "table": {"engine": "InnoDB"}}
+			after["release_sources_all"] = dict(
+				after["release_sources"], crm_integration={"original.py": "crm"}
+			)
+			old_schema = {
+				"columns": {"name": {"type": "varchar(140)"}},
+				"indexes": {"PRIMARY": [{"column": "name", "unique": 1}]},
+				"table": {"engine": "InnoDB"},
+			}
 			new_schema = json.loads(json.dumps(old_schema))
 			new_schema["columns"]["custom_operating_event_key"] = {"type": "varchar(140)"}
-			new_schema["indexes"]["custom_operating_event_key"] = [{"column": "custom_operating_event_key", "unique": 1, "prefix": None, "type": "BTREE"}]
+			new_schema["indexes"]["custom_operating_event_key"] = [
+				{"column": "custom_operating_event_key", "unique": 1, "prefix": None, "type": "BTREE"}
+			]
 			before["schemas"], after["schemas"] = {"Journal Entry": old_schema}, {"Journal Entry": new_schema}
-			for audit in (before, after): audit["tables"]["Journal Entry"] = digest([])
-			models = {name: {"schema": None, "rows": []} for name in runpy.run_path(str(Path(__file__).parents[1] / "deploy/production/procurement_release_metadata.py"))["JOINT_MODELS"]}
-			receipt = {
-				"status": "applied", "steps": [{"status": "complete"}],
-				"before": {"metadata": metadata, "je": {"schema": old_schema, "rows": [], "original_columns": ["name"]}, "models": models, "operating_singles": []},
-				"after": {"metadata": metadata, "je": {"schema": new_schema, "rows": [], "original_columns": ["name"]}, "models": models, "operating_singles": []},
-				"contract": {"sources_before": before["release_sources_all"], "sources_after": before["approved_sources_after"], "model_schemas": {name: None for name in models}},
+			for audit in (before, after):
+				audit["tables"]["Journal Entry"] = digest([])
+			models = {
+				name: {"schema": None, "rows": []}
+				for name in runpy.run_path(
+					str(Path(__file__).parents[1] / "deploy/production/procurement_release_metadata.py")
+				)["JOINT_MODELS"]
 			}
+			receipt = {
+				"status": "applied",
+				"steps": [{"status": "complete"}],
+				"before": {
+					"metadata": metadata,
+					"je": {"schema": old_schema, "rows": [], "original_columns": ["name"]},
+					"models": models,
+					"operating_singles": [],
+				},
+				"after": {
+					"metadata": metadata,
+					"je": {"schema": new_schema, "rows": [], "original_columns": ["name"]},
+					"models": models,
+					"operating_singles": [],
+				},
+				"contract": {
+					"sources_before": before["release_sources_all"],
+					"sources_after": before["approved_sources_after"],
+					"model_schemas": {name: None for name in models},
+				},
+			}
+			receipt["contract"]["custom_fields"] = {"custom_operating_event_key": {}}
 			(root / "joint-receipt.json").write_text(json.dumps(receipt))
 			deployment = root / "deploy/production"
 			deployment.mkdir(parents=True)
 			(deployment / "procurement_release_metadata.py").write_text(
 				(Path(__file__).parents[1] / "deploy/production/procurement_release_metadata.py").read_text()
 			)
-			(deployment / "joint_release_guards.py").write_text((Path(__file__).parents[1] / "deploy/production/joint_release_guards.py").read_text())
+			(deployment / "joint_release_guards.py").write_text(
+				(Path(__file__).parents[1] / "deploy/production/joint_release_guards.py").read_text()
+			)
 			(root / "before.json").write_text(json.dumps(before))
 			(root / "after.json").write_text(json.dumps(after))
+			(root / "tenants.json").write_text(json.dumps({"sites": {site: {} for site in active_sites}}))
+			for site in active_sites[1:]:
+				for phase, value in (("before", before), ("after", after), ("joint-receipt", receipt)):
+					(root / (site + "." + phase + ".json")).write_text(json.dumps(value))
 			(root / "release-source-manifest.json").write_text(json.dumps(manifest))
-			return subprocess.run([sys.executable, "-c", code, tmp, tmp], capture_output=True, text=True)
+			return subprocess.run(
+				[sys.executable, "-c", code, tmp, tmp, "candidate", "image", "old-image", "0"],
+				capture_output=True,
+				text=True,
+			)
 
 	def test_finance_manifest_preserves_crm_and_rejects_unlisted_or_wrong_sources(self):
 		manifest = {
@@ -562,7 +1004,11 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 			}
 		}
 		before = {
-			"tables": {"Has Role": runpy.run_path(str(Path(__file__).parents[1] / "deploy/production/procurement_release_metadata.py"))["digest"]([{"name": "original-child-" + str(index)} for index in range(5)])},
+			"tables": {
+				"Has Role": runpy.run_path(
+					str(Path(__file__).parents[1] / "deploy/production/procurement_release_metadata.py")
+				)["digest"]([{"name": "original-child-" + str(index)} for index in range(5)])
+			},
 			"preserved_apps": {"crm_integration": "crm", "china_finance": "old"},
 			"release_sources": {
 				"deeplinkerp_branding": {"page.js": "old"},
@@ -573,6 +1019,7 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 		for app in manifest["apps"]:
 			after["release_sources"][app][next(iter(manifest["apps"][app]))] = "new"
 		self.assertEqual(self.compare_audits(before, after, manifest).returncode, 0)
+		self.assertEqual(self.compare_audits(before, after, manifest, active_sites=["deeplinkerp.com"]).returncode, 0)
 		for change in ("unlisted", "listed", "crm", "page-role-identities"):
 			with self.subTest(change=change):
 				bad = json.loads(json.dumps(after))
@@ -591,7 +1038,7 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 			root = Path(tmp)
 			(root / "sites/assets").mkdir(parents=True)
 			(root / "sites/deeplinkerp.com").mkdir()
-			for app in ("deeplinkerp_branding", "china_finance", "crm_integration"):
+			for app in ("deeplinkerp_branding", "china_finance", "crm_integration", "oa_purchase_request", "client_akivision"):
 				(root / "apps" / app / app).mkdir(parents=True)
 			(root / "sites/assets/assets.json").write_text('{"bundle": "same"}')
 			(root / "sites/common_site_config.json").write_text('{"maintenance_mode": 1, "secret": "hidden"}')
@@ -612,20 +1059,62 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 			def sql(query, values=None, **kwargs):
 				queried.append(query)
 				if "information_schema.COLUMNS" in query:
-					rows = [{"name": "name", "position": 1, "type": "varchar(140)", "nullable": "NO", "default_value": None, "charset": "utf8mb4", "collation": "utf8mb4_unicode_ci", "extra": "", "expression": None}]
+					rows = [
+						{
+							"name": "name",
+							"position": 1,
+							"type": "varchar(140)",
+							"nullable": "NO",
+							"default_value": None,
+							"charset": "utf8mb4",
+							"collation": "utf8mb4_unicode_ci",
+							"extra": "",
+							"expression": None,
+						}
+					]
 					if new_oa["present"] and values == ("tabOA Purchase Request",):
 						field = new_oa.get("field", "custom_purchase_source_json")
 						check = field == "custom_purchase_company_confirmed"
-						rows.append(dict(rows[0], name=field, position=2, type="tinyint(4)" if check else "longtext", nullable="NO" if check else "YES", default_value="0" if check else "NULL", charset=None if check else "utf8mb4", collation=None if check else "utf8mb4_unicode_ci"))
+						rows.append(
+							dict(
+								rows[0],
+								name=field,
+								position=2,
+								type="tinyint(4)" if check else "longtext",
+								nullable="NO" if check else "YES",
+								default_value="0" if check else "NULL",
+								charset=None if check else "utf8mb4",
+								collation=None if check else "utf8mb4_unicode_ci",
+							)
+						)
 					return rows
 				if "information_schema.STATISTICS" in query:
-					return [{"name": "PRIMARY", "sequence": 1, "column": "name", "unique": 1, "prefix": None, "collation": "A", "type": "BTREE", "nullable": ""}]
+					return [
+						{
+							"name": "PRIMARY",
+							"sequence": 1,
+							"column": "name",
+							"unique": 1,
+							"prefix": None,
+							"collation": "A",
+							"type": "BTREE",
+							"nullable": "",
+						}
+					]
 				if "information_schema.TABLES" in query:
-					return [{"engine": "InnoDB", "row_format": "Dynamic", "collation": "utf8mb4_unicode_ci", "options": ""}]
+					return [
+						{
+							"engine": "InnoDB",
+							"row_format": "Dynamic",
+							"collation": "utf8mb4_unicode_ci",
+							"options": "",
+						}
+					]
 				if "tabHas Role`" in query:
 					self.assertEqual(query, "select * from `tabHas Role` order by name")
 					return roles
-				if query.startswith("select count(*) from `tabOA Purchase Request`"): return [[new_oa["nonnull"]]]
+				if query.startswith("select count(*) from `tabOA Purchase Request`"):
+					return [[new_oa["nonnull"]]]
 				return (
 					[{"doctype": "MES Integration Settings", "field": "callback_url", "value": "updated"}]
 					if "tabSingles" in query
@@ -644,21 +1133,49 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 			capture.__globals__["source_digest"] = lambda app: "source"
 			before = capture()
 			capture(oa_columns=["name", "manual_user_text"])
-			self.assertIn("select `name`,`manual_user_text` from `tabOA Purchase Request` order by name", queried)
+			self.assertIn(
+				"select `name`,`manual_user_text` from `tabOA Purchase Request` order by name", queried
+			)
 			self.assertIn("Operating Expense Source", before["operating_models"])
 			new_oa["present"] = True
-			self.assertEqual(capture(oa_columns=["name"])["oa_new_columns"], {"custom_purchase_source_json": 0})
+			self.assertEqual(
+				capture(oa_columns=["name"])["oa_new_columns"], {"custom_purchase_source_json": 0}
+			)
 			new_oa["nonnull"] = 1
-			self.assertEqual(capture(oa_columns=["name"])["oa_new_columns"], {"custom_purchase_source_json": 1})
+			self.assertEqual(
+				capture(oa_columns=["name"])["oa_new_columns"], {"custom_purchase_source_json": 1}
+			)
 			new_oa.update(field="custom_purchase_company_confirmed", nonnull=0)
-			self.assertEqual(capture(oa_columns=["name"])["oa_new_columns"], {"custom_purchase_company_confirmed": 0})
-			self.assertIn("select count(*) from `tabOA Purchase Request` where `custom_purchase_company_confirmed` is null or `custom_purchase_company_confirmed` <> 0", queried)
+			self.assertEqual(
+				capture(oa_columns=["name"])["oa_new_columns"], {"custom_purchase_company_confirmed": 0}
+			)
+			self.assertIn(
+				"select count(*) from `tabOA Purchase Request` where `custom_purchase_company_confirmed` is null or `custom_purchase_company_confirmed` <> 0",
+				queried,
+			)
 			new_oa["nonnull"] = 1
-			self.assertEqual(capture(oa_columns=["name"])["oa_new_columns"], {"custom_purchase_company_confirmed": 1})
-			fake.conf = {"purchase_source_sync_enabled": True}
-			with patch.dict(__import__("os").environ, {"DEEPLINKERP_RELEASE_QUIESCENT": "1"}):
+			self.assertEqual(
+				capture(oa_columns=["name"])["oa_new_columns"], {"custom_purchase_company_confirmed": 1}
+			)
+			fake.conf = {"purchase_source_sync_enabled": True, "maintenance_mode": 1}
+			with patch.dict(
+				sys.modules, {"joint_release_guards": types.SimpleNamespace(verified_quiescence=lambda: True)}
+			):
 				self.assertTrue(capture()["release_quiescent"])
-			with patch.dict(__import__("os").environ, {"DEEPLINKERP_RELEASE_QUIESCENT": "0"}):
+			with patch.dict(
+				sys.modules,
+				{"joint_release_guards": types.SimpleNamespace(verified_quiescence=lambda: False)},
+			):
+				self.assertFalse(capture()["release_quiescent"])
+			fake.conf["maintenance_mode"] = 0
+			with patch.dict(
+				sys.modules,
+				{
+					"joint_release_guards": types.SimpleNamespace(
+						verified_quiescence=lambda: self.fail("Live audit must not claim quiescence")
+					)
+				},
+			):
 				self.assertFalse(capture()["release_quiescent"])
 			fake.conf = {}
 			new_oa["present"] = False
@@ -676,7 +1193,13 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 			recreated = capture()["tables"]["Has Role"]
 			self.assertEqual(recreated["count"], before["tables"]["Has Role"]["count"])
 			self.assertNotEqual(recreated["sha256"], before["tables"]["Has Role"]["sha256"])
-			for parent in ("Journal Entry", "China Cash Flow Assignment", "China Voucher Sync Issue", "Company", *settings):
+			for parent in (
+				"Journal Entry",
+				"China Cash Flow Assignment",
+				"China Voucher Sync Issue",
+				"Company",
+				*settings,
+			):
 				self.assertIn(parent + " Child", before["tables"])
 			self.assertEqual(before["schemas"]["Journal Entry"]["columns"]["name"]["nullable"], "NO")
 			self.assertIsNone(before["schemas"]["Journal Entry"]["columns"]["name"]["default_value"])
@@ -690,15 +1213,16 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 			self.assertEqual(before["configuration_sha256"], after["configuration_sha256"])
 			config.write_text('{"mes_callback_url": "overwritten", "maintenance_mode": 1}')
 			self.assertNotEqual(before["configuration_sha256"], capture()["configuration_sha256"])
+			self.assertIn("client_akivision", before["release_sources_all"])
+			self.assertIn("Delivery Note", before["tables"])
+			self.assertIn("Delivery Note Item", before["tables"])
+			self.assertIn("Stock Entry Type", before["tables"])
 
 	def test_overlay_archives_require_matching_manifest_and_precise_finance_files(self):
 		function = self.shell_function("prepare_sources")
 		finance_files = [
-			"services/cash_flow_assignment.py",
 			"services/voucher.py",
 			"tests/test_cancellation_sync.py",
-			"tests/test_cancellation_sync_concurrency.py",
-			"translations/zh.csv",
 		]
 		manifest = {
 			"apps": {
@@ -798,11 +1322,11 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 
 	def test_copied_audit_is_readable_despite_private_release_umask(self):
 		source = (Path(__file__).parents[1] / "deploy/production/deploy_unified_purchase.sh").read_text()
-		permission_fix = 'chmod 644 "$build_dir/deploy/production/audit_unified_purchase.py"'
+		permission_fix = 'chmod -R a+rX "$build_dir"'
 		self.assertIn(permission_fix, source)
 		self.assertLess(
 			source.index(permission_fix),
-			source.index('docker cp "$build_dir/deploy/production/audit_unified_purchase.py"'),
+			source.index('capture_release_audit current "$release_dir/current-contract.json"'),
 		)
 
 	def run_recovery(
@@ -815,11 +1339,21 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 		copy_status=0,
 		baseline_present=True,
 		baseline_captured=True,
+		resume_marker=None,
 	):
 		source = (Path(__file__).parents[1] / "deploy/production/deploy_unified_purchase.sh").read_text()
 		function = source.split("recover() {", 1)[1].split("\ntrap recover EXIT", 1)[0]
 		capture = self.shell_function("capture_release_audit")
-		release_functions = "".join(self.shell_function(name) for name in ("revision_label", "quiesce_release_workers", "verify_staged_release", "verify_running_release"))
+		release_functions = "".join(
+			self.shell_function(name)
+			for name in (
+				"revision_label",
+				"quiesce_release_workers",
+				"verify_staged_release",
+				"verify_running_release",
+				"verify_retired_routes",
+			)
+		)
 		baseline = {
 			"site": "deeplinkerp.com",
 			"maintenance_mode": 1,
@@ -864,18 +1398,26 @@ printf '%s|%s' "$crm_sha" "$finance_sha"
 		mock = f"""
 dc=(docker compose)
 services=(backend frontend queue-long queue-short scheduler websocket)
-switched=1
-maintenance=1
+sites=(deeplinkerp.com akivision.deeplinkerp.com latingo.deeplinkerp.com yuewei.deeplinkerp.com)
 baseline_captured={int(baseline_captured)}
+metadata_started=1
+metadata_started_sites=(akivision.deeplinkerp.com latingo.deeplinkerp.com yuewei.deeplinkerp.com)
 release_dir="$1"
 build_dir="$1"
-audit_args=(--release-manifest /tmp/release-source-manifest.json)
+audit_args=(--release-manifest /release/release-source-manifest.json)
 frozen_base=mock-base
 old_image_id=sha256:expected
+new_image_id=sha256:candidate
 current_revision=branding-old
 current_crm=crm-old
 current_finance=finance-old
+current_oa=oa-old
+branding_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 native_receipt=/private/absent-joint-receipt.json
+resume_receipt=/private/resume.json
+python=/env/bin/python
+guard=/release/deploy/production/joint_release_guards.py
+metadata=/release/deploy/production/procurement_release_metadata.py
 maintenance_calls=0
 workers_running=0
 cp() {{ printf 'COPY %s\\n' "$*"; }}
@@ -885,23 +1427,27 @@ docker() {{
   case "$*" in
     'image inspect '*) printf '%s\\n' "$old_image_id" ;;
     inspect*'.Image'* ) printf '%s\\n' "$old_image_id" ;;
-    inspect*'.State.Running'* ) case "$*" in *queue-long*|*queue-short*|*scheduler*) if (( workers_running )); then printf 'true\\n'; else printf 'false\\n'; fi;; *) printf 'true\\n';; esac ;;
+    inspect*'.State.Running'* ) if (( workers_running )); then printf 'true\\n'; else printf 'false\\n'; fi ;;
     inspect*branding.revision*) printf '%s' "$current_revision" ;;
     inspect*crm.revision*) printf '%s' "$current_crm" ;;
     inspect*finance.revision*) printf '%s' "$current_finance" ;;
-    'compose stop '*) workers_running=0; printf 'QUIESCENT\\n' ;;
-    'compose up '*) case "$*" in *--no-start*) workers_running=0; printf 'STAGE STOPPED\\n';; *) case "$*" in *queue-long*) workers_running=1;; esac; printf 'UP\\n';; esac; return {up_status} ;;
-    *'backend test -s '*) return 1 ;;
-    cp*) printf 'DOCKER %s\\n' "$*"; return {copy_status} ;;
-    *'/env/bin/python /tmp/audit_unified_purchase.py'*)
-      printf 'AUDIT %s\\n' "$*" >&2
+    inspect*oa.revision*) printf '%s' "$current_oa" ;;
+    'compose up '*) case "$*" in *--no-start*) workers_running=0; printf 'STAGE STOPPED\\n';; *) workers_running=1; printf 'UP\\n';; esac; return {up_status} ;;
+    *) printf 'DOCKER %s\\n' "$*" ;;
+  esac
+}}
+command_runner() {{
+  printf 'COMMAND %s\\n' "$*" >&2
+  case "$*" in
+    *--assert-pre-resume*) [[ '{resume_marker or "absent"}' == absent ]] ;;
+    *--maintenance-on*) printf 'MAINTENANCE ON\\n'; return 0 ;;
+    *--maintenance-restore*) printf 'RESTORE EXACT CONFIG\\n'; return 0 ;;
+    *--joint-rollback*) printf 'METADATA ROLLBACK\\n'; return {copy_status} ;;
+    *--record-resume*) printf 'DURABLE OLD RESUME\\n' >&2; printf '{{}}'; return 0 ;;
+    *'/audit_unified_purchase.py'*)
       if (( {audit_status} )); then return {audit_status}; fi
       command cat "$release_dir/rollback-fixture.json" ;;
-    *'set-maintenance-mode on'*)
-      maintenance_calls=$((maintenance_calls+1))
-      printf 'MAINTENANCE ON\\n'
-      if (( maintenance_calls == 1 )); then return {initial_maintenance_status}; fi ;;
-    *) printf 'DOCKER %s\\n' "$*" ;;
+    *) return 0 ;;
   esac
 }}
 curl() {{ printf 'HEALTH\\n'; return {health_status}; }}
@@ -913,8 +1459,15 @@ recover
 """
 		with tempfile.TemporaryDirectory() as tmp:
 			root = Path(tmp)
+			(root / "tenants.json").write_text(json.dumps({"sites": {site: {} for site in ("deeplinkerp.com", "akivision.deeplinkerp.com", "latingo.deeplinkerp.com", "yuewei.deeplinkerp.com")}}))
 			if baseline_present:
 				(root / "before.json").write_text(json.dumps(baseline))
+				for site in (
+					"akivision.deeplinkerp.com",
+					"latingo.deeplinkerp.com",
+					"yuewei.deeplinkerp.com",
+				):
+					(root / (site + ".before.json")).write_text(json.dumps(baseline))
 			(root / "rollback-fixture.json").write_text(json.dumps(rollback))
 			(root / "release-source-manifest.json").write_text('{"apps": {}}')
 			return subprocess.run(["bash", "-c", mock, "recovery-test", tmp], capture_output=True, text=True)
@@ -923,11 +1476,11 @@ recover
 		result = self.run_recovery()
 		self.assertEqual(result.returncode, 1)
 		self.assertIn("--phase before", result.stderr)
-		self.assertIn("/tmp/audit_unified_purchase.py", result.stdout)
-		self.assertIn("/tmp/release-source-manifest.json", result.stdout)
+		self.assertIn("/release/deploy/production/audit_unified_purchase.py", result.stderr)
+		self.assertIn("/release/release-source-manifest.json", result.stderr)
 		self.assertIn("Restored full audit matches original baseline", result.stdout)
 		self.assertLess(
-			result.stdout.index("Restored full audit"), result.stdout.index("set-maintenance-mode off")
+			result.stdout.index("Restored full audit"), result.stdout.index("RESTORE EXACT CONFIG")
 		)
 		self.assertNotIn("Manual recovery required", result.stderr)
 
@@ -958,38 +1511,48 @@ recover
 				)
 				self.assertEqual(result.returncode, 1)
 				self.assertIn("MAINTENANCE ON", result.stdout)
-				self.assertNotIn("set-maintenance-mode off", result.stdout)
+				self.assertNotIn("RESTORE EXACT CONFIG", result.stdout)
 				self.assertNotIn("HEALTH", result.stdout)
-				self.assertIn("stop frappe_docker-frontend-1", result.stdout)
-				self.assertIn("Manual recovery required", result.stderr)
+				self.assertNotIn("stop frappe_docker-frontend-1", result.stdout)
+				self.assertIn("HOLD", result.stderr)
 
 	def test_failed_rollback_never_disables_maintenance(self):
 		result = self.run_recovery(up_status=1)
 		self.assertEqual(result.returncode, 1)
 		self.assertIn("MAINTENANCE ON", result.stdout)
-		self.assertNotIn("set-maintenance-mode off", result.stdout)
-		self.assertIn("Manual recovery required", result.stderr)
+		self.assertNotIn("RESTORE EXACT CONFIG", result.stdout)
+		self.assertIn("HOLD", result.stderr)
 
 	def test_verified_rollback_checks_health_before_accepting_recovery(self):
 		result = self.run_recovery()
 		self.assertEqual(result.returncode, 1)  # Original release still failed.
-		self.assertIn("set-maintenance-mode off", result.stdout)
+		self.assertIn("RESTORE EXACT CONFIG", result.stdout)
 		self.assertIn("HEALTH", result.stdout)
 		self.assertNotIn("Manual recovery required", result.stderr)
 
 	def test_unhealthy_rollback_reenables_maintenance(self):
 		result = self.run_recovery(health_status=1)
 		self.assertEqual(result.returncode, 1)
-		self.assertEqual(result.stdout.count("MAINTENANCE ON"), 3)
-		self.assertIn("Manual recovery required", result.stderr)
+		self.assertEqual(result.stdout.count("MAINTENANCE ON"), 1)
+		self.assertIn("HOLD", result.stderr)
 
 	def test_dead_new_backend_does_not_block_host_side_rollback(self):
 		result = self.run_recovery(initial_maintenance_status=1)
 		self.assertEqual(result.returncode, 1)
-		self.assertIn("stop frappe_docker-frontend-1", result.stdout)
-		self.assertEqual(result.stdout.count("UP"), 3)
-		self.assertIn("set-maintenance-mode off", result.stdout)
+		self.assertNotIn("stop frappe_docker-frontend-1", result.stdout)
+		self.assertEqual(result.stdout.count("UP"), 1)
+		self.assertIn("RESTORE EXACT CONFIG", result.stdout)
 		self.assertNotIn("Manual recovery required", result.stderr)
+
+	def test_present_or_unreadable_first_resume_prevents_every_destructive_recovery(self):
+		for marker in ("present", "unreadable"):
+			with self.subTest(marker=marker):
+				result = self.run_recovery(resume_marker=marker)
+				self.assertEqual(result.returncode, 1)
+				self.assertIn("forward-only", result.stderr)
+				self.assertIn("MAINTENANCE ON", result.stdout)
+				for forbidden in ("--joint-rollback", "compose up", "COPY", "RESTORE EXACT CONFIG", "HEALTH"):
+					self.assertNotIn(forbidden, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

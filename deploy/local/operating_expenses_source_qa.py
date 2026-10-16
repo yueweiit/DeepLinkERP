@@ -30,7 +30,10 @@ def oa_manifest():
 		forms = [{"name": key, "value": value} for key, value in (
 			("申请类型", "付款申请"), ("执行地区", "中国"), ("金额", str(400 + index * 100)),
 			("币种", "人民币"), ("事项说明", "QA OA " + case + "（纯合成，无真实付款）"),
-			("收款人", "QA Operating Supplier"), ("付款公司", OA_LEGAL_COMPANY))]
+			("收款人", "QA Operating Supplier"), ("付款公司", OA_LEGAL_COMPANY),
+			("部门/组织", OA_SHEET), ("账户性质", "公户"),
+			("付款日期", "2026-10-10"), ("归属项目", "QA合成项目"),
+			("备注", "QA完整展示字段，无真实业务"))]
 		operations, raw_tasks = [], []
 		nodes = (("manager", "主管审批"),) if case == "supervisor" else (
 			("manager", "主管审批"), ("finance", "财务审批"), ("cashier", "出纳执行"))
@@ -81,10 +84,24 @@ class SyntheticPG:
 		params = params or ()
 		if sql.startswith("SET TRANSACTION") or "attachment_archives_v1" in sql:
 			self.rows = []
+		elif "public.approval_expense_operation" in sql:
+			record_ids = {str(value) for value in params[0]}
+			self.rows = [{"source_id": str(10000 + row["id"]), "approval_no": row["business_id"],
+				"source_updated_at": row["updated_at"], "raw_identity": {
+					"processInstanceId": row["process_instance_id"], "corpId": row["corp_id"],
+					"processCode": row["process_code"], "businessId": row["business_id"]}}
+				for row in self.manifest["instances"] if str(10000 + row["id"]) in record_ids]
 		elif "public.ding_approval_instance" in sql:
-			corp, identities, codes = params
-			self.rows = [r for r in self.manifest["instances"] if r["corp_id"] == corp
-				and r["process_instance_id"] in identities and r["process_code"] in codes]
+			if len(params) == 1:
+				# Global identity corroboration is deliberately not corp/scope filtered.
+				self.rows = [{**r, "raw_identity": {"corpId": r["corp_id"],
+					"processInstanceId": r["process_instance_id"], "processCode": r["process_code"],
+					"businessId": r["business_id"]}} for r in self.manifest["instances"]
+					if r["process_instance_id"] in params[0]]
+			else:
+				corp, identities, codes = params
+				self.rows = [r for r in self.manifest["instances"] if r["corp_id"] == corp
+					and r["process_instance_id"] in identities and r["process_code"] in codes]
 		elif "public.ding_approval_task" in sql:
 			corp, identities = params
 			self.rows = [r for r in self.manifest["tasks"] if r["corp_id"] == corp and r["process_instance_id"] in identities]
@@ -125,7 +142,7 @@ def seed_oa_cashier_rows(conn, stamp):
 		("qa-originator", "QA合成申请人", OA_SHEET, stamp))
 	for index, row in enumerate(oa_manifest()["instances"][:3], 1):
 		amount = 400 + index * 100
-		external = {"system": "dingtalk_expense_database", "source_type": "operation", "record_id": row["process_instance_id"],
+		external = {"system": "dingtalk_expense_database", "source_type": "operation", "record_id": str(10000 + index),
 			"corp_id": OA_CORP, "process_instance_id": row["process_instance_id"], "approval_no": row["business_id"],
 			"application_date": "2026-10-01", "application_type_raw": "付款申请", "source_company_raw": OA_LEGAL_COMPANY,
 			"applicant_id": "qa-originator", "applicant": "QA合成申请人", "approval_status": row["status"], "approval_result": row["result"]}

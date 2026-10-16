@@ -11,6 +11,7 @@ import sys
 import time
 import uuid
 from contextlib import redirect_stderr, redirect_stdout
+from contextvars import ContextVar
 from pathlib import Path
 
 import frappe
@@ -18,15 +19,25 @@ import frappe
 TASKS = {
     "operating": "deeplinkerp_branding.services.operating_expenses.scheduled_sync",
     "purchase": "deeplinkerp_branding.services.purchase_source_service.scheduled_sync",
+    "reversal": "deeplinkerp_branding.services.purchase_reversal_progress.recover",
 }
+SOURCE_TASKS = ("operating", "purchase")
 TASK_TIMEOUT = 300
 SAFE_FAILURE = "Source synchronization failed or was interrupted."
 SITE = "deeplinkerp.com"
 BENCH = Path("/home/frappe/frappe-bench")
+_deadline = ContextVar("dedicated_source_sync_deadline", default=None)
 
 
 class SourceSyncRefused(RuntimeError):
     """A refusal before native Start; no interrupted job needs recovery."""
+
+
+def check_deadline():
+    """Native valuation may consume SIGALRM; keep the same run's deadline."""
+    deadline = _deadline.get()
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("Source sync time limit or cancellation")
 
 
 def log_name(task, run_id):
@@ -78,18 +89,22 @@ def execute_task(task, run_id, timeout=TASK_TIMEOUT):
     frappe.db.rollback()  # A reused process cannot carry a prior task's transaction.
     ensure_allowed()
     _idle_jobs()
-    job = _job(task)
+    job = _job(task, require_logging=task != "reversal")
     if job.is_job_in_queue() or frappe.db.exists("Scheduled Job Log", name):
         raise SourceSyncRefused("Source task is already queued or this run identity was used")
     original_status = job.log_status
+    original_logging = job.create_log
     original_traceback, original_debug = frappe.get_traceback, frappe.debug_log
     original_flag = frappe.flags.get("dedicated_source_sync")
     previous_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGALRM, signal.SIGTERM, signal.SIGINT)}
 
     def interrupted(signum, frame):
+        _deadline.set(time.monotonic())  # A swallowed early SIGTERM is still terminal.
         raise TimeoutError("Source sync time limit or cancellation")
 
     def status(value):
+        if value in ("Start", "Complete"):
+            check_deadline()
         if value == "Start":
             ensure_allowed()
         # Choose an exact durable identity before native Start commits. This
@@ -101,8 +116,13 @@ def execute_task(task, run_id, timeout=TASK_TIMEOUT):
         frappe.debug_log = []
         original_status(value)
 
+    deadline_token = _deadline.set(deadline)
     try:
         job.log_status = status
+        # Recovery has its own accepted-operation audit. Force the native run
+        # log in memory without changing the new job's persisted create_log=0
+        # or the existing installation's two source logging receipts.
+        job.create_log = 1
         frappe.get_traceback = lambda *args, **kwargs: SAFE_FAILURE
         frappe.debug_log = []
         frappe.flags.dedicated_source_sync = True
@@ -118,8 +138,10 @@ def execute_task(task, run_id, timeout=TASK_TIMEOUT):
         for sig, handler in previous_handlers.items():
             signal.signal(sig, handler)
         job.log_status = original_status
+        job.create_log = original_logging
         frappe.get_traceback, frappe.debug_log = original_traceback, original_debug
         frappe.flags.dedicated_source_sync = original_flag
+        _deadline.reset(deadline_token)
         frappe.db.rollback()
     outcome = frappe.db.get_value("Scheduled Job Log", name, "status")
     if outcome not in {"Complete", "Failed"}:
@@ -152,7 +174,7 @@ def finalize_task(task, run_id):
 def logging_snapshot():
     """Read-only evidence; intentionally internal and non-whitelisted."""
     ensure_allowed()
-    jobs = _idle_jobs()
+    jobs = [job for job in _idle_jobs() if job.method in {TASKS[task] for task in SOURCE_TASKS}]
     return {"version": 1, "jobs": [{"name": job.name, "method": job.method,
                                      "create_log": int(job.create_log)} for job in jobs]}
 

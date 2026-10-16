@@ -11,7 +11,8 @@ from deeplinkerp_branding.services import purchase_source_contract as contract
 from deeplinkerp_branding.services import unified_purchase_service as listing
 
 
-def fixture(instance="QA-PUR-SOURCE-1", business="QA-DT-PUR-1", *, region="中国China", beneficiary_company=None, project=None, currency="人民币RMB"):
+def fixture(instance="QA-PUR-SOURCE-1", business="QA-DT-PUR-1", *, region="中国China", beneficiary_company=None, project=None, currency="人民币RMB",
+            item_code="QA-JOINT-PO-ITEM", purchasing_company=None, supplier=None, rate=None, schedule_date=None, raw=False):
     row={"corp_id":"QA-CORP","process_instance_id":instance,"business_id":business,
          "process_code":contract.PROCESS_CODES[0],"status":"COMPLETED","result":"agree",
          "create_time":datetime(2026,1,1,tzinfo=timezone.utc),"updated_at":datetime(2026,1,1,tzinfo=timezone.utc),
@@ -21,15 +22,22 @@ def fixture(instance="QA-PUR-SOURCE-1", business="QA-DT-PUR-1", *, region="中�
             {"name":"金额importe","value":"100"},
             {"name":"收款人beneficiario","value":"QA Operating Supplier"},
             {"name":"需求明细Desglose de los gastos","componentType":"TableField","value":json.dumps([[
-                {"name":"物品编码Código","value":"QA-JOINT-PO-ITEM"},
+                {"name":"物品编码Código","value":item_code},
                 {"name":"物品名称Nombre del artículo","value":"QA synthetic item"},
                 {"name":"数量Cantidad","value":"2"},
                 {"name":"单位Unidad","value":"Nos"},
                 {"name":"总金额Monto Total","value":"100"},
             ]])}]}
-    for name,value in (("归属子公司Subsidiaria",beneficiary_company),("项目Proyecto",project)):
+    if rate is not None:
+        table = json.loads(row["form_component_values"][-1]["value"])
+        table[0].append({"name":"单价Precio", "value":rate})
+        row["form_component_values"][-1]["value"] = json.dumps(table)
+    for name,value in (("归属子公司Subsidiaria",beneficiary_company),("项目Proyecto",project),
+                       ("采购公司",purchasing_company),("供应商",supplier),("交付日期",schedule_date)):
         if value is not None:
             row["form_component_values"].append({"name":name,"value":value})
+    if raw:
+        return row
     source=service._normalize(row)
     proof={"source_id":"QA-cashier-1","source_type":"purchase","corp_id":"QA-CORP","process_instance_id":instance,
            "currency":source["currency"],"paid_amount":"0","payment_evidence_status":"recorded","payments":[],"attachments":[]}
@@ -98,6 +106,19 @@ class NativePurchaseSourcesQA(unittest.TestCase):
         self.assertNotIn(service.RECONCILIATION_FIELD,fields)
 
     def test_source_update_retains_manual_header_and_child_values(self):
+        long_source, long_evidence = fixture("QA-PUR-LONG-PAYEE", "QA-DT-LONG-PAYEE")
+        long_source["payee"] = "QA bank information " + "完整原文" * 100
+        long_source["originator_user_name"] = "QA " + "长申请人" * 100
+        long_source["version"] = contract.digest(long_source)
+        long_name = service._cache_source(long_source, long_evidence, "QA Operating China")
+        long_doc = frappe.get_doc(service.DOCTYPE, long_name)
+        self.assertIsNone(long_doc.payee)
+        self.assertIsNone(long_doc.creator)
+        self.assertEqual(json.loads(long_doc.get(service.SOURCE_FIELD))["payee"], long_source["payee"])
+        self.assertEqual(json.loads(long_doc.get(service.SOURCE_FIELD))["originator_user_name"], long_source["originator_user_name"])
+        self.assertEqual(service._cache_source(long_source, long_evidence), long_name)
+        for dt, before in self.before.items():
+            self.assertEqual(frappe.db.count(dt), before)
         frappe.db.set_value(service.DOCTYPE,self.name,{"currency":"USD","description":"manual text",
             "target_company":"QA Operating China",service.CONFIRMED_FIELD:1,service.BENEFICIARY_FIELD:"QA Operating Mexico"})
         source={**self.source,"requested_amount":"200"}; source["version"]=contract.digest(source)

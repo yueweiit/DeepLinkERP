@@ -104,7 +104,8 @@ class DedicatedSourceSyncTests(unittest.TestCase):
     def test_exact_allowlist_and_unknown_task_refused_before_database(self):
         self.assertEqual(set(self.runner.TASKS.values()), {
             "deeplinkerp_branding.services.operating_expenses.scheduled_sync",
-            "deeplinkerp_branding.services.purchase_source_service.scheduled_sync"})
+            "deeplinkerp_branding.services.purchase_source_service.scheduled_sync",
+            "deeplinkerp_branding.services.purchase_reversal_progress.recover"})
         with self.assertRaises(ValueError):
             self.runner.execute_task("frappe.email.send", self.run_id)
         self.db.get_single_value.assert_not_called()
@@ -118,6 +119,19 @@ class DedicatedSourceSyncTests(unittest.TestCase):
         self.assertEqual(len(self.logs), 1)
         self.method.assert_called_once_with()
 
+    def test_reversal_runs_with_scheduler_off_without_changing_original_logging_flags(self):
+        self.assertIn("reversal", self.jobs)
+        job = self.jobs["reversal"]
+        job.create_log = 0
+        before = self.runner.logging_snapshot()
+        self.assertEqual(len(before["jobs"]), 2)
+        self.assertEqual(self.runner.execute_task("reversal", self.run_id), "Complete")
+        self.assertEqual(job.create_log, 0)
+        self.assertEqual(job.scheduler_log.status, "Complete")
+        self.assertEqual(job.scheduler_log.name, self.runner.log_name("reversal", self.run_id))
+        self.assertEqual(self.runner.logging_snapshot(), before)
+        self.db.set_value.assert_not_called()
+
     def test_swallowed_native_failure_returns_failed_without_sensitive_context(self):
         self.method.side_effect = ValueError("Bearer secret-token; raw approval payload")
         self.assertEqual(self.runner.execute_task("operating", self.run_id), "Failed")
@@ -128,11 +142,24 @@ class DedicatedSourceSyncTests(unittest.TestCase):
         self.db.rollback.assert_called()
 
     def test_timeout_interrupts_actual_python_task_and_native_records_failed(self):
-        self.method.side_effect = lambda: time.sleep(5)
-        started = time.monotonic()
-        self.assertEqual(self.runner.execute_task("purchase", self.run_id, timeout=1), "Failed")
-        self.assertLess(time.monotonic() - started, 3)
-        self.assertEqual(signal.alarm(0), 0)
+        def native_consumes_timeout(signum=None):
+            try:
+                if signum is None:
+                    time.sleep(5)
+                else:
+                    signal.raise_signal(signum)
+            except TimeoutError:
+                return  # Native valuation records its failed RIV, then returns.
+
+        for task, method in (("purchase", lambda: time.sleep(5)), ("reversal", native_consumes_timeout),
+                             ("operating", lambda: native_consumes_timeout(signal.SIGTERM))):
+            with self.subTest(task=task):
+                self.method.side_effect = method
+                started = time.monotonic()
+                self.assertEqual(self.runner.execute_task(task, self.run_id, timeout=0.1), "Failed")
+                self.assertLess(time.monotonic() - started, 1)
+                self.assertEqual(signal.alarm(0), 0)
+                self.assertIsNone(self.runner._deadline.get())
 
     def test_global_scheduler_and_maintenance_guards_create_no_logs(self):
         for field in ("enable_scheduler", "maintenance_mode", "scheduler_disabled"):
@@ -178,7 +205,7 @@ class DedicatedSourceSyncTests(unittest.TestCase):
         self.method.side_effect = [ValueError("source failure"), None]
         self.assertEqual(self.runner.execute_task("operating", self.run_id), "Failed")
         self.assertEqual(self.runner.execute_task("purchase", self.run_id), "Complete")
-        self.assertEqual([job.scheduler_log.status for job in self.jobs.values()], ["Failed", "Complete"])
+        self.assertEqual([self.jobs[task].scheduler_log.status for task in ("operating", "purchase")], ["Failed", "Complete"])
         self.assertEqual(frappe.flags.get("dedicated_source_sync"), None)
 
     def test_cli_deadline_covers_initialization_and_returns_only_safe_json(self):

@@ -9,8 +9,12 @@ module = runpy.run_path(str(Path(__file__).parents[1] / "deploy/production/procu
 
 
 class ProcurementReleaseMetadataTests(unittest.TestCase):
-	def test_only_the_two_payment_models_expand_the_reviewed_release_scope(self):
-		self.assertEqual(set(module["JOINT_MODELS"]), {"Operating Expense Company Map","Operating Expense Source","Operating Expense Mapping","Operating Expense Event","Operating Expense Sync Settings","Purchase Fulfilment Link","Operating Expense Takeover","Operating Expense Payment"})
+	def test_purchase_adaptation_adds_only_rule_model_and_protected_snapshot(self):
+		self.assertIn("Purchase Source Mapping Rule",module["JOINT_MODELS"])
+		self.assertIn("custom_purchase_adaptation_json",module["SOURCE_FIELD_ORDER"])
+
+	def test_reviewed_release_scope_preserves_existing_models_and_adds_purchase_mapping(self):
+		self.assertEqual(set(module["JOINT_MODELS"]), {"Operating Expense Company Map","Operating Expense Source","Operating Expense Mapping","Operating Expense Event","Operating Expense Sync Settings","Purchase Fulfilment Link","Operating Expense Takeover","Operating Expense Payment","Purchase Source Mapping Rule"})
 	def fixture(self):
 		old = {
 			"scope": {"Page": [], "Has Role": []},

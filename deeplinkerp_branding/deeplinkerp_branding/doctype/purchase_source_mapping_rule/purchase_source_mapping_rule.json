@@ -1,0 +1,25 @@
+{
+ "doctype": "DocType", "name": "Purchase Source Mapping Rule", "module": "Deeplinkerp Branding",
+ "custom": 0, "engine": "InnoDB", "autoname": "field:scope_key", "allow_rename": 0, "track_changes": 1,
+ "field_order": ["scope_key", "corp_id", "process_code", "execution_region", "source_organization", "purchase_type", "company", "supplier", "item_group", "purchase_uom", "service_item_code", "service_item_name", "enabled", "rule_version", "confirmed_by", "confirmed_on"],
+ "fields": [
+  {"fieldname":"scope_key","label":"来源范围","fieldtype":"Data","reqd":1,"unique":1,"read_only":1},
+  {"fieldname":"corp_id","label":"来源企业","fieldtype":"Data","reqd":1,"read_only":1},
+  {"fieldname":"process_code","label":"审批模板","fieldtype":"Data","reqd":1,"read_only":1},
+  {"fieldname":"execution_region","label":"执行地区","fieldtype":"Data","reqd":1,"read_only":1},
+  {"fieldname":"source_organization","label":"申请组织","fieldtype":"Data","reqd":1,"read_only":1},
+  {"fieldname":"purchase_type","label":"采购类型","fieldtype":"Select","options":"goods\nprocessing\nmixed","reqd":1,"read_only":1},
+  {"fieldname":"company","label":"采购公司","fieldtype":"Link","options":"Company","reqd":1,"read_only":1},
+  {"fieldname":"supplier","label":"统一结算供应商","fieldtype":"Link","options":"Supplier","reqd":1,"read_only":1},
+  {"fieldname":"item_group","label":"物料组","fieldtype":"Link","options":"Item Group","reqd":1,"read_only":1},
+  {"fieldname":"purchase_uom","label":"计价单位","fieldtype":"Link","options":"UOM","reqd":1,"read_only":1},
+  {"fieldname":"service_item_code","label":"加工服务物料编码","fieldtype":"Data","reqd":1,"read_only":1},
+  {"fieldname":"service_item_name","label":"加工服务物料名称","fieldtype":"Data","reqd":1,"read_only":1},
+  {"fieldname":"enabled","label":"已确认启用","fieldtype":"Check","read_only":1,"default":"0"},
+  {"fieldname":"rule_version","label":"规则版本","fieldtype":"Data","read_only":1},
+  {"fieldname":"confirmed_by","label":"确认人","fieldtype":"Link","options":"User","read_only":1},
+  {"fieldname":"confirmed_on","label":"确认时间","fieldtype":"Datetime","read_only":1}
+ ],
+ "permissions": [{"role":"System Manager","read":1,"export":1}],
+ "sort_field":"modified","sort_order":"DESC"
+}

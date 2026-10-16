@@ -1,5 +1,7 @@
 import copy
 import importlib
+import hashlib
+from pathlib import Path
 import sys
 import types
 import unittest
@@ -49,6 +51,8 @@ finally:
 
 class BootBrandingTest(unittest.TestCase):
 	def setUp(self):
+		if hasattr(branding, "_purchase_page_code_version"):
+			branding._purchase_page_code_version.cache_clear()
 		dependency = patch.object(branding, "frappe", FAKE_FRAPPE)
 		dependency.start()
 		self.addCleanup(dependency.stop)
@@ -259,6 +263,53 @@ class BootBrandingTest(unittest.TestCase):
 		self.assertEqual([icon["name"] for icon in bootinfo["desktop_icons"]], ["Stock"])
 		self.assertIn("deeplinkerp_interface_mode", bootinfo)
 		self.assertEqual(bootinfo["deeplinkerp_interface_mode"]["effective_mode"], "dl")
+
+	def test_purchase_page_code_versions_invalidate_only_two_native_page_caches_without_layout_or_writes(self):
+		bootinfo = self.bootinfo([])
+		bootinfo["page_info"] = {
+			"purchase-payables": {"modified": "native-ap-v1", "roles": ["Accounts User"]},
+			"purchase-payment-records": {"modified": "native-payment-v1", "roles": ["Accounts User"]},
+			"operating-expenses": {"modified": "native-operating-v1", "roles": ["Accounts User"]},
+		}
+		previous = copy.deepcopy(bootinfo["page_info"])
+		with patch.object(FAKE_FRAPPE.db, "set_value", side_effect=AssertionError("boot must not write"), create=True):
+			branding.apply_boot_branding(bootinfo)
+		self.assertNotEqual(bootinfo["page_info"]["purchase-payables"]["modified"], previous["purchase-payables"]["modified"])
+		self.assertNotEqual(bootinfo["page_info"]["purchase-payment-records"]["modified"], previous["purchase-payment-records"]["modified"])
+		self.assertEqual(bootinfo["page_info"]["operating-expenses"], previous["operating-expenses"])
+		self.assertEqual(bootinfo["page_info"]["purchase-payables"]["roles"], ["Accounts User"])
+		# Native Desk.sync_pages removes only _page:<name> whose modified changed.
+		storage = {"_page:" + name: "old-code" for name in previous}
+		storage["dlp-list:site:finance:Purchase%20Invoice"] = "custom-layout"
+		for name, page in bootinfo["page_info"].items():
+			if previous[name]["modified"] != page["modified"]:
+				storage.pop("_page:" + name, None)
+		self.assertEqual(storage, {"_page:operating-expenses": "old-code", "dlp-list:site:finance:Purchase%20Invoice": "custom-layout"})
+		versions = copy.deepcopy(bootinfo["page_info"])
+		branding.apply_boot_branding(bootinfo)
+		self.assertEqual(bootinfo["page_info"], versions, "unchanged code must not evict cached pages repeatedly")
+
+	def test_page_source_change_updates_only_its_hash_and_does_not_add_unauthorized_pages(self):
+		bootinfo = self.bootinfo([])
+		bootinfo["page_info"] = {"purchase-payables": {"modified": "native-v1"}}
+		with patch.object(Path, "read_bytes", return_value=b"approved-page-code-v1"):
+			branding.apply_boot_branding(bootinfo)
+		self.assertEqual(set(bootinfo["page_info"]), {"purchase-payables"})
+		first = bootinfo["page_info"]["purchase-payables"]["modified"]
+		self.assertIn(hashlib.sha256(b"approved-page-code-v1").hexdigest(), first)
+		branding._purchase_page_code_version.cache_clear()  # deployment starts a fresh process
+		with patch.object(Path, "read_bytes", return_value=b"approved-page-code-v2"):
+			branding.apply_boot_branding(bootinfo)
+		self.assertNotEqual(bootinfo["page_info"]["purchase-payables"]["modified"], first)
+		self.assertTrue(bootinfo["page_info"]["purchase-payables"]["modified"].startswith("native-v1|"))
+
+	def test_purchase_page_source_hashes_read_three_fixed_files_once_per_process(self):
+		with patch.object(Path, "read_bytes", return_value=b"approved-code") as read:
+			for _ in range(2):
+				bootinfo = self.bootinfo([])
+				bootinfo["page_info"] = {name: {"modified": "native-v1"} for name in ("purchase-payables", "purchase-payment-records")}
+				branding.apply_boot_branding(bootinfo)
+		self.assertEqual(read.call_count, 3, "one AP source plus payment wrapper/adapter are process cached")
 
 
 if __name__ == "__main__":

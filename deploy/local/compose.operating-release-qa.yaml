@@ -2,7 +2,9 @@
 # checkout; replace it with the reviewed candidate only after site bootstrap.
 services:
   db:
-    image: mariadb:11.8
+    # Do not mount the retained 11.8.9 physical volume into this older engine.
+    # Restore its logical dump into the separately named 11.8.6 volume instead.
+    image: mariadb:11.8.6@sha256:78a5047d3ba33975f183f183c2464cc7f1eab13ec8667e57cc9a5821d6da7577
     environment:
       MARIADB_ROOT_PASSWORD: operating-release-local-only
     command: [--character-set-server=utf8mb4, --collation-server=utf8mb4_unicode_ci]
@@ -20,8 +22,10 @@ services:
     working_dir: /home/frappe/frappe-bench
     volumes:
       - operating-release-sites:/home/frappe/frappe-bench/sites
-      - ${OPERATING_RELEASE_QA_PACKAGE:?Frozen QA package path required}:/home/frappe/frappe-bench/apps/deeplinkerp_branding/deeplinkerp_branding
-      - ../..:/workspace:ro
+      - ${OPERATING_RELEASE_QA_PACKAGE:?Frozen QA package path required}:/home/frappe/frappe-bench/apps/deeplinkerp_branding/deeplinkerp_branding:ro
+      - ${OPERATING_RELEASE_QA_FINANCE_PACKAGE:?Frozen Finance package required}:/home/frappe/frappe-bench/apps/china_finance/china_finance:ro
+      - ${OPERATING_RELEASE_QA_OA_PACKAGE:?Frozen OA package required}:/home/frappe/frappe-bench/apps/oa_purchase_request/oa_purchase_request:ro
+      - ${OPERATING_RELEASE_QA_WORKSPACE:-../..}:/workspace:ro
     depends_on:
       db:
         condition: service_healthy
@@ -34,7 +38,9 @@ services:
     working_dir: /home/frappe/frappe-bench
     volumes:
       - operating-release-sites:/home/frappe/frappe-bench/sites
-      - ${OPERATING_RELEASE_QA_PACKAGE:?Frozen QA package path required}:/home/frappe/frappe-bench/apps/deeplinkerp_branding/deeplinkerp_branding
+      - ${OPERATING_RELEASE_QA_PACKAGE:?Frozen QA package path required}:/home/frappe/frappe-bench/apps/deeplinkerp_branding/deeplinkerp_branding:ro
+      - ${OPERATING_RELEASE_QA_FINANCE_PACKAGE:?Frozen Finance package required}:/home/frappe/frappe-bench/apps/china_finance/china_finance:ro
+      - ${OPERATING_RELEASE_QA_OA_PACKAGE:?Frozen OA package required}:/home/frappe/frappe-bench/apps/oa_purchase_request/oa_purchase_request:ro
     depends_on:
       - backend
       - redis

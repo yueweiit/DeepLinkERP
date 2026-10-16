@@ -92,6 +92,8 @@ def expense_facts(item):
     if not isinstance(attachments,list) or any(not isinstance(row,dict) for row in attachments):
         raise ValueError("来源附件事实格式无效，请核对原单")
     facts = {key: item.get(key) for key in ("source_system", "source_id", "source_company", "application_type", "application_type_raw", "applicant", "payee_name", "summary", "request_date", "currency", "original_source_amount", "original_source_currency", "storage_precision_warning", "source_conflict", "currency_conflict", "approvals")}
+    if item.get("source_system") == "dingtalk-oa" and "company_mapping_source" in item:
+        facts["source_company"] = item["company_mapping_source"]
     if item.get("source_system") == "dingtalk-oa" and isinstance(facts["approvals"], dict):
         approvals = facts["approvals"]
         if isinstance(approvals.get("raw"), dict):
@@ -148,48 +150,113 @@ def payment_decision(item):
     return {"can_register_payment": allowed, "reason": "" if allowed else "审批尚未通过，请核对"}
 
 
+QUICK_TABS = ("all", "pending_work", "pending_payment", "approvals_running", "paid", "reconciliation")
+MONEY_FIELDS = ("amount", "paid_amount", "pending_amount")
+
+
+def _row_amounts(row):
+    amounts = {}
+    for field in MONEY_FIELDS:
+        try:
+            amounts[field] = money(row.get(field))
+        except ValueError:
+            amounts[field] = None
+    return amounts
+
+
+def _work_flags(row, amounts):
+    """Visibility is not authorization; parse monetary facts once per row."""
+    paid, pending = amounts["paid_amount"], amounts["pending_amount"]
+    known = paid is not None and pending is not None and paid >= 0 and pending >= 0
+    abnormal = (paid is not None and paid < 0) or (pending is not None and pending < 0)
+    state = row.get("approval_state")
+    unfinished = state not in {"rejected", "terminated", "withdrawn"} and not row.get("source_withdrawn")
+    return {
+        "all": True,
+        "pending_work": unfinished and not abnormal and (not known or pending > 0),
+        # Legacy callers retain the eligibility-filtered shortcut.
+        "pending_payment": known and pending > 0 and (row.get("payment_eligibility") or {}).get("can_register_payment") is True,
+        "approvals_running": state == "pending",
+        "paid": known and pending == 0,
+        "reconciliation": not known or not row.get("company") or state == "unknown" or bool(row.get("source_conflict") or row.get("currency_conflict") or row.get("projection_conflicts")),
+    }
+
+
 def quick_tab_matches(row, tab):
-    """Do not substitute approval status for actual monetary history."""
-    if tab == "all":
-        return True
-    if tab == "approvals_running":
-        return row.get("approval_state") == "pending"
-    try:
-        pending = money(row.get("pending_amount"))
-        paid = money(row.get("paid_amount"))
-        known = pending >= 0 and paid >= 0
-    except ValueError:
-        pending, known = None, False
-    if tab == "paid":
-        return known and pending == 0
-    if tab == "pending_payment":
-        decision = row.get("payment_eligibility") or {}
-        return known and pending > 0 and decision.get("can_register_payment") is True
-    if tab == "reconciliation":
-        return not known or not row.get("company") or row.get("approval_state") == "unknown" or bool(row.get("source_conflict") or row.get("currency_conflict"))
-    raise ValueError("快捷筛选无效")
+    if tab not in QUICK_TABS:
+        raise ValueError("快捷筛选无效")
+    return _work_flags(row, _row_amounts(row))[tab]
+
+
+def _accumulate_currency(buckets, row, amounts):
+    bucket = buckets.setdefault(row.get("currency") or "未知", {
+        "sums": {field: Decimal(0) for field in MONEY_FIELDS},
+        "known": {field: 0 for field in MONEY_FIELDS}, "incomplete_fields": set(),
+        "anomaly_count": 0, "anomaly_totals": {field: Decimal(0) for field in MONEY_FIELDS},
+    })
+    abnormal = any(value is not None and value < 0 for value in amounts.values())
+    bucket["anomaly_count"] += int(abnormal)
+    for field, value in amounts.items():
+        if value is None:
+            bucket["incomplete_fields"].add(field)
+        elif value < 0 or (abnormal and field in {"paid_amount", "pending_amount"}):
+            # Both balance sides of anomalous history are isolated together.
+            bucket["anomaly_totals"][field] += value
+            bucket["incomplete_fields"].add(field)
+        else:
+            bucket["sums"][field] += value
+            bucket["known"][field] += 1
+
+
+def _currency_result(buckets):
+    result = {}
+    for code, bucket in buckets.items():
+        unknown = bucket["incomplete_fields"]
+        result[code] = {field: None if field in unknown else str(bucket["sums"][field]) for field in MONEY_FIELDS}
+        result[code].update(incomplete=bool(unknown), incomplete_fields=sorted(unknown),
+            known_totals={field: str(bucket["sums"][field]) for field in unknown if bucket["known"][field]},
+            anomaly_count=bucket["anomaly_count"],
+            anomaly_totals={field: str(value) for field, value in bucket["anomaly_totals"].items() if value})
+    return result
 
 
 def currency_totals(rows):
-    fields = ("amount", "paid_amount", "pending_amount")
     buckets = {}
     for row in rows:
-        bucket = buckets.setdefault(row.get("currency") or "未知", {
-            "sums": {field: Decimal(0) for field in fields},
-            "known": {field: 0 for field in fields}, "incomplete_fields": set()})
-        for field in fields:
-            try:
-                bucket["sums"][field] += money(row.get(field))
-                bucket["known"][field] += 1
-            except ValueError:
-                bucket["incomplete_fields"].add(field)
-    result = {}
-    for currency, bucket in buckets.items():
-        unknown = bucket["incomplete_fields"]
-        result[currency] = {field: None if field in unknown else str(bucket["sums"][field]) for field in fields}
-        result[currency].update(incomplete=bool(unknown), incomplete_fields=sorted(unknown),
-            known_totals={field: str(bucket["sums"][field]) for field in unknown if bucket["known"][field]})
-    return result
+        _accumulate_currency(buckets, row, _row_amounts(row))
+    return _currency_result(buckets)
+
+
+def worklist_summary(rows, tab):
+    """One O(N) scan for all shortcut counts and the selected monetary totals."""
+    if tab not in QUICK_TABS:
+        raise ValueError("快捷筛选无效")
+    selected, buckets = [], {}
+    counts = dict.fromkeys(QUICK_TABS, 0)
+    for row in rows:
+        amounts = _row_amounts(row)
+        flags = _work_flags(row, amounts)
+        blockers = []
+        if any(value is not None and value < 0 for value in amounts.values()):
+            blockers.append("付款金额异常，待核对")
+        elif amounts["paid_amount"] is None or amounts["pending_amount"] is None:
+            blockers.append("历史付款待核对")
+        if not row.get("company"):
+            blockers.append("法律公司待确认")
+        elif any(issue in str(row.get("issues") or "") for issue in ("法律公司映射已变更", "法律公司映射已移除")):
+            blockers.append("法律公司归属待复核")
+        decision = row.get("payment_eligibility") or {}
+        if decision.get("can_register_payment") is not True:
+            blockers.append(decision.get("notice") or decision.get("reason") or "审批证据待核对")
+        if row.get("projection_conflicts"):
+            blockers.append("来源字段冲突，待核对")
+        row["blocking_reason"] = "；".join(dict.fromkeys(blockers))
+        for key, matches in flags.items():
+            counts[key] += int(matches)
+        if flags[tab]:
+            selected.append(row)
+            _accumulate_currency(buckets, row, amounts)
+    return selected, counts, _currency_result(buckets)
 
 
 def event_fingerprint(item, mapping, payment_id=None):

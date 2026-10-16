@@ -14,9 +14,11 @@ from frappe.utils import getdate, nowdate
 
 from deeplinkerp_branding.services.unified_purchase_service import _require_export_permission
 
+from .purchase_repost_boundary import procurement_entry
+
 SOURCES = {"Purchase Receipt", "Purchase Order"}
 PI_FIELDS = {"company", "supplier", "currency", "party_account_currency", "grand_total", "base_grand_total",
-             "rounded_total", "base_rounded_total", "disable_rounded_total", "outstanding_amount", "items", "is_return"}
+             "rounded_total", "base_rounded_total", "disable_rounded_total", "outstanding_amount", "items", "is_return", "on_hold"}
 
 _record_reader = ContextVar("purchase_payment_record_reader", default=None)
 
@@ -119,6 +121,8 @@ def _read(doctype, name, fields=()):
 
 
 def _current(doctype, name):
+    from .purchase_repost_boundary import initialize
+    initialize()
     doc = frappe.get_doc(doctype, name, for_update=True)
     doc.check_permission("read")
     if doc.get("company"):
@@ -126,11 +130,33 @@ def _current(doctype, name):
     return doc
 
 
-def order_execution_reason(order):
+class _CurrentReader(_RecordReader):
+    """Fresh locking parents AND children; never the UI bulk-reader cache."""
+    def doc(self, doctype, name):
+        # A nested native hook can update a parent already read by the outer
+        # call (PO submit -> automatic PR draft). The collector owns its own
+        # immutable-phase cache; the orchestration reader must not retain it.
+        return frappe.get_doc(doctype, name, for_update=True)
+
+    def check(self, doc):
+        doc.check_permission("read")
+
+
+@contextmanager
+def current_reads():
+    token = _record_reader.set(_CurrentReader())
+    try:
+        yield
+    finally:
+        _record_reader.reset(token)
+
+
+def order_execution_reason(order, *, allow_completed_invoice_payment=False):
     """PO-authorized source-state check; never expose the OA payload or financial settings."""
     if order.docstatus != 1:
         return "请先核对并提交采购订单，再办理付款或入库"
-    if order.status in ("Closed", "Cancelled", "On Hold", "Completed"):
+    if order.status in ("Closed", "Cancelled", "On Hold") or (
+            order.status == "Completed" and not allow_completed_invoice_payment):
         return "采购订单已关闭、取消、暂停或完成，请先核对订单状态"
     name = order.get("custom_oa_purchase_expense")
     if not name:
@@ -161,67 +187,40 @@ def order_execution_reason(order):
     return ""
 
 
-def order_payment_balance(order):
-    _require_fields("Purchase Order", {"grand_total", "base_grand_total", "advance_paid", "currency", "per_billed"})
-    from erpnext.accounts.doctype.payment_entry.payment_entry import get_reference_details
-    balance = get_reference_details("Purchase Order", order.name, order.currency, "Supplier", order.supplier)
-    return {"currency": order.currency, "outstanding": balance["outstanding_amount"], "reference_doctype": "Purchase Order"}
+def invoice_payment_eligible(doc):
+    """Match native PE's final on_hold refusal; release dates never auto-unhold."""
+    return doc.docstatus == 1 and not doc.is_return and not doc.get("on_hold")
 
 
-def _advance_account(entry):
-    """Use native account selection; an advance must debit an actual asset account."""
-    entry.setup_party_account_field()
-    entry.set_liability_account()
-    if not entry.book_advance_payments_in_separate_party_account:
-        frappe.throw("采购预付款需先由财务确认公司已启用独立预付资产账户；本操作不会修改账套")
-    account = _read("Account", entry.paid_to, {"company", "root_type", "account_currency", "is_group", "disabled"})
-    if account.company != entry.company or account.root_type != "Asset" or account.is_group or account.disabled:
-        frappe.throw("供应商预付款账户必须是本公司可用的资产明细账户，请由财务核对")
-    if account.account_currency != entry.paid_from_account_currency:
-        frappe.throw("跨币种预付款请在原生付款单核对")
+def receipt_eligibility(order, *, can_create, reversal_pending=False):
+    """Read the already-authorized projection; never fetch an order per list row."""
+    reason = ""
+    try:
+        progress = amount(order.get("per_received")) if order.get("per_received") is not None else None
+    except (ValueError, TypeError):
+        progress = None
+    if reversal_pending:
+        reason = "采购冲销未完成，暂不能入库"
+    elif order.get("docstatus") != 1:
+        reason = "订单未提交或已取消"
+    elif order.get("status") in {"Closed", "Cancelled", "On Hold", "Completed"}:
+        reason = "订单已关闭、取消、暂停或完成"
+    elif progress is None or not progress.is_finite() or progress < 0:
+        reason = "收货进度不可用，请核对权限或刷新"
+    elif progress >= 100:
+        reason = "订单已全部收货"
+    elif not can_create:
+        reason = "没有创建采购入库权限"
+    return {"allowed": not bool(reason), "reason": reason}
 
 
-ADVANCE_WARNING = "采购预付款需财务核对本公司独立预付资产账户及权限，请打开原生付款单处理"
-
-
-def _advance_reason(order):
-    """Permission checked, read-only capability using the native account resolver.
-
-    Native precedence is Supplier -> Supplier Group -> Company. Inspect only
-    the layers the resolver may use; never enable flags or manufacture an account.
-    _advance_account still repeats the authoritative native write-time validation.
-    """
-    with _quiet_link_errors():
-        try:
-            company = _read("Company", order.company, {"book_advance_payments_in_separate_party_account", "default_currency"})
-            if not company.book_advance_payments_in_separate_party_account:
-                return ADVANCE_WARNING
-            if order.currency != company.default_currency:
-                return "跨币种预付款请打开原生付款单核对"
-            supplier = _read("Supplier", order.supplier, {"supplier_group", "accounts"})
-            _require_fields("Party Account", {"company", "advance_account"}, "Supplier")
-            own = any(row.company == order.company and row.advance_account for row in supplier.get("accounts", []))
-            if not own:
-                group = _read("Supplier Group", supplier.supplier_group, {"accounts"})
-                _require_fields("Party Account", {"company", "advance_account"}, "Supplier Group")
-                grouped = any(row.company == order.company and row.advance_account for row in group.get("accounts", []))
-                if not grouped:
-                    _require_fields("Company", {"default_advance_paid_account"})
-            from erpnext.accounts.party import get_party_advance_account
-            name = get_party_advance_account("Supplier", order.supplier, order.company)
-            if not name:
-                return ADVANCE_WARNING
-            account = _read("Account", name, {"company", "root_type", "account_currency", "is_group", "disabled"})
-            if account.company != order.company or account.root_type != "Asset" or account.is_group or account.disabled:
-                return ADVANCE_WARNING
-            if account.account_currency != order.currency:
-                return "跨币种预付款请打开原生付款单核对"
-        except (frappe.DoesNotExistError, frappe.PermissionError, frappe.ValidationError):
-            return ADVANCE_WARNING
-    return ""
+def _receipt_payment_source(source_doctype):
+    if source_doctype == "Purchase Order":
+        frappe.throw("采购订单仅支持入库；请从采购入库确认应付后付款，独立预付款请在原生财务付款单处理")
 
 
 def payment_target(source_doctype, source_name, purchase_invoice=None):
+    _receipt_payment_source(source_doctype)
     source = _source(source_doctype, source_name)
     chain = get_purchase_chain(source_doctype, source_name, include_payments=False)
     if chain["incomplete_links"]:
@@ -238,23 +237,10 @@ def payment_target(source_doctype, source_name, purchase_invoice=None):
             frappe.throw("应付单与当前采购单据没有明确关联")
         if target.company != source.company or target.supplier != source.supplier:
             frappe.throw("付款公司和供应商必须与来源一致")
-        if target.docstatus != 1 or target.is_return or target.invoice_is_blocked():
+        if not invoice_payment_eligible(target):
             frappe.throw("应付单未提交、为退货或已暂停付款")
         return source, target, invoice_balance(target)
-    if source_doctype != "Purchase Order":
-        frappe.throw("没有应付单时，仅采购订单支持明确预付款")
-    target = _current("Purchase Order", source_name)
-    reason = order_execution_reason(target)
-    if reason:
-        frappe.throw(reason)
-    if any(row["docstatus"] == 1 for row in chain["invoices"]):
-        frappe.throw("已有已提交采购应付，请按应付余额付款")
-    if amount(target.per_billed) >= 100:
-        frappe.throw("订单已完成开票，请按应付余额付款")
-    reason = _advance_reason(target)
-    if reason:
-        frappe.throw(reason)
-    return source, target, order_payment_balance(target)
+    frappe.throw("尚无已提交应付，请先从采购入库确认应付")
 
 
 LINK_WARNING = "关联缺失或无权读取，请在原生单据核对；快捷付款/确认应付已禁用"
@@ -270,6 +256,10 @@ PAYMENT_COLUMNS = {"name": "付款单", "posting_date": "付款日期", "supplie
                    "payment_type": "付款类型", "amount": "金额", "currency": "付款币种", "bank_account": "记账账户",
                    "state": "付款状态", "remarks": "摘要", "references": "核销引用", "allocation_currency": "核销币种",
                    "vouchers": "会计凭证", "sync_issues": "凭证同步状态"}
+PAYABLE_COLUMNS = {"name": "应付单号", "posting_date": "应付日期", "supplier": "供应商", "company": "公司",
+                   "grand_total": "应付原币金额", "invoice_currency": "应付原币币种",
+                   "total": "应付金额", "settled": "已付 / 核销", "outstanding": "未付余额", "currency": "应付账户币种",
+                   "status": "应付状态", "orders": "采购订单", "receipts": "采购入库"}
 BANK_WARNING = "银行或现金账户不可用或无权读取，请在原生单据核对"
 
 
@@ -283,6 +273,9 @@ def _query_fields(doctype):
 
 
 def _bank_account(name, company, currency, for_update=False):
+    if for_update:
+        from .purchase_repost_boundary import initialize
+        initialize()
     """One bank guard for reads and drawer writes; framework account names stay private."""
     fields = {"company", "account_currency", "is_group", "account_type", "disabled"}
     denied = False
@@ -335,7 +328,7 @@ def _native_filters(doctype, value, allowed):
 
 def _order_by(doctype, value, allowed):
     clauses = []
-    for part in str(value or "posting_date desc, creation desc").split(","):
+    for part in str(value or "posting_date desc").split(","):
         match = re.fullmatch(r"\s*(?:(?:`([^`]+)`|([a-z_][a-z0-9_ ]*))\s*\.\s*)?(?:`([a-z_][a-z0-9_]*)`|([a-z_][a-z0-9_]*))\s*(asc|desc)?\s*", part, re.I)
         if not match:
             frappe.throw("排序字段无效")
@@ -345,7 +338,7 @@ def _order_by(doctype, value, allowed):
         _require_fields(doctype, {field})
         clauses.append(field + " " + (match[5] or "asc").lower())
     if not any(clause.startswith("name ") for clause in clauses):
-        clauses.append("name asc")
+        clauses.append("name desc" if clauses[0] == "posting_date desc" else "name asc")
     return ", ".join(clauses)
 
 
@@ -366,8 +359,11 @@ def _export(doctype, rows, columns, allowed):
     if not isinstance(columns, list) or not columns or len(set(columns)) != len(columns) or any(column not in allowed for column in columns):
         frappe.throw("导出列无效")
     columns = list(columns)
-    if {"grand_total", "amount"}.intersection(columns) and "currency" not in columns:
-        columns.append("currency")
+    currencies = ([("invoice_currency", {"grand_total"}), ("currency", {"total", "settled", "outstanding"})]
+                  if doctype == "Purchase Invoice" else [("currency", {"grand_total", "amount"})])
+    for currency, amounts in currencies:
+        if amounts.intersection(columns) and currency not in columns:
+            columns.append(currency)
     if doctype == "Payment Entry" and "allocation_currency" not in columns:
         columns.append("allocation_currency")
     for row in rows:
@@ -379,7 +375,7 @@ def _export(doctype, rows, columns, allowed):
             cell = getdate(cell) if cell else None
         elif column == "allocation_currency":
             cell = ", ".join(sorted({ref["currency"] for ref in row["references"] if ref.get("currency")}))
-        elif column in ("settled", "outstanding"):
+        elif doctype == "Purchase Receipt" and column in ("settled", "outstanding"):
             cell = [{"currency": balance["currency"], column: balance[column],
                      "scope_label": "共享应付整单余额" if row.get("shared_payable") else "关联应付余额"}
                     for balance in row.get("balances", [])]
@@ -393,7 +389,7 @@ def _export(doctype, rows, columns, allowed):
         return cell
     from frappe.utils.xlsxutils import make_xlsx
     column_styles = {index: (1,) if column == "posting_date" else (0,)
-                     for index, column in enumerate(columns) if column in {"posting_date", "grand_total", "amount"}}
+                     for index, column in enumerate(columns) if column in {"posting_date", "grand_total", "amount", "total", "settled", "outstanding"}}
     styles = {"styles": [{"num_format": "#,##0.00"}, {"num_format": "yyyy-mm-dd"}],
               "column_styles": column_styles} if column_styles else {}
     workbook = make_xlsx([[allowed[column] for column in columns]] + [[value(row, column) for column in columns] for row in rows], "采购记录", styles=styles)
@@ -482,10 +478,10 @@ def _invoice_row(doc, source_type, source_name):
     field = "purchase_receipt" if source_type == "Purchase Receipt" else "purchase_order"
     shared = any(row.get(field) != source_name for row in doc.items)
     balance = invoice_balance(doc) if doc.docstatus == 1 else {}
-    blocked = doc.invoice_is_blocked() if doc.docstatus == 1 else False
+    blocked = bool(doc.get("on_hold")) if doc.docstatus == 1 else False
     return {"name": doc.name, "docstatus": doc.docstatus, "is_return": bool(doc.is_return),
             "shared": shared, "scope_label": "共享应付整单余额" if shared else "关联应付余额",
-            "can_pay": bool(doc.docstatus == 1 and not doc.is_return and not blocked and balance.get("outstanding", 0) > 0),
+            "can_pay": bool(invoice_payment_eligible(doc) and balance.get("outstanding", 0) > 0),
             "blocked": bool(blocked), **balance}
 
 
@@ -503,23 +499,23 @@ def summarize(invoices):
 
 @frappe.whitelist()
 def get_purchase_payables(company=None, supplier=None, search=None, from_date=None, to_date=None,
-                          start=0, page_length=100):
+                          start=0, page_length=100, export_format=None, columns=None, order_by=None):
     if not frappe.has_permission("Payment Entry", "read"):
         frappe.throw("采购人员请在采购订单查看订单进度；应付与付款办理由财务处理", frappe.PermissionError)
     token = _record_reader.set(_RecordReader())
     try:
-        return _get_purchase_payables(company, supplier, search, from_date, to_date, start, page_length)
+        return _get_purchase_payables(company, supplier, search, from_date, to_date, start, page_length, export_format, columns, order_by)
     finally:
         _record_reader.reset(token)
 
 
-def _get_purchase_payables(company, supplier, search, from_date, to_date, start, page_length):
+def _get_purchase_payables(company, supplier, search, from_date, to_date, start, page_length, export_format=None, columns=None, order_by=None):
     """Native PI documents with readable procurement sources, once per invoice.
 
     Totals/balances are whole native invoices, including mixed expense lines.
     No amount is reallocated or reclassified as a procurement cost.
     """
-    fields = PI_FIELDS | {"posting_date", "status"}
+    fields = PI_FIELDS | {"name", "posting_date", "status"}
     _require_fields("Purchase Invoice", fields)
     _require_fields("Purchase Invoice Item", {"purchase_order", "purchase_receipt"}, "Purchase Invoice")
     start, page_length = _pagination(start, page_length)
@@ -529,7 +525,7 @@ def _get_purchase_payables(company, supplier, search, from_date, to_date, start,
     candidates = frappe.get_list("Purchase Invoice", filters=filters,
         or_filters=[["Purchase Invoice Item", field, "is", "set"]
                     for field in ("purchase_order", "purchase_receipt")],
-        fields=["name"], order_by="posting_date desc, name desc", limit_page_length=0)
+        fields=["name"], order_by=_order_by("Purchase Invoice", order_by, fields), limit_page_length=0)
     reader = _record_reader.get()
     reader.preload("Purchase Invoice", [row.name for row in candidates])
     invoices = [doc for (dt, _), doc in reader.docs.items() if dt == "Purchase Invoice" and doc]
@@ -562,7 +558,11 @@ def _get_purchase_payables(company, supplier, search, from_date, to_date, start,
                      "can_pay": bool(invoice["can_pay"] and not warnings
                                      and frappe.has_permission("Payment Entry", "read")
                                      and frappe.has_permission("Payment Entry", "create"))})
-    return {"rows": rows[start:start + page_length], "total_count": len(rows),
+    if export_format:
+        if export_format != "xlsx":
+            frappe.throw("导出格式无效")
+        return _export("Purchase Invoice", rows, columns, PAYABLE_COLUMNS)
+    return {"rows": rows[start:start + page_length], "total_count": len(rows), "totals": summarize(rows),
             "notice": "仅显示关联可读采购订单或采购入库的原生应付单。金额与余额均为整张应付单，可能包含其他费用；不是采购成本或某张入库的分摊金额。草稿、退货、取消分别显示，草稿和取消不计应付余额。"}
 
 
@@ -824,17 +824,22 @@ def get_purchase_chain(source_doctype, source_name, include_payments=True):
         orders = _source_links(doc, "Purchase Order", "purchase_order", warnings)
     else:
         orders = [doc.name]
-    execution_reason = order_execution_reason(doc) if source_doctype == "Purchase Order" else ""
-    if not execution_reason and source_doctype == "Purchase Receipt":
-        for order_name in orders:
-            order = _related("Purchase Order", order_name, warnings, SOURCE_FIELDS, doc.company, doc.supplier)
-            if order:
-                execution_reason = order_execution_reason(order)
-                if execution_reason:
-                    break
-    if execution_reason:
+    execution_reason = payment_execution_reason = ""
+    for order_name in orders:
+        order = doc if source_doctype == "Purchase Order" else _related(
+            "Purchase Order", order_name, warnings, SOURCE_FIELDS, doc.company, doc.supplier)
+        if not order:
+            continue
+        order_reason = order_execution_reason(order)
+        execution_reason = execution_reason or order_reason
+        payment_execution_reason = payment_execution_reason or (
+            order_execution_reason(order, allow_completed_invoice_payment=True)
+            if eligible and order.status == "Completed" else order_reason)
+        if execution_reason and payment_execution_reason:
+            break
+    if payment_execution_reason:
         can_create = False
-        reason = execution_reason
+        reason = payment_execution_reason
     progress = _order_progress(orders, warnings)
     incomplete = LINK_WARNING in warnings
     if incomplete:
@@ -862,20 +867,17 @@ def get_purchase_chain(source_doctype, source_name, include_payments=True):
     advance = None
     advance_reason = ""
     can_prepay = False
-    if source_doctype == "Purchase Order" and frappe.has_permission("Payment Entry", "create"):
-        advance_reason = order_execution_reason(doc)
-        if not advance_reason and incomplete:
-            advance_reason = LINK_WARNING
-        if not advance_reason and any(row["docstatus"] == 1 for row in invoices):
-            advance_reason = "已有已提交采购应付，请按应付余额付款"
-        if not advance_reason:
-            advance_reason = _advance_reason(doc)
-        if not advance_reason:
-            advance = order_payment_balance(doc)
-            can_prepay = amount(doc.per_billed) < 100 and amount(advance["outstanding"]) > 0
-            if not can_prepay:
-                advance_reason = "订单无可预付余额，请核对金额与已预付记录"
+    if source_doctype == "Purchase Order":
+        can_create = can_invoice = False
+    from .purchase_reversal_progress import projection
+    reversal = projection(doc)
+    if reversal and reversal["stage"] != "completed":
+        can_create = can_invoice = can_prepay = False
+        drafts = []
+        reason = invoice_reason = advance_reason = "采购冲销未完成，相关操作暂缓办理"
     return {"source_doctype": source_doctype, "name": doc.name, "company": doc.company, "supplier": doc.supplier,
+            "reversal": reversal,
+            "receipt_eligibility": receipt_eligibility(doc, can_create=bool(frappe.has_permission("Purchase Receipt", "create")), reversal_pending=bool(reversal and reversal["stage"] != "completed")) if source_doctype == "Purchase Order" else None,
             "currency": doc.currency, "grand_total": doc.grand_total, "status": doc.status,
             "docstatus": doc.docstatus, "orders": orders, "order_progress": progress, "invoices": invoices, "balances": [] if incomplete else summarize(invoices), "incomplete_links": incomplete,
             "can_create_invoice": can_invoice, "draft_invoices": drafts,
@@ -906,7 +908,7 @@ def _receipt_list(filters, start, page_length, native_filters, or_filters, order
             query[field] = filters[field]
     if filters.get("from_date") or filters.get("to_date"):
         query["posting_date"] = ["between", [filters.get("from_date") or "1900-01-01", filters.get("to_date") or "2999-12-31"]]
-    fields = RECEIPT_FIELDS
+    fields = [*RECEIPT_FIELDS, "modified"]  # Version metadata is not an export column.
     _require_fields("Purchase Receipt", fields)
     start, page_length = _pagination(start, page_length)
     allowed = _query_fields("Purchase Receipt")
@@ -939,6 +941,7 @@ def _receipt_list(filters, start, page_length, native_filters, or_filters, order
             row["can_create_invoice"] = chain["can_create_invoice"]
             row["draft_invoices"] = chain["draft_invoices"]
             row["draft_orders"] = chain["draft_orders"]
+            row["reversal"] = chain.get("reversal")
             row["shared_payable"] = bool(not chain["incomplete_links"] and any(invoice["shared"] for invoice in chain["invoices"]))
             row["settlement_state"] = "余额不可见" if chain["incomplete_links"] or (chain["warnings"] and not chain["balances"]) else "未形成应付"
             row["payment_state"] = ("关联缺失或无权读取" if chain["incomplete_links"] else "共享应付" if any(i["shared"] for i in chain["invoices"]) else "余额不可见" if chain["warnings"] else "未形成应付")
@@ -957,8 +960,10 @@ def _receipt_list(filters, start, page_length, native_filters, or_filters, order
 
 
 @frappe.whitelist(methods=["POST"])
-def create_payment_draft(source_doctype, source_name, purchase_invoice=None, amount_to_pay=None, bank_account=None, posting_date=None, remarks=None, request_id=None, reference_no=None):
+@procurement_entry
+def create_payment_draft(source_doctype, source_name, purchase_invoice=None, amount_to_pay=None, bank_account=None, posting_date=None, remarks=None, request_id=None, reference_no=None, sources=None, allocations=None):
     """Save exactly a native draft. Never bypass create/read/write or approval permissions."""
+    _receipt_payment_source(source_doctype)
     source = _source(source_doctype, source_name)
     if get_purchase_chain(source_doctype, source_name, include_payments=False)["incomplete_links"]:
         frappe.throw(LINK_WARNING)
@@ -968,52 +973,133 @@ def create_payment_draft(source_doctype, source_name, purchase_invoice=None, amo
         frappe.throw("没有创建付款单权限", frappe.PermissionError)
     if not re.fullmatch(r"[a-zA-Z0-9-]{16,80}", str(request_id or "")):
         frappe.throw("缺少有效请求标识，请刷新付款抽屉")
+    allocation_rows = _payment_allocations(allocations) if sources is not None else None
     try:
-        value = amount(amount_to_pay)
+        value = sum((amount(row["amount"]) for row in allocation_rows), Decimal(0)) if allocation_rows is not None else amount(amount_to_pay)
     except ValueError as exc:
         frappe.throw(str(exc))
     if value <= 0:
         frappe.throw("本次金额必须大于0")
     payload = [source_doctype, source_name, purchase_invoice, str(value), bank_account, str(posting_date or nowdate()), remarks or "", reference_no or ""]
+    if sources is not None:
+        from .purchase_document_actions import _batch_sources
+        sources = _batch_sources(sources)
+        payload += [sources, allocation_rows]
     digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False).encode()).hexdigest()
-    key = "dlp-purchase-draft:" + hashlib.sha256((frappe.session.user + ":" + request_id).encode()).hexdigest()
-    cache = frappe.cache()
-    with cache.lock(key + ":lock", timeout=60, blocking_timeout=5):
-        previous = cache.get_value(key)
-        if previous:
-            if previous["digest"] != digest:
-                frappe.throw("同一请求内容已改变，请重新打开付款抽屉")
-            if not frappe.db.exists("Payment Entry", previous["name"]):
-                frappe.throw("上次请求正在提交或失败，请稍后重试；不要重复创建")
-            entry = _read("Payment Entry", previous["name"])
-            return {"name": entry.name, "docstatus": entry.docstatus, "reused": True}
-        source, target, balance = payment_target(source_doctype, source_name, purchase_invoice)
-        if value > amount(balance["outstanding"]):
-            frappe.throw("本次金额超过最新未付余额，请刷新")
-        _bank_account(bank_account, source.company, balance["currency"])
+
+    def operation():
+        if sources is None:
+            source, target, balance = payment_target(source_doctype, source_name, purchase_invoice)
+            targets = [(target, balance, value)]
+        else:
+            context = _payment_batch_targets(source_doctype, sources, check_versions=True)
+            source = context["sources"][0]
+            by_name = {doc.name: (doc, balance) for doc, balance in context["targets"]}
+            if any(row["name"] not in by_name for row in allocation_rows):
+                frappe.throw("应付单不属于所选真实采购链或当前不可付款")
+            targets = [(by_name[row["name"]][0], by_name[row["name"]][1], amount(row["amount"])) for row in allocation_rows]
+        for _target, balance, allocated in targets:
+            if allocated > amount(balance["outstanding"]):
+                frappe.throw("本次金额超过最新未付余额，请刷新")
+        _bank_account(bank_account, source.company, targets[0][1]["currency"], for_update=True)
         from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
-        entry = get_payment_entry(target.doctype, target.name, bank_account=bank_account, bank_amount=float(value))
+        entry = None
+        compatible = ("company", "party", "party_type", "payment_type", "paid_from", "paid_to", "paid_from_account_currency", "paid_to_account_currency", "source_exchange_rate", "target_exchange_rate", "book_advance_payments_in_separate_party_account")
+        for target, _balance, allocated in targets:
+            native = get_payment_entry(target.doctype, target.name, bank_account=bank_account, bank_amount=float(allocated))
+            _require_fields("Payment Entry", set(compatible) | {"deductions", "references"})
+            _require_fields("Payment Entry Reference", {"reference_doctype", "reference_name", "outstanding_amount", "allocated_amount", "payment_term"}, "Payment Entry")
+            if native.get("deductions") or native.paid_from_account_currency != native.paid_to_account_currency:
+                frappe.throw("原生付款包含扣款或跨币种设置，请打开原生付款单处理")
+            if entry is not None and any(native.get(field) != entry.get(field) for field in compatible):
+                frappe.throw("合并付款的应付账户、币种或原生汇率设置不一致，请打开原生付款单处理")
+            remaining = allocated
+            for ref in native.references:
+                if ref.reference_doctype != target.doctype or ref.reference_name != target.name:
+                    frappe.throw("原生付款引用发生变化，请在原生单据处理")
+                ref.allocated_amount = float(min(remaining, max(Decimal(0), amount(ref.outstanding_amount))))
+                remaining -= amount(ref.allocated_amount)
+            if remaining:
+                frappe.throw("应付付款计划无法完整分配本次金额，请在原生付款单处理")
+            if entry is None:
+                entry = native
+            else:
+                for ref in native.references:
+                    entry.append("references", ref.as_dict())
         entry.check_permission("create")
         entry.posting_date = getdate(posting_date or nowdate())
         entry.reference_date = entry.posting_date
         entry.reference_no = str(reference_no or "")[:140] or None
         entry.paid_amount = entry.received_amount = float(value)
         entry.custom_remarks = bool(remarks)
-        entry.remarks = str(remarks or "")[:1000] or f"{'采购预付款' if target.doctype == 'Purchase Order' else '采购付款'}：{source.name} / {target.name}"
-        # Native payment-term references may be multiple. Use their order and balances without inventing terms.
-        remaining = value
-        for ref in entry.references:
-            allocated = min(remaining, max(Decimal(0), amount(ref.outstanding_amount)))
-            ref.allocated_amount = float(allocated)
-            remaining -= allocated
-        if remaining:
-            frappe.throw("应付付款计划无法完整分配本次金额，请在原生付款单处理")
-        if target.doctype == "Purchase Order":
-            _advance_account(entry)
+        entry.remarks = str(remarks or "")[:1000] or f"采购付款：{source.name} / {target.name}"
         entry.insert()  # normal Frappe validation, workflow, field and document permissions
         if entry.docstatus != 0:
             frappe.throw("付款草稿状态异常")
-        # A concurrent retry sees the same name, or 'pending', never creates another draft.
-        cache.set_value(key, {"digest": digest, "name": entry.name}, expires_in_sec=86400)
-        frappe.db.after_rollback.add(lambda: cache.delete_value(key))
-        return {"name": entry.name, "docstatus": 0, "reused": False}
+        return {"doctype": "Payment Entry", "name": entry.name, "docstatus": 0, "reused": False}
+
+    def replay(previous):
+        # Read the complete native context and current ACLs; never trust audit output.
+        from .purchase_document_actions import _payment
+        from .purchase_operation import replay_artifacts
+        replay_artifacts(previous)
+        entry = _current("Payment Entry", previous["name"])
+        entry.check_permission("write")
+        _payment(entry)
+        return {"name": entry.name, "docstatus": entry.docstatus, "reused": True}
+
+    from .purchase_operation import run
+    result = run(request_id, payload, operation, replay, digest=digest)
+    return {key: result[key] for key in ("name", "docstatus", "reused")}
+
+
+def _payment_allocations(allocations):
+    rows = frappe.parse_json(allocations) if isinstance(allocations, str) else allocations
+    if not isinstance(rows, list) or not rows or len(rows) > 100 or any(not isinstance(row, dict) or not row.get("name") or set(row) != {"name", "amount"} for row in rows):
+        frappe.throw("请明确每张应付单的本次付款金额")
+    if len({row["name"] for row in rows}) != len(rows) or any(amount(row["amount"]) <= 0 for row in rows):
+        frappe.throw("应付单不得重复且每笔付款金额必须大于0")
+    return sorted(rows, key=lambda row: row["name"])
+
+
+def _payment_batch_targets(source_doctype, sources, check_versions=False):
+    _receipt_payment_source(source_doctype)
+    from .purchase_document_actions import _batch_sources, _locked_source, _version
+    selected = _batch_sources(sources)
+    originals = _locked_source(source_doctype, [row["name"] for row in selected], "Purchase Invoice")
+    if check_versions:
+        for original, chosen in zip(originals, selected, strict=False):
+            _version(original, chosen.get("modified"))
+    if any(doc.docstatus != 1 or doc.get("is_return") for doc in originals):
+        frappe.throw("所选来源必须已提交且非退货")
+    if any((doc.company, doc.supplier, doc.currency) != (originals[0].company, originals[0].supplier, originals[0].currency) for doc in originals):
+        frappe.throw("合并付款要求同公司、供应商和币种")
+    candidates = {}
+    for original in originals:
+        chain = get_purchase_chain(source_doctype, original.name, include_payments=False)
+        if chain["incomplete_links"]:
+            frappe.throw(LINK_WARNING)
+        for invoice in chain["invoices"]:
+            if invoice["docstatus"] == 1 and invoice["can_pay"]:
+                candidates.setdefault(invoice["name"], original.name)
+    if not candidates:
+        frappe.throw("所选采购链尚无已提交应付；多订单预付款请逐单或在原生付款单处理")
+    targets = []
+    for name, original_name in sorted(candidates.items()):
+        _, invoice, balance = payment_target(source_doctype, original_name, name)
+        if invoice.currency != originals[0].currency or balance["currency"] != originals[0].currency:
+            frappe.throw("应付核销币种与所选来源不一致，请在原生付款单处理")
+        if amount(balance["outstanding"]) > 0:
+            targets.append((invoice, balance))
+    if not targets:
+        frappe.throw("所选应付已结清或不可付款，请刷新")
+    return {"sources": originals, "targets": targets}
+
+
+@frappe.whitelist()
+@procurement_entry
+def preview_payment_batch(source_doctype, sources):
+    context = _payment_batch_targets(source_doctype, sources)
+    return {"source_doctype": source_doctype, "sources": [{"name": doc.name, "modified": str(doc.modified)} for doc in context["sources"]],
+        "company": context["sources"][0].company, "supplier": context["sources"][0].supplier, "currency": context["sources"][0].currency,
+        "invoices": [{"name": doc.name, **balance} for doc, balance in context["targets"]]}

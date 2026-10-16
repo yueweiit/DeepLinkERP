@@ -35,35 +35,35 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		):
 			self.assertIn(suite, workflow)
 
-	def test_compact_list_is_registered_only_for_supported_native_lists(self):
+	def test_shared_business_date_adapter_reuses_native_lists_without_replacing_compact_adapters(self):
 		self.assertEqual(
 			getattr(hooks, "doctype_list_js", {}),
-			{"Purchase Order": "public/js/purchase_order_list.js", "Material Request": "public/js/material_request_list.js", "Purchase Receipt": "public/js/purchase_receipt_list.js", "Sales Order": "public/js/sales_order_list.js"},
+			{"Purchase Order": "public/js/purchase_order_list.js", "Material Request": "public/js/material_request_list.js", "Purchase Receipt": "public/js/purchase_receipt_list.js", "Sales Order": "public/js/sales_order_list.js", **{doctype: "public/js/compact_list.js" for doctype in ("Request for Quotation", "Supplier Quotation", "Quotation", "Purchase Invoice", "Payment Entry", "Sales Invoice", "Delivery Note", "POS Invoice", "POS Opening Entry", "POS Closing Entry", "OA Purchase Request")}},
 		)
 
 	def test_unified_adapter_loads_after_cache_busted_shared_engine(self):
 		scripts = hooks.app_include_js
-		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.19"
-		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.9"
+		engine = "/assets/deeplinkerp_branding/js/compact_list.js?v=0.0.31"
+		adapter = "/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.13"
 		self.assertIn(engine, scripts)
 		self.assertIn(adapter, scripts)
 		self.assertLess(scripts.index(engine), scripts.index(adapter))
 		payments = next(path for path in scripts if path.startswith("/assets/deeplinkerp_branding/js/purchase_payments.js?v="))
 		self.assertLess(scripts.index(engine), scripts.index(payments))
-		source = "/assets/deeplinkerp_branding/js/purchase_source.js?v=0.0.1"
+		source = "/assets/deeplinkerp_branding/js/purchase_source.js?v=0.0.3"
 		self.assertLess(scripts.index(payments), scripts.index(source))
 		self.assertLess(scripts.index(source), scripts.index(adapter))
 
 	def test_crossborder_drawer_reuses_the_loaded_payment_shell_once(self):
 		scripts = hooks.app_include_js
-		payments = "/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.19"
+		payments = "/assets/deeplinkerp_branding/js/purchase_payments.js?v=0.0.29"
 		crossborder = "/assets/deeplinkerp_branding/js/crossborder_procurement.js?v=0.0.5"
 		self.assertIn(payments, scripts)
 		self.assertIn(crossborder, scripts)
 		self.assertEqual(sum("/crossborder_procurement.js" in path for path in scripts), 1)
 		self.assertLess(scripts.index(payments), scripts.index(crossborder))
-		self.assertLess(scripts.index(crossborder), scripts.index("/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.9"))
-		self.assertIn("/assets/deeplinkerp_branding/css/purchase_payments.css?v=0.0.8", hooks.app_include_css)
+		self.assertLess(scripts.index(crossborder), scripts.index("/assets/deeplinkerp_branding/js/unified_purchase_list.js?v=0.0.13"))
+		self.assertIn("/assets/deeplinkerp_branding/css/purchase_payments.css?v=0.0.10", hooks.app_include_css)
 		self.assertNotIn("crossborder_procurement", str(getattr(hooks, "web_include_js", None)))
 
 	def test_desk_loads_compact_styles_without_changing_website_assets(self):
@@ -76,20 +76,16 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		)
 		self.assertNotIn("purchase_order_list", str(hooks.web_include_css))
 
-	def test_classic_purchase_order_narrow_sidebar_keeps_mode_menu_in_viewport(self):
+	def test_procurement_keeps_readable_sidebar_and_refreshes_styles(self):
 		css = (Path(__file__).resolve().parents[1] / "deeplinkerp_branding/public/css/purchase_order_list.css").read_text()
-		selector = r"body\.dlp-purchase-order-grid-active:not\(\.dlp-mes-navigation-enabled\) \.dlp-interface-mode-menu"
-		rule = re.search(selector + r"\s*\{([^}]+)\}", css)
-		self.assertIsNotNone(rule, "Only the classic PO menu should override the global right anchor")
-		self.assertRegex(rule.group(1), r"left:\s*0\s*;")
-		self.assertRegex(rule.group(1), r"right:\s*auto\s*;")
-		self.assertIn("/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.19", hooks.app_include_css)
+		self.assertNotRegex(css, r"body\.dlp-purchase-order-grid-active:not\(\.dlp-mes-navigation-enabled\) \.body-sidebar")
+		self.assertIn("/assets/deeplinkerp_branding/css/purchase_order_list.css?v=0.0.27", hooks.app_include_css)
 
-	def test_grouped_source_identity_stays_one_line_instead_of_overlapping_its_date(self):
+	def test_purchase_source_identity_stays_one_line_in_the_physical_table(self):
 		css = (Path(__file__).resolve().parents[1] / "deeplinkerp_branding/public/css/purchase_order_list.css").read_text()
-		selector = r"body\.dlp-purchase-order-grid-active \.dlp-po-group > button\[data-purchase-source\]"
+		selector = r"body\.dlp-purchase-order-grid-active \.dlp-purchase-table button\[data-purchase-source\]"
 		rule = re.search(selector + r"\s*\{([^}]+)\}", css)
-		self.assertIsNotNone(rule, "Only the grouped OA identity should override the native fixed button height")
+		self.assertIsNotNone(rule, "The physical OA identity overrides the native fixed button height")
 		for property_name, value in (("display", "block"), ("height", "auto"), ("white-space", "nowrap"), ("overflow", "hidden"), ("text-overflow", "ellipsis"), ("text-align", "left"), ("max-width", "100%")):
 			self.assertRegex(rule.group(1), re.escape(property_name) + r":\s*" + re.escape(value) + r"\s*;")
 
@@ -115,6 +111,21 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		self.assertIsNotNone(header_rule)
 		self.assertRegex(header_rule.group(1), r"font-size:\s*inherit\s*;")
 
+	def test_business_compact_density_and_company_wrapping_preserve_standard_and_detail_clamps(self):
+		css = (Path(__file__).resolve().parents[1] / "deeplinkerp_branding/public/css/purchase_order_list.css").read_text()
+		compact = re.search(r"body:is\([^)]*\) \.dlp-po-grid:not\(\.dlp-po-standard\)\s*\{([^}]+)\}", css)
+		self.assertIsNotNone(compact)
+		self.assertRegex(compact.group(1), r"font-size:\s*12px;")
+		self.assertRegex(compact.group(1), r"--dlp-po-cell-padding:\s*3px 5px;")
+		standard = re.search(r"\.dlp-po-standard \.dlp-po-grid\s*\{([^}]+)\}", css)
+		self.assertRegex(standard.group(1), r"font-size:\s*14px;")
+		self.assertRegex(standard.group(1), r"--dlp-po-cell-padding:\s*7px 9px;")
+		company = next((rule for selector, rule in table_style_rules() if selector.endswith('.dlp-po-grid-row [data-fieldname="company"]')), None)
+		self.assertIsNotNone(company)
+		for property_name, value in (("white-space", "normal"), ("overflow", "visible"), ("text-overflow", "clip"), ("overflow-wrap", "anywhere")):
+			self.assertRegex(company, re.escape(property_name) + r":\s*" + value + r";")
+		self.assertRegex(css, r"\.dlp-purchase-detail-text\s*\{[^}]*-webkit-line-clamp:\s*3;")
+
 	def test_header_outer_stack_beats_native_first_row_and_both_body_sticky_columns(self):
 		css = (Path(__file__).resolve().parents[1] / "deeplinkerp_branding/public/css/purchase_order_list.css").read_text()
 		css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
@@ -134,9 +145,10 @@ class PurchaseOrderAssetsTest(unittest.TestCase):
 		self.assertRegex(css, r"\.dlp-po-filters \.dlp-po-clear-filters\s*\{[^}]*display:\s*inline-flex\s*!important;")
 		self.assertRegex(css[css.index("@media (max-width: 767.98px)"):], r"\.dlp-po-frozen\s*\{\s*position:\s*static;")
 		sales = (root / "sales_order_list.css").read_text()
-		self.assertRegex(sales, r"body\.dlp-sales-order-grid-active \.dlp-po-grid \.result-container\{max-height:var\(--dlp-sales-result-max-height,")
-		viewbar = re.search(r"\.dlp-sales-viewbar\{([^}]+)\}", sales).group(1)
-		self.assertIn("position:static", viewbar)
+		self.assertNotIn("--dlp-sales-result-max-height", sales)
+		self.assertRegex(sales, r"body\.dlp-sales-order-grid-active \.dlp-po-grid \.result-container\s*\{[^}]*max-height:\s*none;[^}]*overflow-x:\s*auto;[^}]*overflow-y:\s*hidden;")
+		viewbar = re.search(r"\.dlp-sales-viewbar\s*\{([^}]+)\}", sales).group(1)
+		self.assertIn("display:contents", viewbar)
 		mode_menu = re.search(r"body\.dlp-sales-order-grid-active:not\(\.dlp-mes-navigation-enabled\) \.dlp-interface-mode-menu\s*\{([^}]+)\}", sales)
 		self.assertIsNotNone(mode_menu, "The narrow classic Sales sidebar must keep its mode menu inside the viewport")
 		self.assertRegex(mode_menu.group(1), r"left:\s*0\s*;")

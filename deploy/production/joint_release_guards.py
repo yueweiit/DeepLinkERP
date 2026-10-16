@@ -1,11 +1,18 @@
 """Pure bounded-schema and durable-receipt guards; no database writes here."""
 
+import base64
 import copy
 import hashlib
 import json
+import math
 import os
 import re
+import stat
+import subprocess
+import tarfile
 import tempfile
+import time
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 PINNED_INVENTORY_BUNDLES = (
@@ -36,6 +43,112 @@ def merge_frozen_branding_sources(base, candidate):
 
 def serialized(value):
 	return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str).encode()
+
+
+def immutable_release_identity(manifest):
+	"""Freeze the app tuple and command tools independently of retained labels."""
+	assert manifest["scope"] == "crm-only"
+	revisions = manifest["revisions"]
+	assert set(revisions) == {"deeplinkerp_branding", "crm_integration", "china_finance", "oa_purchase_request"}
+	assert all(re.fullmatch(r"[0-9a-f]{40}", value) for value in revisions.values())
+	assert re.fullmatch(r"[0-9a-f]{40}", manifest["release_tools_commit"])
+	assert re.fullmatch(r"sha256:[0-9a-f]{64}", manifest["base_image_id"])
+	assert manifest["release_tools"] and all(re.fullmatch(r"[0-9a-f]{64}", value) for value in manifest["release_tools"].values())
+	return hashlib.sha256(serialized({key: manifest[key] for key in ("scope", "base_image_id", "revisions", "release_tools_commit", "release_tools")})).hexdigest()[:40]
+
+
+def approved_release_sources(before, pinned, branding, manifest):
+	"""Exact full-map COPY contract; no deletion or unrelated application drift."""
+	assert before == {app: pinned[app] for app in before}, "Dirty server app source differs from immutable base; HOLD"
+	after = copy.deepcopy(before)
+	after["deeplinkerp_branding"] = merge_frozen_branding_sources(before["deeplinkerp_branding"], branding)
+	if manifest.get("scope") == "crm-only":
+		assert set(manifest["apps"]) == {"crm_integration"}, "CRM-only overlay escaped scope"
+		assert after["deeplinkerp_branding"] == before["deeplinkerp_branding"], "Retained Branding source differs"
+	else:
+		assert set(manifest["apps"]) == {"deeplinkerp_branding", "china_finance", "oa_purchase_request"}
+	for app, files in manifest["apps"].items():
+		if app == "deeplinkerp_branding": continue
+		assert app in after and files, "Required overlay package absent; no auto-install"
+		for name, versions in files.items():
+			assert versions["after"] is not None, "COPY cannot remove source; explicit removal contract required"
+			assert before[app].get(name) == versions["before"], "Unapproved app baseline"
+			after[app][name] = versions["after"]
+	if manifest.get("scope") == "crm-only":
+		assert after["crm_integration"] == manifest["crm_sources_after"], "CRM result differs from complete committed candidate package; deletion or unlisted drift"
+	return after
+
+
+def verify_runtime_source_delta(pinned, runtime, approved):
+	"""Generated files are exact evidence, never a general JSON/source exclusion."""
+	assert set(pinned) == set(runtime), "Runtime physical app inventory differs"
+	allowed = {
+		("ai_assistant", "workspace_sidebar/ai_assistant.json"),
+		("china_finance", "workspace_sidebar/china_finance.json"),
+		("deeplinkerp_branding", "workspace_sidebar/deeplinkerp_settings.json"),
+		("frappe", "desktop_icon/framework.json"),
+		("overseas_costing", "desktop_icon/海外成本核算.json"),
+		("overseas_costing", "workspace_sidebar/海外成本核算.json"),
+	}
+	expected = copy.deepcopy(pinned)
+	for app, files in approved.items():
+		assert app in pinned
+		for name, versions in files.items():
+			metadata_removal = app == "deeplinkerp_branding" and any(part.startswith("._") for part in PurePosixPath(name).parts) and versions["after"] is None
+			assert (app, name) in allowed or metadata_removal, "Unapproved generated source category"
+			assert expected[app].get(name) == versions["before"], "Generated baseline differs"
+			if versions["after"] is None: expected[app].pop(name)
+			else: expected[app][name] = versions["after"]
+	assert runtime == expected, "Runtime app source drift outside frozen generated deltas"
+
+
+def verify_equivalent_build_base(current, base, branding, overlays, *, scope=None):
+	"""Allow a shallower immutable base only when COPY yields the same sources."""
+	assert set(current) == set(base) and "deeplinkerp_branding" in current, "Build base app set differs"
+	for app in current:
+		if app == "deeplinkerp_branding":
+			assert merge_frozen_branding_sources(current[app],branding) == merge_frozen_branding_sources(base[app],branding), "Build base Branding leftovers differ"
+		else:
+			assert current[app] == base[app], "Build base shared app source differs: " + app
+	for app, files in overlays.items():
+		if app == "deeplinkerp_branding":
+			continue
+		for name, versions in files.items():
+			assert versions["before"] == base[app].get(name), "Fixed-base overlay baseline differs"
+			assert versions["after"] is not None, "Fixed-base COPY cannot delete sources"
+			assert versions["before"] == versions["after"] or (scope == "crm-only" and app == "crm_integration"), "Fixed-base release cannot change shared overlays"
+
+
+def verify_branding_layer_member(member):
+	root = PurePosixPath("home/frappe/frappe-bench/apps/deeplinkerp_branding/deeplinkerp_branding")
+	path = PurePosixPath(member.name)
+	assert not path.is_absolute() and ".." not in path.parts and "\\" not in member.name, "Unsafe image layer path"
+	assert not any(part.startswith(".wh.") for part in path.parts), "Image layer whiteout prevents rebase"
+	assert member.isfile() or member.isdir(), "Image layer links/special files prevent rebase"
+	assert path == root or root in path.parents or (member.isdir() and path in root.parents), "Image layer changes outside Branding package"
+
+
+def verify_branding_only_delta(archive, current_layers, base_layers):
+	"""Verify actual Docker layer bytes; no dependency/config changes can be lost."""
+	assert current_layers[:len(base_layers)] == base_layers and len(current_layers) > len(base_layers)
+	with tarfile.open(archive,"r") as image:
+		manifest = json.load(image.extractfile("manifest.json"))
+		assert len(manifest) == 1
+		entry = manifest[0]
+		config = json.load(image.extractfile(entry["Config"]))
+		assert config["rootfs"]["diff_ids"] == current_layers, "Image export identity drift"
+		assert len(entry["Layers"]) == len(current_layers)
+		count = 0
+		for index in range(len(base_layers),len(current_layers)):
+			layer = image.extractfile(entry["Layers"][index])
+			digest = hashlib.file_digest(layer,"sha256").hexdigest() if hasattr(hashlib,"file_digest") else hashlib.sha256(layer.read()).hexdigest()
+			assert "sha256:" + digest == current_layers[index], "Layer digest mismatch"
+			layer.seek(0)
+			with tarfile.open(fileobj=layer,mode="r|") as contents:
+				for member in contents:
+					verify_branding_layer_member(member)
+					count += 1
+	return {"layers_verified":len(current_layers)-len(base_layers),"members_verified":count}
 
 
 def semantic_row(row):
@@ -71,6 +184,1101 @@ def validate_event_index(rows):
 def validate_identity(identity):
 	for key, length in (("candidate_sha", 40), ("contract_sha256", 64)):
 		assert isinstance(identity.get(key), str) and re.fullmatch(f"[0-9a-f]{{{length}}}", identity[key])
+
+
+def assert_pre_resume(path):
+	"""Absence alone permits rollback; present/unreadable intent is forward-only."""
+	assert Path(path).parent.is_dir() and os.access(Path(path).parent, os.R_OK | os.X_OK), "Resume receipt directory missing/unreadable; maintenance HOLD"
+	try:
+		os.lstat(path)
+	except FileNotFoundError:
+		return
+	except OSError as error:
+		raise AssertionError("Resume marker unreadable; maintenance HOLD, forward-only") from error
+	raise AssertionError("First writer resume recorded; maintenance HOLD, forward-only")
+
+
+def record_resume(path, identity, producer):
+	assert re.fullmatch(r"sha256:[0-9a-f]{64}", identity["image_id"])
+	contract = {"image_id": identity["image_id"], "first_resume": producer}
+	key = {"candidate_sha": identity["candidate_sha"], "contract_sha256": hashlib.sha256(serialized(contract)).hexdigest()}
+	if Path(path).exists():
+		receipt = DDLReceipt.load(path, key)
+		assert receipt.state["contract"] == contract, "Another resume intent; HOLD"
+		return receipt.state
+	return DDLReceipt.create(path, key, {}, contract).state
+
+
+def filesystem_budget(operations, *, reserve_bytes=2 * 1024**3, measured_filesystems=None):
+	"""Actual available bytes, summing concurrent demands on each filesystem."""
+	devices = {}
+	measured_filesystems = measured_filesystems or {}
+	for kind, (path, amount) in operations.items():
+		assert isinstance(amount, int) and amount > 0, "Unknown/invalid space estimate: " + kind
+		if str(path) in measured_filesystems:
+			facts = measured_filesystems[str(path)]
+			assert isinstance(facts, dict) and set(facts) == {"device", "available_bytes"}, "Unknown measured filesystem"
+			device, available = facts["device"], facts["available_bytes"]
+			assert type(device) is int and device >= 0 and type(available) is int and available > 0, "Unknown measured filesystem capacity"
+		else:
+			path = Path(path).resolve(strict=True)
+			stats, capacity = os.stat(path), os.statvfs(path)
+			device, available = stats.st_dev, capacity.f_bavail * capacity.f_frsize
+		assert available > 0, "Unknown available filesystem space"
+		entry = devices.setdefault(device, {"device": device, "path": str(path), "available_bytes": available, "required_bytes": reserve_bytes, "operations": {}})
+		entry["available_bytes"] = min(entry["available_bytes"], available)
+		entry["required_bytes"] += amount
+		entry["operations"][kind] = amount
+	for entry in devices.values():
+		assert entry["available_bytes"] >= entry["required_bytes"], "Insufficient filesystem space: " + entry["path"]
+	return list(devices.values())
+
+
+def release_space_budget(archives, image_id, *, main_only=False):
+	"""Uncompressed extraction/build/full-with-files backup demands, before any of them."""
+	import tarfile
+	archives = [Path(value).resolve(strict=True) for value in archives if value]
+	expanded = 0
+	for path in archives:
+		with tarfile.open(path, "r:gz") as archive:
+			expanded += sum(member.size for member in archive.getmembers() if member.isfile())
+	assert expanded > 0
+	if main_only:
+		image = json.loads(_host_call(["docker", "image", "inspect", image_id]))[0]
+		assert image["Id"] == image_id and image["Size"] > 0 and image["RootFS"]["Layers"], "Unknown real shared image layers; HOLD"
+		docker_root = json.loads(_host_call(["docker", "info", "--format", "{{json .DockerRootDir}}"])).strip()
+		# COPY overlays share the existing base. Bound the actual copied bytes and
+		# layer overhead; post-build verifies the observed image size against this.
+		overlay = expanded * 2 + 64 * 1024**2
+		operations = {"extraction": ("/tmp", expanded), "candidate_overlay": (docker_root, overlay), "metadata_audit_receipts": (str(Path.cwd()), 256 * 1024**2), "persistent_main_rq": (docker_root, 256 * 1024**2)}
+		for index, path in enumerate(archives):
+			operations["compressed_archive_" + str(index)] = (path.parent, path.stat().st_size)
+		return {"filesystems": filesystem_budget(operations), "expanded_archive_bytes": expanded, "compressed_archive_bytes": sum(path.stat().st_size for path in archives), "base_image_bytes": image["Size"], "overlay_limit_bytes": overlay, "receipt_limit_bytes": 256 * 1024**2, "archives": {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in archives}}
+	backend = _container_inspect("backend")
+	sites = [item for item in backend["Mounts"] if item["Destination"] == "/home/frappe/frappe-bench/sites"]
+	assert len(sites) == 1 and sites[0]["Type"] in {"bind", "volume"}, "Unknown backup filesystem; HOLD"
+	probe = '''import frappe,json,os
+from pathlib import Path
+os.chdir("/home/frappe/frappe-bench/sites")
+frappe.init(site="deeplinkerp.com",sites_path="/home/frappe/frappe-bench/sites");frappe.connect()
+size=frappe.db.sql("SELECT SUM(DATA_LENGTH+INDEX_LENGTH) FROM information_schema.TABLES WHERE TABLE_SCHEMA=database()")[0][0]
+attachments=0
+for directory in (Path("deeplinkerp.com/public/files"),Path("deeplinkerp.com/private/files")):
+ assert directory.is_dir(),"Unknown attachment budget"
+ for path in directory.rglob("*"):
+  assert not path.is_symlink(),"Unknown shared attachment target"
+  if path.is_file():attachments+=path.stat().st_size
+stats=os.stat("/home/frappe/frappe-bench/sites")
+capacity=os.statvfs("/home/frappe/frappe-bench/sites")
+print(json.dumps({"database_bytes":int(size),"attachment_bytes":attachments,"backup_filesystem":{"device":stats.st_dev,"available_bytes":capacity.f_bavail*capacity.f_frsize}}));frappe.db.rollback();frappe.destroy()
+'''
+	data = json.loads(_host_call(["docker", "exec", "-e", "FRAPPE_STREAM_LOGGING=1", "frappe_docker-backend-1", "/home/frappe/frappe-bench/env/bin/python", "-c", probe]))
+	assert data["database_bytes"] > 0 and data["attachment_bytes"] >= 0
+	image = json.loads(_host_call(["docker", "image", "inspect", image_id]))[0]
+	assert image["Id"] == image_id and image["Size"] > 0, "Unknown real build demand"
+	docker_root = json.loads(_host_call(["docker", "info", "--format", "{{json .DockerRootDir}}"])).strip()
+	operations = {"extraction": ("/tmp", expanded * 2),
+		"build": (docker_root, image["Size"] * 2 + expanded * 2),
+		"full_with_attachments_backup": (sites[0]["Source"], data["database_bytes"] * 12 + data["attachment_bytes"] * 2)}
+	# Measure the inspected mount from inside its running container: Docker's
+	# host volume directory can be inaccessible to the deployment user.
+	filesystems = filesystem_budget(operations, measured_filesystems={sites[0]["Source"]: data.get("backup_filesystem")})
+	return {"filesystems": filesystems, "expanded_archive_bytes": expanded, "base_image_bytes": image["Size"], **data,
+		"archives": {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in archives}}
+
+
+JOB_FIELDS = ("origin", "status", "worker_name", "started_at", "ended_at", "last_heartbeat", "timeout", "success_callback_name", "failure_callback_name", "stopped_callback_name", "success_callback_timeout", "failure_callback_timeout", "stopped_callback_timeout", "result_ttl", "failure_ttl", "retries_left", "repeats_left")
+SHARED_SITES = ("deeplinkerp.com", "akivision.deeplinkerp.com", "latingo.deeplinkerp.com", "yuewei.deeplinkerp.com")
+BENCH_SITES = Path("/home/frappe/frappe-bench/sites")
+RELEASE_SERVICES = ("backend", "frontend", "queue-long", "queue-short", "scheduler", "websocket")
+NATIVE_RELAY_SOURCES = {
+	"frappe/socketio.js": "72bd46b5ae81f718e6dde73d516597e1b7038b70c7339645cc2958a352c71b56",
+	"frappe/realtime/index.js": "d9c8a65da1c840c4c92e369625edcec2812523d4f448b5f5a008593c45d0586f",
+	"frappe/realtime/handlers.js": "1422a00a66d9367da3683128807899e7abc8c0a3ae9879ead5acd17c3db9d303",
+	"frappe/realtime/utils.js": "98a3292c30e2f5803ecd1c06e8756ce9860f5929fe94b96572726deeaa8f81be",
+	"frappe/realtime/middlewares/authenticate.js": "a150cbedb44008a24ae697a6173d33493eb8e1bac71887579801a3b522e2c220",
+	"frappe/node_utils.js": "c08d86349370fa51b030c93e31b1395caed3813c3a6c68c2e3aff38986b110e2",
+	"frappe/frappe/utils/scheduler.py": "f109d9030c3a990a688d2af4b6c510352b2675745f4d1e20b97c041790f124a3",
+}
+
+
+def retirement_site_proof(path, digest, *, original_config=False):
+	"""A pinned completion receipt AND native/filesystem evidence, never a site override."""
+	from frappe.utils import get_sites
+	root = BENCH_SITES.resolve(strict=True)
+	assert isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest), "Retirement digest approval required; HOLD"
+	path = Path(path)
+	assert path.is_file() and not path.is_symlink(), "Retirement receipt missing/linked; HOLD"
+	for parent in path.parents:
+		assert not parent.is_symlink(), "Linked retirement receipt directory; HOLD"
+		if parent == BENCH_SITES:
+			break
+	path = path.resolve(strict=True)
+	assert path.name == "retirement-receipt.json" and path.parent.parent == root / ".deeplinkerp-retired-sites", "Unapproved retirement receipt location; HOLD"
+	assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", path.parent.name), "Unapproved retirement directory; HOLD"
+	raw = path.read_bytes()
+	assert hashlib.sha256(raw).hexdigest() == digest, "Retirement receipt differs from approval; HOLD"
+	receipt = json.loads(raw)
+	assert receipt["version"] == 1 and receipt["status"] == "complete" and receipt["databases_retained"] is True, "Retirement incomplete or databases not retained; HOLD"
+	assert receipt["original_sites"] == list(SHARED_SITES) and receipt["active_sites"] == list(SHARED_SITES[:1]), "Unapproved retirement scope; HOLD"
+	assert set(receipt["retired_sites"]) == set(SHARED_SITES[1:]), "Incomplete retired site set; HOLD"
+	def checked_file(base, relative):
+		name = PurePosixPath(relative)
+		assert relative and str(name) == relative and not name.is_absolute() and ".." not in name.parts and "\\" not in relative, "Unapproved archive path; HOLD"
+		current = base
+		assert not current.is_symlink(), "Linked retirement directory; HOLD"
+		for part in name.parts:
+			current = current / part
+			assert not current.is_symlink(), "Linked retirement content; HOLD"
+		assert current.is_file(), "Missing retired archive/configuration; HOLD"
+		return current
+	checked_file(root, str(path.relative_to(root)))
+	for child in root.iterdir():
+		assert not (child.is_symlink() and (child / "site_config.json").exists()), "Linked active site bypasses native discovery; HOLD"
+	assert get_sites(str(root)) == list(SHARED_SITES[:1]), "Actual active sites are not exclusively main; HOLD"
+	for site, entry in receipt["retired_sites"].items():
+		relative = str(path.parent.relative_to(root) / site)
+		assert entry["directory"] == relative and not os.path.lexists(root / site), "Retired site directory not moved; HOLD"
+		config = checked_file(root, relative + "/site_config.json")
+		assert hashlib.sha256(config.read_bytes()).hexdigest() == entry["config_sha256"], "Retired configuration changed; HOLD"
+		assert entry["archives"], "Missing verified retirement backups; HOLD"
+		for name, checksum in entry["archives"].items():
+			archive = checked_file(root, relative + "/" + name)
+			assert hashlib.sha256(archive.read_bytes()).hexdigest() == checksum["sha256"] == checksum["local_sha256"], "Archive/offline checksum mismatch; HOLD"
+	main = checked_file(root, "deeplinkerp.com/site_config.json").read_bytes()
+	config = json.loads(main)
+	config.pop("maintenance_mode", None)
+	assert hashlib.sha256(serialized(config)).hexdigest() == receipt["main_config_without_maintenance_sha256"], "Main configuration drift; HOLD"
+	if original_config:
+		assert hashlib.sha256(main).hexdigest() == receipt["main_config_sha256"], "Main original configuration differs; HOLD"
+	return {"active_sites": receipt["active_sites"], "receipt_path": str(path), "sha256": digest, "receipt": receipt}
+
+
+def release_sites(*, main_only=False, original_config=False):
+	path, digest = os.environ.get("DEEPLINKERP_RETIREMENT_RECEIPT"), os.environ.get("DEEPLINKERP_RETIREMENT_SHA256")
+	assert bool(path) == bool(digest), "Both retirement path and digest approval required; HOLD"
+	assert not (main_only and path), "Retirement is not the isolated main-only lane; HOLD"
+	return tuple(retirement_site_proof(path, digest, original_config=original_config)["active_sites"]) if path else (SHARED_SITES[:1] if main_only else SHARED_SITES)
+
+
+def verify_retirement_routing(proof, *, serving=True):
+	"""Verify the existing frontend's durable exact-host 410 bind before/after cutover."""
+	nginx = proof["receipt"]["nginx"]
+	destination = nginx["container_path"]
+	assert Path(destination).parent == Path("/etc/nginx/conf.d") and Path(destination).suffix == ".conf", "Unapproved retired route location; HOLD"
+	frontend = _container_inspect("frontend")
+	mounts = [item for item in frontend["Mounts"] if item["Destination"] == destination]
+	assert len(mounts) == 1 and mounts[0]["Type"] == "bind" and mounts[0]["RW"] is False, "Persistent readonly retired route bind required; HOLD"
+	path = Path(mounts[0]["Source"])
+	assert not path.is_symlink() and path.is_file(), "Retired route source missing/linked; HOLD"
+	content = path.read_text()
+	assert hashlib.sha256(path.read_bytes()).hexdigest() == nginx["sha256"], "Retired route hash changed; HOLD"
+	clean = re.sub(r"#.*", "", content)
+	names = re.findall(r"\bserver_name\s+([^;]+);", clean)
+	assert len(names) == 1 and sorted(names[0].split()) == sorted(SHARED_SITES[1:]), "Retired route must name exactly the three retired hosts; HOLD"
+	assert clean.count("{") == clean.count("}") == 1 and re.match(r"\s*server\s*\{", clean) and re.findall(r"\blisten\s+([^;]+);", clean) == ["8080"] and re.findall(r"\breturn\s+(\d+)\b", clean) == ["410"] and not re.search(r"\b(proxy_pass|include|rewrite|location)\b", clean), "Retired route must be a single terminal HTTP 410 server; HOLD"
+	if serving:
+		assert frontend["State"]["Running"], "Frontend not serving retirement route; HOLD"
+		loaded = _host_call(["docker", "exec", "frappe_docker-frontend-1", "nginx", "-T"])
+		marker = "# configuration file " + destination + ":\n"
+		assert marker in loaded and loaded.split(marker, 1)[1].split("# configuration file ", 1)[0].strip() == content.strip(), "Retired route not actually loaded; HOLD"
+		for site in SHARED_SITES[1:]:
+			assert _host_call(["curl", "-sS", "--max-time", "10", "-o", "/dev/null", "-w", "%{http_code}", "https://" + site + "/api/method/ping"]).strip() == "410", "Retired host not returning HTTP 410; HOLD"
+	return {"retired_hosts": list(SHARED_SITES[1:]), "persistent_bind": True, "serving_verified": serving}
+
+
+def native_runtime_proof():
+	"""Known native relay/scheduler only; site handlers cannot add financial writers."""
+	import frappe
+	import gunicorn
+	import rq
+	bench = Path("/home/frappe/frappe-bench")
+	assert (frappe.__version__, rq.__version__, gunicorn.__version__) == ("16.23.0", "2.6.1", "23.0.0"), "Unknown native drain version; HOLD"
+	for name, expected in NATIVE_RELAY_SOURCES.items():
+		assert hashlib.sha256((bench / "apps" / name).read_bytes()).hexdigest() == expected, "Unknown native relay/scheduler source; HOLD: " + name
+	assert not any("dedicated_source_sync" in " ".join(value["argv"]) for value in native_processes().values()), "Source child still running; HOLD"
+	configs, handlers = {}, {}
+	for site in release_sites():
+		frappe.init(site=site, sites_path=str(bench / "sites"))
+		frappe.connect()
+		try:
+			config = frappe.get_site_config(cached=False)
+			assert config.get("maintenance_mode") == 1, "Every shared tenant requires approved maintenance; HOLD"
+			configs[site] = {"maintenance_mode": 1, "scheduler_disabled": config.get("scheduler_disabled")}
+			for app in frappe.get_installed_apps():
+				path = bench / "apps" / app / "realtime" / "handlers.js"
+				if path.exists():
+					assert app == "frappe", "Unreviewed installed realtime handlers: " + site + "/" + app
+					handlers[app] = hashlib.sha256(path.read_bytes()).hexdigest()
+		finally:
+			frappe.db.rollback()
+			frappe.destroy()
+	return {"native_source_sha256": NATIVE_RELAY_SOURCES, "site_configs": configs, "installed_handlers": handlers}
+
+
+def verified_quiescence():
+	"""A raw isolated drain or this release's durable actual host drain, not an env claim."""
+	import frappe
+	main_path = os.environ.get("DEEPLINKERP_MAIN_SEAL_RECEIPT")
+	if main_path:
+		state = DDLReceipt.load(main_path).state
+		proof = json.loads(Path(os.environ["DEEPLINKERP_MAIN_SEAL_PROOF"]).read_bytes())
+		validate_main_seal(state, proof, os.environ["DEEPLINKERP_RELEASE_CANDIDATE_SHA"])
+		assert frappe.local.site == "deeplinkerp.com" and frappe.conf.maintenance_mode == 1, "Main physical maintenance seal required; HOLD"
+		assert frappe.conf.db_name == state["contract"]["database"] and frappe.conf.db_user == state["contract"]["new_user"], "Main private authentication seal differs; HOLD"
+		assert frappe.db.sql("SELECT CURRENT_USER()")[0][0] == state["contract"]["new_user"] + "@%", "Main command uses another principal; HOLD"
+		assert frappe.db.get_single_value("System Settings", "enable_scheduler") in (0, "0", False), "Main global scheduler must remain disabled; HOLD"
+		processes = native_processes()
+		assert set(processes) == {"1"} and Path(processes["1"]["argv"][0]).name.startswith("python"), "Only the bounded main metadata command may run before resume; HOLD"
+		assert_pre_resume(os.environ["DEEPLINKERP_RELEASE_RESUME_RECEIPT"])
+		return True
+	if getattr(getattr(frappe, "local", None), "site", None) == "operating-release-qa.localhost":
+		import redis
+		assert frappe.conf.db_host == "db" and frappe.conf.db_name == "_f8a4c563227c1ef2" and frappe.conf.maintenance_mode == 1
+		assert os.environ.get("DEEPLINKERP_RELEASE_QUIESCENT") == "1", "Isolated rehearsal quiescence not approved"
+		processes = native_processes()
+		assert processes["1"]["argv"] == ["sleep", "infinity"], "DDL rehearsal requires its command-only container"
+		assert not any(any(word in value["argv"] for word in ("worker", "schedule", "gunicorn", "node")) for value in processes.values()), "Unexpected isolated producer; HOLD"
+		config = json.loads(Path("/home/frappe/frappe-bench/sites/common_site_config.json").read_bytes())
+		queue = raw_rq_snapshot(redis.Redis.from_url(config["redis_queue"]))
+		assert not queue["workers"] and not queue["executions"] and not any(rows for key, rows in queue["registries"].items() if key.startswith("wip:")), "Isolated native workers still active"
+		return True
+	path = os.environ.get("DEEPLINKERP_RELEASE_DRAIN_RECEIPT")
+	if not path:
+		return False
+	state = DDLReceipt.load(path).state
+	assert state["identity"]["candidate_sha"] == os.environ.get("DEEPLINKERP_RELEASE_CANDIDATE_SHA"), "Drain belongs to another candidate; HOLD"
+	assert state["status"] == "applied" and set(state["after"]["containers"]) == set(RELEASE_SERVICES), "Actual bounded drain incomplete; HOLD"
+	assert all(not value["running"] for value in state["after"]["containers"].values()), "Unconfirmed stopped identity; HOLD"
+	if state["contract"].get("exit_protocol") == 2:
+		validate_service_exit_receipt(state)
+	else:
+		assert state["contract"]["one_term_only"] and state["before"].get("native") and state["before"].get("source_host"), "Missing native/source drain proof; HOLD"
+	assert_pre_resume(os.environ["DEEPLINKERP_RELEASE_RESUME_RECEIPT"])
+	return True
+
+
+def validate_main_seal(state, proof, candidate_sha):
+	"""Require an actual fresh all-Host authentication and namespace observation."""
+	assert state["status"] == "applied" and state["identity"]["candidate_sha"] == proof["candidate_sha"] == candidate_sha, "Main seal belongs to another/incomplete release; HOLD"
+	assert 0 <= time.time() - proof["observed_at"] <= 120, "Main seal proof is stale; HOLD"
+	assert sorted(proof["old_hosts"]) == sorted(state["contract"]["original_hosts"]) and proof["old_accounts_locked"] is True and proof["old_sessions"] == 0, "Main all-Host authentication seal incomplete; HOLD"
+	assert sorted(proof["discovered_sites"]) == sorted(SHARED_SITES[1:]), "Main physical namespace seal incomplete; HOLD"
+	assert all(proof.get(key) is True for key in ("private_config", "source_idle", "old_containers_unchanged", "producer_containers_stopped")), "Main producer/private credential seal unconfirmed; HOLD"
+	assert proof["new_user"] == state["contract"]["new_user"] and proof["database"] == state["contract"]["database"], "Main private DB seal differs; HOLD"
+
+
+def rq_reference_index(snapshot, *, all_references=True):
+	"""Index native terminal scores and blocking references once, without cleanup."""
+	finished, live, count = {}, set(), 0
+	for rows in (*snapshot["queues"].values(), *snapshot.get("intermediate", {}).values()):
+		count += len(rows)
+		live.update(rows)
+	for name, rows in snapshot["registries"].items():
+		count += len(rows)
+		for member, score in rows:
+			assert isinstance(member, str) and member, "Malformed terminal history member; HOLD"
+			if name.startswith("finished:"):
+				assert (
+					":" not in member
+					and isinstance(score, (int, float))
+					and not isinstance(score, bool)
+					and math.isfinite(score)
+				), "Invalid terminal history score; HOLD"
+				refs = finished.setdefault(member, {})
+				assert name not in refs, "Duplicate terminal history member; HOLD"
+				refs[name] = score
+			elif all_references or name.startswith(("wip:", "deferred:", "scheduled:")):
+				live.add(member.split(":", 1)[0])
+	assert count <= 50000, "RQ reference inventory exceeds bound; HOLD"
+	live.update(worker["current_job"] for worker in snapshot["workers"].values() if worker.get("current_job"))
+	live.update(key.removeprefix("rq:execution:").split(":", 1)[0] for key in snapshot["executions"])
+	live.update(
+		job
+		for job, fact in snapshot["jobs"].items()
+		if fact["status"] in {"queued", "started", "deferred", "scheduled"}
+	)
+	return finished, live
+
+
+def terminal_history_transition(before, after):
+	"""Allow proved native TTL expiry/registry cleanup, not global immutability."""
+	old_finished, old_live = rq_reference_index(before)
+	new_finished, new_live = rq_reference_index(after)
+	blocking = old_live | new_live
+
+	def orphan_index(snapshot, finished):
+		result = {}
+		for name, rows in snapshot.get("historical_orphans", {}).items():
+			for job, score in rows:
+				refs = result.setdefault(job, {})
+				assert (
+					name.startswith("finished:")
+					and name not in refs
+					and finished.get(job, {}).get(name) == score
+					and job not in snapshot["jobs"]
+				), "Inconsistent terminal history orphan; HOLD"
+				presence = snapshot.get("job_presence", {}).get(job, {})
+				assert not presence.get("hash_exists") and not presence.get("data_exists"), (
+					"Terminal history hash reappeared; HOLD"
+				)
+				refs[name] = score
+		assert all(refs == finished[job] for job, refs in result.items()), (
+			"Incomplete terminal history orphan references; HOLD"
+		)
+		return result
+
+	old_orphans = orphan_index(before, old_finished)
+	new_orphans = orphan_index(after, new_finished)
+	for job, refs in old_finished.items():
+		fact = before["jobs"].get(job, {})
+		# Other tenants may run their native recurring jobs; main/unknown
+		# terminal identities cannot silently change across this release seal.
+		if fact.get("status") == "finished" and job in after["jobs"] and not any(
+			job.startswith(site + "||") for site in SHARED_SITES[1:]
+		):
+			assert after["jobs"][job] == fact and new_finished.get(job) == refs, (
+				"Main/unknown terminal history changed; HOLD"
+			)
+	candidates = dict.fromkeys(old_orphans)
+	candidates.update(dict.fromkeys(new_orphans))
+	candidates.update(dict.fromkeys(job for job in old_finished if job in before["jobs"] and job not in after["jobs"]))
+	delta = {"expired_jobs": [], "cleaned_orphans": []}
+	clocks = None
+	for job in candidates:
+		assert job not in blocking, "Terminal history has blocking references; HOLD"
+		if job in old_orphans and old_orphans[job] == new_orphans.get(job):
+			continue
+		assert any(job.startswith(site + "||") for site in SHARED_SITES), (
+			"Unknown terminal history change; HOLD"
+		)
+		assert job not in after["jobs"], "Terminal history revived; HOLD"
+		if clocks is None:
+			old_clock, new_clock = before.get("observation", {}), after.get("observation", {})
+			clocks = [
+				old_clock.get("started_at"),
+				old_clock.get("finished_at"),
+				new_clock.get("started_at"),
+				new_clock.get("finished_at"),
+			]
+			assert all(
+				isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+				for value in clocks
+			) and clocks == sorted(clocks), "Unproved terminal history observation clock; HOLD"
+		if job in old_orphans:
+			assert (
+				not new_finished.get(job)
+				and not new_orphans.get(job)
+				and all(score <= clocks[0] for score in old_orphans[job].values())
+			), "Unproved terminal history cleanup; HOLD"
+			delta["cleaned_orphans"].append(job)
+			continue
+		fact = before["jobs"].get(job, {})
+		presence = before.get("job_presence", {}).get(job, {})
+		pttl = presence.get("pttl")
+		assert (
+			fact.get("status") == "finished"
+			and fact.get("result_ttl") == "600"
+			and presence.get("hash_exists") is True
+			and presence.get("data_exists") is True
+			and isinstance(pttl, int)
+			and not isinstance(pttl, bool)
+			and 0 < pttl <= 600000
+		), "Unproved terminal history expiry; HOLD"
+		try:
+			ended = datetime.fromisoformat(fact["ended_at"].replace("Z", "+00:00"))
+		except (KeyError, AttributeError, ValueError):
+			raise AssertionError("Unproved terminal history ended time; HOLD") from None
+		assert ended.tzinfo is not None, "Unproved terminal history ended timezone; HOLD"
+		refs = old_finished.get(job, {})
+		assert set(refs) == {"finished:" + fact.get("origin", "")}, "Unproved terminal history origin; HOLD"
+		score = next(iter(refs.values()))
+		expires_at = ended.timestamp() + 600
+		assert score <= expires_at < score + 1 and clocks[2] >= clocks[1] + pttl / 1000, (
+			"Terminal history expiry not yet proved; HOLD"
+		)
+		assert new_finished.get(job, {}) in ({}, refs) and new_orphans.get(job, {}) == new_finished.get(
+			job, {}
+		), "Terminal history score changed; HOLD"
+		assert not after.get("job_presence", {}).get(job, {}).get("hash_exists") and not after.get(
+			"job_presence", {}
+		).get(job, {}).get("data_exists"), "Terminal history hash reappeared; HOLD"
+		delta["expired_jobs"].append(job)
+	return delta
+
+
+def raw_rq_snapshot(redis, *, main_only=False, historical_evidence=False):
+	"""RQ 2.6.1 inventory using raw Redis reads, never native cleanup helpers."""
+	detailed = main_only or historical_evidence  # Evidence mode never filters another site's jobs.
+	def decode(value):
+		return value.decode("utf-8", "strict") if isinstance(value, bytes) else value
+	def redis_time():
+		seconds, micros = redis.time()
+		return seconds + micros / 1000000
+	started_at = redis_time() if detailed else None
+	keys, cursor = set(), 0
+	for _ in range(1000):
+		cursor, found = redis.scan(cursor, match="rq:*", count=1000)
+		keys.update(decode(key) for key in found)
+		assert len(keys) <= 10000, "RQ key inventory exceeds bound; HOLD"
+		if cursor == 0:
+			break
+	else:
+		raise AssertionError("Incomplete RQ key inventory; HOLD")
+
+	def typed(key, kind):
+		actual = decode(redis.type(key))
+		assert actual in {kind, "none"}, "Unexpected Redis key type: " + key
+		return actual != "none"
+	def members(key):
+		if not typed(key, "set"):
+			return []
+		assert redis.scard(key) <= 50000, "RQ set exceeds bound"
+		return sorted(decode(value) for value in redis.smembers(key))
+	def listing(key):
+		if not typed(key, "list"):
+			return []
+		assert redis.llen(key) <= 50000, "RQ queue exceeds bound"
+		return [decode(value) for value in redis.lrange(key, 0, -1)]
+	def registry(key):
+		if not typed(key, "zset"):
+			return []
+		assert redis.zcard(key) <= 50000, "RQ registry exceeds bound"
+		return [[decode(value), score] for value, score in redis.zrange(key, 0, -1, withscores=True)]
+	def raw_hash(key):
+		assert typed(key, "hash"), "Referenced RQ hash missing: " + key
+		assert redis.hlen(key) <= 100, "RQ hash exceeds bound"
+		assert all(redis.hstrlen(key, field) <= 4096 for field in redis.hkeys(key)), "RQ worker/execution field exceeds bound"
+		value = {decode(k): decode(v) for k, v in redis.hgetall(key).items()}
+		assert len(serialized(value)) <= 65536, "RQ worker/execution bytes exceed bound"
+		return value
+	queues = members("rq:queues")
+	assert all(key.startswith("rq:queue:") and key.count(":") >= 3 for key in queues), "Unknown RQ queue key"
+	result = {"queues": {}, "intermediate": {}, "registries": {}, "workers": {}, "tombstones": {}, "jobs": {}, "executions": {}, "worker_sets": {}}
+	if detailed:
+		result["historical_orphans"] = {}
+		result["job_presence"] = {}
+	job_ids, execution_keys = set(), set()
+	for key in queues:
+		queue = key.removeprefix("rq:queue:")
+		result["queues"][queue] = listing(key)
+		result["intermediate"][queue] = listing(key + ":intermediate")
+		if not main_only:
+			assert not result["intermediate"][queue], "Unexplained intermediate RQ jobs; HOLD"
+		job_ids.update(result["queues"][queue])
+		job_ids.update(result["intermediate"][queue])
+		result["worker_sets"][queue] = members("rq:workers:" + queue)
+		for kind in ("wip", "deferred", "scheduled", "finished", "failed", "canceled"):
+			rows = registry("rq:" + kind + ":" + queue)
+			result["registries"][kind + ":" + queue] = rows
+			for member, _ in rows:
+				if kind == "wip":
+					assert member.count(":") == 1, "Malformed started execution ID; HOLD"
+					job, execution = member.split(":")
+					execution_keys.add("rq:execution:" + member)
+					assert execution and job, "Empty started execution ID"
+					job_ids.add(job)
+				else:
+					job_ids.add(member)
+	if detailed:
+		known_queues = set(queues) | {key + ":intermediate" for key in queues}
+		for key in keys:
+			if key.startswith("rq:queue:") and key not in known_queues:
+				assert not listing(key), "Unknown/orphan live RQ queue; HOLD"
+			if any(key.startswith("rq:" + kind + ":") for kind in ("wip", "deferred", "scheduled", "finished", "failed", "canceled")) and key.removeprefix("rq:") not in result["registries"]:
+				assert not registry(key), "Unknown/orphan RQ registry; HOLD"
+	worker_keys = members("rq:workers")
+	assert all(key.startswith("rq:worker:") for key in worker_keys), "Malformed worker identity"
+	for key in sorted({key for key in keys if key.startswith("rq:worker:")} | set(worker_keys)):
+		worker = raw_hash(key)
+		assert worker.get("pid") and worker.get("hostname") and worker.get("birth") and worker.get("state") in {"idle", "busy", "suspended"}, "Unknown/stale RQ worker; HOLD"
+		if key in worker_keys:
+			assert not worker.get("death"), "Registered dead worker; HOLD"
+			result["workers"][key] = worker
+			if worker.get("current_job"):
+				job_ids.add(worker["current_job"])
+		else:
+			# Native register_death unregisters then retains the hash for 60s.
+			# Only the caller's original matched worker may explain this tombstone.
+			assert worker.get("death"), "Orphan/stale worker hash; HOLD"
+			result["tombstones"][key] = worker
+	job_ids.update(key.removeprefix("rq:job:") for key in keys if key.startswith("rq:job:"))
+	assert len(job_ids) <= 50000 and all(job and ":" not in job for job in job_ids), "Malformed/oversized RQ job inventory; HOLD"
+	finished, live = rq_reference_index(result)
+
+	def job_metadata():
+		ordered = sorted(job_ids)
+		for start in range(0, len(ordered), 256):
+			batch = ordered[start:start + 256]
+			if detailed:
+				with redis.pipeline(transaction=True) as pipeline:
+					for job in batch:
+						for field in JOB_FIELDS:
+							pipeline.hstrlen("rq:job:" + job, field)
+					assert all(size <= 4096 for size in pipeline.execute()), "Job metadata exceeds bound"
+					for job in batch:
+						key = "rq:job:" + job
+						pipeline.type(key)
+						pipeline.pttl(key)
+						pipeline.hexists(key, "data")
+						pipeline.hmget(key, JOB_FIELDS)
+					values = pipeline.execute()
+				for index, job in enumerate(batch):
+					kind, pttl, data, fields = values[index * 4:index * 4 + 4]
+					kind = decode(kind)
+					assert kind in {"hash", "none"}, "Unexpected RQ job key type; HOLD"
+					result["job_presence"][job] = {"hash_exists": kind == "hash", "data_exists": bool(data), "pttl": pttl}
+					yield job, kind == "hash", data, fields
+			else:
+				for job in batch:
+					key = "rq:job:" + job
+					assert typed(key, "hash") and redis.hexists(key, "data"), "Referenced job missing native data; HOLD"
+					assert all(redis.hstrlen(key, field) <= 4096 for field in JOB_FIELDS), "Job metadata exceeds bound"
+					yield job, True, True, redis.hmget(key, JOB_FIELDS)
+
+	for job, hash_exists, data_exists, fields in job_metadata():
+		if detailed and not hash_exists:
+			historical = finished.get(job, {})
+			assert historical and job not in live and all(score <= started_at for score in historical.values()), "Referenced live/unknown/unexpired job missing native data; HOLD"
+			for name, score in historical.items():
+				result["historical_orphans"].setdefault(name, []).append([job, score])
+			continue
+		assert hash_exists and data_exists, "Referenced job missing native data; HOLD"
+		value = {field: decode(value) for field, value in zip(JOB_FIELDS, fields, strict=False)}
+		assert value["origin"] in result["queues"] and value["status"] in {"queued", "started", "finished", "failed", "deferred", "scheduled", "canceled", "stopped"}, "Unknown job origin/status; HOLD"
+		result["jobs"][job] = value
+		for execution, _ in registry("rq:executions:" + job):
+			execution_keys.add("rq:execution:" + job + ":" + execution)
+	assert {key for key in keys if key.startswith("rq:execution:")} == execution_keys, "Orphan execution; HOLD"
+	for key in sorted(execution_keys):
+		result["executions"][key] = raw_hash(key)
+	assert all(key in worker_keys for rows in result["worker_sets"].values() for key in rows), "Orphan queue worker registration"
+	if detailed:
+		result["observation"] = {"started_at": started_at, "finished_at": redis_time()}
+	assert len(serialized(result)) <= 16 * 1024**2, "RQ complete inventory exceeds byte bound"
+	return result
+
+
+def assert_main_rq_empty(snapshot):
+	"""Natural main-only drain; retain and report shared historical anomalies."""
+	_, live = rq_reference_index(snapshot, all_references=False)
+	for job in live:
+		assert any(job.startswith(site + "||") for site in SHARED_SITES), "Unknown live native job identity; HOLD"
+		assert not job.startswith("deeplinkerp.com||"), "Live main native job/callback remains; HOLD"
+	orphans = snapshot.get("historical_orphans", {})
+	return {"main_empty": True, "historical_orphans": orphans, "shared_strict_hold": bool(orphans)}
+
+
+def verify_rq_drain(before, after, completed):
+	"""Preserve untouched queued/history state; only matched natural work may end."""
+	assert not after["workers"] and not after["executions"], "Old RQ identities still active; HOLD"
+	assert not any(rows for key, rows in after["registries"].items() if key.startswith("wip:")), "Started executions remain; HOLD"
+	assert not before.get("tombstones"), "Unmatched pre-existing dead worker; HOLD"
+	for key, worker in after.get("tombstones", {}).items():
+		original = before["workers"].get(key)
+		assert original and all(worker.get(field) == original.get(field) for field in ("pid", "hostname", "birth", "queues")), "Unmatched dead worker identity; HOLD"
+		assert worker["death"] >= original["birth"], "Invalid native worker death; HOLD"
+	for job, worker in completed.items():
+		fact = after["jobs"].get(job)
+		assert fact and fact["status"] == "finished" and fact["ended_at"] and fact["started_at"] and fact["worker_name"] == worker, "Natural job/callback completion unconfirmed; HOLD"
+	delta = terminal_history_transition(before, after)
+	expired = set(delta["expired_jobs"]) | set(delta["cleaned_orphans"])
+	for queue, jobs in before["queues"].items():
+		assert [job for job in jobs if job not in completed] == [job for job in after["queues"][queue] if job in jobs and job not in completed], "Unmatched queued job vanished or reordered; HOLD"
+	for kind, rows in before["registries"].items():
+		if kind.startswith("wip:"):
+			continue
+		remaining = {tuple(row) for row in after["registries"].get(kind, [])}
+		assert all(tuple(row) in remaining or (kind.startswith("finished:") and row[0] in expired) for row in rows), "Historical RQ registry changed; HOLD"
+	for job, fact in before["jobs"].items():
+		if job not in completed and job not in expired:
+			assert after["jobs"].get(job) == fact, "Unmatched job changed/vanished; HOLD"
+	return delta
+
+
+def native_processes():
+	"""Read PID/start-time/argv identities inside one known container namespace."""
+	result = {}
+	for path in Path("/proc").iterdir():
+		if not path.name.isdigit():
+			continue
+		try:
+			stat = (path / "stat").read_text().rsplit(")", 1)[1].split()
+			argv = [value.decode() for value in (path / "cmdline").read_bytes().split(b"\0") if value]
+			if argv:
+				result[path.name] = {
+					"pid": int(path.name),
+					"parent": int(stat[1]),
+					"start": stat[19],
+					"argv": argv,
+				}
+		except FileNotFoundError:
+			continue  # A concurrent natural exit is re-read by the caller.
+	assert "1" in result and len(result) <= 100, "Unbounded/unknown container process inventory"
+	return result
+
+
+def _host_call(argv, *, timeout=30, include_stderr=False):
+	try:
+		result = subprocess.run(argv, check=True, capture_output=True, text=True, timeout=timeout)
+		return result.stdout + result.stderr if include_stderr else result.stdout
+	except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+		# Keep native errors private; neither credentials nor source payloads go
+		# into the public exception. mkstemp cannot overwrite an earlier attempt.
+		fd, path = tempfile.mkstemp(prefix="deeplinkerp-command-error-", suffix=".json", dir=os.environ.get("DEEPLINKERP_COMMAND_ERROR_DIR"))
+		with os.fdopen(fd, "wb") as output:
+			output.write(serialized({"command": Path(argv[0]).name, "returncode": getattr(error, "returncode", None), "error": type(error).__name__, "stdout": error.stdout, "stderr": error.stderr}))
+			output.flush()
+			os.fsync(output.fileno())
+		raise RuntimeError("Native command failed; private diagnostic: " + path) from None
+
+
+def _container_inspect(service):
+	value = json.loads(_host_call(["docker", "inspect", "frappe_docker-" + service + "-1"]))
+	assert len(value) == 1
+	return value[0]
+
+
+def _container_read(service, tool, action):
+	environment = []
+	if action == "--runtime-proof" and os.environ.get("DEEPLINKERP_RETIREMENT_RECEIPT"):
+		for key in ("DEEPLINKERP_RETIREMENT_RECEIPT", "DEEPLINKERP_RETIREMENT_SHA256"):
+			environment += ["-e", key + "=" + os.environ[key]]
+	return json.loads(_host_call(["docker", "exec", "--workdir", str(BENCH_SITES), *environment, "frappe_docker-" + service + "-1", "/home/frappe/frappe-bench/env/bin/python", "/tmp/joint_release_guards.py", action]))
+
+
+def _command_rq_snapshot(backend, tool, *, action="--rq-snapshot", arguments=()):
+	"""Reuse the read-only probe with the inspected image/network/sites identity."""
+	sites_mounts = [item for item in backend["Mounts"] if item["Destination"] == "/home/frappe/frappe-bench/sites"]
+	assert len(sites_mounts) == 1 and sites_mounts[0]["Type"] in {"bind", "volume"}, "Unknown shared sites mount"
+	site_source = sites_mounts[0].get("Name") if sites_mounts[0]["Type"] == "volume" else sites_mounts[0]["Source"]
+	assert action in {"--rq-snapshot", "--rq-drain-snapshot", "--retirement-proof"}, "Only readonly shared probes permitted"
+	return json.loads(_host_call(["docker", "run", "--rm", "--workdir", str(BENCH_SITES), "--network", backend["HostConfig"]["NetworkMode"], "--mount", "type=bind,source=" + str(Path(tool).resolve()) + ",target=/tmp/joint_release_guards.py,readonly", "-v", site_source + ":/home/frappe/frappe-bench/sites:ro", "--entrypoint", "/home/frappe/frappe-bench/env/bin/python", backend["Image"], "/tmp/joint_release_guards.py", action, *arguments]))
+
+
+def service_exit_plan(service, master_pid=None):
+	"""The native service entrypoints do not share a PID1 signal contract."""
+	assert service in RELEASE_SERVICES, "Unreviewed service exit"
+	if service == "frontend":
+		assert isinstance(master_pid, int) and master_pid > 1, "Signal the nginx master, not its wrapper"
+		return {"signal": "TERM", "pid": master_pid, "exit_codes": [0]}
+	if service == "scheduler":
+		return {"signal": "INT", "pid": 1, "exit_codes": [0, 1]}
+	if service == "websocket":
+		return {"signal": "KILL", "pid": 1, "exit_codes": [137], "requires_idle_relay": True}
+	return {"signal": "TERM", "pid": 1, "exit_codes": [0]}
+
+
+def classify_relay_sockets(rows, owned):
+	"""One scan of socket tables, restricted to native relay-owned descriptors."""
+	result = {"client_connections": [], "unreviewed_connections": []}
+	for line in rows:
+		fields = line.split()
+		assert len(fields) >= 10, "Malformed native socket row"
+		if fields[9] not in owned or fields[3] in {"0A", "06"}:
+			continue
+		local_port, remote_port = int(fields[1].rsplit(":", 1)[1], 16), int(fields[2].rsplit(":", 1)[1], 16)
+		if local_port == 9000:
+			result["client_connections"].append(fields[9])
+		elif remote_port != 6379:
+			result["unreviewed_connections"].append(fields[9])
+	return result
+
+
+def relay_connections():
+	owned = set()
+	for fd in Path("/proc/1/fd").iterdir():
+		try:
+			target = os.readlink(fd)
+			if target.startswith("socket:[") and target.endswith("]"):
+				owned.add(target[8:-1])
+		except FileNotFoundError:
+			continue
+	rows = []
+	for name in ("tcp", "tcp6"):
+		rows.extend((Path("/proc/net") / name).read_text().splitlines()[1:])
+	return classify_relay_sockets(rows, owned)
+
+
+def assert_idle_relay(proof):
+	assert proof["native"], "Unreviewed native relay handlers"
+	assert set(proof["containers"]) == set(RELEASE_SERVICES) - {"websocket"}, "Incomplete business service barrier"
+	assert all(not value["running"] for value in proof["containers"].values()), "Business producer still running"
+	assert not proof["database"]["sessions"] and not proof["database"]["transactions"], "Old database activity remains"
+	assert not proof["relay"]["client_connections"] and not proof["relay"]["unreviewed_connections"], "Relay has outstanding clients/requests"
+
+
+def validate_native_relay_process(argv, environment, mounts):
+	assert argv == ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"], "Unreviewed realtime entrypoint"
+	assert not any(value.startswith(("NODE_OPTIONS=", "NODE_PATH=")) and value.split("=", 1)[1] for value in environment), "Unreviewed realtime preload"
+	apps = PurePosixPath("/home/frappe/frappe-bench/apps")
+	assert not any(PurePosixPath(mount["Destination"]) == apps or PurePosixPath(mount["Destination"]) in apps.parents or apps in PurePosixPath(mount["Destination"]).parents for mount in mounts), "Realtime source must come from immutable inspected image"
+
+
+def validate_service_exit_receipt(state):
+	"""Verify service-specific exits, not a generic success code or an env claim."""
+	assert state["contract"]["exit_protocol"] == 2
+	before, after = state["before"], state["after"]
+	assert before["native"]["native_source_sha256"] == NATIVE_RELAY_SOURCES, "Unreviewed native runtime"
+	assert before["source_host"]["MainPID"] == "0", "Source process remains"
+	plans = state["contract"]["exit_plan"]
+	assert set(plans) == set(before["containers"]) == set(after["containers"]) == set(RELEASE_SERVICES)
+	for service, value in after["containers"].items():
+		plan = plans[service]
+		assert plan == service_exit_plan(service, plan["pid"]), "Unknown native exit contract"
+		assert value["id"] == before["containers"][service]["id"] and value["running"] is False, "Changed/running service identity"
+		assert value["exit_code"] in plan["exit_codes"], "Abnormal business service exit"
+	assert_idle_relay(after["relay_idle_proof"])
+	assert not after["database"]["sessions"] and not after["database"]["transactions"], "Post-exit database activity remains"
+
+
+def database_idle_snapshot():
+	"""Native read-only administrator inventory; password stays inside the DB container."""
+	query = "SELECT 'transaction', trx_id FROM information_schema.INNODB_TRX UNION ALL SELECT 'session', ID FROM information_schema.PROCESSLIST WHERE ID <> CONNECTION_ID() AND USER <> 'system user'"
+	argv = ["docker", "exec", "frappe_docker-db-1", "/bin/sh", "-c", 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mariadb --user=root --batch --skip-column-names -e "$1"', "probe", query]
+	result = {"sessions": [], "transactions": []}
+	for line in _host_call(argv).splitlines():
+		kind, identity = line.split("\t")
+		assert kind in {"session", "transaction"} and identity.isdigit(), "Unknown DB inventory row"
+		result[kind + "s"].append(identity)
+	return result
+
+
+def frontend_master():
+	assert _host_call(["docker", "exec", "frappe_docker-frontend-1", "sha256sum", "/usr/local/bin/nginx-entrypoint.sh"]).split()[0] == "93573cdb6d483223f00b8a2dd67b40f005adb1af378d57c31b0dacdaaef0263c", "Unknown frontend entrypoint"
+	text = _host_call(["docker", "exec", "--user", "0", "frappe_docker-frontend-1", "/bin/sh", "-c", 'pid=$(cat /run/nginx.pid); cat "/proc/$pid/stat"; tr "\\000" " " < "/proc/$pid/cmdline"'])
+	stat, command = text.split("\n", 1)
+	fields = stat.rsplit(")", 1)[1].split()
+	pid = int(stat.split(" ", 1)[0])
+	assert pid > 1 and int(fields[1]) == 1 and command.startswith("nginx: master process nginx -g daemon off;"), "Unknown nginx master identity"
+	return {"pid": pid, "start": fields[19], "argv": command}
+
+
+def drain_release(path, tool, candidate_sha, *, timeout=360):
+	"""Service-specific exits; never force a business process or clean Redis."""
+	assert not Path(path).exists(), "Prior/unknown drain receipt exists; HOLD, do not signal twice"
+	start = time.time()
+	before = {"containers": {}, "processes": {}, "rq": _container_read("backend", tool, "--rq-drain-snapshot"), "native": _container_read("websocket", tool, "--runtime-proof"), "source_host": source_host_proof(), "frontend_master": frontend_master()}
+	assert not before["rq"].get("tombstones"), "Unmatched prior native worker death; HOLD"
+	for service in RELEASE_SERVICES:
+		value = _container_inspect(service)
+		assert value["State"]["Running"], "Old container not running; identity unknown"
+		before["containers"][service] = {"id": value["Id"], "image": value["Image"], "pid": value["State"]["Pid"], "started": value["State"]["StartedAt"], "hostname": value["Config"]["Hostname"]}
+		# nginx frontend lacks the Python runtime; its exact Docker PID/start still
+		# belongs to the same old direct-entrypoint container.
+		if service != "frontend":
+			before["processes"][service] = _container_read(service, tool, "--processes")
+	worker_names = {}
+	for key, worker in before["rq"]["workers"].items():
+		matches = [service for service in ("queue-long", "queue-short") if worker["hostname"] == before["containers"][service]["hostname"] and worker["pid"] == "1"]
+		assert len(matches) == 1, "Unmatched/stale RQ worker process; HOLD"
+		service = matches[0]
+		assert "worker" in before["processes"][service]["1"]["argv"], "Worker is not the known direct PID1 entrypoint"
+		assert service not in worker_names, "Multiple unknown workers in one container"
+		worker_names[service] = key.removeprefix("rq:worker:")
+	assert set(worker_names) == {"queue-long", "queue-short"}, "Missing native worker identity; HOLD"
+	web = before["processes"]["backend"]
+	assert any("gunicorn" in arg for arg in web["1"]["argv"]), "Unknown web entrypoint; HOLD"
+	argv = web["1"]["argv"]
+	assert not any(value in argv for value in ("sh", "bash", "-c", "--config", "-c")) and "frappe.app:application" in argv, "Unknown Gunicorn configuration/wrapper; HOLD"
+	def option(names, default):
+		found = [argv[index + 1] for index, value in enumerate(argv[:-1]) if value in names]
+		found += [value.split("=", 1)[1] for value in argv if value.split("=", 1)[0] in names and "=" in value]
+		assert len(found) <= 1, "Ambiguous web option; HOLD"
+		return found[0] if found else default
+	assert (option(("--workers", "-w"), "1"), option(("--threads",), "1"), option(("--worker-class", "-k"), "sync"), option(("--timeout", "-t"), "30"), option(("--graceful-timeout",), "30")) == ("2", "4", "gthread", "120", "30") and "--preload" in argv, "Unreviewed actual Gunicorn drain configuration; HOLD"
+	assert not any(value.startswith("GUNICORN_CMD_ARGS=") or value.startswith("GUNICORN_CONFIG=") for value in _container_inspect("backend")["Config"]["Env"]), "Unknown web environment options; HOLD"
+	assert "schedule" in before["processes"]["scheduler"]["1"]["argv"], "Unknown native scheduler entrypoint; HOLD"
+	relay_container = _container_inspect("websocket")
+	validate_native_relay_process(before["processes"]["websocket"]["1"]["argv"], relay_container["Config"]["Env"], relay_container.get("Mounts", []))
+	assert _host_call(["docker", "exec", "frappe_docker-websocket-1", "node", "--version"]).strip() == "v24.12.0", "Unknown realtime runtime; HOLD"
+	web_children = [process for process in web.values() if process["parent"] == 1 and any("gunicorn" in arg for arg in process["argv"])]
+	assert len(web_children) == 2, "Expected two known Gunicorn workers; HOLD"
+	plans = {service: service_exit_plan(service, before["frontend_master"]["pid"] if service == "frontend" else None) for service in RELEASE_SERVICES}
+	contract = {"container_ids": {service: value["id"] for service, value in before["containers"].items()}, "worker_names": worker_names, "exit_protocol": 2, "exit_plan": plans}
+	identity = {"candidate_sha": candidate_sha, "contract_sha256": hashlib.sha256(serialized(contract)).hexdigest()}
+	frontend = _container_inspect("frontend")
+	before["frontend_restart_policy"] = copy.deepcopy(frontend["HostConfig"]["RestartPolicy"])
+	assert before["frontend_restart_policy"]["Name"] in {"no", "always", "unless-stopped", "on-failure"}, "Unknown frontend restart policy; HOLD"
+	receipt = DDLReceipt.create(path, identity, before, contract)
+	# An exec-delivered nginx signal is not a manual Docker stop. Suppress only
+	# this exact container's restart until Compose recreates it with its policy.
+	assert frontend["Id"] == before["containers"]["frontend"]["id"] and frontend["State"]["StartedAt"] == before["containers"]["frontend"]["started"], "Frontend identity raced before restart suppression; HOLD"
+	if before["frontend_restart_policy"] != {"Name": "no", "MaximumRetryCount": 0}:
+		receipt.plan("disable-frontend-restart", before["frontend_restart_policy"], {"Name": "no", "MaximumRetryCount": 0}, kind="restart-policy", identity=before["containers"]["frontend"])
+		_host_call(["docker", "update", "--restart", "no", frontend["Id"]])
+		assert _container_inspect("frontend")["HostConfig"]["RestartPolicy"] == {"Name": "no", "MaximumRetryCount": 0}, "Frontend restart suppression unconfirmed; HOLD"
+		receipt.complete("disable-frontend-restart", {"Name": "no", "MaximumRetryCount": 0})
+	completed, last_rq = {}, before["rq"]
+	def observe(snapshot):
+		for job, value in snapshot["jobs"].items():
+			if value["status"] == "started":
+				assert value["worker_name"] in worker_names.values(), "Unmatched raced job; HOLD"
+				completed[job] = value["worker_name"]
+		for key in snapshot["executions"]:
+			job = key.removeprefix("rq:execution:").split(":")[0]
+			value = snapshot["jobs"][job]
+			assert value["worker_name"] in worker_names.values(), "Unmatched native execution; HOLD"
+			completed[job] = value["worker_name"]
+	observe(last_rq)
+	def signal(service):
+		value = _container_inspect(service)
+		assert value["Id"] == before["containers"][service]["id"] and value["State"]["StartedAt"] == before["containers"][service]["started"] and value["State"]["Running"], "Process identity raced before exit; HOLD"
+		if service != "frontend":
+			assert _container_read(service, tool, "--processes")["1"] == before["processes"][service]["1"], "PID/start/argv changed before exit; HOLD"
+		else:
+			assert frontend_master() == before["frontend_master"], "Nginx master identity changed; HOLD"
+		plan = plans[service]
+		receipt.plan("exit-" + service, {"signal_attempted": False}, {"signal_attempted": True}, kind="signal", identity=before["containers"][service], exit_plan=plan)
+		if service == "frontend":
+			_host_call(["docker", "exec", "--user", "0", value["Id"], "/bin/sh", "-c", 'kill -TERM "$1"', "probe", str(plan["pid"])])
+		else:
+			_host_call(["docker", "kill", "--signal", plan["signal"], value["Id"]])
+		receipt.complete("exit-" + service, {"signal_attempted": True})
+	# Close ingress and scheduling first. RQ/Gunicorn then finish actual work.
+	for service in ("frontend", "scheduler", "queue-long", "queue-short", "backend"):
+		signal(service)
+	# Inspect Redis through a command-only old-image process after Gunicorn exits.
+	# The helper is mounted read-only, sites/configs use the already-verified volume.
+	backend = _container_inspect("backend")
+	def stopped_snapshot():
+		return _command_rq_snapshot(backend, tool, action="--rq-drain-snapshot")
+	def container_states():
+		values = json.loads(_host_call(["docker", "inspect", *[before["containers"][service]["id"] for service in RELEASE_SERVICES]]))
+		states = dict(zip(RELEASE_SERVICES, values, strict=True))
+		assert all(value["Id"] == before["containers"][service]["id"] and value["State"]["StartedAt"] == before["containers"][service]["started"] for service, value in states.items()), "Container identity changed during drain"
+		return states
+	while time.time() - start < timeout:
+		states = container_states()
+		if all(not value["State"]["Running"] for service, value in states.items() if service != "websocket"):
+			break
+		time.sleep(1)
+	else:
+		raise AssertionError("Bounded warm drain timed out; maintenance HOLD; no second signal")
+	last_rq = stopped_snapshot()
+	observe(last_rq)
+	idle = {"native": before["native"], "containers": {service: {"id": value["Id"], "running": value["State"]["Running"]} for service, value in states.items() if service != "websocket"}, "database": database_idle_snapshot(), "relay": _container_read("websocket", tool, "--relay-connections")}
+	assert_idle_relay(idle)
+	receipt.plan("idle-relay-proof", {"verified": False}, {"verified": True, "proof": idle}, kind="read-only-barrier")
+	receipt.complete("idle-relay-proof", {"verified": True, "proof": idle})
+	signal("websocket")  # Stateless relay only, after the durable zero-work barrier.
+	for _ in range(100):
+		states = container_states()
+		if not states["websocket"]["State"]["Running"]:
+			break
+		time.sleep(0.1)
+	assert all(not value["State"]["Running"] for value in states.values()), "Idle relay exit unconfirmed; HOLD"
+	logs = {}
+	for service, value in states.items():
+		assert value["State"]["ExitCode"] in plans[service]["exit_codes"], "Abnormal process exit; HOLD"
+		assert not value["State"]["OOMKilled"] and not value["State"].get("Error"), "Killed/unconfirmed process; HOLD"
+		logs[service] = _host_call(["docker", "logs", "--since", str(int(start)), value["Id"]], include_stderr=True)
+		assert len(logs[service].encode()) <= 16 * 1024**2, "Native exit log proof exceeds bound; HOLD"
+		logs[service] = re.sub(r"\x1b\[[0-9;]*m", "", logs[service])
+		if service != "websocket":
+			assert not re.search(r"SIGKILL|force.?stop|cold shutdown|killing.*horse|Worker.*timeout", logs[service], re.I), "Forced/unknown business shutdown; HOLD"
+	for service in ("queue-long", "queue-short"):
+		assert re.search(r"warm shut|warm stop", logs[service], re.I), "Missing native warm-shutdown proof; HOLD"
+		for job in re.findall(r"Job OK\s*\(([^)]+)\)", logs[service]):
+			if before["rq"]["jobs"].get(job, {}).get("status") != "finished":
+				completed[job] = worker_names[service]
+		for job, worker in completed.items():
+			if worker == worker_names[service]:
+				assert re.search(r"Job OK.*\(" + re.escape(job) + r"\)", logs[service]), "Missing native post-callback success log; HOLD"
+	for process in web_children:
+		assert re.search(r"Worker exiting.*\b" + str(process["pid"]) + r"\b", logs["backend"]), "Missing normal Gunicorn worker exit proof; HOLD"
+	if states["scheduler"]["State"]["ExitCode"] == 1:
+		assert "Aborted!" in logs["scheduler"], "Scheduler error is not native INT exit; HOLD"
+	second = stopped_snapshot()
+	assert last_rq["queues"] == second["queues"] and last_rq["intermediate"] == second["intermediate"], "Post-exit queue contents changed; HOLD"
+	delta = verify_rq_drain(before["rq"], second, completed)
+	after = {"containers": {service: {"id": value["Id"], "running": False, "exit_code": value["State"]["ExitCode"]} for service, value in states.items()}, "rq": second, "naturally_completed_jobs": completed, "native_logs": logs, "historical_transition": delta, "relay_idle_proof": idle, "database": database_idle_snapshot()}
+	validate_service_exit_receipt({"contract": contract, "before": before, "after": after})
+	receipt.finish(after)
+	return {"quiescent": True, "receipt": str(path), "exit_protocol": 2}
+
+
+def tenant_preflight(expected_erpnext, *, main_only=False, crm_only=False):
+	"""Read proven active tenants; plan only their explicitly selected metadata."""
+	import erpnext
+	import frappe
+	import gunicorn
+	import rq
+	from procurement_release_metadata import (
+		_capture_joint_state,
+		_joint_plan,
+		_read_only_native_planning,
+		load_joint_contract,
+		verify_current_joint_contract,
+	)
+	assert expected_erpnext and erpnext.__version__ == expected_erpnext, "Unknown/unapproved precise ERPNext version (actual " + erpnext.__version__ + "); HOLD"
+	assert frappe.__version__ == "16.23.0" and rq.__version__ == "2.6.1" and gunicorn.__version__ == "23.0.0", "Unapproved native runtime; HOLD"
+	bench = Path("/home/frappe/frappe-bench")
+	result = {"versions": {"frappe": frappe.__version__, "erpnext": erpnext.__version__, "rq": rq.__version__, "gunicorn": gunicorn.__version__}, "sites": {}}
+	active_sites = release_sites(main_only=main_only, original_config=True)
+	assert not crm_only or active_sites == SHARED_SITES[:1], "CRM metadata is main-only; active-site proof required; HOLD"
+	for site in active_sites:
+		frappe.init(site=site, sites_path=str(bench / "sites"))
+		frappe.connect()
+		try:
+			path = bench / "sites" / site / "site_config.json"
+			assert not path.is_symlink(), "Unknown/shared tenant configuration target; HOLD"
+			raw = path.read_bytes()
+			config = json.loads(raw)
+			installed = frappe.get_installed_apps()
+			entry = {"installed_apps": installed, "configuration": config, "configuration_raw_base64": base64.b64encode(raw).decode(), "configuration_mode": path.stat().st_mode & 0o777, "maintenance_present": "maintenance_mode" in config, "maintenance_value": config.get("maintenance_mode")}
+			assert frappe.db.sql("select version()")[0][0].startswith("11.8.6-"), "Production MariaDB 11.8.6 required; HOLD"
+			if main_only:
+				assert frappe.db.get_single_value("System Settings", "enable_scheduler") in (0, "0", False), (
+					"Main global scheduler must remain disabled; HOLD"
+				)
+			if crm_only:
+				assert "crm_integration" in installed, "Main requires actual CRM installation; no auto-install; HOLD"
+			if "deeplinkerp_branding" in installed:
+				with _read_only_native_planning():
+					native_only = site != "deeplinkerp.com"
+					if not native_only:
+						assert {"china_finance", "oa_purchase_request"} <= set(installed) and frappe.db.exists("DocType", "OA Purchase Request"), "Main requires actual Finance/OA installation; no auto-install; HOLD"
+					contract = load_joint_contract(require_quiescent=False, native_only=native_only, crm_only=crm_only)
+					current = _capture_joint_state(native_only=native_only, crm_only=crm_only)
+					plan = _joint_plan(current, contract, when="preflight", seed="preflight", require_quiescent=False)
+					entry.update(native_only=native_only, bounded_plan_definitions=plan["new_definitions"], audit=current)
+					if crm_only:
+						entry["crm_only"] = True
+			else:
+				raise AssertionError(site + ": Branding not installed; no auto-install; HOLD")
+			result["sites"][site] = entry
+		finally:
+			frappe.db.rollback()
+			frappe.destroy()
+	assert set(result["sites"]) == set(active_sites)
+	return result
+
+
+def restore_site_maintenance(path, site, original, *, enable=False):
+	"""Only the explicitly approved maintenance flag; preserve every other key."""
+	assert site in SHARED_SITES
+	config_path = Path(path) / site / "site_config.json"
+	assert not config_path.is_symlink(), "Tenant configuration target changed; HOLD"
+	config = json.loads(config_path.read_bytes())
+	baseline = original["sites"][site]["configuration"]
+	assert {key: value for key, value in config.items() if key != "maintenance_mode"} == {key: value for key, value in baseline.items() if key != "maintenance_mode"}, "Tenant configuration drift; HOLD"
+	if enable:
+		config["maintenance_mode"] = 1
+	elif "maintenance_mode" in baseline:
+		config["maintenance_mode"] = baseline["maintenance_mode"]
+	else:
+		config.pop("maintenance_mode", None)
+	if enable:
+		DDLReceipt(config_path, {})._save(config)
+	else:
+		assert json.loads(base64.b64decode(original["sites"][site]["configuration_raw_base64"])) == config
+		DDLReceipt(config_path, {})._write(base64.b64decode(original["sites"][site]["configuration_raw_base64"]))
+	os.chmod(config_path, original["sites"][site]["configuration_mode"])
+	assert json.loads(config_path.read_bytes()) == config, "Maintenance read-back failed"
+
+
+def source_host_proof(*, root=None):
+	"""Inspect the existing runner only; never cancel/finalize/logging-snapshot."""
+	root = Path(root) if root is not None else Path("/home/yuewei/.local/state/deeplinkerp-source-sync")
+	status = _host_call(["systemctl", "--user", "show", "deeplinkerp-source-sync.service", "--property=MainPID", "--property=Result", "--property=ActiveState", "--property=ExecMainStartTimestampMonotonic", "--property=ExecMainCode", "--property=ExecMainStatus"])
+	values = dict(line.split("=", 1) for line in status.splitlines() if "=" in line)
+	terminal = values.get("Result") == "success" or (values.get("Result") == "exit-code" and values.get("ExecMainCode") == "1" and values.get("ExecMainStatus", "0").isdigit() and int(values["ExecMainStatus"]) > 0)
+	assert values.get("MainPID") == "0" and values.get("ActiveState") in {"inactive", "failed"} and terminal, "Source host process/result unconfirmed; HOLD"
+	for name in ("currentrun.json", "run.json"):
+		path = root / name
+		if path.exists():
+			state = json.loads(path.read_bytes())
+			assert not state.get("active") and not state.get("pid"), "Source runner durable active identity remains; HOLD"
+			values[name] = state
+	return values
+
+
+def cleanup_owned_build(evidence, acceptance):
+	"""The same release's one regenerable extraction tree, after real acceptance."""
+	import shutil
+	root = Path(evidence).resolve(strict=True)
+	accepted = json.loads(Path(acceptance).read_bytes())
+	owned = json.loads((root / "build-ownership.json").read_bytes())
+	assert accepted.get("browser_accepted") is True and accepted["candidate_sha"] == owned["candidate_sha"] and accepted["image_id"] == owned["image_id"], "Actual online browser acceptance for this frozen release required"
+	assert isinstance(accepted.get("loaded_assets"), list) and accepted["loaded_assets"], "Actual browser-loaded URLs/body SHA required"
+	assert all(asset.get("url") and re.fullmatch(r"[0-9a-f]{64}", asset.get("body_sha256", "")) for asset in accepted["loaded_assets"])
+	loaded = {asset["url"]: asset["body_sha256"] for asset in accepted["loaded_assets"]}
+	assert all(loaded.get("https://deeplinkerp.com" + url) == digest for url, digest in owned["raw_assets"].items()), "Online browser origin/URL/body differs from frozen raw asset delivery; HOLD"
+	path = Path(owned["path"])
+	assert path.parent == Path("/tmp") and path.name.startswith("unified-purchase-build.") and not path.is_symlink()
+	stats = path.stat()
+	assert [stats.st_dev, stats.st_ino, stats.st_uid] == owned["identity"] and stats.st_uid == os.getuid(), "Build ownership/identity changed; HOLD"
+	items = list(path.rglob("*"))
+	for item in items:
+		mode = item.lstat()
+		assert stat.S_ISDIR(mode.st_mode) or (stat.S_ISREG(mode.st_mode) and mode.st_nlink == 1), "Shared/linked/special extraction contents; HOLD"
+	assert sorted(str(item.relative_to(path)) for item in items if item.is_dir()) == owned["directories"], "Build directory inventory changed; HOLD"
+	assert (path / "release-source-manifest.json").is_file() and hashlib.sha256((path / "release-source-manifest.json").read_bytes()).hexdigest() == owned["manifest_sha256"]
+	files = {str(item.relative_to(path)): hashlib.sha256(item.read_bytes()).hexdigest() for item in items if item.is_file()}
+	assert files == owned["files"], "Build tree no longer contains only this release's exact regenerable files; HOLD"
+	size = sum(item.stat().st_size for item in items if item.is_file())
+	assert 0 < size <= owned["max_bytes"], "Unknown/unbounded extraction contents; HOLD"
+	# Include stopped and unrelated containers: cache must be unused/unshared.
+	container_ids = _host_call(["docker", "ps", "-aq"]).split()
+	assert container_ids, "Unknown in-use/shared build inventory; HOLD"
+	containers = json.loads(_host_call(["docker", "inspect", *container_ids]))
+	canonical = path.resolve(strict=True)
+	for container in containers:
+		for mount in container["Mounts"]:
+			source = Path(mount["Source"]).resolve()
+			assert not (source == canonical or source in canonical.parents or canonical in source.parents), "Build tree in-use/shared by a container; HOLD"
+	def health():
+		backend = None
+		if owned.get("lane") == "main-only":
+			import sys
+			helper = root / "main_site_lane.py"
+			assert hashlib.sha256(helper.read_bytes()).hexdigest() == owned["main_helper_sha256"], "Frozen main health helper differs; forward HOLD"
+			rq = json.loads(_host_call([sys.executable, str(helper), "health", "--evidence", str(root), "--build", str(root)]))
+			assert rq.get("main_running") is True and rq.get("rq_aof") is True, "Main release health changed; forward HOLD"
+			for site in SHARED_SITES[1:]:
+				for url, digest in owned["old_raw_assets"].items():
+					body = subprocess.run(["curl", "-fsS", "--max-time", "10", "https://" + site + url], check=True, capture_output=True, timeout=15).stdout
+					assert hashlib.sha256(body).hexdigest() == digest, "Unrelated site's original raw asset body differs; forward HOLD"
+		else:
+			for service in RELEASE_SERVICES:
+				value = _container_inspect(service)
+				assert value["Image"] == owned["image_id"] and value["State"]["Running"] and not value["State"].get("OOMKilled"), "Release health/image changed; forward HOLD"
+				if service == "backend":
+					backend = value
+		active_sites = SHARED_SITES
+		if owned.get("retirement"):
+			assert owned.get("lane") != "main-only" and owned["active_sites"] == list(SHARED_SITES[:1]), "Invalid retired release ownership; HOLD"
+			proof = owned["retirement"]
+			current = _command_rq_snapshot(backend, Path(__file__), action="--retirement-proof", arguments=("--retirement-receipt", proof["receipt_path"], "--retirement-sha256", proof["sha256"]))
+			assert current == proof, "Retirement proof changed; forward HOLD"
+			verify_retirement_routing(current)
+			active_sites = tuple(current["active_sites"])
+		else:
+			assert owned.get("lane") == "main-only" or owned.get("active_sites", list(SHARED_SITES)) == list(SHARED_SITES), "Single-site cleanup without retirement proof; HOLD"
+		for site in active_sites:
+			_host_call(["curl", "-fsS", "--max-time", "10", "https://" + site + "/api/method/ping"])
+		for url, digest in owned["raw_assets"].items():
+			body = subprocess.run(["curl", "-fsS", "--max-time", "10", "https://deeplinkerp.com" + url], check=True, capture_output=True, timeout=15).stdout
+			assert hashlib.sha256(body).hexdigest() == digest, "Current raw asset body differs; forward HOLD"
+		for image_id in (owned["image_id"], owned["rollback_image_id"]):
+			assert json.loads(_host_call(["docker", "image", "inspect", image_id]))[0]["Id"] == image_id, "Current/rollback image retention unconfirmed; forward HOLD"
+		if backend is not None:
+			rq = _command_rq_snapshot(backend, Path(__file__))
+			assert rq.get("redis_ping") is True and {"queues", "workers", "executions", "jobs", "registries"} <= set(rq), "Redis/RQ health unconfirmed; forward HOLD"
+		return rq  # Running writers may naturally advance; record, never mutate/empty.
+	before_rq = health()
+	before = os.statvfs(path.parent)
+	receipt_path = root / "cache-cleanup.json"
+	identity = {"candidate_sha": owned["candidate_sha"], "contract_sha256": hashlib.sha256(serialized(owned)).hexdigest()}
+	receipt = DDLReceipt.create(receipt_path, identity, {"available_bytes": before.f_bavail * before.f_frsize, "redis_rq": before_rq}, owned)
+	receipt.plan("owned-build-cache", {"path": str(path), "exists": True, "bytes": size}, {"path": str(path), "exists": False}, kind="cache-cleanup")
+	shutil.rmtree(path)  # exact validated owned artifact, never a Docker/image/volume prune
+	receipt.complete("owned-build-cache", {"path": str(path), "exists": False})
+	after = os.statvfs(path.parent)
+	after_rq = health()
+	receipt.finish({"removed_bytes": size, "available_bytes": after.f_bavail * after.f_frsize, "health": "verified", "redis_rq": after_rq, "retained_images": [owned["image_id"], owned["rollback_image_id"]]})
+	return receipt.state["after"]
 
 
 class DDLReceipt:
@@ -119,15 +1327,18 @@ class DDLReceipt:
 			os.close(fd)
 
 	def _save(self, state):
+		self._write(serialized(state))
+		self.state = state
+
+	def _write(self, content):
 		fd, temporary = tempfile.mkstemp(prefix=self.path.name + ".", dir=self.path.parent)
 		try:
 			with os.fdopen(fd, "wb") as output:
-				output.write(serialized(state))
+				output.write(content)
 				output.flush()
 				os.fsync(output.fileno())
 			os.replace(temporary, self.path)
 			self._sync_directory(self.path.parent)
-			self.state = state
 		finally:
 			if os.path.exists(temporary):
 				os.unlink(temporary)
@@ -166,3 +1377,78 @@ class DDLReceipt:
 			state = copy.deepcopy(self.state)
 			state["status"] = "restored"
 			self._save(state)
+
+
+def main():
+	import argparse
+	parser = argparse.ArgumentParser(description="Bounded guards for the existing procurement release")
+	action = parser.add_mutually_exclusive_group(required=True)
+	for name in ("rq-snapshot", "rq-main-snapshot", "rq-drain-snapshot", "relay-connections", "processes", "runtime-proof", "tenant-preflight", "source-host-proof", "host-drain", "record-resume", "assert-pre-resume", "maintenance-on", "maintenance-restore", "cleanup-owned-build", "retirement-proof", "verify-retirement-routing"):
+		action.add_argument("--" + name, action="store_true")
+	parser.add_argument("--receipt")
+	parser.add_argument("--candidate-sha")
+	parser.add_argument("--image-id")
+	parser.add_argument("--producer")
+	parser.add_argument("--erpnext-version")
+	parser.add_argument("--tenant-receipt")
+	parser.add_argument("--evidence")
+	parser.add_argument("--acceptance")
+	parser.add_argument("--main-only", action="store_true")
+	parser.add_argument("--crm-only", action="store_true")
+	parser.add_argument("--retirement-receipt")
+	parser.add_argument("--retirement-sha256")
+	parser.add_argument("--staged", action="store_true")
+	args = parser.parse_args()
+	if args.retirement_receipt or args.retirement_sha256:
+		assert args.retirement_receipt and args.retirement_sha256, "Both retirement approvals required; HOLD"
+		os.environ.update(DEEPLINKERP_RETIREMENT_RECEIPT=args.retirement_receipt, DEEPLINKERP_RETIREMENT_SHA256=args.retirement_sha256)
+	if args.rq_snapshot or args.rq_main_snapshot or args.rq_drain_snapshot:
+		import redis
+		import rq
+		assert rq.__version__ == "2.6.1", "RQ native source version unknown; HOLD"
+		config = json.loads(Path("/home/frappe/frappe-bench/sites/common_site_config.json").read_bytes())
+		client = redis.Redis.from_url(config["redis_queue"], socket_connect_timeout=5, socket_timeout=5)
+		assert client.ping() is True, "Redis health unconfirmed; HOLD"
+		result = raw_rq_snapshot(client, main_only=args.rq_main_snapshot, historical_evidence=args.rq_drain_snapshot)
+		result["redis_ping"] = True
+	elif args.relay_connections:
+		result = relay_connections()
+	elif args.processes:
+		result = native_processes()
+	elif args.runtime_proof:
+		result = native_runtime_proof()
+	elif args.tenant_preflight:
+		result = tenant_preflight(args.erpnext_version, main_only=args.main_only, crm_only=args.crm_only)
+	elif args.source_host_proof:
+		result = source_host_proof()
+	elif args.host_drain:
+		result = drain_release(args.receipt, str(Path(__file__).resolve()), args.candidate_sha)
+	elif args.record_resume:
+		result = record_resume(
+			args.receipt, {"candidate_sha": args.candidate_sha, "image_id": args.image_id}, args.producer
+		)
+	elif args.assert_pre_resume:
+		assert_pre_resume(args.receipt)
+		result = {"pre_resume": True}
+	elif args.maintenance_on or args.maintenance_restore:
+		original = json.loads(Path(args.tenant_receipt).read_bytes())
+		active_sites = release_sites()
+		assert set(original["sites"]) == set(active_sites), "Maintenance tenant receipt scope differs; HOLD"
+		for site in active_sites:
+			restore_site_maintenance(
+				"/home/frappe/frappe-bench/sites", site, original, enable=args.maintenance_on
+			)
+		result = {"sites": list(active_sites), "maintenance": "on" if args.maintenance_on else "restored"}
+	elif args.cleanup_owned_build:
+		result = cleanup_owned_build(args.evidence, args.acceptance)
+	elif args.retirement_proof:
+		result = retirement_site_proof(os.environ["DEEPLINKERP_RETIREMENT_RECEIPT"], os.environ["DEEPLINKERP_RETIREMENT_SHA256"], original_config=True)
+	elif args.verify_retirement_routing:
+		result = verify_retirement_routing(json.loads(Path(args.tenant_receipt).read_bytes()), serving=not args.staged)
+	else:
+		raise AssertionError("Unrecognized release action")
+	print(json.dumps(result, sort_keys=True, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+	main()

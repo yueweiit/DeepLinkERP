@@ -24,6 +24,23 @@ release = importlib.import_module("procurement_release_metadata")
 CANDIDATE_SHA = os.environ.get("OPERATING_RELEASE_QA_CANDIDATE_SHA", "a" * 40)
 
 
+def planned_ddl_boundaries(before, contract):
+	"""Count the same bounded additions, not a frozen old column total."""
+	count = len(set(contract["custom_fields"]) - set(before["je"]["schema"]["columns"]))
+	count += int("custom_operating_event_key" in contract["custom_fields"] and "custom_operating_event_key" not in before["je"]["schema"]["indexes"])
+	for name in contract["model_schemas"]:
+		model = before["models"][name]
+		count += int(model["schema"] is None and contract["model_schemas"][name] is not None)
+		for index in contract.get("model_index_ddl", {}).get(name, {}):
+			count += int(model["schema"] is None or index not in model["schema"]["indexes"])
+	if before.get("oa") and contract["source_custom_fields"]:
+		count += len(set(contract["source_custom_fields"]) - set(before["oa"]["schema"]["columns"]))
+		count += int("custom_purchase_source_id" not in before["oa"]["schema"]["indexes"])
+	for name, table in before.get("native_tables", {}).items():
+		count += sum(map(len, release._native_schema_additions(table, contract["native_reversal"], name).values()))
+	return count
+
+
 class JointNativeRehearsal(unittest.TestCase):
 	@classmethod
 	def setUpClass(cls):
@@ -71,7 +88,7 @@ class JointNativeRehearsal(unittest.TestCase):
 		cls.baseline = capture_joint_state()
 		assert all(model["schema"] is None for model in cls.baseline["models"].values()), "Rehearsal needs original pre-operating schema"
 		assert not set(release.CUSTOM_FIELD_ORDER) & set(cls.baseline["je"]["schema"]["columns"])
-		cls.run_prefix = str(os.getpid())
+		cls.run_prefix = CANDIDATE_SHA[:12] + "-" + str(os.getpid())
 
 	@classmethod
 	def tearDownClass(cls):
@@ -92,7 +109,8 @@ class JointNativeRehearsal(unittest.TestCase):
 
 	def capture(self):
 		from audit_unified_purchase import capture_joint_state
-		return capture_joint_state(original_columns=self.baseline["je"]["original_columns"], original_oa_columns=self.baseline["oa"]["original_columns"] if self.baseline.get("oa") else None)
+		return capture_joint_state(original_columns=self.baseline["je"]["original_columns"], original_oa_columns=self.baseline["oa"]["original_columns"] if self.baseline.get("oa") else None,
+			original_native_columns={name: value["original_columns"] for name, value in self.baseline.get("native_tables", {}).items()}, native_only=getattr(self, "native_only", False))
 
 	def restore(self):
 		result = release.restore_joint_metadata(self.receipt, candidate_sha=CANDIDATE_SHA)
@@ -536,6 +554,7 @@ class CrossborderUpgradeNativeRehearsal(unittest.TestCase):
 		frappe.connect()
 		assert frappe.local.site == SITE and frappe.conf.db_host == "db" and frappe.conf.maintenance_mode == 1
 		assert os.environ.get("DEEPLINKERP_RELEASE_QUIESCENT") == "1" and frappe.__version__ == "16.23.0"
+		assert frappe.db.sql("select version()")[0][0].startswith("11.8.6-"), "Fresh logical-restored MariaDB 11.8.6 required"
 		frappe.set_user("Administrator")
 		assert frappe.db.count("GL Entry") == frappe.db.count("Payment Entry") == frappe.db.count("Purchase Order") == 0
 		assert frappe.db.count("Journal Entry") == 1 and frappe.db.count("Journal Entry Account") == 2
@@ -558,15 +577,19 @@ class CrossborderUpgradeNativeRehearsal(unittest.TestCase):
 		frappe.db.sql("insert into `tabOA Purchase Request` (name, creation, modified, owner, modified_by, docstatus, custom_purchase_source_id, custom_purchase_source_json) values (%s, '2000-01-01', '2000-01-01', 'Administrator', 'Administrator', 0, %s, %s)", (cls.oa_name, "DLP-CROSSBORDER-RELEASE-QA-SOURCE", '{"manual":"原始 来源字节"}'))
 		frappe.db.commit()
 		cls.baseline = capture_joint_state()
+		cls.ddl_boundaries = planned_ddl_boundaries(cls.baseline, cls.contract)
+		cls.original_jobs = copy.deepcopy(cls.baseline["metadata"]["scope"]["Scheduled Job Type"])
+		assert len(cls.original_jobs) == 2 and {row["method"] for row in cls.original_jobs} == set(release.SCHEDULED_METHODS) - {release.REVERSAL_METHOD}
 		cls.evidence = Path(frappe.get_site_path("private", "release-evidence", "crossborder-native-qa"))
 		cls.evidence.mkdir(parents=True, exist_ok=True)
-		cls.run_prefix = str(os.getpid())
+		cls.run_prefix = CANDIDATE_SHA[:12] + "-" + str(os.getpid())
 
 	@classmethod
 	def tearDownClass(cls):
 		frappe.db.rollback()
 		from audit_unified_purchase import capture_joint_state
-		current = capture_joint_state(original_columns=cls.baseline["je"]["original_columns"], original_oa_columns=cls.baseline["oa"]["original_columns"])
+		current = capture_joint_state(original_columns=cls.baseline["je"]["original_columns"], original_oa_columns=cls.baseline["oa"]["original_columns"],
+			original_native_columns={name: value["original_columns"] for name, value in cls.baseline["native_tables"].items()})
 		assert current == cls.baseline, "Retain the fixture and receipt if any upgrade drift remains"
 		frappe.db.sql("delete from `tabOA Purchase Request` where name=%s and custom_purchase_source_id=%s and custom_purchase_source_json=%s", (cls.oa_name, "DLP-CROSSBORDER-RELEASE-QA-SOURCE", '{"manual":"原始 来源字节"}'))
 		frappe.db.commit()
@@ -580,14 +603,40 @@ class CrossborderUpgradeNativeRehearsal(unittest.TestCase):
 			self.restore()
 		self.assert_state_equal(self.capture(), self.original)
 
-	def test_eleven_new_ddl_boundaries_keep_old_records_check_defaults_and_reapply_noop(self):
+	def test_contract_ddl_boundaries_keep_old_records_check_defaults_and_reapply_noop(self):
+		# The same adapter/receipt verifies secondary scope first; every non-native
+		# byte remains outside, without installing optional apps or another site.
+		full_original, full_receipt = self.original, self.receipt
+		self.native_only = True
+		self.original = self.capture()
+		native_contract = release.load_joint_contract(native_only=True)
+		self.receipt = self.evidence / (self.run_prefix + "-native-only-apply.json")
+		result = release.apply_joint_metadata(CANDIDATE_SHA, self.receipt, native_only=True)
+		self.assertEqual(result["ddl_boundaries"], planned_ddl_boundaries(self.original, native_contract))
+		after = self.capture()
+		for key in ("je", "oa", "models", "operating_singles"):
+			self.assertEqual(after[key], self.original[key])
+		self.assertEqual(after["metadata"]["outside_rows"], self.original["metadata"]["outside_rows"])
+		self.assertEqual({row["method"] for row in after["metadata"]["scope"]["Scheduled Job Type"]}, {release.REVERSAL_METHOD})
+		first = self.receipt.read_bytes()
+		with patch.object(frappe.db, "sql_ddl", side_effect=AssertionError("Native-only noop attempted DDL")), patch.object(release, "_write_scope", side_effect=AssertionError("Native-only noop attempted metadata")):
+			self.assertTrue(release.apply_joint_metadata(CANDIDATE_SHA, self.receipt, native_only=True)["unchanged"])
+		self.assertEqual(self.receipt.read_bytes(), first)
+		self.assertTrue(release.verify_current_joint_contract(native_only=True)["current_contract_verified"])
+		self.verify_final_gate(after)
+		self.restore()
+		self.native_only = False
+		self.original, self.receipt = full_original, full_receipt
 		with self.assertRaises(AssertionError):
 			release.verify_current_joint_contract()
 		result = release.apply_joint_metadata(CANDIDATE_SHA, self.receipt)
-		self.assertEqual(result["ddl_boundaries"], 11)
+		self.assertEqual(result["ddl_boundaries"], self.ddl_boundaries)
 		self.assertTrue(result["new_fields_at_native_defaults"])
 		after = self.capture()
 		self.assertEqual(after["oa"]["rows"], self.original["oa"]["rows"])
+		self.assertEqual(after["native_tables"], {name: dict(table, schema=after["native_tables"][name]["schema"]) for name, table in self.original["native_tables"].items()})
+		self.assertEqual([row for row in after["metadata"]["scope"]["Scheduled Job Type"] if row["method"] != release.REVERSAL_METHOD], self.original_jobs)
+		self.assertEqual({row["method"] for row in after["metadata"]["scope"]["Scheduled Job Type"]}, set(release.SCHEDULED_METHODS))
 		self.assertEqual(after["audit"]["tables"]["Journal Entry Account"], self.original["audit"]["tables"]["Journal Entry Account"])
 		self.assertEqual(frappe.db.get_value(release.OA_DOCTYPE, self.oa_name, "custom_purchase_company_confirmed"), 0)
 		self.assertEqual(after["models"][release.FULFILMENT_MODEL]["schema"], self.contract["model_schemas"][release.FULFILMENT_MODEL])
@@ -612,9 +661,17 @@ class CrossborderUpgradeNativeRehearsal(unittest.TestCase):
 		release.verify_joint_audit_delta(before, fresh, state)
 
 	def test_every_new_column_create_and_composite_index_autocommit_restores_exact_baseline(self):
-		for crash in range(1, 12):
-			with self.subTest(crash=crash):
-				self.receipt = self.evidence / (self.run_prefix + "-crash-" + str(crash) + ".json")
+		# Full apply/noop above checks every derived boundary. Inject only the
+		# two new independent autocommit risks, not the old identical DDL matrix:
+		# visible native TEXT and the final generated-activity composite index.
+		ir_marker = "ADD INDEX `" + self.contract["native_reversal"]["activity_index"] + "`"
+		cutpoints = ((True, ir_marker), (False, "ADD COLUMN `custom_purchase_pending_reason`"), (False, ir_marker))
+		full_original = self.original
+		for native_only, marker in cutpoints:
+			with self.subTest(native_only=native_only, marker=marker):
+				self.native_only = native_only
+				self.original = self.capture()
+				self.receipt = self.evidence / (self.run_prefix + "-crash-" + str(native_only) + "-" + hashlib.sha256(marker.encode()).hexdigest()[:12] + ".json")
 				original_ddl = frappe.db.sql_ddl
 				counter = [0]
 				def failure(query, **kwargs):
@@ -622,10 +679,14 @@ class CrossborderUpgradeNativeRehearsal(unittest.TestCase):
 					self.assertEqual((state["steps"][-1]["status"], state["steps"][-1]["sql"]), ("pending", str(query)))
 					original_ddl(query, **kwargs)
 					counter[0] += 1
-					if counter[0] == crash: raise RuntimeError("Synthetic crash after native autocommit")
+					if marker in str(query):
+						raise RuntimeError("Synthetic crash after native autocommit")
+
 				with patch.object(frappe.db, "sql_ddl", failure), self.assertRaisesRegex(RuntimeError, "autocommit"):
-					release.apply_joint_metadata(CANDIDATE_SHA, self.receipt)
+					release.apply_joint_metadata(CANDIDATE_SHA, self.receipt, native_only=native_only)
 				self.restore()
+		self.native_only = False
+		self.original = full_original
 
 	def test_partial_custom_field_metadata_autocommit_is_recovered_from_recorded_rows(self):
 		original_sql, original_commit = frappe.db.sql, frappe.db.commit
@@ -665,7 +726,7 @@ class CrossborderUpgradeNativeRehearsal(unittest.TestCase):
 	def test_enabled_sync_keeps_flag_with_locked_quiescence_and_rejects_no_proof(self):
 		original = self.original
 		jobs = original["metadata"]["scope"]["Scheduled Job Type"]
-		self.assertEqual({row["method"] for row in jobs}, set(release.SCHEDULED_METHODS))
+		self.assertEqual({row["method"] for row in jobs}, set(release.SCHEDULED_METHODS) - {release.REVERSAL_METHOD})
 		self.assertEqual(len(jobs), 2)
 		stamp = "2026-10-07 08:45:03.082272"
 		# Reuse this enabled-sync rehearsal with the real dedicated runner's
@@ -683,7 +744,7 @@ class CrossborderUpgradeNativeRehearsal(unittest.TestCase):
 					self.assertFalse(self.receipt.exists())
 					self.assertTrue(release.apply_joint_metadata(CANDIDATE_SHA, self.receipt)["source_sync_enabled"])
 					after = self.capture()
-					self.assertEqual(after["metadata"]["scope"]["Scheduled Job Type"], self.original["metadata"]["scope"]["Scheduled Job Type"])
+					self.assertEqual([row for row in after["metadata"]["scope"]["Scheduled Job Type"] if row["method"] != release.REVERSAL_METHOD], self.original["metadata"]["scope"]["Scheduled Job Type"])
 					with patch.object(frappe.db, "commit", side_effect=AssertionError("Current/noop verification attempted commit")):
 						self.assertTrue(release.apply_joint_metadata(CANDIDATE_SHA, self.receipt)["unchanged"])
 						self.assertTrue(release.verify_current_joint_contract()["source_sync_enabled"])

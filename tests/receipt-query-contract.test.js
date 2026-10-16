@@ -7,7 +7,7 @@ const vm = require("node:vm");
 // Isolate only the browser host. Exercise the real adapter's query function.
 function receiptConfiguration() {
   let configuration;
-  const host = { DeepLinkERPCompactList: { create(value) {
+  const host = { DeepLinkERPCompactList: { ...require('../deeplinkerp_branding/public/js/compact_list.js'), create(value) {
     configuration = value;
     return { install() {} };
   } } };
@@ -18,6 +18,16 @@ function receiptConfiguration() {
 }
 
 const decoded = value => typeof value === "string" ? JSON.parse(value) : value;
+
+test('receipt batch selection only includes submitted nonreturns and clears at page or scope changes',()=>{
+ const config=receiptConfiguration();let clears=0,disabled,toggled;
+ assert.equal(config.providerSelectable({docstatus:1,is_return:0}),true);
+ assert.equal(config.providerSelectable({docstatus:0}),false);assert.equal(config.providerSelectable({docstatus:1,is_return:1}),false);
+ const surface={toggle:value=>toggled=value,find:()=>({prop:(_,value)=>disabled=value,text(){}})};
+ const c={providerScope:'all',providerRows:[{name:'PR'}],list:{get_checked_items:()=>[],clear_checked_items:()=>clears++},$receiptBatch:surface};
+ config.onPageChange(c);assert.equal(clears,1);assert.equal(disabled,true);
+ c.providerScope='orders';config.onScopeChange(c);assert.equal(clears,2);assert.equal(toggled,false);
+});
 
 test("receipt financial view retains native filters, OR filters, sorting and page scope", () => {
   const config = receiptConfiguration();
@@ -102,4 +112,26 @@ test('complete native receipt rows and child-filter fallback retain two money de
  const c=grid.mount(list,env);const doc={name:'PR',grand_total:12.3456,currency:'USD'};
  assert.match(list.get_list_row_html(doc),/12\.35 USD/);assert.doesNotMatch(list.get_list_row_html(doc),/12\.346/);
  c.setProviderScope('all',false);list.get_call_args();assert.equal(c.providerScope,'orders');assert.match(list.get_list_row_html(doc),/12\.35 USD/);
+});
+
+test('receipt lines read only on expansion, retain one version and omit field-level denied native values',async()=>{
+ const config=receiptConfiguration(),calls=[];
+ assert.equal(typeof config.onMount,'function');assert.equal(typeof config.rowExtra,'function');
+ const doc={name:'PR',modified:'v1'},c={providerScope:'all',providerRows:[doc],allowed:new Set(['name','items']),requestId:1,list:{render_list(){},set_rows_as_checked(){}},root:{frappe:{get_route:()=>['List','Purchase Receipt'],model:{with_doctype:async()=>{}},get_meta:()=>({fields:[{fieldname:'item_code'},{fieldname:'qty'},{fieldname:'rate',permlevel:1}]}),perm:{has_perm:(_dt,level)=>level===0},call:async request=>{calls.push(request);return {message:{name:'PR',modified:'v1',currency:'CNY',items:[{name:'PRI',item_code:'MAT',qty:2,rate:300}]}};}}}};
+ config.onMount(c);assert.equal(calls.length,0);assert.equal(config.rowExtra(c,doc),'');
+ await c.toggleRowDetails('PR');assert.equal(calls.length,1);assert.equal(calls[0].method,'frappe.client.get');assert.equal(calls[0].args.doctype,'Purchase Receipt');
+ assert.match(config.rowExtra(c,doc),/MAT|2\.00/);assert.doesNotMatch(config.rowExtra(c,doc),/300|单价/);
+ await c.toggleRowDetails('PR');await c.toggleRowDetails('PR');assert.equal(calls.length,1);
+});
+test('receipt page expansion reads visible native or financial rows and exposes no entry without item permission',async()=>{
+ const config=receiptConfiguration(),calls=[];
+ const c={providerScope:'orders',providerRows:[{name:'HIDDEN'}],allowed:new Set(['items']),requestId:1,list:{data:[{name:'PR1'},{name:'PR2'}],render_list(){}},root:{frappe:{get_route:()=>['List','Purchase Receipt'],model:{with_doctype:async()=>{}},get_meta:()=>({fields:[{fieldname:'item_code'}]}),perm:{has_perm:()=>true},call:async request=>{calls.push(request);return {message:{items:[{item_code:request.args.name}]}};}}}};
+ config.onMount(c);await c.expandAllRowDetails();assert.deepEqual(calls.map(call=>call.args.name),['PR1','PR2']);assert.ok(calls.every(call=>call.method==='frappe.client.get'));
+ c.collapseAllRowDetails();c.allowed.delete('items');await c.expandAllRowDetails();assert.equal(c.expandedDetails.size,0);assert.equal(calls.length,2);assert.equal(config.renderSequence(c,c.list.data[0]),'');
+});
+test('receipt preferences migrate once with backup and preserve density and v4 choices',()=>{
+ const config=receiptConfiguration(),grid=require('../deeplinkerp_branding/public/js/compact_list.js').create(config),allowed=new Set(config.provider.columns.map(col=>col.fieldname));
+ const next=grid.normalizePreferences({columns:['name','currency'],density:'standard',version:3},allowed,config.provider.columns);
+ assert.equal(config.backupMigratedPreferences,true);assert.equal(next.version,4);assert.equal(next.density,'standard');assert.deepEqual(next.columns,Array.from(config.provider.defaultColumns));
+ assert.deepEqual(grid.normalizePreferences({...next,columns:['name','currency']},allowed,config.provider.columns).columns,['name','currency']);
 });

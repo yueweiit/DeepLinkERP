@@ -4,21 +4,105 @@ import contextlib
 import copy
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import stat
+import sys
+import tarfile
 import tempfile
 import types
-import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
-
+from unittest.mock import Mock, call, patch
 
 ROOT = Path(__file__).parents[1]
 
 
 class JointReleaseGuardTests(unittest.TestCase):
+	def test_fixed_base_rejects_layer_changes_outside_branding_whiteouts_and_links(self):
+		guard = self.module()
+		root = "home/frappe/frappe-bench/apps/deeplinkerp_branding/deeplinkerp_branding"
+		guard.verify_branding_layer_member(tarfile.TarInfo(root + "/hooks.py"))
+		for path,kind in (("etc/nginx/nginx.conf",tarfile.REGTYPE), (root+"/.wh.old",tarfile.REGTYPE),
+			(root+"/link",tarfile.SYMTYPE),("home/frappe/frappe-bench/env/pyvenv.cfg",tarfile.REGTYPE)):
+			member = tarfile.TarInfo(path); member.type = kind
+			with self.subTest(path=path),self.assertRaises(AssertionError): guard.verify_branding_layer_member(member)
+
+	def test_fixed_build_base_requires_equivalent_complete_sources_and_no_shared_app_changes(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard,"verify_equivalent_build_base"))
+		current = {"frappe":{"app.py":"native"},"deeplinkerp_branding":{"a.py":"old"},"china_finance":{"x.py":"finance"}}
+		base = copy.deepcopy(current); base["deeplinkerp_branding"]["a.py"] = "older"
+		overlay = {"a.py":"new"}
+		manifest = {"china_finance":{"x.py":{"before":"finance","after":"finance"}}}
+		guard.verify_equivalent_build_base(current,base,overlay,manifest)
+		for kind in ("native","missing","branding-extra","shared-overlay"):
+			changed = copy.deepcopy(base); changes = copy.deepcopy(manifest)
+			if kind == "native": changed["frappe"]["app.py"] = "drift"
+			elif kind == "missing": changed.pop("frappe")
+			elif kind == "branding-extra": changed["deeplinkerp_branding"]["unknown.py"] = "extra"
+			else: changes["china_finance"]["x.py"]["after"] = "new-finance"
+			with self.subTest(kind=kind),self.assertRaises(AssertionError):
+				guard.verify_equivalent_build_base(current,changed,overlay,changes)
+
+	def test_crm_identity_freezes_full_tuple_tools_and_base_independently_of_branding(self):
+		guard = self.module()
+		manifest = {"scope": "crm-only", "base_image_id": "sha256:" + "0" * 64,
+			"revisions": {app: char * 40 for app, char in (("deeplinkerp_branding", "a"), ("crm_integration", "b"), ("china_finance", "c"), ("oa_purchase_request", "d"))},
+			"release_tools_commit": "e" * 40, "release_tools": {"guard.py": "f" * 64}}
+		identity = guard.immutable_release_identity(manifest)
+		self.assertEqual(len(identity), 40)
+		self.assertEqual(identity, guard.immutable_release_identity(copy.deepcopy(manifest)))
+		for key in ("crm", "tools", "base"):
+			changed = copy.deepcopy(manifest)
+			if key == "crm": changed["revisions"]["crm_integration"] = "1" * 40
+			elif key == "tools": changed["release_tools_commit"] = "2" * 40
+			else: changed["base_image_id"] = "sha256:" + "3" * 64
+			self.assertNotEqual(identity, guard.immutable_release_identity(changed))
+		with self.assertRaises(AssertionError): guard.immutable_release_identity(dict(manifest, revisions={"crm_integration": "b" * 40}))
+
+	def test_crm_source_approval_preserves_every_other_app_and_rejects_deletions(self):
+		guard = self.module()
+		before = {"deeplinkerp_branding": {"hooks.py": "a"}, "crm_integration": {"api.py": "b", "keep.py": "c"}, "client_akivision": {"x.py": "d"}}
+		manifest = {"scope": "crm-only", "apps": {"crm_integration": {"api.py": {"before": "b", "after": "e"}}}, "crm_sources_after": {"api.py": "e", "keep.py": "c"}}
+		after = guard.approved_release_sources(before, before, before["deeplinkerp_branding"], manifest)
+		self.assertEqual(after["crm_integration"], {"api.py": "e", "keep.py": "c"})
+		self.assertEqual(after["client_akivision"], before["client_akivision"])
+		for kind in ("baseline", "branding", "delete", "other-app", "omitted-deletion"):
+			old, branding, contract = copy.deepcopy(before), copy.deepcopy(before["deeplinkerp_branding"]), copy.deepcopy(manifest)
+			if kind == "baseline": old["client_akivision"]["x.py"] = "drift"
+			elif kind == "branding": branding["hooks.py"] = "drift"
+			elif kind == "delete": contract["apps"]["crm_integration"]["api.py"]["after"] = None
+			elif kind == "omitted-deletion": contract["crm_sources_after"].pop("keep.py")
+			else: contract["apps"]["client_akivision"] = {"x.py": {"before": "d", "after": "e"}}
+			with self.subTest(kind=kind), self.assertRaises(AssertionError): guard.approved_release_sources(old, before, branding, contract)
+
+	def test_runtime_generated_deltas_require_exact_frozen_hashes_and_never_hide_business_source(self):
+		guard = self.module()
+		base = {"deeplinkerp_branding": {"hooks.py": "business", "workspace_sidebar/deeplinkerp_settings.json": "image", "._hooks.py": "metadata"}, "client_akivision": {"hooks.py": "preserved"}}
+		runtime = copy.deepcopy(base); runtime["deeplinkerp_branding"]["workspace_sidebar/deeplinkerp_settings.json"] = "generated"; runtime["deeplinkerp_branding"].pop("._hooks.py")
+		deltas = {"deeplinkerp_branding": {"workspace_sidebar/deeplinkerp_settings.json": {"before": "image", "after": "generated"}, "._hooks.py": {"before": "metadata", "after": None}}}
+		guard.verify_runtime_source_delta(base, runtime, deltas)
+		for kind in ("unlisted", "wrong-hash", "business", "missing-app"):
+			current, approved = copy.deepcopy(runtime), copy.deepcopy(deltas)
+			if kind == "unlisted": approved["deeplinkerp_branding"].pop("._hooks.py")
+			elif kind == "wrong-hash": current["deeplinkerp_branding"]["workspace_sidebar/deeplinkerp_settings.json"] = "drift"
+			elif kind == "missing-app": current.pop("client_akivision")
+			else:
+				current["deeplinkerp_branding"]["hooks.py"] = "drift"
+				approved["deeplinkerp_branding"]["hooks.py"] = {"before": "business", "after": "drift"}
+			with self.subTest(kind=kind), self.assertRaises(AssertionError): guard.verify_runtime_source_delta(base, current, approved)
+
+	def test_shallower_base_allows_exact_crm_overlay_only_in_explicit_scope(self):
+		guard = self.module()
+		current = {"deeplinkerp_branding": {"a.py": "old"}, "crm_integration": {"api.py": "crm"}, "client_akivision": {"x.py": "native"}}
+		base = copy.deepcopy(current); base["deeplinkerp_branding"]["a.py"] = "older"
+		overlays = {"crm_integration": {"api.py": {"before": "crm", "after": "candidate"}}}
+		guard.verify_equivalent_build_base(current, base, {"a.py": "old"}, overlays, scope="crm-only")
+		base["client_akivision"]["x.py"] = "drift"
+		with self.assertRaises(AssertionError): guard.verify_equivalent_build_base(current, base, {"a.py": "old"}, overlays, scope="crm-only")
+
 	def module(self):
 		path = ROOT / "deploy/production/joint_release_guards.py"
 		self.assertTrue(path.exists(), "Durable joint release guards are missing")
@@ -27,8 +111,211 @@ class JointReleaseGuardTests(unittest.TestCase):
 		spec.loader.exec_module(module)
 		return module
 
+	@contextlib.contextmanager
+	def tenant_preflight_runtime(self, sites, *, crm_installed=True):
+		guard = self.module()
+		fields = self.metadata_module().CRM_FIELD_NAMES
+		crm_definitions = [dt + "-" + name for dt, names in fields.items() for name in names]
+		current = {"metadata": {"outside_rows": {"DocType": [{"name": "OperatingExpenseCompanyMap", "manual": "retained conflict"}]}}, "audit": {"all_business_tables": "frozen", "all_app_sources": "frozen"}}
+		def contract(**scope):
+			return dict(scope, definitions=crm_definitions if scope.get("crm_only") else ["OperatingExpenseCompanyMap"])
+		def plan(before, contract, **kwargs):
+			if not contract.get("crm_only") and not contract.get("native_only"):
+				raise AssertionError("OperatingExpenseCompanyMap definition conflict")
+			return {"new_definitions": contract["definitions"] if contract.get("crm_only") else []}
+		metadata = types.SimpleNamespace(
+			load_joint_contract=Mock(side_effect=contract), _capture_joint_state=Mock(side_effect=lambda **scope: copy.deepcopy(current)),
+			_joint_plan=Mock(side_effect=plan), _read_only_native_planning=Mock(side_effect=contextlib.nullcontext), verify_current_joint_contract=Mock(),
+		)
+		installed = ["deeplinkerp_branding", "china_finance", "oa_purchase_request"] + (["crm_integration"] if crm_installed else [])
+		frappe = types.SimpleNamespace(__version__="16.23.0", init=Mock(), connect=Mock(), destroy=Mock(), get_installed_apps=lambda: installed,
+			db=types.SimpleNamespace(sql=Mock(return_value=[("11.8.6-MariaDB",)]), get_single_value=Mock(return_value=0), exists=Mock(return_value=True), rollback=Mock(), commit=Mock(side_effect=AssertionError("Preflight must not write"))))
+		with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
+			root = Path(tmp)
+			for site in sites:
+				path = root / "sites" / site / "site_config.json"
+				path.parent.mkdir(parents=True)
+				path.write_text('{"maintenance_mode":0,"manual":"retained"}')
+			stack.enter_context(patch.dict(sys.modules, {"frappe": frappe, "erpnext": types.SimpleNamespace(__version__="16.23.0"), "rq": types.SimpleNamespace(__version__="2.6.1"), "gunicorn": types.SimpleNamespace(__version__="23.0.0"), "procurement_release_metadata": metadata}))
+			stack.enter_context(patch.object(guard, "Path", side_effect=lambda value: root if value == "/home/frappe/frappe-bench" else Path(value)))
+			stack.enter_context(patch.object(guard, "release_sites", return_value=sites))
+			yield guard, metadata, current, frappe
+			for site in sites:
+				self.assertEqual((root / "sites" / site / "site_config.json").read_text(), '{"maintenance_mode":0,"manual":"retained"}')
+			frappe.db.commit.assert_not_called()
+
+	def test_crm_tenant_preflight_uses_bounded_planner_and_preserves_unrelated_conflict(self):
+		for main_only in (True, False):
+			with self.subTest(main_only=main_only), self.tenant_preflight_runtime(("deeplinkerp.com",)) as (guard, metadata, current, frappe):
+				before = copy.deepcopy(current)
+				with self.assertRaisesRegex(AssertionError, "OperatingExpenseCompanyMap definition conflict"):
+					guard.tenant_preflight("16.23.0", main_only=main_only)
+				result = guard.tenant_preflight("16.23.0", main_only=main_only, crm_only=True)
+				metadata.load_joint_contract.assert_called_with(require_quiescent=False, native_only=False, crm_only=True)
+				metadata._capture_joint_state.assert_called_with(native_only=False, crm_only=True)
+				args, kwargs = metadata._joint_plan.call_args
+				self.assertEqual(args[0], before)
+				self.assertTrue(args[1]["crm_only"])
+				self.assertEqual(kwargs, {"when": "preflight", "seed": "preflight", "require_quiescent": False})
+				entry = result["sites"]["deeplinkerp.com"]
+				self.assertTrue(entry["crm_only"])
+				self.assertFalse(entry["native_only"])
+				self.assertEqual(len(entry["bounded_plan_definitions"]), 19)
+				self.assertTrue(all("-custom_crm_" in name for name in entry["bounded_plan_definitions"]))
+				self.assertEqual(entry["audit"], before)
+				self.assertEqual(current, before)
+				self.assertEqual(frappe.db.rollback.call_count, 2)
+				self.assertEqual(frappe.destroy.call_count, 2)
+
+	def test_crm_tenant_preflight_requires_installed_app_and_proven_main_site_scope(self):
+		for sites, crm_installed, error in ((("deeplinkerp.com",), False, "actual CRM installation"), (self.module().SHARED_SITES, True, "CRM metadata is main-only")):
+			with self.subTest(sites=sites, crm_installed=crm_installed), self.tenant_preflight_runtime(sites, crm_installed=crm_installed) as (guard, metadata, _, frappe):
+				with self.assertRaisesRegex(AssertionError, error):
+					guard.tenant_preflight("16.23.0", crm_only=True)
+				metadata.load_joint_contract.assert_not_called()
+				metadata._capture_joint_state.assert_not_called()
+				metadata._joint_plan.assert_not_called()
+		with self.tenant_preflight_runtime(self.module().SHARED_SITES) as (guard, metadata, _, frappe):
+			metadata._joint_plan.side_effect = lambda *args, **kwargs: {"new_definitions": []}
+			result = guard.tenant_preflight("16.23.0")
+			self.assertEqual(set(result["sites"]), set(guard.SHARED_SITES))
+			metadata.load_joint_contract.assert_has_calls([call(require_quiescent=False, native_only=native, crm_only=False) for native in (False, True, True, True)])
+			self.assertEqual([entry["native_only"] for entry in result["sites"].values()], [False, True, True, True])
+
+	def test_tenant_preflight_cli_propagates_explicit_crm_scope_and_legacy_default(self):
+		guard = self.module()
+		for flags in (("--crm-only",), ("--main-only", "--crm-only"), (), ("--main-only",)):
+			with self.subTest(flags=flags), patch.object(sys, "argv", ["guard", "--tenant-preflight", "--erpnext-version", "16.23.0", *flags]), patch.object(guard, "tenant_preflight", return_value={"sites": {}}) as preflight, contextlib.redirect_stdout(io.StringIO()):
+				guard.main()
+				preflight.assert_called_once_with("16.23.0", main_only="--main-only" in flags, crm_only="--crm-only" in flags)
+
 	def schema(self):
 		return {"columns": {"name": {"type": "varchar(140)", "default": "NULL"}}, "indexes": {"PRIMARY": [{"column": "name", "unique": 1, "prefix": None}]}, "table": {"engine": "InnoDB"}}
+
+	def test_service_specific_exit_plan_does_not_signal_frontend_wrapper(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "service_exit_plan"), "Missing service-specific exit contract")
+		self.assertEqual(guard.service_exit_plan("frontend", 8), {"signal": "TERM", "pid": 8, "exit_codes": [0]})
+		self.assertEqual(guard.service_exit_plan("scheduler"), {"signal": "INT", "pid": 1, "exit_codes": [0, 1]})
+		self.assertEqual(guard.service_exit_plan("websocket"), {"signal": "KILL", "pid": 1, "exit_codes": [137], "requires_idle_relay": True})
+		for service, pid in (("frontend", 1), ("frontend", 0), ("database", None)):
+			with self.subTest(service=service, pid=pid), self.assertRaises(AssertionError):
+				guard.service_exit_plan(service, pid)
+
+	def test_native_relay_entrypoint_rejects_preloads_alternate_programs_and_app_mounts(self):
+		guard = self.module()
+		argv = ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]
+		guard.validate_native_relay_process(argv, [], [])
+		for arguments, environment, mounts in ((["node", "/tmp/other.js"], [], []), (argv, ["NODE_OPTIONS=--require=/tmp/other.js"], []), (argv, [], [{"Destination": "/home/frappe/frappe-bench/apps/frappe"}]), (argv, [], [{"Destination": "/home/frappe/frappe-bench"}])):
+			with self.subTest(arguments=arguments, environment=environment, mounts=mounts), self.assertRaises(AssertionError): guard.validate_native_relay_process(arguments, environment, mounts)
+
+	def test_failed_native_command_keeps_private_diagnostics_without_public_error_text(self):
+		guard = self.module()
+		with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"DEEPLINKERP_COMMAND_ERROR_DIR": directory}), patch.object(guard.subprocess, "run", side_effect=guard.subprocess.CalledProcessError(1, ["docker"], output="private stdout", stderr="private stderr")):
+			with self.assertRaises(RuntimeError) as error: guard._host_call(["docker", "probe"])
+			self.assertNotIn("private stderr", str(error.exception))
+			files = list(Path(directory).iterdir())
+			self.assertEqual(len(files), 1)
+			self.assertEqual(files[0].stat().st_mode & 0o777, 0o600)
+			self.assertEqual(json.loads(files[0].read_bytes())["stderr"], "private stderr")
+
+	def test_idle_relay_requires_all_business_services_stopped_and_no_clients_or_db_work(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "assert_idle_relay"), "Missing stateless relay barrier")
+		proof = {"native": True, "containers": {role: {"running": False} for role in guard.RELEASE_SERVICES if role != "websocket"}, "database": {"sessions": [], "transactions": []}, "relay": {"client_connections": [], "unreviewed_connections": []}}
+		guard.assert_idle_relay(proof)
+		for bad in ("native", "container", "session", "transaction", "client", "connection"):
+			with self.subTest(bad=bad):
+				changed = copy.deepcopy(proof)
+				if bad == "native": changed["native"] = False
+				elif bad == "container": changed["containers"]["backend"]["running"] = True
+				elif bad in {"session", "transaction"}: changed["database"][bad + "s"] = ["active"]
+				else: changed["relay"]["client_connections" if bad == "client" else "unreviewed_connections"] = ["active"]
+				with self.assertRaises(AssertionError): guard.assert_idle_relay(changed)
+
+	def test_relay_socket_parser_classifies_owned_sockets_not_other_container_connections(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "classify_relay_sockets"), "Missing owned socket inventory")
+		rows = ["0: 00000000:2328 00000000:0000 0A 0 0 0 0 0 11", "1: 0100007F:ABCD 0100007F:18EB 01 0 0 0 0 0 12", "2: 0100007F:2328 0100007F:AA00 01 0 0 0 0 0 13"]
+		self.assertEqual(guard.classify_relay_sockets(rows, {"11", "12"}), {"client_connections": [], "unreviewed_connections": []})
+		self.assertEqual(len(guard.classify_relay_sockets(rows, {"13"})["client_connections"]), 1)
+		with self.assertRaises(AssertionError): guard.classify_relay_sockets(["malformed"], {"11"})
+
+	def test_service_exit_receipt_rejects_cold_worker_or_unproved_relay(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "validate_service_exit_receipt"), "Missing exit receipt validation")
+		plans = {role: guard.service_exit_plan(role, 8 if role == "frontend" else None) for role in guard.RELEASE_SERVICES}
+		state = {"contract": {"exit_protocol": 2, "exit_plan": plans}, "before": {"native": {"native_source_sha256": guard.NATIVE_RELAY_SOURCES}, "source_host": {"MainPID": "0"}, "containers": {role: {"id": role} for role in plans}}, "after": {"containers": {role: {"id": role, "running": False, "exit_code": plan["exit_codes"][0]} for role, plan in plans.items()}, "relay_idle_proof": {"native": True, "containers": {role: {"running": False} for role in plans if role != "websocket"}, "database": {"sessions": [], "transactions": []}, "relay": {"client_connections": [], "unreviewed_connections": []}}, "database": {"sessions": [], "transactions": []}}}
+		guard.validate_service_exit_receipt(state)
+		for bad in ("worker", "relay", "database", "identity", "native"):
+			with self.subTest(bad=bad):
+				changed = copy.deepcopy(state)
+				if bad == "worker": changed["after"]["containers"]["queue-long"]["exit_code"] = 137
+				elif bad == "relay": changed["after"].pop("relay_idle_proof")
+				elif bad == "database": changed["after"]["database"]["transactions"] = ["active"]
+				elif bad == "identity": changed["after"]["containers"]["websocket"]["id"] = "other"
+				else: changed["before"]["native"]["native_source_sha256"] = {}
+				with self.assertRaises((AssertionError, KeyError)): guard.validate_service_exit_receipt(changed)
+
+	def test_source_failure_is_preserved_but_not_confused_with_active_work(self):
+		guard = self.module()
+		with tempfile.TemporaryDirectory() as directory:
+			Path(directory, "run.json").write_text(json.dumps({"active": None, "last": {"status": "Failed"}}))
+			status = "MainPID=0\nActiveState=failed\nResult=exit-code\nExecMainCode=1\nExecMainStatus=1\n"
+			with patch.object(guard, "_host_call", return_value=status):
+				proof = guard.source_host_proof(root=Path(directory))
+				self.assertEqual(proof["Result"], "exit-code")
+				self.assertEqual(proof["run.json"]["last"]["status"], "Failed")
+				Path(directory, "run.json").write_text(json.dumps({"active": "unfinished"}))
+				with self.assertRaises(AssertionError): guard.source_host_proof(root=Path(directory))
+			with patch.object(guard, "_host_call", return_value=status.replace("MainPID=0", "MainPID=15")):
+				with self.assertRaises(AssertionError): guard.source_host_proof(root=Path(directory))
+
+	def test_drain_reaches_relay_only_after_business_exits_and_stops_on_active_database(self):
+		for active_database, restart_policy in ((False, "unless-stopped"), (True, "unless-stopped"), (False, "no"), (True, "no")):
+			with self.subTest(active_database=active_database, restart_policy=restart_policy), tempfile.TemporaryDirectory() as directory:
+				guard = self.module()
+				states = {role: {"Id": role, "Image": "image", "State": {"Running": True, "StartedAt": "start", "Pid": 1, "ExitCode": 0, "OOMKilled": False}, "Config": {"Hostname": role, "Env": []}, "HostConfig": {"RestartPolicy": {"Name": "unless-stopped", "MaximumRetryCount": 0}}} for role in guard.RELEASE_SERVICES}
+				states["frontend"]["HostConfig"]["RestartPolicy"]["Name"] = restart_policy
+				argv = {"backend": ["gunicorn", "--workers", "2", "--threads", "4", "--worker-class", "gthread", "--timeout", "120", "--preload", "frappe.app:application"], "queue-long": ["bench", "worker"], "queue-short": ["bench", "worker"], "scheduler": ["bench", "schedule"], "websocket": ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]}
+				processes = {role: {"1": {"pid": 1, "start": "1", "parent": 0, "argv": values}} for role, values in argv.items()}
+				for pid in (8, 9): processes["backend"][str(pid)] = {"pid": pid, "parent": 1, "argv": ["gunicorn"]}
+				rq = {"queues": {"bench:short": [], "bench:long": []}, "intermediate": {}, "registries": {}, "jobs": {}, "executions": {}, "workers": {}, "tombstones": {}, "worker_sets": {}}
+				for role in ("queue-short", "queue-long"): rq["workers"]["rq:worker:" + role] = {"hostname": role, "pid": "1", "birth": "then"}
+				stopped = copy.deepcopy(rq); stopped["workers"] = {}
+				signals = []
+				def host(command, **kwargs):
+					if command[:2] == ["docker", "update"]:
+						self.assertEqual(command, ["docker", "update", "--restart", "no", "frontend"])
+						states["frontend"]["HostConfig"]["RestartPolicy"] = {"Name": "no", "MaximumRetryCount": 0}
+						return "frontend"
+					if command[:2] == ["docker", "logs"]: return "warm shutdown\nWorker exiting 8\nWorker exiting 9\n"
+					if command[:2] == ["docker", "inspect"]: return json.dumps([states[role] for role in command[2:]])
+					if "--version" in command: return "v24.12.0\n"
+					role = "frontend" if command[:2] == ["docker", "exec"] else command[-1]
+					if role == "frontend" and states[role]["HostConfig"]["RestartPolicy"]["Name"] != "no":
+						states[role]["State"]["StartedAt"] = "restarted"
+						return role
+					if role == "websocket": self.assertTrue(all(not states[item]["State"]["Running"] for item in guard.RELEASE_SERVICES if item != role))
+					signals.append((role, command))
+					states[role]["State"].update(Running=False, ExitCode=137 if role == "websocket" else 0)
+					return role
+				def read(role, tool, action):
+					if action == "--rq-drain-snapshot": return copy.deepcopy(rq)
+					if action == "--runtime-proof": return {"native_source_sha256": guard.NATIVE_RELAY_SOURCES}
+					if action == "--relay-connections": return {"client_connections": [], "unreviewed_connections": []}
+					return processes[role]
+				log = types.SimpleNamespace(stdout="warm shutdown\nWorker exiting 8\nWorker exiting 9\n", stderr="")
+				with patch.object(guard, "_container_inspect", side_effect=lambda role: copy.deepcopy(states[role])), patch.object(guard, "_container_read", side_effect=read), patch.object(guard, "frontend_master", return_value={"pid": 12}), patch.object(guard, "source_host_proof", return_value={"MainPID": "0"}), patch.object(guard, "_command_rq_snapshot", return_value=stopped), patch.object(guard, "database_idle_snapshot", return_value={"sessions": ["active"] if active_database else [], "transactions": []}), patch.object(guard, "_host_call", side_effect=host), patch.object(guard.subprocess, "run", return_value=log):
+					if active_database:
+						with self.assertRaisesRegex(AssertionError, "database activity"): guard.drain_release(Path(directory) / "drain.json", "tool", "a" * 40)
+					else:
+						self.assertTrue(guard.drain_release(Path(directory) / "drain.json", "tool", "a" * 40)["quiescent"])
+				self.assertEqual([role for role, _ in signals], ["frontend", "scheduler", "queue-long", "queue-short", "backend"] + ([] if active_database else ["websocket"]))
+				self.assertNotIn("KILL", str([command for role, command in signals if role != "websocket"]))
+				receipt = json.loads(Path(directory, "drain.json").read_bytes())
+				self.assertEqual(receipt["before"]["frontend_restart_policy"]["Name"], restart_policy)
+				self.assertEqual(receipt["steps"][0]["status"], "complete")
 
 	def test_native_delta_keeps_every_original_column_index_and_table_option(self):
 		guard = self.module().assert_schema_delta
@@ -83,6 +370,42 @@ class JointReleaseGuardTests(unittest.TestCase):
 			return module
 		finally:
 			sys.path.pop(0)
+
+	def test_crm_definition_capture_executes_only_frozen_definition_builders(self):
+		module = self.metadata_module()
+		source = """import frappe
+PROCESS_STATUS_OPTIONS = "pending"
+def execute():
+    raise AssertionError("installer must never execute")
+def audit_fields(definitions, insert_after):
+    return [dict(fieldname=name, fieldtype=kind, insert_after=insert_after) for name, kind in definitions]
+def create_crm_custom_fields():
+    create_custom_fields({"Sales Order Item": audit_fields([("custom_crm_order_item_id", "Data")], "item_code"), "Item": [dict(fieldname="legacy", fieldtype="Data")]}, update=True)
+"""
+		definitions = module._capture_crm_definitions(source)
+		self.assertEqual(definitions["Sales Order Item"][0]["fieldname"], "custom_crm_order_item_id")
+		self.assertEqual(definitions["Item"][0]["fieldname"], "legacy")
+		with self.assertRaises((AssertionError, NameError)): module._capture_crm_definitions(source.replace('create_custom_fields({', 'frappe.db.sql("delete forbidden"); create_custom_fields({'))
+
+	def test_crm_schema_delta_is_additive_defaults_only_and_strict_native_ddl(self):
+		module = self.metadata_module()
+		fields = {"custom_crm_order_item_id": {"fieldname": "custom_crm_order_item_id", "fieldtype": "Data", "length": 140}, "custom_crm_historical_replay": {"fieldname": "custom_crm_historical_replay", "fieldtype": "Check"}}
+		before = {"schema": self.schema()}
+		additions = module._crm_schema_additions(before, fields)
+		self.assertEqual(set(additions["columns"]), set(fields))
+		self.assertEqual(additions["columns"]["custom_crm_historical_replay"]["default_value"], "0")
+		module._validate_crm_ddl("ALTER TABLE `tabDelivery Note` ADD COLUMN `custom_crm_order_item_id` varchar(140)", "Delivery Note", {"custom_crm_order_item_id"}, fields)
+		module._validate_crm_ddl("ALTER TABLE `tabDelivery Note Item` ADD COLUMN `custom_crm_source_unit_price` decimal(21,9) NOT NULL DEFAULT 0.0", "Delivery Note Item", {"custom_crm_source_unit_price"}, {"custom_crm_source_unit_price": {"fieldtype": "Float"}})
+		for query in ("ALTER TABLE `tabDelivery Note` DROP COLUMN `name`", "ALTER TABLE `tabSales Order` ADD COLUMN `custom_crm_order_item_id` varchar(140)", "ALTER TABLE `tabDelivery Note` ADD COLUMN `custom_crm_order_item_id` varchar(90)"):
+			with self.subTest(query=query), self.assertRaises(AssertionError): module._validate_crm_ddl(query, "Delivery Note", set(fields), fields)
+
+	def test_crm_stock_type_keeps_existing_raw_rows_and_refuses_purpose_conflict(self):
+		module = self.metadata_module()
+		row = {"name": "CRM Outbound Temporary Receipt", "purpose": "Material Receipt", "creation": "old", "is_standard": 1, "owner": "manual-owner"}
+		wanted = dict(row, creation="new", is_standard=0, owner="Administrator")
+		self.assertEqual(module._crm_stock_type_plan([row], wanted), [row])
+		self.assertEqual(module._crm_stock_type_plan([], wanted), [wanted])
+		with self.assertRaises(AssertionError): module._crm_stock_type_plan([dict(row, purpose="Material Transfer")], wanted)
 
 	def test_existing_page_compatibility_is_only_null_or_exact_name_and_never_rewrites_raw_rows(self):
 		module = self.metadata_module()
@@ -319,6 +642,7 @@ class JointReleaseGuardTests(unittest.TestCase):
 		after["models"]["Operating Expense Source"]["schema"] = self.schema()
 		after["metadata"]["scope"]["Scheduled Job Type"] = [{"name": "exact-new-job", "method": module.OPERATING_METHOD, "creation": "frozen"}]
 		contract = {"metadata_plan": {"scope": after["metadata"]["scope"], "new_definitions": ["Operating Expense Source"]}, "sources_before": before["audit"]["release_sources_all"], "sources_after": after["audit"]["release_sources_all"], "preserved_before": before["audit"]["preserved_apps"]}
+		contract.update(model_schemas={name: model["schema"] for name, model in after["models"].items()}, custom_fields=dict.fromkeys(module.CUSTOM_FIELD_ORDER))
 		receipt = self.module().DDLReceipt.create(path, {"candidate_sha": "a" * 40, "contract_sha256": "b" * 64}, before, contract)
 		receipt.finish(after)
 		return receipt, before, after
@@ -336,7 +660,7 @@ class JointReleaseGuardTests(unittest.TestCase):
 			current["metadata"]["scope"] = copy.deepcopy(new)
 		fake = types.SimpleNamespace(conf=types.SimpleNamespace(maintenance_mode=1), db=types.SimpleNamespace(rollback=lambda: None, commit=lambda: events.append("commit"), sql_ddl=ddl), scrub=lambda name: name.lower().replace(" ", "_"), clear_cache=lambda **kw: None)
 		audit = types.SimpleNamespace(capture_joint_state=lambda **kw: copy.deepcopy(current), table_schema=lambda name: copy.deepcopy(current["je"]["schema"] if name == "Journal Entry" else current["models"][name]["schema"]))
-		with patch.dict(sys.modules, {"frappe": fake, "audit_unified_purchase": audit}), patch.object(module, "_assert_joint_invariants", lambda *a, **kw: None), patch.object(module, "capture_joint_metadata", lambda: copy.deepcopy(current["metadata"])), patch.object(module, "_write_scope", write_scope):
+		with patch.dict(sys.modules, {"frappe": fake, "audit_unified_purchase": audit}), patch.object(sys.modules["joint_release_guards"], "verified_quiescence", return_value=True), patch.object(module, "_assert_joint_invariants", lambda *a, **kw: None), patch.object(module, "capture_joint_metadata", lambda **kw: copy.deepcopy(current["metadata"])), patch.object(module, "_write_scope", write_scope):
 			return module.restore_joint_metadata(path, **kwargs)
 
 	def test_fully_applied_rollback_refuses_missing_new_metadata_column_index_or_model_before_writes(self):
@@ -536,23 +860,31 @@ class JointReleaseGuardTests(unittest.TestCase):
 			return []
 		with patch.dict(sys.modules, {"frappe": types.SimpleNamespace(db=types.SimpleNamespace(sql=sql))}):
 			module._assert_no_joint_customizations()
-		self.assertEqual(len(events), 3)
+		self.assertEqual(len(events), 4)
 		self.assertTrue(all("Journal Entry" not in values or set(module.CUSTOM_FIELD_ORDER) <= set(values) for _, values in events))
 
 	def test_native_planning_virtualizes_cache_fills_but_forbids_real_cache_sql_and_commit_mutations(self):
 		module = self.metadata_module()
 		events = []
-		cache = types.SimpleNamespace(**{name: lambda *a, **kw: events.append("real-cache") for name in ("get_value", "set_value", "delete_value", "set", "delete", "hset", "hdel", "sadd", "srem", "publish", "flushdb", "flushall")})
+		cache = types.SimpleNamespace(**{name: lambda *a, **kw: events.append("real-cache") for name in ("get_value", "set_value", "delete_value", "hget", "set", "delete", "hset", "hdel", "sadd", "srem", "publish", "flushdb", "flushall")})
 		fake = types.SimpleNamespace(get_meta=lambda *a, **kw: "meta", cache=cache, client_cache=types.SimpleNamespace(get_value=cache.get_value, set_value=cache.set_value, delete_value=cache.delete_value), db=types.SimpleNamespace(sql=lambda query, *a, **kw: [query], sql_ddl=lambda *a, **kw: events.append("real-ddl"), commit=lambda: events.append("commit"), rollback=lambda: events.append("rollback")))
 		with patch.dict(sys.modules, {"frappe": fake}), module._read_only_native_planning() as queries:
 			fake.cache.set_value("columns", ["name"])
 			self.assertEqual(fake.cache.get_value("columns"), ["name"])
 			self.assertEqual(fake.cache.get_value("generated", generator=lambda: 2), 2)
+			generated = []
+			def user_doc():
+				generated.append("Administrator")
+				return {"name": "Administrator"}
+			self.assertEqual(fake.cache.hget("user_doc", "Administrator", user_doc), {"name": "Administrator"})
+			self.assertEqual(fake.cache.hget("user_doc", "Administrator", user_doc), {"name": "Administrator"})
+			self.assertEqual(generated, ["Administrator"])
+			self.assertIsNone(fake.cache.hget("user_doc", "Administrator", shared=True))
 			fake.client_cache.set_value("native-meta", "value")
 			self.assertEqual(fake.client_cache.get_value("native-meta"), "value")
 			self.assertEqual(fake.db.sql("select 1"), ["select 1"])
 			fake.db.sql_ddl("captured-only")
-			for action in (lambda: fake.db.sql("update anything"), fake.db.commit, fake.db.rollback, lambda: fake.cache.set("key", "value"), fake.cache.flushdb):
+			for action in (lambda: fake.db.sql("update anything"), fake.db.commit, fake.db.rollback, lambda: fake.cache.set("key", "value"), lambda: fake.cache.hset("user_doc", "Administrator", {}), fake.cache.flushdb):
 				with self.assertRaises(AssertionError):
 					action()
 			self.assertEqual(queries, ["captured-only"])
@@ -611,11 +943,12 @@ class JointReleaseGuardTests(unittest.TestCase):
 	def test_shell_quiesces_workers_before_new_image_and_keeps_durable_receipt_in_sites_volume(self):
 		source = (ROOT / "deploy/production/deploy_unified_purchase.sh").read_text()
 		self.assertIn("quiesce_release_workers() {", source)
-		self.assertIn('"${dc[@]}" stop queue-long queue-short scheduler', source)
+		self.assertIn('--host-drain', source)
+		self.assertNotIn('"${dc[@]}" stop ', source)
 		self.assertIn("--joint-apply", source)
 		self.assertIn("--joint-rollback", source)
 		self.assertIn("/home/frappe/frappe-bench/sites/deeplinkerp.com/private/release-evidence/", source)
-		self.assertLess(source.index("quiesce_release_workers\n"), source.index("switched=1"))
+		self.assertLess(source.index("quiesce_release_workers\n"), source.index('# All six containers are staged stopped.'))
 
 	def test_cli_refuses_ambiguous_actions_or_non_durable_receipt_before_connecting(self):
 		module = self.metadata_module()
@@ -696,7 +1029,7 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 		with self.assertRaises(AssertionError):
 			self.page_title_plan(module, before, contract)
 
-	def invariant_fixture(self, module):
+	def invariant_fixture(self, module, *, baseline_phase=None):
 		je = self.schema()
 		for field in module.CUSTOM_FIELD_ORDER:
 			je["columns"][field] = module._je_column(len(je["columns"]))
@@ -704,13 +1037,55 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 		metadata = {"scope": {"Has Role": [], "Custom Field": []}, "outside": {"Custom Field": module.digest([{"name": "Purchase Order-custom_oa_purchase_expense", "fieldtype": "Data"}])}, "outside_rows": {"Custom Field": [{"name": "Purchase Order-custom_oa_purchase_expense", "fieldtype": "Data"}], "Has Role": []}}
 		rows = [{"name": f"source-{i}", "original_evidence": '{"manual": 1 }'} for i in range(372)]
 		before = {"metadata": metadata, "je": {"schema": je, "rows": [{"name": "old-je"}], "original_columns": list(je["columns"])}, "models": {"Operating Expense Source": {"schema": self.schema(), "rows": rows}}, "operating_singles": [{"doctype": "Operating Expense Sync Settings", "field": "sync_enabled", "value": "0"}], "audit": {"release_sources_all": {"branding": "candidate"}, "tables": {"Has Role": module.digest([]), "OA Purchase Request": module.digest([{"name": "OA-old", "manual": "keep"}])}, "schemas": {"Journal Entry": je}, "singles": "same", "configuration_sha256": "same"}}
-		contract = {"sources_after": before["audit"]["release_sources_all"], "model_schemas": {"Operating Expense Source": self.schema()}}
+		contract = {"sources_after": before["audit"]["release_sources_all"], "model_schemas": {"Operating Expense Source": self.schema()}, "custom_fields": dict.fromkeys(module.CUSTOM_FIELD_ORDER)}
+		if baseline_phase is not None:
+			apps = ("deeplinkerp_branding", "china_finance", "oa_purchase_request", "crm_integration", "frappe", "erpnext", "other_app")
+			sources = {app: {"source.py": app + "-before"} for app in apps}
+			preserved = {app: app + "-package-before" for app in apps if app != "deeplinkerp_branding"}
+			contract.update(sources_before=sources, preserved_before=preserved, sources_after=copy.deepcopy(sources), preserved_after=copy.deepcopy(preserved))
+			for app in ("deeplinkerp_branding", "china_finance", "oa_purchase_request"):
+				contract["sources_after"][app]["source.py"] = app + "-after"
+				if app in preserved: contract["preserved_after"][app] = app + "-package-after"
+			before["audit"].update(release_sources_all=copy.deepcopy(contract["sources_" + baseline_phase]), preserved_apps=copy.deepcopy(contract["preserved_" + baseline_phase]))
 		return types.SimpleNamespace(state={"before": before, "contract": contract}), copy.deepcopy(before)
 
-	def assert_invariants(self, module, receipt, current):
+	def assert_invariants(self, module, receipt, current, *, source_phase="after"):
 		fake = types.SimpleNamespace(db=types.SimpleNamespace(sql=lambda *a, **kw: [[0]]))
 		with patch.dict(sys.modules, {"frappe": fake}):
-			module._assert_joint_invariants(receipt, current)
+			module._assert_joint_invariants(receipt, current, source_phase=source_phase)
+
+	def test_receipt_source_baseline_matches_its_image_phase_without_mutation(self):
+		module = self.metadata_module()
+		for baseline_phase in ("before", "after"):
+			for source_phase in ("before", "after"):
+				with self.subTest(baseline_phase=baseline_phase, source_phase=source_phase):
+					receipt, current = self.invariant_fixture(module, baseline_phase=baseline_phase)
+					contract = receipt.state["contract"]
+					current["audit"].update(release_sources_all=copy.deepcopy(contract["sources_" + source_phase]), preserved_apps=copy.deepcopy(contract["preserved_" + source_phase]))
+					original, snapshot = copy.deepcopy(receipt.state), copy.deepcopy(current)
+					self.assert_invariants(module, receipt, current, source_phase=source_phase)
+					self.assertEqual(receipt.state, original)
+					self.assertEqual(current, snapshot)
+
+	def test_image_phase_matching_keeps_every_app_source_and_package_protected(self):
+		module = self.metadata_module()
+		for location in ("baseline", "current"):
+			for drift in ("native-source", "oa-source", "missing-source", "extra-source", "package", "mixed-package-phase", "missing-package", "extra-package"):
+				with self.subTest(location=location, drift=drift):
+					receipt, current = self.invariant_fixture(module, baseline_phase="after")
+					contract = receipt.state["contract"]
+					current["audit"].update(release_sources_all=copy.deepcopy(contract["sources_before"]), preserved_apps=copy.deepcopy(contract["preserved_before"]))
+					audit = receipt.state["before"]["audit"] if location == "baseline" else current["audit"]
+					if drift in ("native-source", "oa-source"):
+						audit["release_sources_all"]["frappe" if drift == "native-source" else "oa_purchase_request"]["source.py"] = "unapproved"
+					elif drift == "missing-source": audit["release_sources_all"].pop("other_app")
+					elif drift == "extra-source": audit["release_sources_all"]["unexpected_app"] = {}
+					elif drift == "package": audit["preserved_apps"]["crm_integration"] = "unapproved"
+					elif drift == "mixed-package-phase": audit["preserved_apps"] = copy.deepcopy(contract["preserved_before" if location == "baseline" else "preserved_after"])
+					elif drift == "missing-package": audit["preserved_apps"].pop("other_app")
+					else: audit["preserved_apps"]["unexpected_app"] = "unapproved"
+					with self.assertRaises(AssertionError):
+						self.assert_invariants(module, receipt, current, source_phase="before")
 
 	def test_joint_invariants_accept_exact_active_business_rows_and_single(self):
 		module = self.metadata_module()
@@ -729,24 +1104,26 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 				else: current["metadata"]["outside_rows"]["Custom Field"][0]["fieldtype"] = "Link"
 				with self.assertRaises(AssertionError): self.assert_invariants(module, receipt, current)
 
-	def test_only_eleven_exact_oa_fields_are_in_scope_not_existing_po_or_native_oa_flags(self):
+	def test_only_contract_oa_fields_are_in_scope_not_existing_po_or_native_oa_flags(self):
 		module = self.metadata_module()
 		fields = module.SOURCE_FIELD_ORDER
-		self.assertEqual(len(fields), 11)
-		for field in fields:
-			self.assertTrue(module._in_joint_scope("Custom Field", {"name": "OA Purchase Request-" + field, "dt": "OA Purchase Request", "fieldname": field}))
-			self.assertTrue(module._in_joint_scope("Custom Field", {"name": "orphan-alias", "dt": "OA Purchase Request", "fieldname": field}))
-		for dt, field in (("Purchase Order", "custom_oa_purchase_expense"), ("OA Purchase Request", "source_stale"), ("OA Purchase Request", "target_company")):
-			self.assertFalse(module._in_joint_scope("Custom Field", {"name": dt + "-" + field, "dt": dt, "fieldname": field}))
+		self.assertEqual(len(fields), 13)
+		fake = types.SimpleNamespace(get_app_path=lambda app, filename: str(ROOT / app / filename))
+		with patch.dict(sys.modules, {"frappe": fake}):
+			for field in fields:
+				self.assertTrue(module._in_joint_scope("Custom Field", {"name": "OA Purchase Request-" + field, "dt": "OA Purchase Request", "fieldname": field}))
+				self.assertTrue(module._in_joint_scope("Custom Field", {"name": "orphan-alias", "dt": "OA Purchase Request", "fieldname": field}))
+			for dt, field in (("Purchase Order", "custom_oa_purchase_expense"), ("OA Purchase Request", "source_stale"), ("OA Purchase Request", "target_company")):
+				self.assertFalse(module._in_joint_scope("Custom Field", {"name": dt + "-" + field, "dt": dt, "fieldname": field}))
 
 	def test_source_cf_definitions_reuse_installer_without_invoking_it_and_keep_security(self):
 		module = self.metadata_module()
 		self.assertTrue(hasattr(module, "_source_custom_fields"))
 		fake = types.SimpleNamespace(get_app_path=lambda app, filename: str(ROOT / app / filename))
 		with patch.dict(sys.modules, {"frappe": fake}): fields = module._source_custom_fields()
-		self.assertEqual(len(fields), 11)
+		self.assertEqual(len(fields), 13)
 		for name, field in fields.items():
-			visible = name in {"custom_purchase_beneficiary_company", "custom_purchase_company_proposal", "custom_purchase_project"}
+			visible = name in {"custom_purchase_beneficiary_company", "custom_purchase_company_proposal", "custom_purchase_project", "custom_purchase_pending_reason"}
 			self.assertEqual((field.get("hidden", 0), field["read_only"], field["no_copy"]), (int(not visible), 1, 1))
 			self.assertFalse(field.get("default") or field.get("reqd"))
 			self.assertEqual(field.get("unique", 0), int(name == "custom_purchase_source_id"))
@@ -813,7 +1190,7 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 		self.assertTrue(hasattr(module, "_validate_oa_ddl"))
 		fields = self.source_fields(module)
 		for name, field in fields.items():
-			kind = {"Data": "varchar(140)", "Link": "varchar(140)", "Long Text": "longtext", "Check": "tinyint(4) NOT NULL DEFAULT 0", "Datetime": "datetime(6)"}[field["fieldtype"]]
+			kind = {"Data": "varchar(140)", "Link": "varchar(140)", "Long Text": "longtext", "Small Text": "text", "Check": "tinyint(4) NOT NULL DEFAULT 0", "Datetime": "datetime(6)"}[field["fieldtype"]]
 			module._validate_oa_ddl(f"ALTER TABLE `tabOA Purchase Request` ADD COLUMN `{name}` {kind}", set(fields), fields)
 		module._validate_oa_ddl("ALTER TABLE `tabOA Purchase Request` ADD UNIQUE INDEX IF NOT EXISTS custom_purchase_source_id (`custom_purchase_source_id`)", set(fields), fields)
 		for sql in ("ALTER TABLE `tabPurchase Order` ADD COLUMN `custom_purchase_source_id` varchar(140)", "ALTER TABLE `tabOA Purchase Request` MODIFY COLUMN `currency` varchar(140)", "ALTER TABLE `tabOA Purchase Request` ADD COLUMN `custom_purchase_source_json` varchar(140)", "ALTER TABLE `tabOA Purchase Request` ADD COLUMN `custom_purchase_source_id` varchar(140) NOT NULL", "ALTER TABLE `tabOA Purchase Request` ADD UNIQUE INDEX IF NOT EXISTS custom_purchase_source_id (`custom_purchase_source_id`(40))"):
@@ -852,7 +1229,7 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 		self.assertEqual(set(additions["indexes"]), {"custom_purchase_source_id"})
 		for name, definition in additions["columns"].items():
 			kind = fields[name]["fieldtype"]
-			self.assertEqual(definition["type"], {"Data": "varchar(140)", "Link": "varchar(140)", "Long Text": "longtext", "Check": "tinyint(4)", "Datetime": "datetime(6)"}[kind])
+			self.assertEqual(definition["type"], {"Data": "varchar(140)", "Link": "varchar(140)", "Long Text": "longtext", "Small Text": "text", "Check": "tinyint(4)", "Datetime": "datetime(6)"}[kind])
 			self.assertEqual((definition["nullable"], definition["default_value"]), ("NO", "0") if kind == "Check" else ("YES", "NULL"))
 			if kind in {"Check", "Datetime"}:
 				self.assertIsNone(definition["charset"])
@@ -872,7 +1249,7 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 			spec.loader.exec_module(audit)
 		module = self.metadata_module()
 		schema = self.schema()
-		with patch.dict(sys.modules, {"procurement_release_metadata": module}), patch.object(audit, "table_schema", side_effect=lambda dt: schema if dt in {"Journal Entry", "OA Purchase Request"} else None), patch.object(audit, "capture_audit", return_value={}), patch.object(module, "capture_joint_metadata", return_value={}):
+		with patch.dict(sys.modules, {"procurement_release_metadata": module}), patch.object(audit, "table_schema", side_effect=lambda dt: schema if dt in {"Journal Entry", "OA Purchase Request"} else None), patch.object(audit, "capture_audit", return_value={}), patch.object(module, "capture_joint_metadata", return_value={}), patch.object(module, "_native_reversal_contract", return_value={"tables": []}):
 			state = audit.capture_joint_state(original_columns=["name"], original_oa_columns=["name", "manual"])
 		self.assertEqual(state["oa"]["original_columns"], ["name", "manual"])
 		self.assertEqual(state["oa"]["rows"], [{"name": "OA-old", "manual": "keep"}])
@@ -946,7 +1323,7 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 				changed["audit"][{"flag": "purchase_source_sync_enabled", "maintenance": "maintenance_mode", "quiescence": "release_quiescent"}[drift]] = False
 				with self.assertRaises(AssertionError): self.assert_invariants(module, receipt, changed)
 
-	def native_oa_boundary(self, module, path, *, crash=None):
+	def native_field_boundary(self, module, path, *, crash=None, crm_only=False):
 		"""Real apply/receipt/rollback guards, with only native IO/DDL substituted."""
 		receipt, current = self.invariant_fixture(module)
 		fields = self.source_fields(module)
@@ -967,6 +1344,24 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 		plan["scope"]["Scheduled Job Type"] = [{"name": "preserved-operating-job", "method": module.OPERATING_METHOD}, {"name": module.PURCHASE_SOURCE_METHOD, "method": module.PURCHASE_SOURCE_METHOD}]
 		before["metadata"]["scope"]["Scheduled Job Type"] = [plan["scope"]["Scheduled Job Type"][0]]
 		current["metadata"]["scope"]["Scheduled Job Type"] = copy.deepcopy(before["metadata"]["scope"]["Scheduled Job Type"])
+		crm_fields = {}
+		if crm_only:
+			crm_fields = {dt: {key: {"fieldname": key, "fieldtype": "Float" if key == "custom_crm_source_unit_price" else "Check" if key == "custom_crm_historical_replay" else "Small Text" if key == "custom_crm_repost_ids" else "Data"} for key in names} for dt, names in module.CRM_FIELD_NAMES.items()}
+			current["crm_only"] = True
+			current["crm_tables"] = {dt: {"schema": self.schema(), "rows": [{"name": "manual-" + dt}], "original_columns": ["name"]} for dt in crm_fields}
+			current["metadata"]["scope"]["Stock Entry Type"] = []
+			current["metadata"]["outside_rows"]["Stock Entry Type"] = [{"name": "Historical manual type", "purpose": "Material Transfer", "creation": "original"}]
+			current["metadata"]["outside"]["Stock Entry Type"] = module.digest(current["metadata"]["outside_rows"]["Stock Entry Type"])
+			current["audit"]["crm_new_columns"] = {}
+			for dt, table in current["crm_tables"].items():
+				current["audit"]["schemas"][dt] = table["schema"]
+				current["audit"]["tables"][dt] = module.digest(table["rows"])
+			current["audit"]["tables"]["Stock Entry Type"] = module.digest(current["metadata"]["outside_rows"]["Stock Entry Type"])
+			before = copy.deepcopy(current)
+			contract.update(crm_only=True, crm_fields=crm_fields, source_custom_fields={})
+			plan["scope"] = copy.deepcopy(current["metadata"]["scope"])
+			plan["scope"]["Custom Field"] = [dict(field, name=dt + "-" + key, dt=dt) for dt, entries in crm_fields.items() for key, field in entries.items()]
+			plan["scope"]["Stock Entry Type"] = [{"name": module.CRM_STOCK_TYPE, "purpose": "Material Receipt", "is_standard": 0, "creation": "candidate"}]
 		events, control = [], {"crash": crash, "added": 0, "nonnull": False}
 		class Field(dict):
 			def __getattr__(self, name):
@@ -976,14 +1371,14 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 					raise AttributeError(name) from None
 			__setattr__ = dict.__setitem__
 		meta = types.SimpleNamespace(fields=[Field(field) for field in fields.values()])
-		def schema(name): return copy.deepcopy(current["oa"]["schema"] if name == "OA Purchase Request" else current["je"]["schema"])
+		def schema(name): return copy.deepcopy(current["crm_tables"][name]["schema"] if crm_only and name in crm_fields else current["oa"]["schema"] if name == "OA Purchase Request" else current["je"]["schema"])
 		def native_sql(name, wanted):
-			if name != "OA Purchase Request": return []
+			if name != "OA Purchase Request" and name not in crm_fields: return []
 			result = []
 			for field in wanted.fields:
-				if field.fieldname not in current["oa"]["schema"]["columns"]:
-					kind = {"Data": "varchar(140)", "Link": "varchar(140)", "Long Text": "longtext", "Check": "tinyint(4) NOT NULL DEFAULT 0", "Datetime": "datetime(6)"}[field.fieldtype]
-					result.append(f"ALTER TABLE `tabOA Purchase Request` ADD COLUMN `{field.fieldname}` {kind}")
+				if field.fieldname not in schema(name)["columns"]:
+					kind = {"Data": "varchar(140)", "Link": "varchar(140)", "Long Text": "longtext", "Small Text": "text", "Check": "tinyint(4) NOT NULL DEFAULT 0", "Datetime": "datetime(6)", "Float": "decimal(21,9) NOT NULL DEFAULT 0.0"}[field.fieldtype]
+					result.append(f"ALTER TABLE `tab{name}` ADD COLUMN `{field.fieldname}` {kind}")
 			if any(field.fieldname == "custom_purchase_source_id" and field.get("unique") for field in wanted.fields) and "custom_purchase_source_id" not in current["oa"]["schema"]["indexes"]:
 				result.append("ALTER TABLE `tabOA Purchase Request` ADD UNIQUE INDEX IF NOT EXISTS custom_purchase_source_id (`custom_purchase_source_id`)")
 			return result
@@ -992,57 +1387,103 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 			self.assertEqual(stored.state["steps"][-1]["status"], "pending")
 			self.assertEqual(stored.state["steps"][-1]["sql"], query)
 			events.append(query)
-			columns, indexes = current["oa"]["schema"]["columns"], current["oa"]["schema"]["indexes"]
+			dt = query.split("`tab", 1)[1].split("`", 1)[0]
+			table = current["crm_tables"][dt] if crm_only else current["oa"]
+			columns, indexes = table["schema"]["columns"], table["schema"]["indexes"]
 			if " ADD COLUMN " in query:
 				key = query.split(" ADD COLUMN `")[1].split("`")[0]
-				columns[key] = module._source_column(fields[key], len(columns))
+				columns[key] = module._crm_column(crm_fields[dt][key], len(columns)) if crm_only else module._source_column(fields[key], len(columns))
 			elif " ADD UNIQUE INDEX " in query: indexes["custom_purchase_source_id"] = module._source_index()
 			elif " DROP COLUMN " in query:
-				key = query.rsplit("`", 2)[1]; columns.pop(key)
+				key = query.rsplit("`", 2)[1]
+				self.assertEqual(columns[key]["position"], max(value.get("position", 0) for value in columns.values()), "Reverse native append order prevents ordinal drift")
+				columns.pop(key)
 				if key == "custom_purchase_source_id": indexes.pop(key, None)
 			else: self.fail("DDL escaped narrow OA scope: " + query)
 			if " ADD " in query:
 				control["added"] += 1
 				if control["crash"] == control["added"]: raise RuntimeError("crash after native autocommit")
 		def write_scope(old, wanted): current["metadata"]["scope"] = copy.deepcopy(wanted)
-		fake = types.SimpleNamespace(conf=types.SimpleNamespace(maintenance_mode=1), get_meta=lambda name, **kw: meta if name == "OA Purchase Request" else types.SimpleNamespace(fields=[]), clear_cache=lambda **kw: None, scrub=lambda name: name.lower().replace(" ", "_"))
+		fake = types.SimpleNamespace(conf=types.SimpleNamespace(maintenance_mode=1), get_meta=lambda name, **kw: types.SimpleNamespace(fields=[Field(field) for field in crm_fields[name].values()]) if name in crm_fields else meta if name == "OA Purchase Request" else types.SimpleNamespace(fields=[]), clear_cache=lambda **kw: None, scrub=lambda name: name.lower().replace(" ", "_"))
 		fake.db = types.SimpleNamespace(sql=lambda *a, **kw: [[int(control["nonnull"])]], commit=lambda: events.append("commit"), rollback=lambda: None, sql_ddl=ddl)
 		fake.db.updatedb = lambda name, wanted: [fake.db.sql_ddl(query) for query in native_sql(name, wanted)]
 		def capture_state(**kwargs):
 			current["audit"]["oa_new_columns"] = {key: int(control["nonnull"]) for key in current["oa"]["schema"]["columns"] if key not in before["oa"]["schema"]["columns"]}
+			if crm_only:
+				current["audit"]["crm_new_columns"] = {dt + "/" + key: int(control["nonnull"]) for dt, table in current["crm_tables"].items() for key in set(table["schema"]["columns"]) - set(before["crm_tables"][dt]["schema"]["columns"])}
+				current["audit"]["tables"]["Stock Entry Type"] = module.digest(sorted(current["metadata"]["scope"]["Stock Entry Type"] + current["metadata"]["outside_rows"]["Stock Entry Type"], key=lambda row: row["name"]))
 			return copy.deepcopy(current)
 		audit = types.SimpleNamespace(capture_joint_state=capture_state, table_schema=schema)
 		stack = __import__("contextlib").ExitStack()
 		self.addCleanup(stack.close)
 		stack.enter_context(patch.dict(sys.modules, {"frappe": fake, "frappe.model.meta": types.SimpleNamespace(Meta=object), "frappe.utils": types.SimpleNamespace(now_datetime=lambda: "2026-10-06"), "audit_unified_purchase": audit}))
-		stack.enter_context(patch.object(module, "load_joint_contract", side_effect=lambda: copy.deepcopy(contract)))
+		stack.enter_context(patch.object(sys.modules["joint_release_guards"], "verified_quiescence", return_value=True))
+		stack.enter_context(patch.object(module, "load_joint_contract", side_effect=lambda **kwargs: copy.deepcopy(contract)))
 		stack.enter_context(patch.object(module, "_joint_plan", return_value=plan))
 		stack.enter_context(patch.object(module, "_native_schema_sql", side_effect=native_sql))
 		stack.enter_context(patch.object(module, "_write_scope", side_effect=write_scope))
-		stack.enter_context(patch.object(module, "capture_joint_metadata", side_effect=lambda: copy.deepcopy(current["metadata"])))
+		stack.enter_context(patch.object(module, "capture_joint_metadata", side_effect=lambda **kw: copy.deepcopy(current["metadata"])))
 		stack.enter_context(patch.object(module, "_desired_navigation", side_effect=lambda scope, **kw: scope))
 		return before, current, events, control
 
-	def test_eleven_oa_column_intents_and_unique_index_are_durable_and_second_apply_is_idle(self):
+	def test_crm_adapter_reuses_receipts_preserves_manual_rows_and_repeats_without_writes(self):
 		module = self.metadata_module()
 		with tempfile.TemporaryDirectory() as directory:
 			path = Path(directory) / "receipt.json"
-			before, current, events, _ = self.native_oa_boundary(module, path)
+			before, current, events, control = self.native_field_boundary(module, path, crm_only=True)
+			result = module.apply_joint_metadata("a" * 40, path, crm_only=True)
+			self.assertEqual(result["ddl_boundaries"], 19)
+			self.assertEqual(current["metadata"]["outside_rows"], before["metadata"]["outside_rows"])
+			first = path.read_bytes(); events.clear()
+			self.assertTrue(module.apply_joint_metadata("a" * 40, path, crm_only=True)["unchanged"])
+			self.assertEqual(events, [])
+			self.assertEqual(first, path.read_bytes())
+			stored = self.module().DDLReceipt.load(path).state
+			old, new = copy.deepcopy(before["audit"]), copy.deepcopy(current["audit"])
+			old.update(joint_metadata=before["metadata"], approved_sources_after=stored["contract"]["sources_after"])
+			new["joint_metadata"] = current["metadata"]
+			module.verify_joint_audit_delta(old, new, stored)
+			module.restore_joint_metadata(path)
+			self.assertEqual(current, before)
+
+	def test_crm_each_pending_native_column_is_reversible_until_resume_and_nondefault_data_holds(self):
+		for crash in range(1, 20):
+			with self.subTest(crash=crash), tempfile.TemporaryDirectory() as directory:
+				module = self.metadata_module(); path = Path(directory) / "receipt.json"
+				before, current, events, control = self.native_field_boundary(module, path, crash=crash, crm_only=True)
+				with self.assertRaisesRegex(RuntimeError, "autocommit"): module.apply_joint_metadata("a" * 40, path, crm_only=True)
+				if crash == 1:
+					control["nonnull"] = True
+					with self.assertRaises(AssertionError): module.restore_joint_metadata(path)
+					control["nonnull"] = False
+					marker = path.with_suffix(".resume.json"); marker.write_text("first writer")
+					with self.assertRaisesRegex(AssertionError, "forward-only"): module.restore_joint_metadata(path)
+					marker.unlink()
+				module.restore_joint_metadata(path)
+				self.assertEqual(current, before)
+
+	def test_contract_oa_column_intents_and_unique_index_are_durable_and_second_apply_is_idle(self):
+		module = self.metadata_module()
+		with tempfile.TemporaryDirectory() as directory:
+			path = Path(directory) / "receipt.json"
+			before, current, events, _ = self.native_field_boundary(module, path)
 			result = module.apply_joint_metadata("a" * 40, path)
-			self.assertEqual(result["ddl_boundaries"], 12)
+			self.assertEqual(result["ddl_boundaries"], len(module.SOURCE_FIELD_ORDER) + 1)
 			self.assertEqual(current["models"], before["models"])
 			self.assertEqual(current["operating_singles"], before["operating_singles"])
 			first = path.read_bytes(); events.clear()
 			self.assertTrue(module.apply_joint_metadata("a" * 40, path)["unchanged"])
 			self.assertEqual(events, [])
 			self.assertEqual(path.read_bytes(), first)
+			self.assertTrue(module.restore_joint_metadata(path)["restored"])
+			self.assertEqual(current, before)
 
 	def test_each_interrupted_oa_autocommit_rolls_back_only_new_null_columns_and_job(self):
-		for crash in range(1, 13):
+		for crash in range(1, len(self.metadata_module().SOURCE_FIELD_ORDER) + 2):
 			with self.subTest(crash=crash), tempfile.TemporaryDirectory() as directory:
 				module = self.metadata_module()
 				path = Path(directory) / "receipt.json"
-				before, current, events, control = self.native_oa_boundary(module, path, crash=crash)
+				before, current, events, control = self.native_field_boundary(module, path, crash=crash)
 				with self.assertRaisesRegex(RuntimeError, "autocommit"): module.apply_joint_metadata("a" * 40, path)
 				self.assertEqual(self.module().DDLReceipt.load(path).state["steps"][-1]["status"], "pending")
 				control["crash"] = None
@@ -1078,7 +1519,7 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 		module = self.metadata_module()
 		with tempfile.TemporaryDirectory() as directory:
 			path = Path(directory) / "receipt.json"
-			before, current, _, _ = self.native_oa_boundary(module, path)
+			before, current, _, _ = self.native_field_boundary(module, path)
 			module.apply_joint_metadata("a" * 40, path)
 			receipt = self.module().DDLReceipt.load(path).state
 			old, new = copy.deepcopy(before["audit"]), copy.deepcopy(current["audit"])
@@ -1090,7 +1531,7 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 		module = self.metadata_module()
 		with tempfile.TemporaryDirectory() as directory:
 			path = Path(directory) / "receipt.json"
-			before, current, _, _ = self.native_oa_boundary(module, path)
+			before, current, _, _ = self.native_field_boundary(module, path)
 			module.apply_joint_metadata("a" * 40, path)
 			receipt = self.module().DDLReceipt.load(path).state
 			old, new = copy.deepcopy(before["audit"]), copy.deepcopy(current["audit"])
@@ -1120,12 +1561,662 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 		module = self.metadata_module()
 		with tempfile.TemporaryDirectory() as directory:
 			path = Path(directory) / "receipt.json"
-			_, _, events, control = self.native_oa_boundary(module, path, crash=1)
+			_, _, events, control = self.native_field_boundary(module, path, crash=1)
 			with self.assertRaises(RuntimeError): module.apply_joint_metadata("a" * 40, path)
 			control.update(crash=None, nonnull=True)
 			events.clear()
 			with self.assertRaisesRegex(AssertionError, "non-NULL"): module.restore_joint_metadata(path)
 			self.assertEqual(events, [])
+
+
+class CombinedReleaseContractTests(unittest.TestCase):
+	module = JointReleaseGuardTests.module
+	metadata_module = JointReleaseGuardTests.metadata_module
+	def test_native_only_scope_keeps_optional_metadata_and_old_jobs_outside(self):
+		module = self.metadata_module()
+		import inspect
+		self.assertIn("native_only", inspect.signature(module.capture_joint_metadata).parameters)
+		fake = types.SimpleNamespace(get_app_path=lambda app, name: str(ROOT / app / name), get_meta=lambda dt, **kw: types.SimpleNamespace(fields=[]))
+		with patch.dict(sys.modules, {"frappe": fake}):
+			native = module._native_reversal_contract()
+		rows = {dt: [] for dt in ("DocType", "Custom Field", "Page", "Workspace", "Workspace Sidebar", "Scheduled Job Type", "Property Setter", "Custom DocPerm")}
+		rows["Custom Field"] = [{"name": dt + "-" + native["fieldname"], "dt": dt, "fieldname": native["fieldname"]} for dt in native["targets"]] + [{"name": "Journal Entry-" + module.CUSTOM_FIELD_ORDER[0], "dt": "Journal Entry", "fieldname": module.CUSTOM_FIELD_ORDER[0]}]
+		rows["DocType"] = [{"name": name} for name in module.JOINT_MODELS]
+		rows["Workspace"] = [{"name": "Buying", "custom": "原始字节"}]
+		rows["Scheduled Job Type"] = [{"name": "native-" + str(i), "method": method} for i, method in enumerate(module.SCHEDULED_METHODS)]
+		with patch.dict(sys.modules, {"frappe": fake}), patch.object(module, "_rows", side_effect=lambda dt: copy.deepcopy(rows[dt])):
+			result = module.capture_joint_metadata(native_only=True)
+		self.assertEqual(len(result["scope"]["Custom Field"]), 6)
+		self.assertEqual(result["scope"]["Scheduled Job Type"], [rows["Scheduled Job Type"][-1]])
+		for dt in ("DocType", "Page", "Workspace", "Workspace Sidebar"):
+			self.assertEqual(result["scope"][dt], [])
+			self.assertEqual(result["outside_rows"][dt], rows[dt])
+		self.assertEqual(result["outside_rows"]["Scheduled Job Type"], rows["Scheduled Job Type"][:2])
+		before = {"metadata": {"scope": {dt: [] for dt in rows}}, "je": {"schema": {"columns": {}, "indexes": {}}}, "models": {}, "operating_singles": []}
+		definitions = {row["name"]: {"source": dict(row, doctype="Custom Field"), "native": {"Custom Field": [row]}} for row in rows["Custom Field"][:6]}
+		contract = {"native_only": True, "native_reversal": native, "definitions": definitions, "custom_fields": {}, "model_schemas": {}, "native_metadata_schemas": {"DocField": {"columns": {}}}}
+		fake.db = types.SimpleNamespace(sql=lambda *a, **kw: [], exists=lambda *a: True)
+		with patch.dict(sys.modules, {"frappe": fake, "frappe.model.meta": types.SimpleNamespace(Meta=object), "audit_unified_purchase": types.SimpleNamespace(table_schema=None)}), patch.object(module, "_native_rows", side_effect=lambda source, **kw: {"Custom Field": [{k: v for k, v in source.items() if k != "doctype"}]}), patch.object(module, "_native_reversal_plan", return_value={}), patch.object(module, "_desired_navigation", side_effect=AssertionError("Native-only touched navigation")):
+			plan = module._joint_plan(before, contract, when="frozen", seed="frozen", require_quiescent=False)
+		self.assertEqual([row["name"] for row in plan["scope"]["Custom Field"]], sorted(definitions))
+
+	def test_native_only_rollback_uses_shared_first_writer_marker(self):
+		module, guard = self.metadata_module(), self.module()
+		fake = types.SimpleNamespace(conf=types.SimpleNamespace(maintenance_mode=1))
+		with tempfile.TemporaryDirectory() as directory:
+			shared = Path(directory) / "main.resume.json"
+			guard.record_resume(shared, {"candidate_sha": "a" * 40, "image_id": "sha256:" + "b" * 64}, "candidate-serving")
+			with patch.dict(sys.modules, {"frappe": fake, "audit_unified_purchase": types.SimpleNamespace(table_schema=None)}), patch.dict(os.environ, {"DEEPLINKERP_RELEASE_RESUME_RECEIPT": str(shared)}), patch("joint_release_guards.verified_quiescence", return_value=True), patch("joint_release_guards.DDLReceipt.load", side_effect=AssertionError("Secondary receipt was loaded before the shared marker gate")):
+				with self.assertRaisesRegex(AssertionError, "forward|HOLD"):
+					module.restore_joint_metadata(Path(directory) / "secondary.json")
+
+	def test_twelfth_source_field_reuses_visible_readonly_native_text(self):
+		module = self.metadata_module()
+		fake = types.SimpleNamespace(get_app_path=lambda app, name: str(ROOT / app / name))
+		with patch.dict(sys.modules, {"frappe": fake}):
+			fields = module._source_custom_fields()
+		self.assertEqual(len(fields), 13)
+		field = fields["custom_purchase_pending_reason"]
+		self.assertEqual((field["fieldtype"], field.get("hidden", 0), field["read_only"], field["no_copy"], field.get("permlevel", 0)), ("Small Text", 0, 1, 1, 0))
+		self.assertEqual(module._source_column(field, 20)["type"], "text")
+		module._validate_oa_ddl("ALTER TABLE `tabOA Purchase Request` ADD COLUMN `custom_purchase_pending_reason` text", {field["fieldname"]}, fields)
+
+	def test_native_reversal_contract_is_separate_from_drop_table_models(self):
+		module = self.metadata_module()
+		self.assertTrue(hasattr(module, "_native_reversal_contract"), "Native contract must reuse the existing installer")
+		fake = types.SimpleNamespace(get_app_path=lambda app, name: str(ROOT / app / name))
+		with patch.dict(sys.modules, {"frappe": fake}):
+			contract = module._native_reversal_contract()
+		self.assertEqual(set(contract["tables"]), {"Bin", "Purchase Order", "Purchase Receipt", "Purchase Invoice", "Payment Entry", "Repost Item Valuation", "Integration Request"})
+		self.assertFalse(set(contract["tables"]) & set(module.JOINT_MODELS))
+		self.assertEqual(contract["definition"]["options"], "Integration Request")
+		self.assertEqual(contract["activity_index_columns"], ["integration_request_service", contract["activity_column"], "name"])
+		self.assertIn("'Completed'", contract["activity_expression"])
+		self.assertEqual(contract["recover_method"], module.REVERSAL_METHOD)
+
+	def test_first_resume_marker_is_durable_idempotent_and_blocks_rollback(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "assert_pre_resume"), "Pre-resume rollback guard required")
+		with tempfile.TemporaryDirectory() as directory:
+			path = Path(directory) / "resume.json"
+			guard.assert_pre_resume(path)
+			with patch.object(guard.DDLReceipt, "_sync_directory", wraps=guard.DDLReceipt._sync_directory) as sync:
+				guard.record_resume(path, {"candidate_sha": "a" * 40, "image_id": "sha256:" + "b" * 64}, "candidate-web")
+				sync.assert_called_once_with(path.parent)
+			first = path.read_bytes()
+			guard.record_resume(path, {"candidate_sha": "a" * 40, "image_id": "sha256:" + "b" * 64}, "candidate-web")
+			self.assertEqual(path.read_bytes(), first)
+			for corrupt in (False, True):
+				with self.subTest(corrupt=corrupt):
+					if corrupt:
+						path.write_text("broken")
+					with self.assertRaisesRegex(AssertionError, "forward|HOLD"):
+						guard.assert_pre_resume(path)
+
+	def test_budget_uses_actual_same_filesystem_sum_and_refuses_unknown(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "filesystem_budget"), "Actual filesystem budget required")
+		with tempfile.TemporaryDirectory() as directory:
+			path = Path(directory)
+			with patch.object(guard.os, "statvfs", return_value=types.SimpleNamespace(f_bavail=10, f_frsize=10)):
+				self.assertEqual(guard.filesystem_budget({"extract": (path, 20), "build": (path, 30)}, reserve_bytes=10)[0]["required_bytes"], 60)
+				with self.assertRaisesRegex(AssertionError, "space"):
+					guard.filesystem_budget({"extract": (path, 60), "backup": (path, 50)}, reserve_bytes=0)
+			for amount in (None, 0, -1):
+				with self.subTest(amount=amount), self.assertRaises(AssertionError):
+					guard.filesystem_budget({"backup": (path, amount)})
+
+	@contextlib.contextmanager
+	def shared_budget_boundary(self, directory, filesystem):
+		guard = self.module()
+		archive = Path(directory) / "candidate.tar.gz"
+		with tarfile.open(archive, "w:gz") as output:
+			output.add(ROOT / "deploy/production/joint_release_guards.py", arcname="guard.py")
+		source = "/var/lib/docker/volumes/frappe_docker_sites/_data"
+		image_id = "sha256:" + "a" * 64
+		probe_calls = []
+		def host(argv):
+			if argv[:3] == ["docker", "exec", "-e"]:
+				probe_calls.append(argv[-1])
+				return json.dumps({"database_bytes": 10, "attachment_bytes": 20, "backup_filesystem": filesystem})
+			if argv[:3] == ["docker", "image", "inspect"]:
+				return json.dumps([{"Id": image_id, "Size": 30}])
+			if argv[:2] == ["docker", "info"]:
+				return json.dumps(directory)
+			raise AssertionError("Unexpected host operation: " + str(argv))
+		original_resolve = Path.resolve
+		def resolve(path, *args, **kwargs):
+			if str(path).startswith("/var/lib/docker/volumes/"):
+				raise PermissionError("/var/lib/docker/volumes")
+			return original_resolve(path, *args, **kwargs)
+		with patch.object(guard, "_container_inspect", return_value={"Mounts": [{"Type": "volume", "Source": source, "Destination": "/home/frappe/frappe-bench/sites"}]}), patch.object(guard, "_host_call", side_effect=host), patch.object(Path, "resolve", autospec=True, side_effect=resolve):
+			yield guard, archive, image_id, source, probe_calls
+
+	def test_shared_budget_reads_inaccessible_volume_capacity_in_container(self):
+		with tempfile.TemporaryDirectory() as directory:
+			filesystem = {"device": os.stat(directory).st_dev, "available_bytes": 100 * 1024**3}
+			with self.shared_budget_boundary(directory, filesystem) as (guard, archive, image_id, source, probes):
+				result = guard.release_space_budget([archive], image_id)
+			self.assertEqual(len(result["filesystems"]), 1)
+			entry = result["filesystems"][0]
+			self.assertEqual(entry["operations"]["full_with_attachments_backup"], 160)
+			self.assertEqual(entry["required_bytes"], 2 * 1024**3 + 4 * result["expanded_archive_bytes"] + 60 + 160)
+			self.assertIn("os.statvfs(", probes[0])
+			self.assertIn("os.stat(", probes[0])
+
+	def test_shared_budget_keeps_separate_volume_capacity_and_rejects_shortage(self):
+		with tempfile.TemporaryDirectory() as directory:
+			device = os.stat(directory).st_dev + 1
+			for available in (3 * 1024**3, 100):
+				with self.subTest(available=available), self.shared_budget_boundary(directory, {"device": device, "available_bytes": available}) as (guard, archive, image_id, source, _):
+					if available == 100:
+						with self.assertRaisesRegex(AssertionError, "Insufficient filesystem space"):
+							guard.release_space_budget([archive], image_id)
+					else:
+						result = guard.release_space_budget([archive], image_id)
+						entry = next(row for row in result["filesystems"] if row["device"] == device)
+						self.assertEqual(entry["path"], source)
+						self.assertEqual(entry["available_bytes"], available)
+						self.assertEqual(entry["required_bytes"], 2 * 1024**3 + 160)
+						self.assertEqual(len(result["filesystems"]), 2)
+
+	def test_shared_budget_refuses_unknown_volume_capacity(self):
+		with tempfile.TemporaryDirectory() as directory:
+			cases = [{}, {"device": None, "available_bytes": 3 * 1024**3}] + [{"device": 1, "available_bytes": value} for value in (None, 0, -1)]
+			for filesystem in cases:
+				with self.subTest(filesystem=filesystem), self.shared_budget_boundary(directory, filesystem) as (guard, archive, image_id, _, _):
+					with self.assertRaisesRegex(AssertionError, "Unknown measured filesystem"):
+						guard.release_space_budget([archive], image_id)
+
+	def test_raw_rq_snapshot_preserves_queue_order_without_native_cleanup_calls(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "raw_rq_snapshot"), "Read-only raw RQ inventory required")
+		class Redis:
+			worker = None
+			historical = False
+			orphan_queue = False
+			orphan_terminal = False
+			clock_reads = 0
+			pipeline_calls = None
+			def time(self):
+				self.clock_reads += 1
+				return 1601, self.clock_reads
+			def pttl(self, key): return 600000 if self.type(key) == b"hash" else -2
+			def pipeline(self, *, transaction):
+				assert transaction is True
+				redis = self
+				class Pipeline:
+					def __init__(self): self.commands = []
+					def __enter__(self): return self
+					def __exit__(self, *args): pass
+					def __getattr__(self, name):
+						assert name in {"hstrlen", "type", "pttl", "hexists", "hmget"}, "Unexpected Redis write or native cleanup"
+						def queue(*args): self.commands.append((name, args)); return self
+						return queue
+					def execute(self):
+						if redis.pipeline_calls is None: redis.pipeline_calls = []
+						redis.pipeline_calls.append(list(self.commands))
+						result = [getattr(redis, name)(*args) for name, args in self.commands]
+						self.commands = []
+						return result
+				return Pipeline()
+			def scan(self, cursor, **kwargs): return 0, [b"rq:queues", b"rq:workers", b"rq:queue:bench:short", b"rq:job:queued"] + ([b"rq:worker:old"] if self.worker is not None else []) + ([b"rq:queue:unknown"] if self.orphan_queue else []) + ([b"rq:finished:bench:orphan"] if self.orphan_terminal else [])
+			def type(self, key): return b"set" if key in {"rq:queues", "rq:workers"} else b"list" if key == "rq:queue:bench:short" or (key == "rq:queue:unknown" and self.orphan_queue) else b"zset" if (self.historical and key == "rq:finished:bench:short") or (self.orphan_terminal and key == "rq:finished:bench:orphan") else b"hash" if key == "rq:job:queued" or (key == "rq:worker:old" and self.worker is not None) else b"none"
+			def scard(self, key): return len(self.smembers(key))
+			def smembers(self, key): return {b"rq:queue:bench:short"} if key == "rq:queues" else set()
+			def llen(self, key): return 2 if key == "rq:queue:bench:short" else int(self.orphan_queue and key == "rq:queue:unknown")
+			def lrange(self, key, *args): return [b"queued", b"queued"] if key == "rq:queue:bench:short" else [b"deeplinkerp.com||orphan"] if key == "rq:queue:unknown" and self.orphan_queue else []
+			def zcard(self, key): return int(self.type(key) == b"zset")
+			def zrange(self, key, *args, **kwargs): return [(b"old-finished", 1)] if self.type(key) == b"zset" else []
+			def hlen(self, key): return 4
+			def hstrlen(self, key, field): return 4
+			def hmget(self, key, fields): return [{"status": b"queued", "origin": b"bench:short"}.get(field) for field in fields]
+			def hexists(self, key, field): return self.type(key) == b"hash"
+			def hkeys(self, key): return list(self.worker)
+			def hgetall(self, key): return self.worker
+		snapshot = guard.raw_rq_snapshot(Redis())
+		self.assertEqual(snapshot["queues"]["bench:short"], ["queued", "queued"])
+		self.assertEqual(snapshot["workers"], {})
+		self.assertEqual(snapshot["jobs"]["queued"]["status"], "queued")
+		historical = Redis()
+		historical.historical = True
+		with self.assertRaisesRegex(AssertionError, "missing"):
+			guard.raw_rq_snapshot(historical)
+		observed = guard.raw_rq_snapshot(historical, main_only=True)
+		self.assertEqual(observed["historical_orphans"], {"finished:bench:short": [["old-finished", 1]]})
+		self.assertEqual(observed["job_presence"]["old-finished"], {"hash_exists": False, "data_exists": False, "pttl": -2})
+		self.assertEqual(observed["job_presence"]["queued"]["pttl"], 600000)
+		self.assertEqual(historical.clock_reads, 2)
+		self.assertLess(observed["observation"]["started_at"], observed["observation"]["finished_at"])
+		self.assertEqual(len(historical.pipeline_calls), 2)
+		self.assertTrue(all("data" not in args[1] for batch in historical.pipeline_calls for name, args in batch if name == "hmget"))
+		self.assertTrue(historical.historical)
+		self.assertIn("historical_evidence", guard.raw_rq_snapshot.__code__.co_varnames, "Shared drain must retain complete terminal evidence")
+		shared = guard.raw_rq_snapshot(historical, historical_evidence=True)
+		self.assertEqual(shared["queues"], observed["queues"])
+		self.assertEqual(shared["historical_orphans"], observed["historical_orphans"])
+		historical.orphan_terminal = True
+		with self.assertRaisesRegex(AssertionError, "Unknown/orphan RQ registry"):
+			guard.raw_rq_snapshot(historical, historical_evidence=True)
+		historical.orphan_terminal = False
+		historical.orphan_queue = True
+		with self.assertRaisesRegex(AssertionError, "Unknown|Orphan"):
+			guard.raw_rq_snapshot(historical, main_only=True)
+		redis = Redis()
+		redis.worker = dict(pid="1", hostname="native", birth="2026-10-09T00:00:00Z", state="idle", queues="bench:short")
+		with self.assertRaisesRegex(AssertionError, "Orphan/stale"):
+			guard.raw_rq_snapshot(redis)
+		redis.worker["death"] = "2026-10-09T00:01:00Z"
+		after = guard.raw_rq_snapshot(redis)
+		before = copy.deepcopy(snapshot)
+		before["workers"] = {"rq:worker:old": {key: value for key, value in redis.worker.items() if key != "death"}}
+		guard.verify_rq_drain(before, after, {})
+		after["tombstones"]["rq:worker:old"]["birth"] = "old-unmatched"
+		with self.assertRaisesRegex(AssertionError, "identity"):
+			guard.verify_rq_drain(before, after, {})
+
+	def test_owned_build_cleanup_rejects_drift_shared_mount_or_asset_without_deleting(self):
+		guard = self.module()
+		for scenario in ("exact", "retired-exact", "retired-proof-drift", "retired-routing-broken", "retired-unproved", "main-exact", "main-helper-drift", "main-old-asset-drift", "extra-file", "changed-file", "extra-directory", "hardlink", "special", "shared-mount", "asset-url", "asset-origin", "asset-body", "redis-pre", "redis-post", "post-health"):
+			with self.subTest(scenario=scenario), tempfile.TemporaryDirectory(prefix="unified-purchase-build.", dir="/tmp") as build_name, tempfile.TemporaryDirectory() as evidence_name:
+				build, evidence = Path(build_name), Path(evidence_name)
+				(build / "release-source-manifest.json").write_bytes(b"{}")
+				(build / "raw.js").write_bytes(b"raw")
+				files = {item.name: hashlib.sha256(item.read_bytes()).hexdigest() for item in build.iterdir()}
+				stats = build.stat()
+				image = "sha256:" + "b" * 64
+				owned = {"path": str(build), "identity": [stats.st_dev, stats.st_ino, stats.st_uid], "files": files, "directories": [], "manifest_sha256": files["release-source-manifest.json"], "max_bytes": 100, "candidate_sha": "a" * 40, "image_id": image, "rollback_image_id": "sha256:" + "c" * 64, "raw_assets": {"/assets/raw.js?v=1": files["raw.js"]}}
+				if scenario.startswith("main-"):
+					owned.update(lane="main-only", main_helper_sha256=hashlib.sha256(b"frozen").hexdigest(), old_raw_assets=owned["raw_assets"])
+					(evidence / "main_site_lane.py").write_bytes(b"drift" if scenario == "main-helper-drift" else b"frozen")
+				route = "server { listen 8080; server_name " + " ".join(guard.SHARED_SITES[1:]) + "; return 410; }\n"
+				(evidence / "retired-sites.conf").write_text(route)
+				if scenario.startswith("retired-"):
+					owned["active_sites"] = ["deeplinkerp.com"]
+					if scenario != "retired-unproved":
+						owned["retirement"] = {"active_sites": ["deeplinkerp.com"], "receipt_path": "/home/frappe/frappe-bench/sites/.deeplinkerp-retired-sites/2026-10-10/retirement-receipt.json", "sha256": "d" * 64, "receipt": {"nginx": {"container_path": "/etc/nginx/conf.d/retired-sites.conf", "sha256": hashlib.sha256(route.encode()).hexdigest()}}}
+				(evidence / "build-ownership.json").write_text(json.dumps(owned))
+				accepted = {"browser_accepted": True, "candidate_sha": owned["candidate_sha"], "image_id": image, "loaded_assets": [{"url": "https://deeplinkerp.com/assets/raw.js?v=" + ("0" if scenario == "asset-url" else "1"), "body_sha256": "d" * 64 if scenario == "asset-body" else files["raw.js"]}]}
+				if scenario == "asset-origin":
+					accepted["loaded_assets"][0]["url"] = "http://localhost/assets/raw.js?v=1"
+				(evidence / "acceptance.json").write_text(json.dumps(accepted))
+				if scenario == "extra-file":
+					(build / "not-this-release.txt").write_text("keep")
+				if scenario == "changed-file":
+					(build / "raw.js").write_text("new")
+				if scenario == "extra-directory":
+					(build / "unowned").mkdir()
+				if scenario == "hardlink":
+					os.link(build / "raw.js", evidence / "shared.js")
+				if scenario == "special":
+					os.mkfifo(build / "unowned-pipe")
+				calls = []
+				def host_call(args):
+					calls.append(args)
+					if "--retirement-proof" in args:
+						proof = copy.deepcopy(owned["retirement"])
+						if scenario == "retired-proof-drift":
+							proof["sha256"] = "e" * 64
+						return json.dumps(proof)
+					if "nginx" in args:
+						return "# configuration file /etc/nginx/conf.d/retired-sites.conf:\n" + route
+					if args[0] == "curl" and "%{http_code}" in args:
+						return "200" if scenario == "retired-routing-broken" else "410"
+					if "main_site_lane.py" in args[1]:
+						return json.dumps({"main_running": True, "rq_aof": True})
+					if args == ["docker", "ps", "-aq"]:
+						return "container-id"
+					if args[:2] == ["docker", "inspect"]:
+						return json.dumps(
+							[{"Mounts": [{"Source": str(build.resolve())}]}]
+							if scenario == "shared-mount"
+							else [{"Mounts": []}]
+						)
+					if args[:3] == ["docker", "image", "inspect"]:
+						return json.dumps([{"Id": args[-1]}])
+					if args[:2] == ["docker", "run"]:
+						return json.dumps(
+							{
+								"redis_ping": not (
+									scenario == "redis-pre" or (scenario == "redis-post" and not build.exists())
+								),
+								"queues": {"bench:short": ["preserved"]},
+								"workers": {},
+								"executions": {},
+								"jobs": {},
+								"registries": {},
+							}
+						)
+					return "pong"
+				def inspect(service):
+					self.assertFalse(scenario.startswith("main-"), "Main cleanup must not expect old six containers to run the candidate image")
+					mounts = [{"Destination": "/home/frappe/frappe-bench/sites", "Type": "volume", "Name": "sites"}]
+					if scenario.startswith("retired-") and service == "frontend":
+						mounts.append({"Type": "bind", "Destination": "/etc/nginx/conf.d/retired-sites.conf", "Source": str(evidence / "retired-sites.conf"), "RW": False})
+					return {"Image": image, "State": {"Running": not (scenario == "post-health" and not build.exists())}, "Mounts": mounts, "HostConfig": {"NetworkMode": "release-net"}}
+				def body(args, **kwargs):
+					return types.SimpleNamespace(stdout=b"drift" if scenario == "main-old-asset-drift" and "https://akivision" in args[-1] else b"raw")
+				with patch.object(guard, "_host_call", side_effect=host_call), patch.object(guard, "_container_inspect", side_effect=inspect), patch.object(guard.subprocess, "run", side_effect=body):
+					if scenario in {"exact", "main-exact", "retired-exact"}:
+						result = guard.cleanup_owned_build(evidence, evidence / "acceptance.json")
+						self.assertEqual(result["removed_bytes"], 5)
+						if scenario in {"exact", "retired-exact"}:
+							self.assertEqual(result["redis_rq"]["queues"], {"bench:short": ["preserved"]})
+						else:
+							self.assertTrue(result["redis_rq"]["rq_aof"])
+						self.assertFalse(build.exists())
+						if scenario == "retired-exact":
+							self.assertFalse(any(call[0] == "curl" and "-fsS" in call and any(site in call[-1] for site in guard.SHARED_SITES[1:]) for call in calls), "Retired hosts must not be tested as active sites")
+					elif scenario in {"post-health", "redis-post"}:
+						with self.assertRaisesRegex(AssertionError, "forward HOLD"):
+							guard.cleanup_owned_build(evidence, evidence / "acceptance.json")
+						self.assertFalse(build.exists())
+						self.assertEqual(guard.DDLReceipt.load(evidence / "cache-cleanup.json").state["status"], "applying")
+					else:
+						with self.assertRaises(AssertionError):
+							guard.cleanup_owned_build(evidence, evidence / "acceptance.json")
+						self.assertTrue(build.exists())
+					self.assertFalse(any("prune" in call or "rm" in call for call in calls))
+
+	def test_native_generated_column_and_pointer_schema_keep_case_and_original_projection(self):
+		module = self.metadata_module()
+		self.assertTrue(hasattr(module, "_native_schema_additions"))
+		fake = types.SimpleNamespace(get_app_path=lambda app, name: str(ROOT / app / name))
+		with patch.dict(sys.modules, {"frappe": fake}):
+			native = module._native_reversal_contract()
+		schema = JointReleaseGuardTests.schema(self)
+		schema["columns"]["name"] = module._je_column(0)
+		for key in ("integration_request_service", "status", "request_description"):
+			schema["columns"][key] = module._je_column(len(schema["columns"]))
+		for dt in native["tables"]:
+			with self.subTest(dt=dt):
+				original = {"schema": copy.deepcopy(schema), "original_columns": list(schema["columns"]), "rows": [{"name": "original", "status": "Completed"}]}
+				delta = module._native_schema_additions(original, native, dt)
+				self.assertEqual(len(delta["columns"]), 1)
+				self.assertEqual(len(delta["indexes"]), 1)
+				self.assertEqual(original["schema"], schema)
+				if dt == "Integration Request":
+					column = delta["columns"][native["activity_column"]]
+					self.assertEqual((column["type"], column["extra"]), ("tinyint(4)", "VIRTUAL GENERATED"))
+					self.assertIn("'Completed'", column["expression"])
+					self.assertEqual([row["column"] for row in delta["indexes"][native["activity_index"]]], native["activity_index_columns"])
+
+	def test_main_scope_blocks_live_native_work_without_stopping_other_tenants(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "assert_main_rq_empty"), "Scoped native main drain is missing")
+		base = {"queues": {"bench:short": []}, "intermediate": {"bench:short": []}, "registries": {}, "workers": {}, "jobs": {}, "executions": {}, "historical_orphans": {"rq:finished:bench:short": [["old-finished", 1]]}}
+		base["queues"]["bench:short"] = ["akivision.deeplinkerp.com||accepted"]
+		base["jobs"]["akivision.deeplinkerp.com||accepted"] = {"status": "queued"}
+		before = copy.deepcopy(base)
+		result = guard.assert_main_rq_empty(base)
+		self.assertEqual(base, before)
+		self.assertEqual(result["historical_orphans"], base["historical_orphans"])
+		self.assertTrue(result["shared_strict_hold"])
+		for status in ("finished", "failed", "canceled"):
+			terminal = copy.deepcopy(base)
+			job = "deeplinkerp.com||terminal"
+			terminal["registries"][status + ":bench:short"] = [[job, 1]]
+			terminal["jobs"][job] = {"status": status}
+			with self.subTest(terminal_status=status):
+				self.assertTrue(guard.assert_main_rq_empty(terminal)["main_empty"])
+		for kind in ("queued", "intermediate", "wip", "deferred", "scheduled", "callback", "unknown"):
+			with self.subTest(kind=kind):
+				value = copy.deepcopy(base)
+				job = "unknown-live" if kind == "unknown" else "deeplinkerp.com||accepted"
+				if kind == "queued":
+					value["queues"]["bench:short"].append(job)
+				elif kind == "intermediate":
+					value["intermediate"]["bench:short"].append(job)
+				elif kind in {"wip", "deferred", "scheduled"}:
+					value["registries"][kind + ":bench:short"] = [
+						[job + (":execution" if kind == "wip" else ""), 1]
+					]
+				elif kind == "callback":
+					value["workers"]["rq:worker:shared"] = {"current_job": job}
+				else:
+					value["jobs"][job] = {"status": "started"}
+				with self.assertRaisesRegex(AssertionError, "main|Unknown"):
+					guard.assert_main_rq_empty(value)
+
+	def test_terminal_history_allows_only_observed_natural_expiry_or_cleanup(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "terminal_history_transition"), "Bounded terminal-history guard required")
+		registry = "finished:bench:short"
+		for site in guard.SHARED_SITES:
+			job = site + "||scheduled_job||fixture"
+			before = {"queues": {"bench:short": []}, "intermediate": {}, "registries": {registry: [[job, 1600.0]]}, "workers": {}, "executions": {}, "jobs": {job: {"origin": "bench:short", "status": "finished", "ended_at": "1970-01-01T00:16:40Z", "result_ttl": "600"}}, "historical_orphans": {}, "observation": {"started_at": 1590.0, "finished_at": 1590.01}, "job_presence": {job: {"hash_exists": True, "data_exists": True, "pttl": 9990}}}
+			after = copy.deepcopy(before)
+			after.update(jobs={}, historical_orphans={registry: [[job, 1600.0]]}, observation={"started_at": 1601.0, "finished_at": 1601.01}, job_presence={job: {"hash_exists": False, "data_exists": False, "pttl": -2}})
+			original = copy.deepcopy(before), copy.deepcopy(after)
+			with self.subTest(site=site, case="expiry"):
+				self.assertEqual(guard.terminal_history_transition(before, after), {"expired_jobs": [job], "cleaned_orphans": []})
+				self.assertEqual((before, after), original)
+			cleaned = copy.deepcopy(after)
+			cleaned.update(registries={registry: []}, historical_orphans={}, job_presence={})
+			cleaned["observation"] = {"started_at": 1602.0, "finished_at": 1602.01}
+			with self.subTest(site=site, case="cleanup"):
+				self.assertEqual(guard.terminal_history_transition(after, cleaned), {"expired_jobs": [], "cleaned_orphans": [job]})
+				self.assertEqual(guard.terminal_history_transition(before, cleaned), {"expired_jobs": [job], "cleaned_orphans": []})
+			for identity in (job, "unknown-finished-history"):
+				old = json.loads(json.dumps(before).replace(job, identity))
+				for case in ("score", "requeued", "metadata"):
+					new = copy.deepcopy(old)
+					if case == "score": new["registries"][registry][0][1] = 1700.0
+					elif case == "requeued":
+						new["jobs"][identity]["status"] = "queued"
+						new["queues"]["bench:short"] = [identity]
+					else: new["jobs"][identity]["ended_at"] = "1970-01-01T00:16:41Z"
+					with self.subTest(site=site, retained_identity=identity, case=case):
+						if identity == job and site != guard.SHARED_SITES[0]:
+							self.assertEqual(guard.terminal_history_transition(old, new), {"expired_jobs": [], "cleaned_orphans": []})
+							self.assertTrue(guard.assert_main_rq_empty(new)["main_empty"])
+						else:
+							with self.assertRaisesRegex(AssertionError, "terminal history changed"):
+								guard.terminal_history_transition(old, new)
+			for case in ("unknown", "unobserved", "unfinished", "no-ended", "no-ttl", "no-expiry", "premature", "score-drift", "orphan-score-drift", "orphan-extra-ref", "bad-score", "duplicate", "before-live", "after-live", "data-reappears", "revived"):
+				old, new = copy.deepcopy(before), copy.deepcopy(after)
+				if case == "unknown":
+					old = json.loads(json.dumps(old).replace(job, "unknown-history"))
+					new = json.loads(json.dumps(new).replace(job, "unknown-history"))
+				elif case == "unobserved": old["jobs"] = {}
+				elif case == "unfinished": old["jobs"][job]["status"] = "started"
+				elif case == "no-ended": old["jobs"][job]["ended_at"] = None
+				elif case == "no-ttl": old["jobs"][job]["result_ttl"] = "0"
+				elif case == "no-expiry": old["job_presence"][job]["pttl"] = -1
+				elif case == "premature": new["observation"]["started_at"] = 1599.0
+				elif case == "score-drift": new["registries"][registry][0][1] = 1602.0
+				elif case == "orphan-score-drift": new["historical_orphans"][registry][0][1] = 1602.0
+				elif case == "orphan-extra-ref": new["registries"]["finished:bench:long"] = [[job, 1600.0]]
+				elif case == "bad-score": old["registries"][registry][0][1] = float("nan")
+				elif case == "duplicate": new["registries"][registry].append([job, 1600.0])
+				elif case == "before-live": old["workers"] = {"worker": {"current_job": job}}
+				elif case == "after-live": new["queues"]["bench:short"] = [job]
+				elif case == "data-reappears": new["job_presence"][job]["hash_exists"] = True
+				else:
+					old = copy.deepcopy(after)
+					new = copy.deepcopy(cleaned)
+					new["jobs"] = {job: before["jobs"][job]}
+				with self.subTest(site=site, case=case), self.assertRaisesRegex(AssertionError, "history|History|terminal|Terminal|HOLD"):
+					guard.terminal_history_transition(old, new)
+		static = copy.deepcopy(after)
+		static = json.loads(json.dumps(static).replace(job, "unknown-static-history"))
+		self.assertEqual(guard.terminal_history_transition(static, copy.deepcopy(static)), {"expired_jobs": [], "cleaned_orphans": []})
+
+	def test_main_seal_requires_fresh_all_host_auth_namespace_and_stopped_producer_proof(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "validate_main_seal"), "Real main auth/namespace seal receipt is missing")
+		state = {"identity": {"candidate_sha": "a" * 40}, "status": "applied", "contract": {"old_user": "_old", "new_user": "dlp_main_new", "database": "_db", "original_hosts": ["%", "172.18.0.5", "172.18.0.9"]}}
+		proof = {"candidate_sha": "a" * 40, "observed_at": guard.time.time(), "old_hosts": ["%", "172.18.0.5", "172.18.0.9"], "old_accounts_locked": True, "old_sessions": 0, "discovered_sites": list(guard.SHARED_SITES[1:]), "private_config": True, "source_idle": True, "old_containers_unchanged": True, "producer_containers_stopped": True, "new_user": "dlp_main_new", "database": "_db"}
+		guard.validate_main_seal(state, proof, "a" * 40)
+		for field, value in (("old_hosts", ["%"]), ("old_accounts_locked", False), ("old_sessions", 1), ("discovered_sites", list(guard.SHARED_SITES)), ("producer_containers_stopped", False), ("private_config", False), ("old_containers_unchanged", False), ("observed_at", 0), ("new_user", "_old")):
+			with self.subTest(field=field), self.assertRaisesRegex(AssertionError, "seal|HOLD"):
+				guard.validate_main_seal(state, dict(proof, **{field: value}), "a" * 40)
+
+
+class RetiredSiteReleaseTests(unittest.TestCase):
+	module = JointReleaseGuardTests.module
+
+	@contextlib.contextmanager
+	def retirement(self, guard):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			main = root / guard.SHARED_SITES[0]
+			main.mkdir()
+			config = {"db_name": "main", "maintenance_mode": 0}
+			(main / "site_config.json").write_text(json.dumps(config))
+			def digest(path):
+				return hashlib.sha256(path.read_bytes()).hexdigest()
+			receipt = {"version": 1, "status": "complete", "original_sites": list(guard.SHARED_SITES), "active_sites": [guard.SHARED_SITES[0]], "databases_retained": True, "main_config_sha256": digest(main / "site_config.json"), "main_config_without_maintenance_sha256": hashlib.sha256(guard.serialized({"db_name": "main"})).hexdigest(), "retired_sites": {}, "nginx": {"container_path": "/etc/nginx/conf.d/retired-sites.conf", "sha256": "f" * 64}}
+			for site in guard.SHARED_SITES[1:]:
+				relative = ".deeplinkerp-retired-sites/2026-10-10/" + site
+				retired = root / relative
+				(retired / ".retirement-archive").mkdir(parents=True)
+				(retired / "site_config.json").write_text(json.dumps({"db_name": site}))
+				archive = retired / ".retirement-archive/database.sql.gz"
+				archive.write_bytes(b"original database archive")
+				receipt["retired_sites"][site] = {"directory": relative, "config_sha256": digest(retired / "site_config.json"), "archives": {".retirement-archive/database.sql.gz": {"sha256": digest(archive), "local_sha256": digest(archive)}}}
+			path = root / ".deeplinkerp-retired-sites/2026-10-10/retirement-receipt.json"
+			path.write_text(json.dumps(receipt))
+			# Same native filesystem discovery algorithm, no DB or business mocks.
+			native = types.SimpleNamespace(get_sites=lambda sites_path: sorted(p.name for p in Path(sites_path).iterdir() if p.is_dir() and not p.is_symlink() and (p / "site_config.json").exists()))
+			with patch.dict(sys.modules, {"frappe.utils": native}), patch.object(guard, "BENCH_SITES", root, create=True):
+				yield root, path, receipt, digest
+
+	def test_completed_pinned_retirement_derives_only_actual_main_without_changing_historical_sites(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "retirement_site_proof"), "Completed retirement proof is missing")
+		with self.retirement(guard) as (_root, path, receipt, digest):
+			proof = guard.retirement_site_proof(path, digest(path), original_config=True)
+			self.assertEqual(proof["active_sites"], ["deeplinkerp.com"])
+			self.assertEqual(guard.SHARED_SITES, tuple(receipt["original_sites"]))
+			with patch.dict(os.environ, {"DEEPLINKERP_RETIREMENT_RECEIPT": str(path), "DEEPLINKERP_RETIREMENT_SHA256": digest(path)}):
+				self.assertEqual(guard.release_sites(), ("deeplinkerp.com",))
+				with self.assertRaisesRegex(AssertionError, "isolated|HOLD"):
+					guard.release_sites(main_only=True)
+		with patch.dict(os.environ, {}, clear=True):
+			self.assertEqual(guard.release_sites(), guard.SHARED_SITES)
+			self.assertEqual(guard.release_sites(main_only=True), guard.SHARED_SITES[:1])
+
+	def test_retirement_rejects_incomplete_receipt_live_site_missing_archive_and_configuration_drift(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "retirement_site_proof"), "Completed retirement proof is missing")
+		for scenario in ("status", "digest", "database", "active", "original", "local", "directory", "missing-archive", "archive-drift", "old-live", "unknown-live", "site-symlink", "archive-symlink", "main-drift"):
+			with self.subTest(scenario=scenario), self.retirement(guard) as (root, path, receipt, digest):
+				expected = digest(path)
+				first = receipt["retired_sites"][guard.SHARED_SITES[1]]
+				archive = root / first["directory"] / next(iter(first["archives"]))
+				if scenario == "status":
+					receipt["status"] = "backup_only"
+				elif scenario == "database":
+					receipt["databases_retained"] = False
+				elif scenario == "active":
+					receipt["active_sites"].append(guard.SHARED_SITES[1])
+				elif scenario == "original":
+					receipt["original_sites"].pop()
+				elif scenario == "local":
+					next(iter(first["archives"].values()))["local_sha256"] = "a" * 64
+				elif scenario == "directory":
+					first["directory"] = "../other"
+				elif scenario == "missing-archive":
+					archive.unlink()
+				elif scenario == "archive-drift":
+					archive.write_bytes(b"changed")
+				elif scenario in {"old-live", "unknown-live"}:
+					live = root / (guard.SHARED_SITES[1] if scenario == "old-live" else "unknown.site")
+					live.mkdir()
+					(live / "site_config.json").write_text("{}")
+				elif scenario == "site-symlink":
+					(root / "hidden.site").symlink_to(root / first["directory"], target_is_directory=True)
+				elif scenario == "archive-symlink":
+					outside = root / "shared.gz"
+					outside.write_bytes(archive.read_bytes())
+					archive.unlink()
+					archive.symlink_to(outside)
+				elif scenario == "main-drift":
+					(root / "deeplinkerp.com/site_config.json").write_text('{"db_name":"other"}')
+				path.write_text(json.dumps(receipt))
+				if scenario != "digest":
+					expected = digest(path)
+				else:
+					path.write_text(json.dumps(receipt) + " ")
+				with self.assertRaises((AssertionError, FileNotFoundError)):
+					guard.retirement_site_proof(path, expected, original_config=True)
+
+	def test_maintenance_consumes_actual_active_sites_and_preserves_main_config_identity(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "release_sites"), "Verified release scope is missing")
+		with self.retirement(guard) as (root, path, _receipt, digest):
+			original_digest = digest(path)
+			(root / "deeplinkerp.com/site_config.json").write_text('{"db_name":"main","maintenance_mode":1}')
+			self.assertEqual(guard.retirement_site_proof(path, original_digest)["active_sites"], ["deeplinkerp.com"])
+			with self.assertRaisesRegex(AssertionError, "configuration|HOLD"):
+				guard.retirement_site_proof(path, original_digest, original_config=True)
+			calls = []
+			tenants = root / "tenants.json"
+			tenants.write_text(json.dumps({"sites": {"deeplinkerp.com": {}}}))
+			with patch.dict(os.environ, {"DEEPLINKERP_RETIREMENT_RECEIPT": str(path), "DEEPLINKERP_RETIREMENT_SHA256": original_digest}), patch.object(guard, "restore_site_maintenance", side_effect=lambda base, site, original, **kw: calls.append(site)), patch.object(sys, "argv", ["guard", "--maintenance-restore", "--tenant-receipt", str(tenants)]), patch("builtins.print"):
+				guard.main()
+			self.assertEqual(calls, ["deeplinkerp.com"])
+
+	def test_persistent_retired_route_requires_exact_bind_loaded_fragment_and_real_410(self):
+		guard = self.module()
+		self.assertTrue(hasattr(guard, "verify_retirement_routing"), "Persistent retirement routing proof is missing")
+		for scenario in ("exact", "message", "writable", "wrong-host", "unloaded", "hash", "http"):
+			with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
+				path = Path(directory) / "retired-sites.conf"
+				hosts = " ".join(guard.SHARED_SITES[1:] if scenario != "wrong-host" else guard.SHARED_SITES)
+				content = "server { listen 8080; server_name " + hosts + "; return 410; }\n"
+				if scenario == "message":
+					content = content.replace("return 410;", 'default_type text/plain; return 410 "Archived";')
+				path.write_text(content)
+				proof = {"active_sites": ["deeplinkerp.com"], "receipt": {"nginx": {"container_path": "/etc/nginx/conf.d/retired-sites.conf", "sha256": hashlib.sha256(content.encode()).hexdigest() if scenario != "hash" else "e" * 64}}}
+				container = {"Mounts": [{"Type": "bind", "Source": str(path), "Destination": proof["receipt"]["nginx"]["container_path"], "RW": scenario == "writable"}], "State": {"Running": True}}
+				calls = []
+				def host(args):
+					calls.append(args)
+					if "nginx" in args:
+						return "" if scenario == "unloaded" else "# configuration file /etc/nginx/conf.d/retired-sites.conf:\n" + content
+					return "200" if scenario == "http" else "410"
+				with patch.object(guard, "_container_inspect", return_value=container), patch.object(guard, "_host_call", side_effect=host):
+					if scenario in {"exact", "message"}:
+						guard.verify_retirement_routing(proof)
+						self.assertEqual(sum(call[0] == "curl" for call in calls), 3)
+					else:
+						with self.assertRaises(AssertionError):
+							guard.verify_retirement_routing(proof)
+
+	def test_host_drain_forwards_retirement_pin_to_runtime_but_never_narrows_raw_rq(self):
+		guard = self.module()
+		calls = []
+		with patch.dict(os.environ, {"DEEPLINKERP_RETIREMENT_RECEIPT": "/retirement-receipt.json", "DEEPLINKERP_RETIREMENT_SHA256": "a" * 64}), patch.object(guard, "_host_call", side_effect=lambda args: calls.append(args) or "{}"):
+			guard._container_read("backend", "guard.py", "--runtime-proof")
+			guard._container_read("backend", "guard.py", "--rq-snapshot")
+			guard._container_read("scheduler", "guard.py", "--processes")
+		self.assertIn("DEEPLINKERP_RETIREMENT_RECEIPT=/retirement-receipt.json", calls[0])
+		self.assertIn("DEEPLINKERP_RETIREMENT_SHA256=" + "a" * 64, calls[0])
+		self.assertFalse(any("RETIREMENT" in value for value in calls[1]))
+		for call in calls:
+			self.assertIn("--workdir", call)
+			self.assertEqual(call[call.index("--workdir") + 1], str(guard.BENCH_SITES))
+
+	def test_readonly_command_probes_use_native_sites_workdir_and_keep_mount_identity(self):
+		guard = self.module()
+		backend = {
+			"Mounts": [{"Destination": str(guard.BENCH_SITES), "Type": "volume", "Name": "original-sites"}],
+			"HostConfig": {"NetworkMode": "original-network"},
+			"Image": "sha256:original-image",
+		}
+		calls = []
+		with patch.object(guard, "_host_call", side_effect=lambda args: calls.append(args) or "{}"):
+			guard._command_rq_snapshot(backend, __file__)
+			guard._command_rq_snapshot(backend, __file__, action="--retirement-proof")
+		for call in calls:
+			self.assertIn("--workdir", call)
+			self.assertEqual(call[call.index("--workdir") + 1], str(guard.BENCH_SITES))
+			self.assertIn("original-sites:" + str(guard.BENCH_SITES) + ":ro", call)
+			self.assertIn("original-network", call)
+			self.assertIn("sha256:original-image", call)
+			self.assertFalse(any("RETIREMENT" in value for value in call))
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ from frappe.model import get_permitted_fields
 from .purchase_payment_service import _read, _record_reader, _RecordReader, amount, invoice_balance, _quiet_link_errors, _require_fields, PI_FIELDS
 from . import purchase_fulfilment_service as fulfilment
 
-ITEM_FIELDS = {"name", "idx", "item_code", "item_name", "description", "qty", "uom", "rate", "amount", "received_qty"}
+ITEM_FIELDS = {"name", "idx", "item_code", "item_name", "description", "warehouse", "qty", "uom", "rate", "amount", "received_qty"}
 NOTICE = "仅显示有权查看的订单进度；不包含银行账户、应付单或付款单明细。订单未付不是已到货应付余额。"
 UNCERTAIN = "共享应付、退货或跨币种无法安全归入本订单，请由财务核对；不将整单金额冒充采购成本。"
 

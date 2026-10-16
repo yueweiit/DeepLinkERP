@@ -287,6 +287,8 @@ def fake_frappe(
 	class FakeDB:
 		@staticmethod
 		def get_value(doctype, filters, fieldname):
+			if (doctype, fieldname) == ("Bin", "custom_purchase_reversal_operation"):
+				return None
 			assert (doctype, fieldname) == ("Bin", "actual_qty")
 			return actual_qty
 

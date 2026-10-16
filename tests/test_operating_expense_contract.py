@@ -49,6 +49,13 @@ class OperatingExpenseContractTest(unittest.TestCase):
         for change in ({"amount":"101"}, {"source_company":"other"}, {"payee_name":"other"}, {"oa_identity":{"corp_id":"other", "process_instance_id":"instance"}}):
             self.assertNotEqual(contract.payment_intent_facts(before), contract.payment_intent_facts({**after, **change}))
 
+    def test_display_organization_does_not_change_existing_accounting_identity(self):
+        before = {**source(), "source_system": "dingtalk-oa", "source_company": "legacy mapping organization"}
+        after = {**before, "source_company": "original application organization",
+                 "company_mapping_source": before["source_company"]}
+        self.assertEqual(contract.expense_facts(before), contract.expense_facts(after))
+        self.assertNotEqual(contract.expense_facts(before), contract.expense_facts({**after, "company_mapping_source": None}))
+
     def test_payment_decision_rejects_non_boolean_oa_authorization(self):
         item = {**source(), "source_system": "dingtalk-oa"}
         for value in (1, 0, "true", None):
@@ -82,6 +89,58 @@ class OperatingExpenseContractTest(unittest.TestCase):
         mixed = contract.currency_totals(rows + [{"currency":"CNY","amount":"200","paid_amount":"30","pending_amount":"170"}])
         self.assertIsNone(mixed["CNY"]["paid_amount"])
         self.assertEqual(mixed["CNY"]["known_totals"]["paid_amount"], "30")
+
+    def test_pending_work_includes_blocked_and_unknown_unfinished_requests(self):
+        base = {"approval_state": "approved", "paid_amount": "0", "pending_amount": "100",
+                "payment_eligibility": {"can_register_payment": False}}
+        for amounts in ({}, {"paid_amount": "30", "pending_amount": "70"},
+                        {"paid_amount": None, "pending_amount": None}):
+            row = {**base, **amounts}
+            self.assertTrue(contract.quick_tab_matches(row, "pending_work"))
+        for state in ("rejected", "terminated", "withdrawn"):
+            self.assertFalse(contract.quick_tab_matches({**base, "approval_state": state}, "pending_work"))
+        self.assertFalse(contract.quick_tab_matches({**base, "paid_amount": "100", "pending_amount": "0"}, "pending_work"))
+        self.assertFalse(contract.quick_tab_matches({**base, "pending_amount": "-5"}, "pending_work"))
+
+    def test_worklist_statistics_share_one_classification_and_isolate_overpayment(self):
+        rows = [
+            {"approval_state": "pending", "currency": "CNY", "amount": "100", "paid_amount": None, "pending_amount": None},
+            {"approval_state": "approved", "company": "Legal", "currency": "CNY", "amount": "100", "paid_amount": "30", "pending_amount": "70"},
+            {"approval_state": "approved", "company": "Legal", "currency": "CNY", "amount": "100", "paid_amount": "105", "pending_amount": "-5"},
+            {"approval_state": "rejected", "currency": "CNY", "amount": "100", "paid_amount": None, "pending_amount": None},
+        ]
+        selected, counts, totals = contract.worklist_summary(rows, "pending_work")
+        self.assertEqual(selected, rows[:2])
+        self.assertEqual(counts["all"], 4)
+        self.assertEqual(counts["pending_work"], 2)
+        self.assertEqual(counts["reconciliation"], 3)
+        self.assertEqual(totals["CNY"]["known_totals"]["pending_amount"], "70")
+        all_totals = contract.currency_totals(rows)
+        self.assertIsNone(all_totals["CNY"]["pending_amount"])
+        self.assertEqual(all_totals["CNY"]["anomaly_count"], 1)
+        self.assertEqual(all_totals["CNY"]["anomaly_totals"]["pending_amount"], "-5")
+        self.assertEqual(all_totals["CNY"]["known_totals"]["pending_amount"], "70")
+
+    def test_blocker_uses_current_ledger_balances_not_cached_source_history(self):
+        row = {"company": "Legal", "approval_state": "approved", "currency": "CNY", "amount": "100",
+               "paid_amount": "30", "pending_amount": "70", "blocking_reason": "历史付款待核对",
+               "payment_eligibility": {"can_register_payment": True}}
+        contract.worklist_summary([row], "all")
+        self.assertEqual(row["blocking_reason"], "")
+        row.update(paid_amount=None, pending_amount=None)
+        contract.worklist_summary([row], "all")
+        self.assertEqual(row["blocking_reason"], "历史付款待核对")
+        row.update(paid_amount="30", pending_amount="70", issues="原法律公司映射已移除，需要复核")
+        contract.worklist_summary([row], "all")
+        self.assertIn("法律公司归属待复核", row["blocking_reason"])
+
+    def test_negative_paid_history_is_not_a_normal_payable_total(self):
+        total = contract.currency_totals([{"currency": "CNY", "amount": "100", "paid_amount": "-10", "pending_amount": "110"}])["CNY"]
+        self.assertTrue(total["incomplete"])
+        self.assertIsNone(total["paid_amount"])
+        self.assertIsNone(total["pending_amount"])
+        self.assertEqual(total["anomaly_count"], 1)
+        self.assertEqual(total["anomaly_totals"], {"paid_amount": "-10", "pending_amount": "110"})
 
     def test_payment_copy_identity_excludes_timestamps_but_retains_evidence(self):
         payment = source()["payments"][0]
