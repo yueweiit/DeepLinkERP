@@ -2,6 +2,13 @@
 
 `china_finance` 是面向 ERPNext v16 的中国财务合规应用。应用保留 ERPNext 原有总账过账机制，在其基础上提供法定会计凭证快照、对账单、税务发票、版本化财务报表、期间结账控制和电子档案。
 
+## 协作入口
+
+财务应用固定使用 `china_finance` 分支，从该分支更新后开发，PR 目标也选择 `china_finance`。
+2026-10-16 的应用基线与线上 `b73f17138fdf8235e91a687b8a113cbb33e7031c` 完全一致，生产源码标签为 `production/2026-10-16/china_finance`。
+整理前的主线保存在合并历史及 `archive/2026-10-16/china_finance-before-production-alignment`。跨应用对接见[统一分支说明](https://github.com/yueweiit/DeepLinkERP/blob/deeplinkerp_branding/docs/contributing/erp-branches.md)。
+本次仅整理源码基线，没有执行部署、迁移或财务数据操作；后续发布仍按现有流程验收。
+
 ## 已实现模块
 
 - 按公司配置企业会计准则或小企业会计准则；
