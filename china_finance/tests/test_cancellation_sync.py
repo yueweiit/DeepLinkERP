@@ -1,7 +1,10 @@
+import json
 import unittest
+from decimal import Decimal
 from unittest.mock import patch
 
 import frappe
+from frappe.utils import flt
 
 from china_finance.services.cash_flow_assignment import cancel_assignments_for_source
 from china_finance.services.voucher import _ensure_cancellation_sync_issue, on_gl_source_cancel, process_cancellation_snapshot
@@ -15,7 +18,7 @@ class TestCancellationSync(unittest.TestCase):
 		self.company = self.insert("Company", company_name=self.prefix, abbr=self.prefix[-5:], default_currency="CNY")
 		self.source = self.insert("Payment Entry", company=self.company, posting_date="2026-07-01", docstatus=2)
 		self.voucher = self.insert(
-			"China Accounting Voucher", company=self.company, posting_date="2026-07-01",
+			"China Accounting Voucher", company=self.company, currency="CNY", posting_date="2026-07-01",
 			source_doctype="Payment Entry", source_name=self.source, source_event="Posting",
 			source_key=f"Posting|Payment Entry|{self.source}", docstatus=1, status="Posted",
 		)
@@ -255,12 +258,38 @@ class TestCancellationSync(unittest.TestCase):
 			self.assertIs(raised.exception, error)
 			release.assert_not_called()
 
-	def snapshot_entries(self):
-		for idx, values in enumerate(({"debit": 100, "credit": 0}, {"debit": 0, "credit": 100}), 1):
-			self.insert(
+	def snapshot_entries(self, entries=None):
+		names = []
+		for idx, values in enumerate(entries or ({"debit": 100, "credit": 0}, {"debit": 0, "credit": 100}), 1):
+			names.append(self.insert(
 				"China Accounting Voucher Entry", parent=self.voucher, parenttype="China Accounting Voucher",
-				parentfield="entries", idx=idx, account=self.account, account_currency="CNY", **values,
-			)
+				parentfield="entries", idx=idx, **{"account": self.account, "account_currency": "CNY", **values},
+			))
+		# Prepare the same parent totals as the native snapshot controller.
+		rows = frappe.get_doc("China Accounting Voucher", self.voucher).entries
+		frappe.db.set_value("China Accounting Voucher", self.voucher, {
+			"total_debit": sum(flt(row.debit, 2) for row in rows),
+			"total_credit": sum(flt(row.credit, 2) for row in rows),
+		})
+		return names
+
+	def detailed_snapshot_entries(self):
+		other_account = self.insert("Account", company=self.company, account_name=self.prefix + "-Other")
+		return self.snapshot_entries([
+			{
+				"account_currency": "USD", "debit": 123.456789, "credit": 0,
+				"debit_in_account_currency": 17.891234, "credit_in_account_currency": 0,
+				"party_type": "Supplier", "party": self.prefix + "-Supplier",
+				"cost_center": self.prefix + "-Cost Center", "project": self.prefix + "-Project",
+				"finance_book": self.prefix + "-Book", "against_voucher_type": "Purchase Invoice",
+				"against_voucher": self.prefix + "-Invoice", "dimensions_json": '{"region":"华东","department":"采购"}',
+			},
+			{
+				"account": other_account, "account_currency": "USD", "debit": 0, "credit": 123.456789,
+				"debit_in_account_currency": 0, "credit_in_account_currency": 17.891234,
+				"dimensions_json": "{}",
+			},
+		])
 
 	def process_with_settings(self):
 		# No settings are written. Only this fixture company's lookup is patched.
@@ -314,16 +343,14 @@ class TestCancellationSync(unittest.TestCase):
 		frappe.db.set_value("China Accounting Voucher", first["voucher"], "reversal_of", self.voucher)
 		self.assertEqual(self.process_with_settings()["status"], "resolved")
 
-	def test_snapshot_without_original_requires_empty_reversal_origin(self):
+	def test_snapshot_without_original_stays_pending_even_with_cancelled_gl(self):
 		frappe.db.delete("China Accounting Voucher", {"name": self.voucher})
 		for debit, credit in ((0, 100), (100, 0)):
 			self.insert("GL Entry", company=self.company, voucher_type="Payment Entry", voucher_no=self.source, account=self.account, account_currency="CNY", is_cancelled=1, debit=debit, credit=credit)
 		first = self.process_with_settings()
-		self.assertEqual(first["status"], "resolved", first)
-		self.assertIsNone(frappe.db.get_value("China Accounting Voucher", first["voucher"], "reversal_of"))
-		self.assertEqual(self.process_with_settings()["status"], "resolved")
-		frappe.db.set_value("China Accounting Voucher", first["voucher"], "reversal_of", self.prefix + "-Foreign Posting")
-		self.assertEqual(self.process_with_settings()["status"], "pending")
+		self.assertEqual(first["status"], "pending", first)
+		self.assertIn("原始已提交", first["error"])
+		self.assertFalse(frappe.db.exists("China Accounting Voucher", {"source_key": f"Cancellation|Payment Entry|{self.source}"}))
 
 	def test_pending_existing_snapshot_retry_remains_correct(self):
 		self.snapshot_entries()
@@ -342,7 +369,8 @@ class TestCancellationSync(unittest.TestCase):
 		self.assertEqual(frappe.db.get_value("China Accounting Voucher", self.voucher, "status"), "Posted")
 		self.assertEqual(frappe.db.get_value("Payment Entry", self.source, "docstatus"), 2)
 
-	def test_retained_cancelled_gl_rows_are_read_without_reposting(self):
+	def test_retained_cancelled_gl_rows_use_original_snapshot_without_reposting(self):
+		self.snapshot_entries()
 		gl_names = [
 			self.insert(
 				"GL Entry", company=self.company, voucher_type="Payment Entry", voucher_no=self.source,
@@ -357,7 +385,174 @@ class TestCancellationSync(unittest.TestCase):
 		self.assertEqual([frappe.get_doc("GL Entry", name).as_dict() for name in gl_names], before)
 		self.assertEqual(frappe.db.count("GL Entry"), count)
 		doc = frappe.get_doc("China Accounting Voucher", result["voucher"])
-		self.assertEqual({row.gl_entry for row in doc.entries}, set(gl_names))
+		self.assertEqual(len(doc.entries), 2)
+		self.assertTrue(all(not row.gl_entry for row in doc.entries))
+		self.assertEqual([(row.debit, row.credit) for row in doc.entries], [(0, 100), (100, 0)])
+
+	def test_native_original_and_reverse_gl_cannot_become_zero_cancellation(self):
+		self.detailed_snapshot_entries()
+		original = frappe.get_doc("China Accounting Voucher", self.voucher)
+		before = [row.as_dict() for row in original.entries]
+		gl_names = []
+		for row in original.entries:
+			for reverse in (False, True):
+				gl_names.append(self.insert(
+					"GL Entry", company=self.company, voucher_type="Payment Entry", voucher_no=self.source,
+					account=row.account, account_currency=row.account_currency, is_cancelled=1,
+					debit=row.credit if reverse else row.debit, credit=row.debit if reverse else row.credit,
+					debit_in_account_currency=row.credit_in_account_currency if reverse else row.debit_in_account_currency,
+					credit_in_account_currency=row.debit_in_account_currency if reverse else row.credit_in_account_currency,
+				))
+		before_gl = [frappe.get_doc("GL Entry", name).as_dict() for name in gl_names]
+		result = self.process_with_settings()
+		self.assertEqual(result["status"], "resolved", result)
+		cancellation = frappe.get_doc("China Accounting Voucher", result["voucher"])
+		self.assertEqual(len(cancellation.entries), len(original.entries))
+		for source, reverse in zip(original.entries, cancellation.entries):
+			self.assertEqual((reverse.debit, reverse.credit), (source.credit, source.debit))
+			self.assertEqual((reverse.debit_in_account_currency, reverse.credit_in_account_currency), (source.credit_in_account_currency, source.debit_in_account_currency))
+			for field in ("account", "account_currency", "party_type", "party", "cost_center", "project", "finance_book", "against_voucher_type", "against_voucher", "dimensions_json"):
+				self.assertEqual(reverse.get(field), source.get(field), field)
+		self.assertEqual(self.process_with_settings()["voucher"], cancellation.name)
+		self.assertEqual([row.as_dict() for row in frappe.get_doc("China Accounting Voucher", self.voucher).entries], before)
+		self.assertEqual([frappe.get_doc("GL Entry", name).as_dict() for name in gl_names], before_gl)
+
+	def test_unreliable_original_snapshot_stays_pending_without_cleanup(self):
+		self.snapshot_entries()
+		assignment = self.assignment()
+		for field, invalid in (
+			("docstatus", 0), ("company", self.prefix + "-Foreign Company"),
+			("source_doctype", "Purchase Invoice"), ("source_name", self.prefix + "-Foreign Source"),
+			("source_event", "Cancellation"), ("status", "Draft"),
+			("reversal_of", self.prefix + "-Other Origin"), ("currency", "USD"),
+		):
+			with self.subTest(field=field):
+				before = frappe.db.get_value("China Accounting Voucher", self.voucher, field)
+				frappe.db.set_value("China Accounting Voucher", self.voucher, field, invalid)
+				try:
+					result = self.process_with_settings()
+					self.assertEqual(result["status"], "pending", result)
+					self.assertIn("原始已提交", result["error"])
+					self.assertEqual(frappe.db.get_value("China Cash Flow Assignment", assignment, "status"), "Draft")
+					self.assertFalse(frappe.db.exists("China Accounting Voucher", {"source_key": f"Cancellation|Payment Entry|{self.source}"}))
+				finally:
+					frappe.db.set_value("China Accounting Voucher", self.voucher, field, before)
+
+	def test_zero_cancellation_cannot_resolve_same_account_offset_snapshot(self):
+		self.snapshot_entries()
+		first = self.process_with_settings()
+		assignment = self.assignment()
+		for row in frappe.get_doc("China Accounting Voucher", first["voucher"]).entries:
+			frappe.db.set_value("China Accounting Voucher Entry", row.name, {"debit": 0, "credit": 0})
+		before = frappe.get_doc("China Accounting Voucher", first["voucher"]).as_dict()
+		result = self.process_with_settings()
+		self.assertEqual(result["status"], "pending", result)
+		self.assertEqual(frappe.db.get_value("China Cash Flow Assignment", assignment, "status"), "Draft")
+		self.assertEqual(frappe.get_doc("China Accounting Voucher", first["voucher"]).as_dict(), before)
+
+	def test_correct_reversal_entries_with_wrong_parent_totals_stay_pending(self):
+		self.detailed_snapshot_entries()
+		first = self.process_with_settings()
+		frappe.db.set_value("China Accounting Voucher", first["voucher"], {"total_debit": 999, "total_credit": 999})
+		before = frappe.get_doc("China Accounting Voucher", first["voucher"]).as_dict()
+		result = self.process_with_settings()
+		self.assertEqual(result["status"], "pending", result)
+		self.assertEqual(frappe.get_doc("China Accounting Voucher", first["voucher"]).as_dict(), before)
+
+	def assert_precision_mismatch_stays_pending(self, debit_field, credit_field):
+		self.detailed_snapshot_entries()
+		first = self.process_with_settings()
+		rows = frappe.get_doc("China Accounting Voucher", first["voucher"]).entries
+		frappe.db.set_value("China Accounting Voucher Entry", rows[0].name, credit_field, Decimal(str(rows[0].get(credit_field))) + Decimal("0.000001"))
+		frappe.db.set_value("China Accounting Voucher Entry", rows[1].name, debit_field, Decimal(str(rows[1].get(debit_field))) + Decimal("0.000001"))
+		self.assertEqual(self.process_with_settings()["status"], "pending")
+
+	def test_balanced_base_currency_error_below_display_precision_stays_pending(self):
+		self.assert_precision_mismatch_stays_pending("debit", "credit")
+
+	def test_balanced_account_currency_error_below_display_precision_stays_pending(self):
+		self.assert_precision_mismatch_stays_pending("debit_in_account_currency", "credit_in_account_currency")
+
+	def test_cancellation_account_and_dimensions_must_match_original(self):
+		self.detailed_snapshot_entries()
+		first = self.process_with_settings()
+		row = frappe.get_doc("China Accounting Voucher", first["voucher"]).entries[0]
+		for field, invalid in (
+			("account", self.prefix + "-Wrong Account"), ("account_currency", "EUR"),
+			("party_type", "Customer"), ("party", self.prefix + "-Other Party"),
+			("cost_center", self.prefix + "-Other Cost Center"), ("project", self.prefix + "-Other Project"),
+			("finance_book", self.prefix + "-Other Book"), ("against_voucher_type", "Sales Invoice"),
+			("against_voucher", self.prefix + "-Other Invoice"),
+			("dimensions_json", '{"region":"华南","department":"采购"}'),
+			("dimensions_json", "not JSON"), ("dimensions_json", '["region"]'),
+			("dimensions_json", '{"region":NaN}'),
+		):
+			with self.subTest(field=field, invalid=invalid):
+				frappe.db.set_value("China Accounting Voucher Entry", row.name, field, invalid)
+				try:
+					self.assertEqual(self.process_with_settings()["status"], "pending")
+				finally:
+					frappe.db.set_value("China Accounting Voucher Entry", row.name, field, row.get(field))
+
+	def test_cancellation_missing_or_extra_accounting_key_stays_pending(self):
+		self.detailed_snapshot_entries()
+		first = self.process_with_settings()
+		row = frappe.get_doc("China Accounting Voucher", first["voucher"]).entries[0]
+		extra = self.insert(
+			"China Accounting Voucher Entry", parent=first["voucher"], parenttype="China Accounting Voucher", parentfield="entries", idx=3,
+			account=self.account, account_currency="CNY", debit=0, credit=0, dimensions_json='{"extra":"key"}',
+		)
+		self.assertEqual(self.process_with_settings()["status"], "pending")
+		frappe.db.delete("China Accounting Voucher Entry", {"name": extra})
+		frappe.db.delete("China Accounting Voucher Entry", {"name": row.name})
+		self.assertEqual(self.process_with_settings()["status"], "pending")
+
+	def test_invalid_original_dimensions_stay_pending_without_snapshot(self):
+		names = self.snapshot_entries()
+		frappe.db.set_value("China Accounting Voucher Entry", names[0], "dimensions_json", "invalid JSON")
+		result = self.process_with_settings()
+		self.assertEqual(result["status"], "pending", result)
+		self.assertFalse(frappe.db.exists("China Accounting Voucher", {"source_key": f"Cancellation|Payment Entry|{self.source}"}))
+
+	def test_invalid_or_nonfinite_loaded_cancellation_amounts_stay_pending(self):
+		self.snapshot_entries()
+		first = self.process_with_settings()
+		load_doc = frappe.get_doc
+		for invalid in ("invalid amount", float("nan"), float("inf"), float("-inf")):
+			with self.subTest(invalid=invalid):
+				def load_invalid(*args, **kwargs):
+					doc = load_doc(*args, **kwargs)
+					if doc.doctype == "China Accounting Voucher" and doc.name == first["voucher"]:
+						doc.entries[0].credit = invalid
+					return doc
+				# SQL DECIMAL rejects these values. Exercise the validation boundary
+				# with an invalid loaded value without attempting a database write.
+				with patch("frappe.get_doc", side_effect=load_invalid):
+					self.assertEqual(self.process_with_settings()["status"], "pending")
+
+	def test_normalized_dimensions_and_reordered_split_rows_still_resolve(self):
+		self.detailed_snapshot_entries()
+		first = self.process_with_settings()
+		rows = frappe.get_doc("China Accounting Voucher", first["voucher"]).entries
+		values = rows[0].as_dict()
+		frappe.db.set_value("China Accounting Voucher Entry", rows[0].name, {"idx": 3, "dimensions_json": json.dumps({"department": "采购", "region": "华东"}, ensure_ascii=True), "credit": 100, "credit_in_account_currency": 10})
+		values.update(name=None, idx=1, credit=23.456789, credit_in_account_currency=7.891234)
+		self.insert("China Accounting Voucher Entry", **{key: value for key, value in values.items() if key not in ("doctype", "name")})
+		result = self.process_with_settings()
+		self.assertEqual(result["status"], "resolved", result)
+		self.assertEqual(result["voucher"], first["voucher"])
+
+	def test_negative_debit_snapshot_reverses_both_currencies(self):
+		self.snapshot_entries([
+			{"debit": 100.123456, "credit": 0, "debit_in_account_currency": 10.123456, "account_currency": "USD"},
+			{"debit": -0.123456, "credit": 0, "debit_in_account_currency": -0.123456, "account_currency": "USD", "dimensions_json": '{"offset":"interest"}'},
+			{"debit": 0, "credit": 100, "credit_in_account_currency": 10, "account_currency": "USD"},
+		])
+		result = self.process_with_settings()
+		self.assertEqual(result["status"], "resolved", result)
+		rows = frappe.get_doc("China Accounting Voucher", result["voucher"]).entries
+		self.assertEqual((rows[1].debit, rows[1].credit, rows[1].debit_in_account_currency, rows[1].credit_in_account_currency), (0, -0.123456, 0, -0.123456))
+		self.assertEqual(self.process_with_settings()["status"], "resolved")
 
 	def test_uncancelled_source_retry_remains_pending_without_audit_writes(self):
 		name = self.assignment(docstatus=1)

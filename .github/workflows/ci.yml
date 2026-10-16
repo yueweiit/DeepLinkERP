@@ -2,7 +2,7 @@ name: China Finance CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, china_finance]
   pull_request:
   workflow_dispatch:
 
