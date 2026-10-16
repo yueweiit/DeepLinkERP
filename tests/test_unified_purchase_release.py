@@ -1,6 +1,7 @@
 """Test isolated recovery and native CLI parsing; never invoke a release."""
 
 import contextlib
+import fcntl
 import hashlib
 import io
 import json
@@ -20,6 +21,65 @@ from unittest.mock import patch
 class ReleaseRecoveryTests(unittest.TestCase):
 	def release_source(self):
 		return (Path(__file__).parents[1] / "deploy/production/deploy_unified_purchase.sh").read_text()
+
+	def test_crm_scope_has_independent_receipts_budget_and_preserved_revision_labels(self):
+		source = self.release_source()
+		self.assertIn("--crm-only", source)
+		self.assertIn('"$crm_archive" "$finance_archive" "$oa_archive" "$old_image_id"', source)
+		self.assertIn('release_identity=', source)
+		self.assertNotIn('\ncrm_sha=$current_crm\n', source)
+		self.assertIn('joint-${release_identity:0:12}.json', source)
+		self.assertIn('--candidate-sha "${release_identity:-$branding_sha}"', source)
+		self.assertIn('CRM-only requires main scope', source)
+		self.assertLess(source.index("if (( crm_only )); then verify_crm_frozen_overlay; fi"), source.index("source_sync_timer_active=0"))
+		self.assertIn("Candidate differs from preflight-approved full sources", source)
+
+	def test_both_entrypoint_preflights_pass_crm_scope_without_changing_legacy_commands(self):
+		commands = [line for line in self.release_source().splitlines() if line.lstrip().startswith('command_runner "$new_image_id" "$python" "$guard" --tenant-preflight')]
+		self.assertEqual(len(commands), 2)
+		for command in commands:
+			for crm_only in (True, False):
+				with self.subTest(command=command, crm_only=crm_only), tempfile.TemporaryDirectory() as tmp:
+					script = f"""
+set -euo pipefail
+release_dir=$1;new_image_id=new;python=python;guard=guard;expected_erpnext=16.23.0
+metadata_scope_args=({'--crm-only' if crm_only else ''})
+command_runner() {{ {shlex.quote(sys.executable)} -c 'import json,sys;print(json.dumps(sys.argv[1:]))' "$@"; }}
+""" + command
+					result = subprocess.run(["bash", "-c", script, "test", tmp], capture_output=True, text=True)
+					self.assertEqual(result.returncode, 0, result.stderr)
+					args = json.loads((Path(tmp) / "tenants.json").read_text())
+					expected = ["new", "python", "guard", "--tenant-preflight"]
+					if "--main-only" in command:
+						expected.append("--main-only")
+					expected += ["--erpnext-version", "16.23.0"] + (["--crm-only"] if crm_only else [])
+					self.assertEqual(args, expected)
+
+	def test_runtime_inventory_reads_physical_packages_independently_of_requested_baseline_list(self):
+		function = self.shell_function("verify_crm_runtime_sources")
+		code = function.split(" -c '\n", 1)[1].split("\n' ", 1)[0]
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			for app in ("crm_integration", "client_akivision"):
+				(root / app / app).mkdir(parents=True)
+				(root / app / app / "hooks.py").write_text(app)
+			with patch("pathlib.Path", side_effect=lambda value: root if value == "/home/frappe/frappe-bench/apps" else Path(value)), patch.object(sys, "argv", ["-c", json.dumps(["crm_integration"])]), contextlib.redirect_stdout(io.StringIO()) as output:
+				exec(code, {})
+			self.assertEqual(set(json.loads(output.getvalue())), {"crm_integration", "client_akivision"})
+
+	def test_crm_archive_must_match_exact_manifest_even_when_extra_source_is_safe_path(self):
+		function = self.shell_function("prepare_sources")
+		for extra in (False, True):
+			with self.subTest(extra=extra), tempfile.TemporaryDirectory() as tmp:
+				root = Path(tmp); (root / "build").mkdir()
+				manifest = {"scope": "crm-only", "apps": {"crm_integration": {"api.py": {"before": "old", "after": hashlib.sha256(b"new").hexdigest()}}}}
+				for kind, files in (("branding", {"deeplinkerp_branding/hooks.py": b"retained"}), ("crm", {"crm-overlay/crm_integration/api.py": b"new", **({"crm-overlay/crm_integration/unreviewed.py": b"bad"} if extra else {})})):
+					with tarfile.open(root / (kind + ".tar.gz"), "w:gz") as tar:
+						for name, data in dict(files, **{"release-source-manifest.json": json.dumps(manifest).encode()}).items():
+							member = tarfile.TarInfo(name); member.size = len(data); tar.addfile(member, io.BytesIO(data))
+				code = function + '\nbuild_dir="$1"; archive="$2"; crm_archive="$3"; finance_archive=""; oa_archive=""; prepare_sources\n'
+				result = subprocess.run(["bash", "-c", code, "test", str(root / "build"), str(root / "branding.tar.gz"), str(root / "crm.tar.gz")], capture_output=True, text=True)
+				self.assertEqual(result.returncode == 0, not extra, result.stderr)
 
 	def test_shared_cutover_preserves_immutable_assets_manifest(self):
 		source = self.release_source()
@@ -217,6 +277,121 @@ retarget_existing_source_sync sha256:ccccccccccccccccccccccccccccccccccccccccccc
 					)
 				else:
 					self.assertEqual(result.stdout, "")
+
+	def test_crm_timer_guard_is_armed_before_stop_and_restores_only_proven_original_state(self):
+		source = self.release_source()
+		self.assertLess(source.index("trap recover_crm_pre_cutover EXIT"), source.index("if (( source_sync_timer_active )); then systemctl --user stop"))
+		function = self.shell_function("recover_crm_pre_cutover")
+		for active, runtime, config in ((1, 0, "same"), (0, 0, "same"), (1, 1, "same"), (1, 0, "changed")):
+			with self.subTest(active=active,runtime=runtime,config=config):
+				script = function + f"""
+set -euo pipefail
+source_sync_timer_active={active};timer_guard_image=old;current_revision=branding;current_crm=crm;current_finance=finance;current_oa=oa
+timer_guard_config=/test/config;timer_guard_config_sha=same
+verify_running_release() {{ return {runtime}; }}
+sha256sum() {{ printf '%s  config\n' '{config}'; }}
+flock() {{ :; }}
+systemctl() {{ printf 'TIMER %s\n' "$*"; }}
+trap recover_crm_pre_cutover EXIT
+false
+"""
+				result=subprocess.run(["bash","-c",script],capture_output=True,text=True)
+				self.assertNotEqual(result.returncode,0)
+				self.assertEqual("start deeplinkerp-source-sync.timer" in result.stdout, bool(active and runtime==0 and config=="same"),result.stderr)
+
+	def test_crm_timer_original_state_survives_retry_and_rejects_config_drift(self):
+		function=self.shell_function("record_crm_source_timer_state")
+		with tempfile.TemporaryDirectory() as tmp:
+			root=Path(tmp);config=root/"config.json";config.write_text('{"pins":"original"}')
+			script=function+f'\npython3() {{ {shlex.quote(sys.executable)} "$@"; }}\n'+"""
+set -euo pipefail
+release_identity=release;timer_guard_image=image;current_revision=branding;current_crm=crm;current_finance=finance;current_oa=oa
+record_crm_source_timer_state "$1" "$2" "$3"
+"""
+			args=["bash","-c",script,"test",str(root/"timer.json"),str(config)]
+			first=subprocess.run(args+["1"],capture_output=True,text=True)
+			self.assertEqual(first.returncode,0,first.stderr);self.assertEqual(first.stdout.strip(),"1")
+			retry=subprocess.run(args+["0"],capture_output=True,text=True)
+			self.assertEqual(retry.returncode,0,retry.stderr);self.assertEqual(retry.stdout.strip(),"1")
+			config.write_text('{"pins":"different"}')
+			drift=subprocess.run(args+["0"],capture_output=True,text=True)
+			self.assertNotEqual(drift.returncode,0)
+
+	def test_crm_main_prepare_failure_before_seal_restores_timer_and_preserves_exit_code(self):
+		functions = "".join(self.shell_function(name) for name in (
+			"recover_crm_pre_cutover", "recover_main_only", "run_main_only_release",
+		))
+		for crm_only, active, runtime, config in ((1, 1, 0, "same"), (0, 1, 0, "same"), (1, 0, 0, "same"), (1, 1, 1, "same"), (1, 1, 0, "changed")):
+			with self.subTest(crm_only=crm_only, active=active, runtime=runtime, config=config), tempfile.TemporaryDirectory() as tmp:
+				script = functions + f"""
+set -euo pipefail
+release_dir=$1;crm_only={crm_only};source_sync_timer_active={active}
+new_image_id=new;old_image_id=old;python=python;guard=guard;expected_erpnext=16.23.0;branding_sha=branding
+timer_guard_image=old;current_revision=branding;current_crm=crm;current_finance=finance;current_oa=oa
+timer_guard_config=/test/config;timer_guard_config_sha=same
+command_runner() {{ :; }}
+main_lane() {{ printf 'LANE %s\\n' "$*" >&2; [[ "$1" != prepare ]] || return 17; return 99; }}
+capture_release_audit() {{ printf 'UNEXPECTED audit\\n' >&2; return 99; }}
+verify_running_release() {{ return {runtime}; }}
+sha256sum() {{ printf '%s  config\\n' '{config}'; }}
+flock() {{ :; }}
+systemctl() {{ printf 'TIMER %s\\n' "$*"; }}
+trap recover_crm_pre_cutover EXIT
+run_main_only_release
+"""
+				result = subprocess.run(["bash", "-c", script, "test", tmp], capture_output=True, text=True)
+				self.assertEqual(result.returncode, 17, result.stderr)
+				self.assertFalse((Path(tmp) / "main-seal.json").exists())
+				self.assertEqual("TIMER --user start deeplinkerp-source-sync.timer" in result.stdout, bool(crm_only and active and runtime == 0 and config == "same"), result.stderr)
+				self.assertEqual("TIMER --user is-active --quiet deeplinkerp-source-sync.timer" in result.stdout, bool(crm_only and active and runtime == 0 and config == "same"), result.stderr)
+				self.assertNotIn("UNEXPECTED", result.stderr)
+				self.assertEqual(result.stderr.count("LANE "), 1, result.stderr)
+
+	def test_crm_pre_cutover_timer_restart_and_verification_keep_both_release_locks(self):
+		with tempfile.TemporaryDirectory() as tmp:
+			root = Path(tmp)
+			probe = root / "lock_probe.py"
+			probe.write_text("""
+import fcntl, sys
+action, *args = sys.argv[1:]
+if action == 'acquire':
+    for fd in (8, 9):
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+elif action == 'unlock':
+    fcntl.flock(int(args[0]), fcntl.LOCK_UN)
+else:
+    for path in args[:2]:
+        with open(path, 'r+') as competitor:
+            try:
+                fcntl.flock(competitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass
+            else:
+                raise SystemExit('Competing release acquired ' + path)
+    print('LOCKED ' + ' '.join(args[2:]))
+""")
+			script = self.shell_function("recover_crm_pre_cutover") + f"""
+set -euo pipefail
+test_python={shlex.quote(sys.executable)};lock_probe={shlex.quote(str(probe))}
+lock8=$1/global.lock;lock9=$1/release.lock
+exec 8>"$lock8" 9>"$lock9"
+"$test_python" "$lock_probe" acquire
+source_sync_timer_active=1;timer_guard_image=old;current_revision=branding;current_crm=crm;current_finance=finance;current_oa=oa
+timer_guard_config=/test/config;timer_guard_config_sha=same
+verify_running_release() {{ return 0; }}
+sha256sum() {{ printf 'same  config\\n'; }}
+flock() {{ "$test_python" "$lock_probe" unlock "$2"; }}
+systemctl() {{ "$test_python" "$lock_probe" probe "$lock8" "$lock9" "$@"; }}
+trap recover_crm_pre_cutover EXIT
+(exit 23)
+"""
+			result = subprocess.run(["bash", "-c", script, "test", tmp], capture_output=True, text=True, timeout=10)
+			self.assertEqual(result.returncode, 23, result.stderr)
+			self.assertIn("LOCKED --user start deeplinkerp-source-sync.timer", result.stdout, result.stderr)
+			self.assertIn("LOCKED --user is-active --quiet deeplinkerp-source-sync.timer", result.stdout, result.stderr)
+			for path in (root / "global.lock", root / "release.lock"):
+				with path.open("r+") as released:
+					fcntl.flock(released, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 	def audit_module(self, fake_frappe):
 		metadata = types.ModuleType("procurement_release_metadata")
@@ -863,7 +1038,7 @@ printf '%s|%s|%s|%s' "$crm_sha" "$finance_sha" "$current_finance" "$current_oa"
 			root = Path(tmp)
 			(root / "sites/assets").mkdir(parents=True)
 			(root / "sites/deeplinkerp.com").mkdir()
-			for app in ("deeplinkerp_branding", "china_finance", "crm_integration", "oa_purchase_request"):
+			for app in ("deeplinkerp_branding", "china_finance", "crm_integration", "oa_purchase_request", "client_akivision"):
 				(root / "apps" / app / app).mkdir(parents=True)
 			(root / "sites/assets/assets.json").write_text('{"bundle": "same"}')
 			(root / "sites/common_site_config.json").write_text('{"maintenance_mode": 1, "secret": "hidden"}')
@@ -1038,6 +1213,10 @@ printf '%s|%s|%s|%s' "$crm_sha" "$finance_sha" "$current_finance" "$current_oa"
 			self.assertEqual(before["configuration_sha256"], after["configuration_sha256"])
 			config.write_text('{"mes_callback_url": "overwritten", "maintenance_mode": 1}')
 			self.assertNotEqual(before["configuration_sha256"], capture()["configuration_sha256"])
+			self.assertIn("client_akivision", before["release_sources_all"])
+			self.assertIn("Delivery Note", before["tables"])
+			self.assertIn("Delivery Note Item", before["tables"])
+			self.assertIn("Stock Entry Type", before["tables"])
 
 	def test_overlay_archives_require_matching_manifest_and_precise_finance_files(self):
 		function = self.shell_function("prepare_sources")

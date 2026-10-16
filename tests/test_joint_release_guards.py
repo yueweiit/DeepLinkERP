@@ -4,6 +4,7 @@ import contextlib
 import copy
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import stat
@@ -13,7 +14,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 ROOT = Path(__file__).parents[1]
 
@@ -45,6 +46,63 @@ class JointReleaseGuardTests(unittest.TestCase):
 			with self.subTest(kind=kind),self.assertRaises(AssertionError):
 				guard.verify_equivalent_build_base(current,changed,overlay,changes)
 
+	def test_crm_identity_freezes_full_tuple_tools_and_base_independently_of_branding(self):
+		guard = self.module()
+		manifest = {"scope": "crm-only", "base_image_id": "sha256:" + "0" * 64,
+			"revisions": {app: char * 40 for app, char in (("deeplinkerp_branding", "a"), ("crm_integration", "b"), ("china_finance", "c"), ("oa_purchase_request", "d"))},
+			"release_tools_commit": "e" * 40, "release_tools": {"guard.py": "f" * 64}}
+		identity = guard.immutable_release_identity(manifest)
+		self.assertEqual(len(identity), 40)
+		self.assertEqual(identity, guard.immutable_release_identity(copy.deepcopy(manifest)))
+		for key in ("crm", "tools", "base"):
+			changed = copy.deepcopy(manifest)
+			if key == "crm": changed["revisions"]["crm_integration"] = "1" * 40
+			elif key == "tools": changed["release_tools_commit"] = "2" * 40
+			else: changed["base_image_id"] = "sha256:" + "3" * 64
+			self.assertNotEqual(identity, guard.immutable_release_identity(changed))
+		with self.assertRaises(AssertionError): guard.immutable_release_identity(dict(manifest, revisions={"crm_integration": "b" * 40}))
+
+	def test_crm_source_approval_preserves_every_other_app_and_rejects_deletions(self):
+		guard = self.module()
+		before = {"deeplinkerp_branding": {"hooks.py": "a"}, "crm_integration": {"api.py": "b", "keep.py": "c"}, "client_akivision": {"x.py": "d"}}
+		manifest = {"scope": "crm-only", "apps": {"crm_integration": {"api.py": {"before": "b", "after": "e"}}}, "crm_sources_after": {"api.py": "e", "keep.py": "c"}}
+		after = guard.approved_release_sources(before, before, before["deeplinkerp_branding"], manifest)
+		self.assertEqual(after["crm_integration"], {"api.py": "e", "keep.py": "c"})
+		self.assertEqual(after["client_akivision"], before["client_akivision"])
+		for kind in ("baseline", "branding", "delete", "other-app", "omitted-deletion"):
+			old, branding, contract = copy.deepcopy(before), copy.deepcopy(before["deeplinkerp_branding"]), copy.deepcopy(manifest)
+			if kind == "baseline": old["client_akivision"]["x.py"] = "drift"
+			elif kind == "branding": branding["hooks.py"] = "drift"
+			elif kind == "delete": contract["apps"]["crm_integration"]["api.py"]["after"] = None
+			elif kind == "omitted-deletion": contract["crm_sources_after"].pop("keep.py")
+			else: contract["apps"]["client_akivision"] = {"x.py": {"before": "d", "after": "e"}}
+			with self.subTest(kind=kind), self.assertRaises(AssertionError): guard.approved_release_sources(old, before, branding, contract)
+
+	def test_runtime_generated_deltas_require_exact_frozen_hashes_and_never_hide_business_source(self):
+		guard = self.module()
+		base = {"deeplinkerp_branding": {"hooks.py": "business", "workspace_sidebar/deeplinkerp_settings.json": "image", "._hooks.py": "metadata"}, "client_akivision": {"hooks.py": "preserved"}}
+		runtime = copy.deepcopy(base); runtime["deeplinkerp_branding"]["workspace_sidebar/deeplinkerp_settings.json"] = "generated"; runtime["deeplinkerp_branding"].pop("._hooks.py")
+		deltas = {"deeplinkerp_branding": {"workspace_sidebar/deeplinkerp_settings.json": {"before": "image", "after": "generated"}, "._hooks.py": {"before": "metadata", "after": None}}}
+		guard.verify_runtime_source_delta(base, runtime, deltas)
+		for kind in ("unlisted", "wrong-hash", "business", "missing-app"):
+			current, approved = copy.deepcopy(runtime), copy.deepcopy(deltas)
+			if kind == "unlisted": approved["deeplinkerp_branding"].pop("._hooks.py")
+			elif kind == "wrong-hash": current["deeplinkerp_branding"]["workspace_sidebar/deeplinkerp_settings.json"] = "drift"
+			elif kind == "missing-app": current.pop("client_akivision")
+			else:
+				current["deeplinkerp_branding"]["hooks.py"] = "drift"
+				approved["deeplinkerp_branding"]["hooks.py"] = {"before": "business", "after": "drift"}
+			with self.subTest(kind=kind), self.assertRaises(AssertionError): guard.verify_runtime_source_delta(base, current, approved)
+
+	def test_shallower_base_allows_exact_crm_overlay_only_in_explicit_scope(self):
+		guard = self.module()
+		current = {"deeplinkerp_branding": {"a.py": "old"}, "crm_integration": {"api.py": "crm"}, "client_akivision": {"x.py": "native"}}
+		base = copy.deepcopy(current); base["deeplinkerp_branding"]["a.py"] = "older"
+		overlays = {"crm_integration": {"api.py": {"before": "crm", "after": "candidate"}}}
+		guard.verify_equivalent_build_base(current, base, {"a.py": "old"}, overlays, scope="crm-only")
+		base["client_akivision"]["x.py"] = "drift"
+		with self.assertRaises(AssertionError): guard.verify_equivalent_build_base(current, base, {"a.py": "old"}, overlays, scope="crm-only")
+
 	def module(self):
 		path = ROOT / "deploy/production/joint_release_guards.py"
 		self.assertTrue(path.exists(), "Durable joint release guards are missing")
@@ -52,6 +110,84 @@ class JointReleaseGuardTests(unittest.TestCase):
 		module = importlib.util.module_from_spec(spec)
 		spec.loader.exec_module(module)
 		return module
+
+	@contextlib.contextmanager
+	def tenant_preflight_runtime(self, sites, *, crm_installed=True):
+		guard = self.module()
+		fields = self.metadata_module().CRM_FIELD_NAMES
+		crm_definitions = [dt + "-" + name for dt, names in fields.items() for name in names]
+		current = {"metadata": {"outside_rows": {"DocType": [{"name": "OperatingExpenseCompanyMap", "manual": "retained conflict"}]}}, "audit": {"all_business_tables": "frozen", "all_app_sources": "frozen"}}
+		def contract(**scope):
+			return dict(scope, definitions=crm_definitions if scope.get("crm_only") else ["OperatingExpenseCompanyMap"])
+		def plan(before, contract, **kwargs):
+			if not contract.get("crm_only") and not contract.get("native_only"):
+				raise AssertionError("OperatingExpenseCompanyMap definition conflict")
+			return {"new_definitions": contract["definitions"] if contract.get("crm_only") else []}
+		metadata = types.SimpleNamespace(
+			load_joint_contract=Mock(side_effect=contract), _capture_joint_state=Mock(side_effect=lambda **scope: copy.deepcopy(current)),
+			_joint_plan=Mock(side_effect=plan), _read_only_native_planning=Mock(side_effect=contextlib.nullcontext), verify_current_joint_contract=Mock(),
+		)
+		installed = ["deeplinkerp_branding", "china_finance", "oa_purchase_request"] + (["crm_integration"] if crm_installed else [])
+		frappe = types.SimpleNamespace(__version__="16.23.0", init=Mock(), connect=Mock(), destroy=Mock(), get_installed_apps=lambda: installed,
+			db=types.SimpleNamespace(sql=Mock(return_value=[("11.8.6-MariaDB",)]), get_single_value=Mock(return_value=0), exists=Mock(return_value=True), rollback=Mock(), commit=Mock(side_effect=AssertionError("Preflight must not write"))))
+		with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
+			root = Path(tmp)
+			for site in sites:
+				path = root / "sites" / site / "site_config.json"
+				path.parent.mkdir(parents=True)
+				path.write_text('{"maintenance_mode":0,"manual":"retained"}')
+			stack.enter_context(patch.dict(sys.modules, {"frappe": frappe, "erpnext": types.SimpleNamespace(__version__="16.23.0"), "rq": types.SimpleNamespace(__version__="2.6.1"), "gunicorn": types.SimpleNamespace(__version__="23.0.0"), "procurement_release_metadata": metadata}))
+			stack.enter_context(patch.object(guard, "Path", side_effect=lambda value: root if value == "/home/frappe/frappe-bench" else Path(value)))
+			stack.enter_context(patch.object(guard, "release_sites", return_value=sites))
+			yield guard, metadata, current, frappe
+			for site in sites:
+				self.assertEqual((root / "sites" / site / "site_config.json").read_text(), '{"maintenance_mode":0,"manual":"retained"}')
+			frappe.db.commit.assert_not_called()
+
+	def test_crm_tenant_preflight_uses_bounded_planner_and_preserves_unrelated_conflict(self):
+		for main_only in (True, False):
+			with self.subTest(main_only=main_only), self.tenant_preflight_runtime(("deeplinkerp.com",)) as (guard, metadata, current, frappe):
+				before = copy.deepcopy(current)
+				with self.assertRaisesRegex(AssertionError, "OperatingExpenseCompanyMap definition conflict"):
+					guard.tenant_preflight("16.23.0", main_only=main_only)
+				result = guard.tenant_preflight("16.23.0", main_only=main_only, crm_only=True)
+				metadata.load_joint_contract.assert_called_with(require_quiescent=False, native_only=False, crm_only=True)
+				metadata._capture_joint_state.assert_called_with(native_only=False, crm_only=True)
+				args, kwargs = metadata._joint_plan.call_args
+				self.assertEqual(args[0], before)
+				self.assertTrue(args[1]["crm_only"])
+				self.assertEqual(kwargs, {"when": "preflight", "seed": "preflight", "require_quiescent": False})
+				entry = result["sites"]["deeplinkerp.com"]
+				self.assertTrue(entry["crm_only"])
+				self.assertFalse(entry["native_only"])
+				self.assertEqual(len(entry["bounded_plan_definitions"]), 19)
+				self.assertTrue(all("-custom_crm_" in name for name in entry["bounded_plan_definitions"]))
+				self.assertEqual(entry["audit"], before)
+				self.assertEqual(current, before)
+				self.assertEqual(frappe.db.rollback.call_count, 2)
+				self.assertEqual(frappe.destroy.call_count, 2)
+
+	def test_crm_tenant_preflight_requires_installed_app_and_proven_main_site_scope(self):
+		for sites, crm_installed, error in ((("deeplinkerp.com",), False, "actual CRM installation"), (self.module().SHARED_SITES, True, "CRM metadata is main-only")):
+			with self.subTest(sites=sites, crm_installed=crm_installed), self.tenant_preflight_runtime(sites, crm_installed=crm_installed) as (guard, metadata, _, frappe):
+				with self.assertRaisesRegex(AssertionError, error):
+					guard.tenant_preflight("16.23.0", crm_only=True)
+				metadata.load_joint_contract.assert_not_called()
+				metadata._capture_joint_state.assert_not_called()
+				metadata._joint_plan.assert_not_called()
+		with self.tenant_preflight_runtime(self.module().SHARED_SITES) as (guard, metadata, _, frappe):
+			metadata._joint_plan.side_effect = lambda *args, **kwargs: {"new_definitions": []}
+			result = guard.tenant_preflight("16.23.0")
+			self.assertEqual(set(result["sites"]), set(guard.SHARED_SITES))
+			metadata.load_joint_contract.assert_has_calls([call(require_quiescent=False, native_only=native, crm_only=False) for native in (False, True, True, True)])
+			self.assertEqual([entry["native_only"] for entry in result["sites"].values()], [False, True, True, True])
+
+	def test_tenant_preflight_cli_propagates_explicit_crm_scope_and_legacy_default(self):
+		guard = self.module()
+		for flags in (("--crm-only",), ("--main-only", "--crm-only"), (), ("--main-only",)):
+			with self.subTest(flags=flags), patch.object(sys, "argv", ["guard", "--tenant-preflight", "--erpnext-version", "16.23.0", *flags]), patch.object(guard, "tenant_preflight", return_value={"sites": {}}) as preflight, contextlib.redirect_stdout(io.StringIO()):
+				guard.main()
+				preflight.assert_called_once_with("16.23.0", main_only="--main-only" in flags, crm_only="--crm-only" in flags)
 
 	def schema(self):
 		return {"columns": {"name": {"type": "varchar(140)", "default": "NULL"}}, "indexes": {"PRIMARY": [{"column": "name", "unique": 1, "prefix": None}]}, "table": {"engine": "InnoDB"}}
@@ -234,6 +370,42 @@ class JointReleaseGuardTests(unittest.TestCase):
 			return module
 		finally:
 			sys.path.pop(0)
+
+	def test_crm_definition_capture_executes_only_frozen_definition_builders(self):
+		module = self.metadata_module()
+		source = """import frappe
+PROCESS_STATUS_OPTIONS = "pending"
+def execute():
+    raise AssertionError("installer must never execute")
+def audit_fields(definitions, insert_after):
+    return [dict(fieldname=name, fieldtype=kind, insert_after=insert_after) for name, kind in definitions]
+def create_crm_custom_fields():
+    create_custom_fields({"Sales Order Item": audit_fields([("custom_crm_order_item_id", "Data")], "item_code"), "Item": [dict(fieldname="legacy", fieldtype="Data")]}, update=True)
+"""
+		definitions = module._capture_crm_definitions(source)
+		self.assertEqual(definitions["Sales Order Item"][0]["fieldname"], "custom_crm_order_item_id")
+		self.assertEqual(definitions["Item"][0]["fieldname"], "legacy")
+		with self.assertRaises((AssertionError, NameError)): module._capture_crm_definitions(source.replace('create_custom_fields({', 'frappe.db.sql("delete forbidden"); create_custom_fields({'))
+
+	def test_crm_schema_delta_is_additive_defaults_only_and_strict_native_ddl(self):
+		module = self.metadata_module()
+		fields = {"custom_crm_order_item_id": {"fieldname": "custom_crm_order_item_id", "fieldtype": "Data", "length": 140}, "custom_crm_historical_replay": {"fieldname": "custom_crm_historical_replay", "fieldtype": "Check"}}
+		before = {"schema": self.schema()}
+		additions = module._crm_schema_additions(before, fields)
+		self.assertEqual(set(additions["columns"]), set(fields))
+		self.assertEqual(additions["columns"]["custom_crm_historical_replay"]["default_value"], "0")
+		module._validate_crm_ddl("ALTER TABLE `tabDelivery Note` ADD COLUMN `custom_crm_order_item_id` varchar(140)", "Delivery Note", {"custom_crm_order_item_id"}, fields)
+		module._validate_crm_ddl("ALTER TABLE `tabDelivery Note Item` ADD COLUMN `custom_crm_source_unit_price` decimal(21,9) NOT NULL DEFAULT 0.0", "Delivery Note Item", {"custom_crm_source_unit_price"}, {"custom_crm_source_unit_price": {"fieldtype": "Float"}})
+		for query in ("ALTER TABLE `tabDelivery Note` DROP COLUMN `name`", "ALTER TABLE `tabSales Order` ADD COLUMN `custom_crm_order_item_id` varchar(140)", "ALTER TABLE `tabDelivery Note` ADD COLUMN `custom_crm_order_item_id` varchar(90)"):
+			with self.subTest(query=query), self.assertRaises(AssertionError): module._validate_crm_ddl(query, "Delivery Note", set(fields), fields)
+
+	def test_crm_stock_type_keeps_existing_raw_rows_and_refuses_purpose_conflict(self):
+		module = self.metadata_module()
+		row = {"name": "CRM Outbound Temporary Receipt", "purpose": "Material Receipt", "creation": "old", "is_standard": 1, "owner": "manual-owner"}
+		wanted = dict(row, creation="new", is_standard=0, owner="Administrator")
+		self.assertEqual(module._crm_stock_type_plan([row], wanted), [row])
+		self.assertEqual(module._crm_stock_type_plan([], wanted), [wanted])
+		with self.assertRaises(AssertionError): module._crm_stock_type_plan([dict(row, purpose="Material Transfer")], wanted)
 
 	def test_existing_page_compatibility_is_only_null_or_exact_name_and_never_rewrites_raw_rows(self):
 		module = self.metadata_module()
@@ -1151,7 +1323,7 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 				changed["audit"][{"flag": "purchase_source_sync_enabled", "maintenance": "maintenance_mode", "quiescence": "release_quiescent"}[drift]] = False
 				with self.assertRaises(AssertionError): self.assert_invariants(module, receipt, changed)
 
-	def native_oa_boundary(self, module, path, *, crash=None):
+	def native_field_boundary(self, module, path, *, crash=None, crm_only=False):
 		"""Real apply/receipt/rollback guards, with only native IO/DDL substituted."""
 		receipt, current = self.invariant_fixture(module)
 		fields = self.source_fields(module)
@@ -1172,6 +1344,24 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 		plan["scope"]["Scheduled Job Type"] = [{"name": "preserved-operating-job", "method": module.OPERATING_METHOD}, {"name": module.PURCHASE_SOURCE_METHOD, "method": module.PURCHASE_SOURCE_METHOD}]
 		before["metadata"]["scope"]["Scheduled Job Type"] = [plan["scope"]["Scheduled Job Type"][0]]
 		current["metadata"]["scope"]["Scheduled Job Type"] = copy.deepcopy(before["metadata"]["scope"]["Scheduled Job Type"])
+		crm_fields = {}
+		if crm_only:
+			crm_fields = {dt: {key: {"fieldname": key, "fieldtype": "Float" if key == "custom_crm_source_unit_price" else "Check" if key == "custom_crm_historical_replay" else "Small Text" if key == "custom_crm_repost_ids" else "Data"} for key in names} for dt, names in module.CRM_FIELD_NAMES.items()}
+			current["crm_only"] = True
+			current["crm_tables"] = {dt: {"schema": self.schema(), "rows": [{"name": "manual-" + dt}], "original_columns": ["name"]} for dt in crm_fields}
+			current["metadata"]["scope"]["Stock Entry Type"] = []
+			current["metadata"]["outside_rows"]["Stock Entry Type"] = [{"name": "Historical manual type", "purpose": "Material Transfer", "creation": "original"}]
+			current["metadata"]["outside"]["Stock Entry Type"] = module.digest(current["metadata"]["outside_rows"]["Stock Entry Type"])
+			current["audit"]["crm_new_columns"] = {}
+			for dt, table in current["crm_tables"].items():
+				current["audit"]["schemas"][dt] = table["schema"]
+				current["audit"]["tables"][dt] = module.digest(table["rows"])
+			current["audit"]["tables"]["Stock Entry Type"] = module.digest(current["metadata"]["outside_rows"]["Stock Entry Type"])
+			before = copy.deepcopy(current)
+			contract.update(crm_only=True, crm_fields=crm_fields, source_custom_fields={})
+			plan["scope"] = copy.deepcopy(current["metadata"]["scope"])
+			plan["scope"]["Custom Field"] = [dict(field, name=dt + "-" + key, dt=dt) for dt, entries in crm_fields.items() for key, field in entries.items()]
+			plan["scope"]["Stock Entry Type"] = [{"name": module.CRM_STOCK_TYPE, "purpose": "Material Receipt", "is_standard": 0, "creation": "candidate"}]
 		events, control = [], {"crash": crash, "added": 0, "nonnull": False}
 		class Field(dict):
 			def __getattr__(self, name):
@@ -1181,14 +1371,14 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 					raise AttributeError(name) from None
 			__setattr__ = dict.__setitem__
 		meta = types.SimpleNamespace(fields=[Field(field) for field in fields.values()])
-		def schema(name): return copy.deepcopy(current["oa"]["schema"] if name == "OA Purchase Request" else current["je"]["schema"])
+		def schema(name): return copy.deepcopy(current["crm_tables"][name]["schema"] if crm_only and name in crm_fields else current["oa"]["schema"] if name == "OA Purchase Request" else current["je"]["schema"])
 		def native_sql(name, wanted):
-			if name != "OA Purchase Request": return []
+			if name != "OA Purchase Request" and name not in crm_fields: return []
 			result = []
 			for field in wanted.fields:
-				if field.fieldname not in current["oa"]["schema"]["columns"]:
-					kind = {"Data": "varchar(140)", "Link": "varchar(140)", "Long Text": "longtext", "Small Text": "text", "Check": "tinyint(4) NOT NULL DEFAULT 0", "Datetime": "datetime(6)"}[field.fieldtype]
-					result.append(f"ALTER TABLE `tabOA Purchase Request` ADD COLUMN `{field.fieldname}` {kind}")
+				if field.fieldname not in schema(name)["columns"]:
+					kind = {"Data": "varchar(140)", "Link": "varchar(140)", "Long Text": "longtext", "Small Text": "text", "Check": "tinyint(4) NOT NULL DEFAULT 0", "Datetime": "datetime(6)", "Float": "decimal(21,9) NOT NULL DEFAULT 0.0"}[field.fieldtype]
+					result.append(f"ALTER TABLE `tab{name}` ADD COLUMN `{field.fieldname}` {kind}")
 			if any(field.fieldname == "custom_purchase_source_id" and field.get("unique") for field in wanted.fields) and "custom_purchase_source_id" not in current["oa"]["schema"]["indexes"]:
 				result.append("ALTER TABLE `tabOA Purchase Request` ADD UNIQUE INDEX IF NOT EXISTS custom_purchase_source_id (`custom_purchase_source_id`)")
 			return result
@@ -1197,10 +1387,12 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 			self.assertEqual(stored.state["steps"][-1]["status"], "pending")
 			self.assertEqual(stored.state["steps"][-1]["sql"], query)
 			events.append(query)
-			columns, indexes = current["oa"]["schema"]["columns"], current["oa"]["schema"]["indexes"]
+			dt = query.split("`tab", 1)[1].split("`", 1)[0]
+			table = current["crm_tables"][dt] if crm_only else current["oa"]
+			columns, indexes = table["schema"]["columns"], table["schema"]["indexes"]
 			if " ADD COLUMN " in query:
 				key = query.split(" ADD COLUMN `")[1].split("`")[0]
-				columns[key] = module._source_column(fields[key], len(columns))
+				columns[key] = module._crm_column(crm_fields[dt][key], len(columns)) if crm_only else module._source_column(fields[key], len(columns))
 			elif " ADD UNIQUE INDEX " in query: indexes["custom_purchase_source_id"] = module._source_index()
 			elif " DROP COLUMN " in query:
 				key = query.rsplit("`", 2)[1]
@@ -1212,18 +1404,21 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 				control["added"] += 1
 				if control["crash"] == control["added"]: raise RuntimeError("crash after native autocommit")
 		def write_scope(old, wanted): current["metadata"]["scope"] = copy.deepcopy(wanted)
-		fake = types.SimpleNamespace(conf=types.SimpleNamespace(maintenance_mode=1), get_meta=lambda name, **kw: meta if name == "OA Purchase Request" else types.SimpleNamespace(fields=[]), clear_cache=lambda **kw: None, scrub=lambda name: name.lower().replace(" ", "_"))
+		fake = types.SimpleNamespace(conf=types.SimpleNamespace(maintenance_mode=1), get_meta=lambda name, **kw: types.SimpleNamespace(fields=[Field(field) for field in crm_fields[name].values()]) if name in crm_fields else meta if name == "OA Purchase Request" else types.SimpleNamespace(fields=[]), clear_cache=lambda **kw: None, scrub=lambda name: name.lower().replace(" ", "_"))
 		fake.db = types.SimpleNamespace(sql=lambda *a, **kw: [[int(control["nonnull"])]], commit=lambda: events.append("commit"), rollback=lambda: None, sql_ddl=ddl)
 		fake.db.updatedb = lambda name, wanted: [fake.db.sql_ddl(query) for query in native_sql(name, wanted)]
 		def capture_state(**kwargs):
 			current["audit"]["oa_new_columns"] = {key: int(control["nonnull"]) for key in current["oa"]["schema"]["columns"] if key not in before["oa"]["schema"]["columns"]}
+			if crm_only:
+				current["audit"]["crm_new_columns"] = {dt + "/" + key: int(control["nonnull"]) for dt, table in current["crm_tables"].items() for key in set(table["schema"]["columns"]) - set(before["crm_tables"][dt]["schema"]["columns"])}
+				current["audit"]["tables"]["Stock Entry Type"] = module.digest(sorted(current["metadata"]["scope"]["Stock Entry Type"] + current["metadata"]["outside_rows"]["Stock Entry Type"], key=lambda row: row["name"]))
 			return copy.deepcopy(current)
 		audit = types.SimpleNamespace(capture_joint_state=capture_state, table_schema=schema)
 		stack = __import__("contextlib").ExitStack()
 		self.addCleanup(stack.close)
 		stack.enter_context(patch.dict(sys.modules, {"frappe": fake, "frappe.model.meta": types.SimpleNamespace(Meta=object), "frappe.utils": types.SimpleNamespace(now_datetime=lambda: "2026-10-06"), "audit_unified_purchase": audit}))
 		stack.enter_context(patch.object(sys.modules["joint_release_guards"], "verified_quiescence", return_value=True))
-		stack.enter_context(patch.object(module, "load_joint_contract", side_effect=lambda: copy.deepcopy(contract)))
+		stack.enter_context(patch.object(module, "load_joint_contract", side_effect=lambda **kwargs: copy.deepcopy(contract)))
 		stack.enter_context(patch.object(module, "_joint_plan", return_value=plan))
 		stack.enter_context(patch.object(module, "_native_schema_sql", side_effect=native_sql))
 		stack.enter_context(patch.object(module, "_write_scope", side_effect=write_scope))
@@ -1231,11 +1426,47 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 		stack.enter_context(patch.object(module, "_desired_navigation", side_effect=lambda scope, **kw: scope))
 		return before, current, events, control
 
+	def test_crm_adapter_reuses_receipts_preserves_manual_rows_and_repeats_without_writes(self):
+		module = self.metadata_module()
+		with tempfile.TemporaryDirectory() as directory:
+			path = Path(directory) / "receipt.json"
+			before, current, events, control = self.native_field_boundary(module, path, crm_only=True)
+			result = module.apply_joint_metadata("a" * 40, path, crm_only=True)
+			self.assertEqual(result["ddl_boundaries"], 19)
+			self.assertEqual(current["metadata"]["outside_rows"], before["metadata"]["outside_rows"])
+			first = path.read_bytes(); events.clear()
+			self.assertTrue(module.apply_joint_metadata("a" * 40, path, crm_only=True)["unchanged"])
+			self.assertEqual(events, [])
+			self.assertEqual(first, path.read_bytes())
+			stored = self.module().DDLReceipt.load(path).state
+			old, new = copy.deepcopy(before["audit"]), copy.deepcopy(current["audit"])
+			old.update(joint_metadata=before["metadata"], approved_sources_after=stored["contract"]["sources_after"])
+			new["joint_metadata"] = current["metadata"]
+			module.verify_joint_audit_delta(old, new, stored)
+			module.restore_joint_metadata(path)
+			self.assertEqual(current, before)
+
+	def test_crm_each_pending_native_column_is_reversible_until_resume_and_nondefault_data_holds(self):
+		for crash in range(1, 20):
+			with self.subTest(crash=crash), tempfile.TemporaryDirectory() as directory:
+				module = self.metadata_module(); path = Path(directory) / "receipt.json"
+				before, current, events, control = self.native_field_boundary(module, path, crash=crash, crm_only=True)
+				with self.assertRaisesRegex(RuntimeError, "autocommit"): module.apply_joint_metadata("a" * 40, path, crm_only=True)
+				if crash == 1:
+					control["nonnull"] = True
+					with self.assertRaises(AssertionError): module.restore_joint_metadata(path)
+					control["nonnull"] = False
+					marker = path.with_suffix(".resume.json"); marker.write_text("first writer")
+					with self.assertRaisesRegex(AssertionError, "forward-only"): module.restore_joint_metadata(path)
+					marker.unlink()
+				module.restore_joint_metadata(path)
+				self.assertEqual(current, before)
+
 	def test_contract_oa_column_intents_and_unique_index_are_durable_and_second_apply_is_idle(self):
 		module = self.metadata_module()
 		with tempfile.TemporaryDirectory() as directory:
 			path = Path(directory) / "receipt.json"
-			before, current, events, _ = self.native_oa_boundary(module, path)
+			before, current, events, _ = self.native_field_boundary(module, path)
 			result = module.apply_joint_metadata("a" * 40, path)
 			self.assertEqual(result["ddl_boundaries"], len(module.SOURCE_FIELD_ORDER) + 1)
 			self.assertEqual(current["models"], before["models"])
@@ -1252,7 +1483,7 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 			with self.subTest(crash=crash), tempfile.TemporaryDirectory() as directory:
 				module = self.metadata_module()
 				path = Path(directory) / "receipt.json"
-				before, current, events, control = self.native_oa_boundary(module, path, crash=crash)
+				before, current, events, control = self.native_field_boundary(module, path, crash=crash)
 				with self.assertRaisesRegex(RuntimeError, "autocommit"): module.apply_joint_metadata("a" * 40, path)
 				self.assertEqual(self.module().DDLReceipt.load(path).state["steps"][-1]["status"], "pending")
 				control["crash"] = None
@@ -1288,7 +1519,7 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 		module = self.metadata_module()
 		with tempfile.TemporaryDirectory() as directory:
 			path = Path(directory) / "receipt.json"
-			before, current, _, _ = self.native_oa_boundary(module, path)
+			before, current, _, _ = self.native_field_boundary(module, path)
 			module.apply_joint_metadata("a" * 40, path)
 			receipt = self.module().DDLReceipt.load(path).state
 			old, new = copy.deepcopy(before["audit"]), copy.deepcopy(current["audit"])
@@ -1300,7 +1531,7 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 		module = self.metadata_module()
 		with tempfile.TemporaryDirectory() as directory:
 			path = Path(directory) / "receipt.json"
-			before, current, _, _ = self.native_oa_boundary(module, path)
+			before, current, _, _ = self.native_field_boundary(module, path)
 			module.apply_joint_metadata("a" * 40, path)
 			receipt = self.module().DDLReceipt.load(path).state
 			old, new = copy.deepcopy(before["audit"]), copy.deepcopy(current["audit"])
@@ -1330,7 +1561,7 @@ class PurchaseSourceReleaseCompatibilityTests(unittest.TestCase):
 		module = self.metadata_module()
 		with tempfile.TemporaryDirectory() as directory:
 			path = Path(directory) / "receipt.json"
-			_, _, events, control = self.native_oa_boundary(module, path, crash=1)
+			_, _, events, control = self.native_field_boundary(module, path, crash=1)
 			with self.assertRaises(RuntimeError): module.apply_joint_metadata("a" * 40, path)
 			control.update(crash=None, nonnull=True)
 			events.clear()
