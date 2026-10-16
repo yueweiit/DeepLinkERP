@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "snapshot_date": "2026-10-16",
+  "site": "deeplinkerp.com",
+  "erp_image_id": "sha256:193f768bf492faf72d2b9082d91c9b78346b67dff7f237bf69923e59185c22d1",
+  "collaboration_branch": "deeplinkerp_branding",
+  "applications": {
+    "deeplinkerp_branding": {
+      "collaboration_branch": "deeplinkerp_branding",
+      "production_commit": "3ff92df60f67d1cd76e79e2d063bd44b71a8a410",
+      "production_source_branch": "codex/sales-order-prepayments",
+      "production_source_path": "deeplinkerp_branding"
+    },
+    "crm_integration": {
+      "collaboration_branch": "crm_integration",
+      "production_commit": "3711df05962d0a09f5f5a7363c431a323c33e934",
+      "production_source_branch": "codex/crm-outbound-native",
+      "alignment": "Separate application line; its branch HEAD is not asserted to be deployed."
+    },
+    "china_finance": {
+      "collaboration_branch": "china_finance",
+      "production_commit": "b73f17138fdf8235e91a687b8a113cbb33e7031c",
+      "production_source_branch": "codex/finance-cancellation-forward",
+      "alignment": "Separate application line; its branch HEAD is not asserted to be deployed."
+    },
+    "oa_purchase_request": {
+      "collaboration_branch": "oa_purchase_request",
+      "production_commit": "cecb3b2c9e3c48217dbe127327ea8f2d5ee40ea7",
+      "local_source_branch": "codex/explicit-purchase-receipts",
+      "alignment": "Production commit is retained locally; remote commit lookup was unavailable during this audit."
+    }
+  },
+  "release_tools_commit": "289690cd45944a3ccbfe8fb8e100c2fc1fe9791d",
+  "policy": {
+    "application_source": "Branding application files in this baseline equal the recorded production commit byte for byte.",
+    "history": "Previous branch commits remain reachable through merge parents; no history rewrite is required.",
+    "deployment": "Merging code does not deploy it. Use the existing locked release workflow and update this snapshot after a verified release."
+  }
+}
