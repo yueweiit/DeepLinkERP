@@ -17,10 +17,10 @@
 		["dlp_receipts", "关联收款记录", 290], ["dlp_sync", "财务确认 / 同步", 200], ["dlp_last_confirmation", "最近确认人 / 时间", 235], ["dlp_actions", "操作", 110],
 	].map(([fieldname, label, width]) => ({ fieldname, label, width }));
 	const presets = {
-		main: ["name", "customer_name", "custom_process_status", "dlp_product", "dlp_quantity", "grand_total", "delivery_date", "dlp_actions"],
+		main: ["name", "customer_name", "advance_paid", "custom_process_status", "dlp_product", "dlp_quantity", "grand_total", "delivery_date", "dlp_actions"],
 		middle: ["name", "title", "contact_display", "dlp_sales_person", "customer", "transaction_date", "delivery_date", "custom_remark", "dlp_actions"],
 		tail: ["name", "custom_odt", "status", "per_delivered", "owner", "creation", "modified_by", "modified", "dlp_actions"],
-		finance: ["name", "customer_name", "custom_process_status", "grand_total", "dlp_receipts", "dlp_last_confirmation", "dlp_actions"],
+		finance: ["name", "customer_name", "advance_paid", "custom_process_status", "grand_total", "dlp_receipts", "dlp_last_confirmation", "dlp_actions"],
 	};
 	const itemColumns = [["idx", "序号"], ["item_code", "品目编码"], ["item_name", "品项名"], ["custom_specifications", "颜色"], ["qty", "数量"], ["rate", "单价"], ["amount", "金额"], ["custom_item_tax_amount", "IVA 增值税"], ["delivery_date", "交付日期"], ["custom_product", "产品系列"], ["warehouse", "仓库"]];
 	const primaryItemFields = new Set(["idx", "item_code", "item_name", "custom_specifications", "qty", "rate", "amount"]);
@@ -28,6 +28,7 @@
 	const t = (value, args) => (root.__ || ((x, values = []) => x.replace(/\{(\d+)\}/g, (_, i) => values[i] ?? "")))(value, args);
 	const state = value => t(statusLabels[value] || value || "—");
 	const money = (value, currency) => value === undefined || value === null ? "—" : `${Number(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${esc(currency || "")}`;
+	const prepayment = header => header.party_account_currency && header.advance_paid !== "" && Number.isFinite(Number(header.advance_paid)) ? money(header.advance_paid, header.party_account_currency) : "—";
 	const call = async (method, args) => (await root.frappe.call({ method: API + method, args })).message;
 	function itemTable(detail, full = true) {
 		const permitted = new Set(detail.item_fields || []), currency = detail.header.currency;
@@ -38,17 +39,25 @@
 	function detailsHTML(detail) {
 		const header = detail.header;
 		const fields = [["custom_crm_order_no", "CRM 订单号"], ["name", "ERP 订单号"], ["customer_name", "客户"], ["customer", "ERP 客户编码"], ["title", "ERP 标题"], ["contact_display", "联系人"], ["contact_email", "联系人邮箱"], ["contact_mobile", "联系电话"], ["transaction_date", "订单日期"], ["delivery_date", "预计交付日期"], ["company", "公司"], ["custom_process_status", "ERP 业务状态"], ["grand_total", "ERP 订单金额"], ["advance_paid", "ERP 预付款汇总"], ["custom_odt", "ODT"], ["custom_remark", "销售备注"], ["owner", "ERP 创建人"], ["creation", "创建时间"], ["modified_by", "ERP 更新人"], ["modified", "更新时间"]].filter(([field]) => Object.hasOwn(header, field));
-		return `<div class="dlp-sales-detail-layout"><section><h4>${esc(t("订单基本信息"))}</h4><dl>${fields.map(([field, label]) => `<dt>${esc(t(label))}</dt><dd>${field === "custom_process_status" ? esc(state(header[field])) : ["grand_total", "advance_paid"].includes(field) ? money(header[field], header[field === "advance_paid" ? "party_account_currency" : "currency"]) : esc(header[field] || "—")}</dd>`).join("")}</dl><p class="text-muted">${esc(t("显示 ERP 已同步字段；负责人来自销售团队，创建人是 ERP 账户。"))}</p><a class="btn btn-default btn-sm" href="/desk/sales-order/${encodeURIComponent(header.name)}">${esc(t(detail.can_edit ? "打开原生订单编辑" : "打开原生订单"))}</a></section><section><div class="dlp-sales-detail-heading"><h4>${esc(t("订单产品明细"))}</h4><button class="btn btn-default btn-sm dlp-sales-all-items" aria-expanded="false">${esc(t("显示全部明细字段"))}</button></div>${itemTable(detail, false)}<h4>${esc(t("订单附件"))}</h4>${(detail.attachments || []).filter(file => /^\/(private\/)?files\//.test(file.file_url)).map(file => `<p><a target="_blank" rel="noopener" href="${esc(file.file_url)}">${esc(file.file_name)}</a></p>`).join("") || `<p class="text-muted">${esc(t("没有可见附件"))}</p>`}<p class="text-muted">${esc(t("预计交付日期沿用 ERP 交期；CRM 未同步的源字段不作推断。"))}</p></section></div>`;
+		return `<div class="dlp-sales-detail-layout"><section><h4>${esc(t("订单基本信息"))}</h4><dl>${fields.map(([field, label]) => `<dt>${esc(t(label))}</dt><dd>${field === "custom_process_status" ? esc(state(header[field])) : field === "advance_paid" ? prepayment(header) : field === "grand_total" ? money(header[field], header.currency) : esc(header[field] || "—")}</dd>`).join("")}</dl>${Object.hasOwn(header, "advance_paid") ? `<p class="text-muted">${esc(t("预付款为 ERP 订单汇总；草稿收款不代表已到账，未录入的收款请向财务核对。"))}</p>` : ""}<p class="text-muted">${esc(t("显示 ERP 已同步字段；负责人来自销售团队，创建人是 ERP 账户。"))}</p><a class="btn btn-default btn-sm" href="/desk/sales-order/${encodeURIComponent(header.name)}">${esc(t(detail.can_edit ? "打开原生订单编辑" : "打开原生订单"))}</a></section><section><div class="dlp-sales-detail-heading"><h4>${esc(t("订单产品明细"))}</h4><button class="btn btn-default btn-sm dlp-sales-all-items" aria-expanded="false">${esc(t("显示全部明细字段"))}</button></div>${itemTable(detail, false)}<h4>${esc(t("订单附件"))}</h4>${(detail.attachments || []).filter(file => /^\/(private\/)?files\//.test(file.file_url)).map(file => `<p><a target="_blank" rel="noopener" href="${esc(file.file_url)}">${esc(file.file_name)}</a></p>`).join("") || `<p class="text-muted">${esc(t("没有可见附件"))}</p>`}<p class="text-muted">${esc(t("预计交付日期沿用 ERP 交期；CRM 未同步的源字段不作推断。"))}</p></section></div>`;
 	}
 	function renderValue(field, doc, formatters) {
 		const tr = formatters.translate || t;
+		if (field === "advance_paid") return prepayment(doc);
 		if (field === "name") return `${esc(doc.custom_crm_order_no || doc.name)}${doc.custom_crm_order_no ? `<small class="dlp-sales-erp-number">ERP: ${esc(doc.name)}</small>` : ""}`;
 		if (field === "custom_process_status") return `<span class="dlp-sales-state">${esc(tr(financialLabel(doc[field])))}</span>`;
 		if (field === "status") return `<span class="dlp-sales-state">${esc(tr(orderStatusLabels[doc[field]] || doc[field] || "—"))}</span>`;
 		if (field === "dlp_product") return esc(doc.dlp_product || "—") + (doc.dlp_item_count > 1 ? `<small> · ${doc.dlp_item_count} ${esc(tr("项"))}</small>` : "");
 		if (field === "dlp_quantity") return doc.dlp_quantity == null ? "—" : esc(doc.dlp_quantity);
 		if (field === "dlp_actions") return `<button type="button" class="btn btn-default btn-xs dlp-sales-detail" data-name="${esc(doc.name)}">${esc(tr("查看明细"))}</button>`;
-		if (field === "dlp_receipts") return (doc.dlp_finance?.receipts || []).map(payment => `${esc(payment.name)} · ${esc(tr(payment.docstatus === 1 ? "已提交" : payment.docstatus === 2 ? "已取消" : "草稿"))}<br>${money(payment.allocated_amount, payment.currency)}`).join("<br>") || esc(tr("未找到可见的关联收款记录"));
+		if (field === "dlp_receipts") {
+			const finance = doc.dlp_finance;
+			if (!finance) return esc(tr("正在核验收款记录…"));
+			if (!Array.isArray(finance.receipts)) return esc(tr("收款记录暂不可用，请打开原生订单核对。"));
+			const records = finance.receipts.map(payment => `${esc(payment.name)} · ${esc(tr(payment.docstatus === 1 ? "已提交" : payment.docstatus === 2 ? "已取消" : "草稿"))}<br>${money(payment.allocated_amount, payment.currency)}`).join("<br>");
+			const warning = finance.association_error ? "收款与订单关联异常，请联系财务核对。" : finance.receipts_complete === false ? "部分收款记录受权限限制，请联系财务核对。" : "";
+			return records + (warning ? `${records ? "<br>" : ""}<small class="text-warning">${esc(tr(warning))}</small>` : "") || esc(tr("未找到可见的关联收款记录"));
+		}
 		if (field === "dlp_sync") return doc.dlp_finance ? esc(tr(syncWarning(doc) || "—")) : esc(tr("正在核验订单…"));
 		if (field === "dlp_last_confirmation") { const audit = doc.dlp_finance?.last_confirmation, warning = syncWarning(doc); return `${audit ? `${esc(audit.user)}<br>${esc(audit.creation)}` : "—"}${warning ? `<br><small class="text-warning">${esc(tr(warning))}</small>` : ""}`; }
 	}
@@ -97,9 +106,13 @@
 		} catch (_) { if (generation === controller.requestId && salesListActive(controller)) controller.$salesNotice?.text(t("补充信息读取失败；可打开原生订单核对。")); }
 	}
 	function migratePreferences(value, allowed) {
-		if (!value?.columns || value.version === 3) return value;
-		const columns = value.columns.filter(field => field !== "status");
-		if (allowed.has("custom_process_status") && !columns.includes("custom_process_status")) columns.splice(Math.max(columns.indexOf("customer_name") + 1, 1), 0, "custom_process_status");
+		if (!Array.isArray(value?.columns) || value.version >= 4) return value;
+		const columns = value.version === 3 ? [...value.columns] : value.columns.filter(field => field !== "status");
+		if (value.version !== 3 && allowed.has("custom_process_status") && !columns.includes("custom_process_status")) columns.splice(Math.max(columns.indexOf("customer_name") + 1, 1), 0, "custom_process_status");
+		if (allowed.has("advance_paid") && allowed.has("party_account_currency") && !columns.includes("advance_paid")) {
+			const anchor = columns.includes("customer_name") ? "customer_name" : "name";
+			columns.splice(Math.max(columns.indexOf(anchor) + 1, 1), 0, "advance_paid");
+		}
 		return { ...value, columns };
 	}
 	function onColumnsChange(controller) {
@@ -187,7 +200,7 @@
 			controller.refresh();
 			controller.$salesNotice.text(t(controller.salesView === "finance" ? "收款记录未录入不代表未收款；定金由财务按线下约定判断。" : "展开产品行或查看明细；左右滚动查看全部字段。"));
 		});
-		const select = root.$(`<select class="form-control input-xs dlp-sales-preset" aria-label="${esc(t("字段分组"))}">${[["main", "主要字段"], ["middle", "订单资料"], ["tail", "来源与进度"]].map(([value, label]) => `<option value="${value}">${esc(t(label))}</option>`).join("")}</select>`).appendTo(controller.$toolbar);
+		const select = root.$(`<select class="form-control input-xs dlp-sales-preset" aria-label="${esc(t("字段分组"))}">${[["main", "主要字段"], ["middle", "订单资料"], ["tail", "来源与进度"], ["finance", "收款与预付"]].map(([value, label]) => `<option value="${value}">${esc(t(label))}</option>`).join("")}</select>`).appendTo(controller.$toolbar);
 		select.on("change", event => controller.setColumns(presets[event.target.value]));
 		controller.list.$result?.on("click.dlpSalesDetails", ".dlp-sales-detail,.dlp-sales-expand", async event => {
 			event.preventDefault(); event.stopPropagation(); const button = root.$(event.currentTarget), name = button.attr("data-name");
@@ -281,7 +294,7 @@
 	function dismissAutomaticOnboarding(controller) {
 		return grid.dismissAutomaticOnboarding(controller, root);
 	}
-	const grid = engine.create({ doctype: "Sales Order", controllerKey: "dlpSalesOrderGrid", routeClass: "dlp-sales-order-grid-active", columns: COLUMNS, freezeUntil: "name", defaultColumns: presets.finance, preferenceVersion: 3, migratePreferences, keepColumnHeader: true, onSelectionChange: updateReleaseSelection, purchaseChrome: true, mainFilterFields: ["search", "customer", "financial_status", "from_date", "to_date", "company"],
+	const grid = engine.create({ doctype: "Sales Order", controllerKey: "dlpSalesOrderGrid", routeClass: "dlp-sales-order-grid-active", columns: COLUMNS, freezeUntil: "name", defaultColumns: presets.finance, preferenceVersion: 4, migratePreferences, keepColumnHeader: true, onSelectionChange: updateReleaseSelection, purchaseChrome: true, mainFilterFields: ["search", "customer", "financial_status", "from_date", "to_date", "company"],
 		computedFields: ["dlp_product", "dlp_quantity", "dlp_sales_person", "dlp_receipts", "dlp_sync", "dlp_last_confirmation", "dlp_actions"], extraFields: ["customer", "custom_crm_order_no", "party_account_currency"],
 		numbers: ["grand_total", "advance_paid", "per_delivered", "per_billed"], dates: ["transaction_date", "delivery_date"], moneySummary: true, quickFields: ["company", "customer"], searchFields: ["name", "custom_crm_order_no", "customer_name", "custom_odt"], optionLabels: { financial_status: financialLabels, custom_process_status: statusLabels, status: orderStatusLabels },
 		controls: [{ fieldname: "search", fieldtype: "Data", label: "订单号 / 客户 / ODT" }, { fieldname: "customer", fieldtype: "Link", options: "Customer", label: "客户" }, { fieldname: "financial_status", permission_field: "custom_process_status", fieldtype: "Select", label: "财务审核状态", emptyLabel: "全部审核状态", options: "\npending\napproved\nrejected" }, { fieldname: "from_date", permission_field: "transaction_date", fieldtype: "Date", label: "开始日期" }, { fieldname: "to_date", permission_field: "transaction_date", fieldtype: "Date", label: "结束日期" }, { fieldname: "product", permission_field: "items", fieldtype: "Link", options: "Item", label: "品目编码" }, { fieldname: "company", fieldtype: "Link", options: "Company", label: "公司" }],

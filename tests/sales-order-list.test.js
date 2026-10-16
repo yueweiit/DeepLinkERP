@@ -44,23 +44,23 @@ test("sales presets retain an explicit details action and ERP account identity f
 
 test('default finance columns show approval while delivery status stays optional',()=>{
  assert.ok(!grid.presets.main.includes('status'));
- assert.deepEqual(grid.presets.finance,['name','customer_name','custom_process_status','grand_total','dlp_receipts','dlp_last_confirmation','dlp_actions']);
+ assert.deepEqual(grid.presets.finance,['name','customer_name','advance_paid','custom_process_status','grand_total','dlp_receipts','dlp_last_confirmation','dlp_actions']);
  assert.ok(grid.presets.main.includes('custom_process_status'));
  const query=grid.buildQuery({filters:[['Sales Order','status','=','Closed'],['Sales Order','custom_process_status','=','Pending Production']],or_filters:[]},{},new Set(['status','custom_process_status']));
  assert.deepEqual(query.filters,[['Sales Order','status','=','Closed'],['Sales Order','custom_process_status','=','Pending Production']]);
 });
 
 test('saved sales columns prune obsolete price while keeping version-3 status, order and density',()=>{
- const allowed=new Set(grid.COLUMNS.map(col=>col.fieldname));
+ const allowed=new Set([...grid.COLUMNS.map(col=>col.fieldname),'party_account_currency']);
  const upgraded=grid.normalizePreferences({version:2,density:'standard',columns:['name','customer_name','custom_process_status','status','dlp_rate','grand_total']},allowed);
- assert.deepEqual(upgraded.columns,['name','customer_name','custom_process_status','grand_total']);
+ assert.deepEqual(upgraded.columns,['name','customer_name','advance_paid','custom_process_status','grand_total']);
  assert.equal(upgraded.density,'standard');
  const hidden=grid.normalizePreferences({...upgraded,columns:['name','customer_name']},allowed);
  assert.deepEqual(hidden.columns,['name','customer_name'],'a deliberate hide after the upgrade remains respected');
  for(const columns of [['name','status','dlp_rate','customer_name','grand_total'],['name','grand_total','dlp_rate','customer_name']]){
   const saved=grid.normalizePreferences({version:3,density:'standard',columns},allowed);
-  assert.deepEqual(saved.columns,columns.filter(field=>field!=='dlp_rate'));
-  assert.equal(saved.version,3);assert.equal(saved.density,'standard');
+  assert.deepEqual(saved.columns,columns.filter(field=>field!=='dlp_rate').flatMap(field=>field==='customer_name'?[field,'advance_paid']:[field]));
+  assert.equal(saved.version,4);assert.equal(saved.density,'standard');
  }
 });
 
@@ -99,7 +99,7 @@ test('mounted configuration defaults to finance without resetting saved columns'
  f.config.mountControls(f.controller);
  assert.equal(f.controller.salesView,'finance');
  assert.deepEqual(Array.from(f.config.defaultColumns),grid.presets.finance);
- assert.equal(f.config.preferenceVersion,3);
+ assert.equal(f.config.preferenceVersion,4);
  assert.ok(!f.config.computedFields.includes('dlp_rate'));
  const control=f.config.controls.find(control=>control.fieldname==='financial_status');
  assert.equal(control.permission_field,'custom_process_status');
@@ -124,6 +124,7 @@ test('sales scope and release controls mount inside the existing personal-column
  assert.equal(f.controller.$salesViewbar.parent,f.controller.$toolbar);
  assert.equal(f.controller.$salesNotice.after,f.controller.$toolbar);
  assert.equal(nodes.find(node=>node.html.includes('dlp-sales-preset')).parent,f.controller.$toolbar);
+ assert.match(nodes.find(node=>node.html.includes('dlp-sales-preset')).html,/<option value="finance">收款与预付<\/option>/);
  assert.deepEqual(f.controller.preferences.columns,columns);
  assert.equal(f.controller.salesView,'finance');
 });
@@ -571,4 +572,47 @@ test('all four cached inventory pages share viewport fitting without stale loads
   }
   assert.equal(callbacks.length,4);assert.equal(pending.length,4,'returning to a cached page does not issue another read');
  } finally {route='Item';callbacks.forEach(fn=>fn());Object.assign(global,previous);}
+});
+
+
+test('prepayment is visible in both default groups and upgrades personal columns once without changing their order',()=>{
+ for(const preset of [grid.presets.main,grid.presets.finance])assert.equal(preset[preset.indexOf('customer_name')+1],'advance_paid');
+ const allowed=new Set([...grid.COLUMNS.map(c=>c.fieldname),'party_account_currency']);
+ const before={version:3,density:'standard',columns:['name','status','grand_total','customer_name','dlp_actions']};
+ const upgraded=grid.normalizePreferences(before,allowed);
+ assert.deepEqual(upgraded.columns,['name','status','grand_total','customer_name','advance_paid','dlp_actions']);
+ assert.equal(upgraded.density,'standard');assert.equal(upgraded.version,4);
+ assert.deepEqual(before.columns,['name','status','grand_total','customer_name','dlp_actions']);
+ const hidden={...upgraded,columns:upgraded.columns.filter(c=>c!=='advance_paid')};
+ assert.deepEqual(grid.normalizePreferences(hidden,allowed),hidden);
+ for(const denied of ['advance_paid','party_account_currency']){
+  const fields=new Set(allowed);fields.delete(denied);
+  assert.ok(!grid.normalizePreferences(before,fields).columns.includes('advance_paid'));
+ }
+});
+
+test('prepayment shows the account currency, keeps explicit zero and never implies a missing receipt is unpaid',()=>{
+ const render=doc=>grid.renderValue('advance_paid',doc,{});
+ assert.equal(render({advance_paid:1200,currency:'USD',party_account_currency:'MXN'}),'1,200.00 MXN');
+ assert.equal(render({advance_paid:0,party_account_currency:'MXN'}),'0.00 MXN');
+ for(const doc of [{advance_paid:100,currency:'USD'},{party_account_currency:'MXN'},{advance_paid:'',party_account_currency:'MXN'}])assert.equal(render(doc),'—');
+ const detail=header=>grid.detailsHTML({header:{name:'SO-1',...header},item_fields:[],items:[]});
+ assert.match(detail({advance_paid:0,party_account_currency:'MXN'}),/0\.00 MXN/);
+ assert.match(detail({advance_paid:1200,party_account_currency:'MXN'}),/1,200\.00 MXN/);
+ assert.doesNotMatch(detail({advance_paid:98765,currency:'USD'}),/98,765/);
+ assert.match(detail({advance_paid:0,party_account_currency:'MXN'}),/草稿收款.*未录入.*财务/s);
+ assert.doesNotMatch(detail({}),/草稿收款/);
+});
+
+
+test('receipt visibility distinguishes loading, restricted records and association conflicts from an empty readable result',()=>{
+ const render=finance=>grid.renderValue('dlp_receipts',{dlp_finance:finance},{});
+ assert.match(render(undefined),/正在核验/);
+ assert.match(render({receipts:[],receipts_complete:false}),/权限.*财务/);
+ assert.match(render({receipts:[],receipts_complete:true}),/未找到可见的关联收款记录/);
+ assert.match(render({association_error:true,receipts:[],receipts_complete:true}),/关联异常/);
+ assert.match(render({reason:'order unavailable'}),/暂不可用/);
+ const records={receipts:[{name:'PE-1',allocated_amount:0,currency:'MXN',docstatus:0}],receipts_complete:false};
+ assert.match(render(records),/PE-1.*草稿.*0\.00 MXN.*权限/s);
+ assert.doesNotMatch(render(records),/已提交|未付款/);
 });
