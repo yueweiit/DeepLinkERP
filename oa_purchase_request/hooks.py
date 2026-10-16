@@ -23,6 +23,5 @@ doc_events = {
 	"Purchase Order": {
 		"validate": "oa_purchase_request.latingo_backfill.sync_latingo_purchase_order_review_flags",
 		"before_submit": "oa_purchase_request.latingo_backfill.validate_latingo_purchase_order_submission",
-		"on_submit": "oa_purchase_request.oa_purchase_request.oa_purchase_request.auto_create_purchase_receipt",
 	},
 }
