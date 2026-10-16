@@ -616,3 +616,18 @@ test('receipt visibility distinguishes loading, restricted records and associati
  assert.match(render(records),/PE-1.*草稿.*0\.00 MXN.*权限/s);
  assert.doesNotMatch(render(records),/已提交|未付款/);
 });
+
+test('failed current receipt lookup stops loading and preserves selection while stale failures remain ignored',async()=>{
+ const f=mountedReleaseFixture(),notices=[],paints=[];
+ f.controller.salesView='all';f.controller.preferences.columns=['name','dlp_receipts'];
+ f.controller.$salesNotice={text:value=>notices.push(value)};
+ f.list.render_list=()=>paints.push('render');f.list.set_rows_as_checked=()=>paints.push('selection');
+ const pending=f.config.onRows(f.controller);
+ f.reads[0].resolve({message:{}});await new Promise(setImmediate);
+ f.reads[1].reject(new Error('private upstream response'));await pending;
+ assert.match(f.grid.renderValue('dlp_receipts',f.list.data[0],{}),/读取失败.*刷新/);
+ assert.doesNotMatch(f.grid.renderValue('dlp_receipts',f.list.data[0],{}),/正在核验|private upstream/);
+ assert.deepEqual(paints,['render','selection']);assert.match(notices[0],/读取失败/);
+ const stale=f.config.onRows(f.controller);f.controller.requestId++;
+ f.reads[2].reject(new Error('stale'));await stale;assert.equal(paints.length,2);
+});

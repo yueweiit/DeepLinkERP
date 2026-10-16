@@ -53,6 +53,7 @@
 		if (field === "dlp_receipts") {
 			const finance = doc.dlp_finance;
 			if (!finance) return esc(tr("正在核验收款记录…"));
+			if (finance.receipts_read_failed) return esc(tr("收款记录读取失败，请刷新重试。"));
 			if (!Array.isArray(finance.receipts)) return esc(tr("收款记录暂不可用，请打开原生订单核对。"));
 			const records = finance.receipts.map(payment => `${esc(payment.name)} · ${esc(tr(payment.docstatus === 1 ? "已提交" : payment.docstatus === 2 ? "已取消" : "草稿"))}<br>${money(payment.allocated_amount, payment.currency)}`).join("<br>");
 			const warning = finance.association_error ? "收款与订单关联异常，请联系财务核对。" : finance.receipts_complete === false ? "部分收款记录受权限限制，请联系财务核对。" : "";
@@ -103,7 +104,12 @@
 				controller.list.data.forEach(row => { row.dlp_finance = finance.find(item => item.name === row.name); });
 			}
 			controller.list.render_list(); controller.list.set_rows_as_checked?.(); controller.list.on_row_checked?.();
-		} catch (_) { if (generation === controller.requestId && salesListActive(controller)) controller.$salesNotice?.text(t("补充信息读取失败；可打开原生订单核对。")); }
+		} catch (_) {
+			if (generation !== controller.requestId || !salesListActive(controller)) return;
+			controller.list.data.forEach(row => { row.dlp_finance = { receipts_read_failed: true }; });
+			controller.list.render_list?.(); controller.list.set_rows_as_checked?.();
+			controller.$salesNotice?.text(t("补充信息读取失败；请刷新重试或打开原生订单核对。"));
+		}
 	}
 	function migratePreferences(value, allowed) {
 		if (!Array.isArray(value?.columns) || value.version >= 4) return value;
