@@ -3,36 +3,44 @@
   "snapshot_date": "2026-10-16",
   "site": "deeplinkerp.com",
   "erp_image_id": "sha256:193f768bf492faf72d2b9082d91c9b78346b67dff7f237bf69923e59185c22d1",
-  "collaboration_branch": "deeplinkerp_branding",
+  "default_branch": "deeplinkerp_branding",
   "applications": {
     "deeplinkerp_branding": {
       "collaboration_branch": "deeplinkerp_branding",
       "production_commit": "3ff92df60f67d1cd76e79e2d063bd44b71a8a410",
+      "production_application_tree": "002ac0fa6f03f360004bc7bd9d3d79e8bb3272e7",
       "production_source_branch": "codex/sales-order-prepayments",
+      "production_tag": "production/2026-10-16/deeplinkerp_branding",
       "production_source_path": "deeplinkerp_branding"
     },
     "crm_integration": {
       "collaboration_branch": "crm_integration",
       "production_commit": "3711df05962d0a09f5f5a7363c431a323c33e934",
+      "production_application_tree": "51bf261293b28e987a1d5b35f04800d72ef61697",
       "production_source_branch": "codex/crm-outbound-native",
-      "alignment": "Separate application line; its branch HEAD is not asserted to be deployed."
+      "production_tag": "production/2026-10-16/crm_integration",
+      "alignment": "Application source equals the production commit at this collaboration alignment."
     },
     "china_finance": {
       "collaboration_branch": "china_finance",
       "production_commit": "b73f17138fdf8235e91a687b8a113cbb33e7031c",
+      "production_application_tree": "064fb4af5536f57ae0096cf9b3dfc8d543467031",
       "production_source_branch": "codex/finance-cancellation-forward",
-      "alignment": "Separate application line; its branch HEAD is not asserted to be deployed."
+      "production_tag": "production/2026-10-16/china_finance",
+      "alignment": "Application source equals the production commit at this collaboration alignment."
     },
     "oa_purchase_request": {
       "collaboration_branch": "oa_purchase_request",
       "production_commit": "cecb3b2c9e3c48217dbe127327ea8f2d5ee40ea7",
-      "local_source_branch": "codex/explicit-purchase-receipts",
-      "alignment": "Production commit is retained locally; remote commit lookup was unavailable during this audit."
+      "production_application_tree": "dcfe4faac2248c2cf8c5b9a514ad3e86ee7433af",
+      "production_source_branch": "codex/explicit-purchase-receipts",
+      "production_tag": "production/2026-10-16/oa_purchase_request",
+      "alignment": "Production source is archived on GitHub and retained byte for byte in this application baseline."
     }
   },
   "release_tools_commit": "289690cd45944a3ccbfe8fb8e100c2fc1fe9791d",
   "policy": {
-    "application_source": "Branding application files in this baseline equal the recorded production commit byte for byte.",
+    "application_source": "Each application directory at its collaboration alignment equals its recorded production commit byte for byte. Later branch HEADs are not automatically deployed.",
     "history": "Previous branch commits remain reachable through merge parents; no history rewrite is required.",
     "deployment": "Merging code does not deploy it. Use the existing locked release workflow and update this snapshot after a verified release."
   }
