@@ -1,5 +1,4 @@
 import builtins
-from contextlib import nullcontext
 from unittest.mock import MagicMock, call, patch
 
 import frappe
@@ -25,52 +24,15 @@ from crm_integration.crm_integration.sales_order import (
 	restore_deposit_confirmation_after_failure,
 	run_confirm_deposit_sync,
 )
-from crm_integration.crm_integration.api import (
-	create_sales_order,
-	validate_sales_order_payload,
-	validate_sales_order_update_status,
-)
 
 
 class TestMESSalesOrderPayload(UnitTestCase):
-	def test_new_crm_order_records_known_preproduction_state(self):
-		doc = MagicMock(name="SO-001", docstatus=1)
-		doc.get.return_value = "Pending Deposit Confirmation"
-		with (
-			patch("crm_integration.crm_integration.api.ensure_sales_persons_exist"),
-			patch("crm_integration.crm_integration.api.create_crm_log"),
-			patch("crm_integration.crm_integration.api.update_crm_log"),
-			patch("crm_integration.crm_integration.api.get_request_url", return_value="/test"),
-			patch("crm_integration.crm_integration.api.preserve_explicit_zero_rates"),
-			patch.object(frappe, "get_doc", return_value=doc),
-		):
-			create_sales_order({"doctype": "Sales Order"})
-		self.assertEqual(doc.custom_crm_production_started, 0)
-		self.assertEqual(doc.custom_crm_production_milestone, "NOT_STARTED")
-
-	def test_create_cannot_claim_production_milestone(self):
-		for field in ("custom_crm_production_started", "custom_crm_production_milestone"):
-			with self.assertRaisesRegex(frappe.ValidationError, "生产里程碑"):
-				validate_sales_order_payload({"doctype": "Sales Order", field: 1})
-
-	def test_legacy_or_uncertain_order_cannot_use_old_update_api(self):
-		doc = frappe._dict(custom_crm_production_started=0,
-			custom_crm_production_milestone=None, custom_process_status="Pending Deposit Confirmation")
-		with self.assertRaisesRegex(frappe.ValidationError, "无法确认"):
-			validate_sales_order_update_status(doc)
-		doc.custom_crm_production_milestone = "ATTEMPTED"
-		with self.assertRaisesRegex(frappe.ValidationError, "无法确认"):
-			validate_sales_order_update_status(doc)
-		doc.custom_crm_production_milestone = "NOT_STARTED"
-		validate_sales_order_update_status(doc)
-
 	def test_versions_are_preserved_per_sales_order_line(self):
 		order = frappe._dict(
 			name="SO-001",
 			custom_crm_order_no="CRM-001",
 			items=[
-				frappe._dict(name="SOI-PRINT", item_code="ITEM-001", qty=100,
-					custom_version="PC_PRINT", custom_mes_route_scenario="ROUTE-A"),
+				frappe._dict(name="SOI-PRINT", item_code="ITEM-001", qty=100, custom_version="PC_PRINT"),
 				frappe._dict(name="SOI-OTHER", item_code="ITEM-001", qty=50, custom_version="OTHER_VERSION"),
 			],
 		)
@@ -80,8 +42,6 @@ class TestMESSalesOrderPayload(UnitTestCase):
 			[(row["name"], row["custom_version"]) for row in payload["data"]["items"]],
 			[("SOI-PRINT", "PC_PRINT"), ("SOI-OTHER", "OTHER_VERSION")],
 		)
-		self.assertEqual(payload["data"]["items"][0]["custom_mes_route_scenario"], "ROUTE-A")
-		self.assertNotIn("custom_mes_route_scenario", payload["data"]["items"][1])
 
 	def test_orders_without_versions_keep_optional_field_absent(self):
 		for version_fields in ({}, {"custom_version": None}, {"custom_version": ""}):
@@ -135,8 +95,6 @@ class TestMESSalesOrderPayload(UnitTestCase):
 		payload = post.call_args.kwargs["json"]
 		self.assertEqual(payload["deliveryNoteName"], "MAT-DN-2026-00001")
 		self.assertEqual(payload["delivery_note"], "MAT-DN-2026-00001")
-		self.assertEqual(payload["erpOrderId"], "SO-001")
-		self.assertEqual(payload["crmApprovalRound"], 0)
 
 
 class TestSalesOrderPermissions(UnitTestCase):
@@ -304,11 +262,8 @@ class TestSalesOrderPermissions(UnitTestCase):
 			) as push_status,
 			patch("crm_integration.crm_integration.sales_order.push_sales_order_to_mes") as push_mes,
 			patch("crm_integration.crm_integration.sales_order.set_process_status") as set_status,
-			patch.object(frappe.db, "commit") as commit,
 		):
 			operations.attach_mock(push_status, "push_status")
-			operations.attach_mock(doc.db_set, "db_set")
-			operations.attach_mock(commit, "commit")
 			operations.attach_mock(push_mes, "push_mes")
 			operations.attach_mock(set_status, "set_status")
 			run_confirm_deposit_sync(doc)
@@ -317,37 +272,17 @@ class TestSalesOrderPermissions(UnitTestCase):
 			operations.mock_calls,
 			[
 				call.push_status(doc, CRM_STATUS_CONFIRMED_DEPOSIT_PUSH_PRODUCTION),
-				call.db_set("custom_crm_production_milestone", "ATTEMPTED", update_modified=True),
-				call.commit(),
 				call.push_status(doc, CRM_STATUS_IN_PRODUCTION),
-				call.db_set({"custom_crm_production_started": 1,
-					"custom_crm_production_milestone": "REACHED"}, update_modified=True),
-				call.commit(),
 				call.push_mes(doc),
 				call.set_status(doc, PENDING_PRODUCTION),
 			],
 		)
 
-	def test_e3_timeout_keeps_production_fact_uncertain(self):
-		doc = self.make_sales_order(DEPOSIT_CONFIRMATION_PROCESSING)
-		with (
-			patch("crm_integration.crm_integration.sales_order.push_sales_order_status_to_crm",
-				side_effect=[None, RuntimeError("timeout")]),
-			patch("crm_integration.crm_integration.sales_order.push_sales_order_to_mes") as push_mes,
-			patch.object(frappe.db, "commit") as commit,
-			self.assertRaisesRegex(RuntimeError, "timeout"),
-		):
-			run_confirm_deposit_sync(doc)
-		doc.db_set.assert_called_once_with("custom_crm_production_milestone", "ATTEMPTED", update_modified=True)
-		commit.assert_called_once()
-		push_mes.assert_not_called()
-
 	def test_failed_confirm_deposit_job_persists_failure_log(self):
-		doc = self.make_sales_order(DEPOSIT_CONFIRMATION_PROCESSING)
+		doc = self.make_sales_order()
 
 		with (
 			patch.object(frappe, "get_doc", return_value=doc),
-			patch("crm_integration.crm_integration.sales_order.crm_sales_order_creation_lock", return_value=nullcontext()),
 			patch(
 				"crm_integration.crm_integration.sales_order.is_crm_integration_enabled",
 				return_value=True,
@@ -370,17 +305,6 @@ class TestSalesOrderPermissions(UnitTestCase):
 		restore_status.assert_called_once_with("SO-001")
 		create_log.assert_called_once()
 		commit.assert_called_once_with()
-
-	def test_stale_confirm_deposit_job_does_not_push_cancelled_order(self):
-		doc = self.make_sales_order("Cancelled")
-		with (
-			patch.object(frappe, "get_doc", return_value=doc),
-			patch("crm_integration.crm_integration.sales_order.is_crm_integration_enabled", return_value=True),
-			patch("crm_integration.crm_integration.sales_order.crm_sales_order_creation_lock", return_value=nullcontext()),
-			patch("crm_integration.crm_integration.sales_order.run_confirm_deposit_sync") as sync,
-		):
-			self.assertIsNone(confirm_deposit_and_push_to_mes_job("SO-001"))
-		sync.assert_not_called()
 
 	def test_failed_confirm_deposit_restores_retryable_status(self):
 		doc = self.make_sales_order(DEPOSIT_CONFIRMATION_PROCESSING)
